@@ -7,6 +7,7 @@ Devflow uses three testing layers:
 - graph validation and closures
 - fingerprint determinism
 - cache snapshot and restore semantics
+- cache-key override stability and correctness
 - instance identity and env persistence
 - port allocation and reuse
 

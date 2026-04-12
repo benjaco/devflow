@@ -35,6 +35,7 @@ Last updated: 2026-04-12
 - Bounded parallel ready-queue scheduling implemented in `pkg/engine`
 - Typed engine event stream implemented for run/task/cache/process/log events
 - Polling watch mode implemented with debounced batches and selective reruns via `github.com/radovskyb/watcher`
+- Per-task cache-key override semantics documented for future implementation
 - CLI commands implemented:
   - `run`
   - `watch`
@@ -60,10 +61,12 @@ Last updated: 2026-04-12
 - Build the first usable TUI slice in `pkg/tui`
 - Replace the placeholder example adapter behavior with a more realistic adapter contract exercise
 - Add service readiness checks and richer watch restart policies
+- Implement task-defined cache-key overrides in the runtime/task model
 
 ## Deferred / Known Gaps
 
 - `tui` package is a stub
 - No restart/stop/cache subcommands yet
 - Service readiness checks are not modeled yet
+- Cache-key overrides are designed and documented but not implemented yet
 - Example adapter is intentionally lightweight and not a full replacement for the target Nushell flows
