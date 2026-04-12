@@ -75,6 +75,33 @@ Guideline:
 - use the automatic key unless the adapter can define a narrower and more correct semantic key
 - when using an override, the task author is responsible for including any dependency/version/config data needed for correctness
 
+## Built Binary Helpers
+
+`pkg/project` now includes a generic helper for software-build tools that need to be compiled once and reused by later tasks.
+
+Current shape:
+
+```go
+type BinaryTool struct {
+    TaskName    string
+    Description string
+    Deps        []string
+    Inputs      Inputs
+    Output      string
+    Build       process.CommandSpec
+    Signature   string
+    Tags        []string
+}
+```
+
+Semantics:
+- `BuildTask()` returns a cacheable `KindOnce` task
+- the task key still comes from the normal task-input fingerprint model
+- the built artifact is cached as a declared output file
+- later tasks can call `tool.Run(...)` or `tool.Start(...)` to execute the built artifact
+
+This is intended for helper binaries such as code generators, schema tools, or repo-local build utilities. The helper stays generic: the engine does not know how the binary is produced, only which inputs fingerprint it and which output file should be cached.
+
 ## Event Stream
 
 The engine now emits a typed in-process event stream for live consumers. Event categories include:

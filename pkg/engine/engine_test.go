@@ -554,6 +554,97 @@ func TestServiceReadinessTimeoutFailsRun(t *testing.T) {
 	}
 }
 
+type binaryToolProject struct {
+	tool project.BinaryTool
+}
+
+func (p *binaryToolProject) Name() string { return "binary-tool-project" }
+
+func (p *binaryToolProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "binary-tool"}, nil
+}
+
+func (p *binaryToolProject) Targets() []project.Target {
+	return []project.Target{{Name: "build", RootTasks: []string{"use_tool"}}}
+}
+
+func (p *binaryToolProject) Tasks() []project.Task {
+	buildTask := p.tool.BuildTask()
+	return []project.Task{
+		buildTask,
+		{
+			Name: "use_tool",
+			Kind: project.KindOnce,
+			Deps: []string{buildTask.Name},
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				return p.tool.RunSpec(ctx, rt, project.BinaryExecSpec{
+					Args: []string{"hello"},
+					Env: map[string]string{
+						"OUT_FILE": rt.Abs("result.txt"),
+					},
+				})
+			},
+		},
+	}
+}
+
+func TestBinaryToolBuildTaskCachesAndRestoresArtifact(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "tool-src.sh"), []byte("#!/bin/sh\necho \"$1\" > \"$OUT_FILE\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &binaryToolProject{
+		tool: project.BinaryTool{
+			TaskName:    "build_mocktool",
+			Description: "Build mock helper binary",
+			Inputs:      project.Inputs{Files: []string{"tool-src.sh"}},
+			Output:      ".devflow/tools/mocktool",
+			Build: process.CommandSpec{
+				Name: "sh",
+				Args: []string{"-c", "mkdir -p .devflow/tools && cp tool-src.sh .devflow/tools/mocktool && chmod +x .devflow/tools/mocktool"},
+			},
+		},
+	}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Result.CacheHits) != 0 {
+		t.Fatalf("unexpected first-run cache hits: %v", first.Result.CacheHits)
+	}
+	if err := os.Remove(filepath.Join(worktree, ".devflow", "tools", "mocktool")); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Result.CacheHits) != 1 || second.Result.CacheHits[0] != "build_mocktool" {
+		t.Fatalf("unexpected second-run cache hits: %v", second.Result.CacheHits)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, ".devflow", "tools", "mocktool")); err != nil {
+		t.Fatalf("expected cached binary to be restored: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(worktree, "result.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "hello\n" {
+		t.Fatalf("unexpected tool output %q", got)
+	}
+}
+
 func waitFor(t *testing.T, timeout time.Duration, fn func() bool) {
 	t.Helper()
 	if !waitForBool(timeout, fn) {

@@ -9,6 +9,47 @@ An adapter defines:
 
 Tasks should stay semantic. The adapter decides which files, directories, env vars, and custom probes contribute to each fingerprint.
 
+## Built Binary Tools
+
+For repo-local helper executables, use the built-in binary-tool helper in `pkg/project`.
+
+Example:
+
+```go
+tool := project.BinaryTool{
+    TaskName: "build_auth_mapping",
+    Inputs: project.Inputs{
+        Files: []string{"tools/auth-mapping/main.go", "go.mod", "go.sum"},
+    },
+    Output: ".devflow/tools/auth-mapping",
+    Build: process.CommandSpec{
+        Name: "go",
+        Args: []string{"build", "-o", ".devflow/tools/auth-mapping", "./tools/auth-mapping"},
+    },
+}
+buildTask := tool.BuildTask()
+
+tasks := []project.Task{
+    buildTask,
+    {
+        Name: "auth_mapping",
+        Kind: project.KindOnce,
+        Deps: []string{buildTask.Name},
+        Run: func(ctx context.Context, rt *project.Runtime) error {
+            return tool.Run(ctx, rt, "--config", rt.Abs("backend/auth/config.json"))
+        },
+    },
+}
+```
+
+Rules:
+- the tool output path should be worktree-relative so it can be cached and restored
+- keep the binary output outside the input directories you fingerprint, or ignore it explicitly
+- use the task `Inputs` to describe what should invalidate the build
+- use `Signature` if the build command itself needs a stable explicit version marker
+
+This gives you a standard way to compile helper binaries once, cache them by input hash, and run the restored artifact later from downstream tasks.
+
 ## Service Readiness
 
 Service tasks can define an optional readiness function.

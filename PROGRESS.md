@@ -36,6 +36,7 @@ Last updated: 2026-04-13
 - Typed engine event stream implemented for run/task/cache/process/log events
 - Polling watch mode implemented with debounced batches and selective reruns via `github.com/radovskyb/watcher`
 - Service readiness hooks implemented for service tasks, with generic ready-file/TCP/HTTP helpers and engine-enforced readiness timeouts
+- Generic built-binary helper implemented in `pkg/project` for cacheable helper-binary builds plus later `Run`/`Start` execution
 - Per-task cache-key override semantics documented for future implementation
 - CLI commands implemented:
   - `run`
@@ -60,6 +61,8 @@ Last updated: 2026-04-13
 - Unit/integration-style tests added for core packages
 - Example-project smoke tests added for cache hits, watch reruns, and multi-worktree isolation
 - Engine tests added for readiness success and readiness timeout failure
+- Built-binary helper tests added for direct build/run/start behavior and engine-level cache restore
+- CLI integration coverage added for the example adapter JSON lifecycle (`run`, `status`, `logs`, `instances`, `doctor`, `stop`)
 - Verified with `go test ./...`
 
 ## In Progress

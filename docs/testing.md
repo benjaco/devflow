@@ -16,7 +16,8 @@ Devflow uses three testing layers:
 - subprocess stdout/stderr capture
 - service lifecycle management
 - service readiness success and timeout behavior
-- CLI JSON output shape
+- built-binary helper build/run/start coverage and cache-restore coverage
+- CLI JSON output shape, including command-level lifecycle coverage for `run`, `status`, `logs`, `instances`, `doctor`, and `stop`
 - sequential engine execution with cache hits
 - polling watch batching and selective watch reruns
 

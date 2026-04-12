@@ -20,6 +20,7 @@ Early development. The current implementation focuses on the generic core:
 - local snapshot cache
 - subprocess execution and service supervision
 - service readiness gating before a service is considered running
+- built-in binary-tool helpers for cacheable helper-binary builds and later execution
 - detached `run/watch --detach` background supervisor launching
 - worktree instances and shared port leasing
 - polling-based watch mode using `github.com/radovskyb/watcher`

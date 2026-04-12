@@ -99,6 +99,148 @@ func TestStopCommandStopsTrackedProcess(t *testing.T) {
 	}
 }
 
+func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := seedExampleWorktree(worktree); err != nil {
+		t.Fatal(err)
+	}
+
+	runStdout := &bytes.Buffer{}
+	app := &App{Stdout: runStdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{
+		"run", "fullstack",
+		"--json",
+		"--ci",
+		"--project", "go-next-monorepo",
+		"--worktree", worktree,
+		"--max-parallel", "4",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var runResult api.RunResult
+	if err := json.Unmarshal(runStdout.Bytes(), &runResult); err != nil {
+		t.Fatal(err)
+	}
+	if !runResult.Success {
+		t.Fatalf("expected successful run result: %+v", runResult)
+	}
+	if runResult.InstanceID == "" {
+		t.Fatalf("expected instance ID in run result: %+v", runResult)
+	}
+	t.Cleanup(func() {
+		inst, err := instance.Load(worktree, runResult.InstanceID)
+		if err != nil {
+			return
+		}
+		_, _ = instance.StopProcesses(inst, "")
+	})
+
+	statusStdout := &bytes.Buffer{}
+	app = &App{Stdout: statusStdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"status", "--json", "--worktree", worktree}); err != nil {
+		t.Fatal(err)
+	}
+	var status api.StatusResult
+	if err := json.Unmarshal(statusStdout.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.InstanceID != runResult.InstanceID {
+		t.Fatalf("unexpected status instance ID: got %q want %q", status.InstanceID, runResult.InstanceID)
+	}
+	if len(status.Nodes) == 0 {
+		t.Fatal("expected status nodes")
+	}
+	if !hasNodeState(status.Nodes, "backend_dev", api.StateRunning) {
+		t.Fatalf("expected backend_dev running in status: %+v", status.Nodes)
+	}
+	if !hasNodeState(status.Nodes, "frontend_dev", api.StateRunning) {
+		t.Fatalf("expected frontend_dev running in status: %+v", status.Nodes)
+	}
+
+	waitForCondition(t, 3*time.Second, func() bool {
+		lines, err := readLastLines(instance.LogPath(worktree, runResult.InstanceID, "backend_dev"), 5)
+		return err == nil && len(lines) > 0
+	})
+
+	logsStdout := &bytes.Buffer{}
+	app = &App{Stdout: logsStdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"logs", "backend_dev", "--json", "--worktree", worktree, "--tail", "5"}); err != nil {
+		t.Fatal(err)
+	}
+	logEvents := decodeJSONLines(t, logsStdout.Bytes())
+	if len(logEvents) == 0 {
+		t.Fatal("expected log events from logs command")
+	}
+	if got := logEvents[0]["task"]; got != "backend_dev" {
+		t.Fatalf("unexpected logs task: %v", got)
+	}
+	if _, ok := logEvents[0]["line"]; !ok {
+		t.Fatalf("expected log line payload: %v", logEvents[0])
+	}
+
+	instancesStdout := &bytes.Buffer{}
+	app = &App{Stdout: instancesStdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"instances", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var instancesList []api.InstanceSummary
+	if err := json.Unmarshal(instancesStdout.Bytes(), &instancesList); err != nil {
+		t.Fatal(err)
+	}
+	if !containsInstance(instancesList, runResult.InstanceID) {
+		t.Fatalf("expected instances list to contain %q: %+v", runResult.InstanceID, instancesList)
+	}
+
+	doctorStdout := &bytes.Buffer{}
+	app = &App{Stdout: doctorStdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"doctor", "--json", "--worktree", worktree, "--project", "go-next-monorepo"}); err != nil {
+		t.Fatal(err)
+	}
+	var doctor api.DoctorResult
+	if err := json.Unmarshal(doctorStdout.Bytes(), &doctor); err != nil {
+		t.Fatal(err)
+	}
+	if !doctor.ChecksPassed {
+		t.Fatalf("expected doctor checks to pass: %+v", doctor)
+	}
+	if doctor.InstanceID != runResult.InstanceID {
+		t.Fatalf("unexpected doctor instance ID: got %q want %q", doctor.InstanceID, runResult.InstanceID)
+	}
+
+	stopStdout := &bytes.Buffer{}
+	app = &App{Stdout: stopStdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"stop", "--json", "--worktree", worktree, "--all"}); err != nil {
+		t.Fatal(err)
+	}
+	var stopPayload map[string]any
+	if err := json.Unmarshal(stopStdout.Bytes(), &stopPayload); err != nil {
+		t.Fatal(err)
+	}
+	stopped, ok := stopPayload["stopped"].([]any)
+	if !ok || len(stopped) < 2 {
+		t.Fatalf("expected stopped service list in stop payload: %v", stopPayload)
+	}
+
+	finalStatusStdout := &bytes.Buffer{}
+	app = &App{Stdout: finalStatusStdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"status", "--json", "--worktree", worktree}); err != nil {
+		t.Fatal(err)
+	}
+	var finalStatus api.StatusResult
+	if err := json.Unmarshal(finalStatusStdout.Bytes(), &finalStatus); err != nil {
+		t.Fatal(err)
+	}
+	if !hasNodeState(finalStatus.Nodes, "backend_dev", api.StateStopped) {
+		t.Fatalf("expected backend_dev stopped after stop command: %+v", finalStatus.Nodes)
+	}
+	if !hasNodeState(finalStatus.Nodes, "frontend_dev", api.StateStopped) {
+		t.Fatalf("expected frontend_dev stopped after stop command: %+v", finalStatus.Nodes)
+	}
+}
+
 func waitForProcessExit(t *testing.T, handle *process.Handle) {
 	t.Helper()
 	done := make(chan error, 1)
@@ -110,4 +252,80 @@ func waitForProcessExit(t *testing.T, handle *process.Handle) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for process exit")
 	}
+}
+
+func waitForCondition(t *testing.T, timeout time.Duration, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("condition not met before timeout")
+}
+
+func hasNodeState(nodes []api.NodeStatus, name string, want api.NodeState) bool {
+	for _, node := range nodes {
+		if node.Name == name && node.State == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsInstance(items []api.InstanceSummary, id string) bool {
+	for _, item := range items {
+		if item.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func decodeJSONLines(t *testing.T, data []byte) []map[string]string {
+	t.Helper()
+	lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
+	out := make([]map[string]string, 0, len(lines))
+	for _, line := range lines {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var payload map[string]string
+		if err := json.Unmarshal(line, &payload); err != nil {
+			t.Fatalf("decode json line %q: %v", string(line), err)
+		}
+		out = append(out, payload)
+	}
+	return out
+}
+
+func seedExampleWorktree(dst string) error {
+	root, err := filepath.Abs(filepath.Join("..", "..", "examples", "go-next-monorepo", "worktree"))
+	if err != nil {
+		return err
+	}
+	return copyTree(root, dst)
+}
+
+func copyTree(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode())
+	})
 }
