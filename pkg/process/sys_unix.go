@@ -5,23 +5,27 @@ package process
 import (
 	"os/exec"
 	"syscall"
-	"time"
 )
 
 func prepareCmd(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func stopCmd(cmd *exec.Cmd, grace time.Duration) error {
+func terminateCmd(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
 	pgid := -cmd.Process.Pid
 	if err := syscall.Kill(pgid, syscall.SIGTERM); err != nil {
-		_ = cmd.Process.Kill()
+		return err
+	}
+	return nil
+}
+
+func killCmd(cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	time.Sleep(grace)
-	_ = syscall.Kill(pgid, syscall.SIGKILL)
-	return nil
+	pgid := -cmd.Process.Pid
+	return syscall.Kill(pgid, syscall.SIGKILL)
 }

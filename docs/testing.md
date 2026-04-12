@@ -16,6 +16,7 @@ Devflow uses three testing layers:
 - service lifecycle management
 - CLI JSON output shape
 - sequential engine execution with cache hits
+- polling watch batching and selective watch reruns
 
 ## Example/Smoke Coverage
 

@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -48,7 +47,7 @@ func (a *App) Run(args []string) error {
 	case "graph":
 		return a.graphCmd(args[1:])
 	case "watch":
-		return errors.New("watch mode is not implemented yet")
+		return a.watchCmd(args[1:])
 	case "tui":
 		return tui.Run()
 	default:
@@ -87,6 +86,9 @@ func (a *App) runCmd(args []string) error {
 	if target == "" {
 		return fmt.Errorf("usage: devflow run <target>")
 	}
+	if *modeWatch {
+		return a.executeWatch(target, *jsonOut, *worktree, *projectName, *maxParallel)
+	}
 	root, err := resolveWorktree(*worktree)
 	if err != nil {
 		return err
@@ -119,6 +121,62 @@ func (a *App) runCmd(args []string) error {
 		_, _ = fmt.Fprintf(a.Stdout, "target=%s instance=%s success=%v cache_hits=%d\n", outcome.Result.Target, outcome.Result.InstanceID, outcome.Result.Success, len(outcome.Result.CacheHits))
 	}
 	return runErr
+}
+
+func (a *App) watchCmd(args []string) error {
+	target := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		target = args[0]
+		args = args[1:]
+	}
+	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	jsonOut := fs.Bool("json", false, "")
+	worktree := fs.String("worktree", "", "")
+	projectName := fs.String("project", defaultProject(), "")
+	maxParallel := fs.Int("max-parallel", 0, "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if target == "" {
+		if fs.NArg() != 1 {
+			return fmt.Errorf("usage: devflow watch <target>")
+		}
+		target = fs.Arg(0)
+	}
+	if target == "" {
+		return fmt.Errorf("usage: devflow watch <target>")
+	}
+	return a.executeWatch(target, *jsonOut, *worktree, *projectName, *maxParallel)
+}
+
+func (a *App) executeWatch(target string, jsonOut bool, worktreeFlag, projectName string, maxParallel int) error {
+	root, err := resolveWorktree(worktreeFlag)
+	if err != nil {
+		return err
+	}
+	p, err := project.Lookup(projectName)
+	if err != nil {
+		return err
+	}
+	eng, err := engine.New(p, root)
+	if err != nil {
+		return err
+	}
+	if jsonOut {
+		events := eng.SubscribeEvents()
+		go func() {
+			for evt := range events {
+				_ = writeJSONLine(a.Stdout, evt)
+			}
+		}()
+	}
+	return eng.Watch(context.Background(), engine.Request{
+		Target:      target,
+		Worktree:    root,
+		Mode:        api.ModeWatch,
+		MaxParallel: maxParallel,
+	})
 }
 
 func (a *App) statusCmd(args []string) error {

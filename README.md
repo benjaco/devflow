@@ -7,6 +7,7 @@ It is designed for:
 - supervised long-running services
 - worktree-scoped instance isolation
 - per-instance ports and runtime env
+- watch-mode partial reruns and selective service restarts
 - stable JSON output for humans, CI, and future agents
 
 ## Status
@@ -17,9 +18,10 @@ Early development. The current implementation focuses on the generic core:
 - local snapshot cache
 - subprocess execution and service supervision
 - worktree instances and shared port leasing
+- polling-based watch mode using `github.com/radovskyb/watcher`
 - JSON-capable CLI commands
 
-Watch mode, the TUI, and the full-stack example adapter are scaffolded but intentionally minimal until the core is stable.
+The TUI and the richer full-stack example adapter are still intentionally minimal while the core stabilizes.
 
 ## Quick Start
 

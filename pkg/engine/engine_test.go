@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"devflow/pkg/api"
+	"devflow/pkg/process"
 	"devflow/pkg/project"
 )
 
@@ -277,4 +278,153 @@ func mustContainEventType(t *testing.T, types []api.EventType, want api.EventTyp
 		}
 	}
 	t.Fatalf("missing event type %q in %v", want, types)
+}
+
+type watchProject struct {
+	aRuns       atomic.Int32
+	bRuns       atomic.Int32
+	serviceRuns atomic.Int32
+}
+
+func (p *watchProject) Name() string { return "watch-project" }
+
+func (p *watchProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "watch"}, nil
+}
+
+func (p *watchProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"service", "b"}}}
+}
+
+func (p *watchProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:      "a",
+			Kind:      project.KindOnce,
+			Inputs:    project.Inputs{Files: []string{"a.txt"}},
+			Outputs:   project.Outputs{Files: []string{"a.out"}},
+			Cache:     true,
+			Signature: "watch-a-v1",
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				p.aRuns.Add(1)
+				return os.WriteFile(filepath.Join(rt.Worktree, "a.out"), []byte("a"), 0o644)
+			},
+		},
+		{
+			Name:      "b",
+			Kind:      project.KindOnce,
+			Inputs:    project.Inputs{Files: []string{"b.txt"}},
+			Outputs:   project.Outputs{Files: []string{"b.out"}},
+			Cache:     true,
+			Signature: "watch-b-v1",
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				p.bRuns.Add(1)
+				return os.WriteFile(filepath.Join(rt.Worktree, "b.out"), []byte("b"), 0o644)
+			},
+		},
+		{
+			Name:      "service",
+			Kind:      project.KindService,
+			Deps:      []string{"a"},
+			Restart:   project.RestartOnInputChange,
+			Signature: "watch-service-v1",
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				p.serviceRuns.Add(1)
+				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
+					Name: "sh",
+					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
+					Dir:  rt.Worktree,
+					Env:  rt.Env,
+				})
+				return err
+			},
+		},
+	}
+}
+
+func TestWatchRerunsOnlyAffectedSlice(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "a.txt"), []byte("a1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "b.txt"), []byte("b1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &watchProject{}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Watch(ctx, Request{Target: "dev", Worktree: worktree, Mode: api.ModeWatch, MaxParallel: 2})
+	}()
+
+	waitFor(t, 3*time.Second, func() bool {
+		return p.aRuns.Load() == 1 && p.bRuns.Load() == 1 && p.serviceRuns.Load() == 1
+	})
+
+	if err := os.WriteFile(filepath.Join(worktree, "b.txt"), []byte("b2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		return p.bRuns.Load() == 2
+	})
+	if got := p.aRuns.Load(); got != 1 {
+		t.Fatalf("unexpected a reruns after b change: %d", got)
+	}
+	if got := p.serviceRuns.Load(); got != 1 {
+		t.Fatalf("unexpected service restart after b change: %d", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(worktree, "a.txt"), []byte("a2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ok := waitForBool(4*time.Second, func() bool {
+		return p.aRuns.Load() == 2 && p.serviceRuns.Load() == 2
+	})
+	if !ok {
+		t.Fatalf("watch did not rerun expected slice: a=%d b=%d service=%d", p.aRuns.Load(), p.bRuns.Load(), p.serviceRuns.Load())
+	}
+	if got := p.bRuns.Load(); got != 2 {
+		t.Fatalf("unexpected b reruns after a change: %d", got)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("watch returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for watch shutdown")
+	}
+}
+
+func waitFor(t *testing.T, timeout time.Duration, fn func() bool) {
+	t.Helper()
+	if !waitForBool(timeout, fn) {
+		t.Fatal("condition not met before timeout")
+	}
+}
+
+func waitForBool(timeout time.Duration, fn func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return true
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return false
 }

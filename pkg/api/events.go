@@ -5,6 +5,8 @@ type EventType string
 const (
 	EventRunStarted      EventType = "run_started"
 	EventRunFinished     EventType = "run_finished"
+	EventWatchCycleStart EventType = "watch_cycle_started"
+	EventWatchCycleDone  EventType = "watch_cycle_finished"
 	EventInstanceUpdated EventType = "instance_updated"
 	EventTaskState       EventType = "task_state_changed"
 	EventLogLine         EventType = "log_line"
@@ -27,6 +29,7 @@ type Event struct {
 	Line          string    `json:"line,omitempty"`
 	CacheKey      string    `json:"cacheKey,omitempty"`
 	PID           int       `json:"pid,omitempty"`
+	Files         []string  `json:"files,omitempty"`
 	Error         string    `json:"error,omitempty"`
 	Success       *bool     `json:"success,omitempty"`
 }

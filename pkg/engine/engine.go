@@ -22,6 +22,7 @@ import (
 	"devflow/pkg/ports"
 	"devflow/pkg/process"
 	"devflow/pkg/project"
+	"devflow/pkg/watch"
 )
 
 type Request struct {
@@ -87,30 +88,113 @@ func (e *Engine) SubscribeEvents() <-chan api.Event {
 	return e.events.Subscribe()
 }
 
-func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
+func (e *Engine) Watch(ctx context.Context, req Request) error {
 	started := time.Now().UTC()
-	inst, err := instance.Resolve(req.Worktree, filepath.Base(req.Worktree))
+	inst, state, baseRT, err := e.prepareExecution(ctx, req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	cfg, err := e.project.ConfigureInstance(ctx, req.Worktree)
-	if err != nil {
-		return nil, err
-	}
-	inst.Label = cfg.Label
-	inst.DB = cfg.DB
-	inst.Env = mergeInstanceEnv(inst.Env, cfg.Env, map[string]string{
-		"DEVFLOW_INSTANCE_ID": inst.ID,
-		"DEVFLOW_WORKTREE":    inst.Worktree,
+	e.publish(api.Event{
+		TS:         process.NowRFC3339Nano(),
+		Type:       api.EventRunStarted,
+		InstanceID: inst.ID,
+		Worktree:   req.Worktree,
+		Target:     req.Target,
+		Mode:       req.Mode,
 	})
-	if len(cfg.PortNames) > 0 {
-		inst.Ports, err = e.ports.Allocate(inst.ID, cfg.PortNames)
-		if err != nil {
-			return nil, err
+
+	order, err := e.graph.TargetClosure(req.Target)
+	if err != nil {
+		return err
+	}
+
+	initialSuccess := true
+	if err := e.runReadyQueue(ctx, func() {}, baseRT, state, order); err != nil {
+		initialSuccess = false
+	}
+	e.publish(api.Event{
+		TS:         process.NowRFC3339Nano(),
+		Type:       api.EventWatchCycleDone,
+		InstanceID: inst.ID,
+		Worktree:   req.Worktree,
+		Target:     req.Target,
+		Mode:       req.Mode,
+		Success:    boolPtr(initialSuccess),
+	})
+
+	runner, err := watch.New(watch.Options{Root: req.Worktree})
+	if err != nil {
+		return err
+	}
+	batches, errs, err := runner.Start(ctx)
+	if err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			e.stopAllServices(req, inst, state)
+			e.publishRunFinished(api.RunResult{
+				Target:     req.Target,
+				Mode:       req.Mode,
+				InstanceID: inst.ID,
+				Success:    true,
+				DurationMs: time.Since(started).Milliseconds(),
+				StartedAt:  started.Format(time.RFC3339),
+				FinishedAt: time.Now().UTC().Format(time.RFC3339),
+			}, req.Worktree, "")
+			return nil
+		case err := <-errs:
+			if err == nil {
+				continue
+			}
+			return err
+		case batch, ok := <-batches:
+			if !ok {
+				e.stopAllServices(req, inst, state)
+				return nil
+			}
+			if len(batch.Files) == 0 {
+				continue
+			}
+			affectedOrder, changed := e.affectedWatchOrder(req.Target, batch.Files)
+			if len(affectedOrder) == 0 {
+				continue
+			}
+			e.publish(api.Event{
+				TS:         process.NowRFC3339Nano(),
+				Type:       api.EventWatchCycleStart,
+				InstanceID: inst.ID,
+				Worktree:   req.Worktree,
+				Target:     req.Target,
+				Mode:       req.Mode,
+				Files:      changed,
+			})
+			state.stopServices(req, affectedOrder)
+			success := true
+			if err := e.runReadyQueue(ctx, func() {}, baseRT, state, affectedOrder); err != nil {
+				success = false
+			}
+			e.publish(api.Event{
+				TS:         process.NowRFC3339Nano(),
+				Type:       api.EventWatchCycleDone,
+				InstanceID: inst.ID,
+				Worktree:   req.Worktree,
+				Target:     req.Target,
+				Mode:       req.Mode,
+				Files:      changed,
+				Success:    boolPtr(success),
+			})
 		}
 	}
-	if err := instance.Save(inst); err != nil {
+}
+
+func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
+	started := time.Now().UTC()
+	inst, state, baseRT, err := e.prepareExecution(ctx, req)
+	if err != nil {
 		return nil, err
 	}
 
@@ -118,35 +202,6 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	state := &runState{
-		req:      req,
-		inst:     inst,
-		status:   map[string]api.NodeStatus{},
-		depKeys:  map[string]string{},
-		services: map[string]*process.Handle{},
-		publish:  e.publish,
-	}
-	for _, name := range order {
-		task := e.graph.Tasks[name]
-		state.status[name] = api.NodeStatus{
-			Name:    name,
-			Kind:    string(task.Kind),
-			State:   api.StatePending,
-			LogPath: instance.LogPath(req.Worktree, inst.ID, name),
-		}
-	}
-	if err := instance.SaveStatus(req.Worktree, inst.ID, req.Target, req.Mode, state.status); err != nil {
-		return nil, err
-	}
-	e.publish(api.Event{
-		TS:         process.NowRFC3339Nano(),
-		Type:       api.EventInstanceUpdated,
-		InstanceID: inst.ID,
-		Worktree:   req.Worktree,
-		Target:     req.Target,
-		Mode:       req.Mode,
-	})
 
 	result := api.RunResult{
 		Target:     req.Target,
@@ -158,19 +213,6 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-
-	baseRT := &project.Runtime{
-		Worktree: req.Worktree,
-		Instance: inst,
-		Mode:     req.Mode,
-		Env:      cloneMap(inst.Env),
-		EventFn: func(evt api.Event) {
-			e.publish(evt)
-		},
-		OnService: func(task string, handle *process.Handle) {
-			state.registerService(task, handle)
-		},
-	}
 	e.publish(api.Event{
 		TS:         process.NowRFC3339Nano(),
 		Type:       api.EventRunStarted,
@@ -210,6 +252,81 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 	}
 	e.publishRunFinished(result, req.Worktree, "")
 	return &Outcome{Result: result, Instance: inst}, nil
+}
+
+func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instance, *runState, *project.Runtime, error) {
+	inst, err := instance.Resolve(req.Worktree, filepath.Base(req.Worktree))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	cfg, err := e.project.ConfigureInstance(ctx, req.Worktree)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	inst.Label = cfg.Label
+	inst.DB = cfg.DB
+	inst.Env = mergeInstanceEnv(inst.Env, cfg.Env, map[string]string{
+		"DEVFLOW_INSTANCE_ID": inst.ID,
+		"DEVFLOW_WORKTREE":    inst.Worktree,
+	})
+	if len(cfg.PortNames) > 0 {
+		inst.Ports, err = e.ports.Allocate(inst.ID, cfg.PortNames)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	if err := instance.Save(inst); err != nil {
+		return nil, nil, nil, err
+	}
+
+	order, err := e.graph.TargetClosure(req.Target)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	state := &runState{
+		req:      req,
+		inst:     inst,
+		status:   map[string]api.NodeStatus{},
+		depKeys:  map[string]string{},
+		services: map[string]*process.Handle{},
+		publish:  e.publish,
+	}
+	for _, name := range order {
+		task := e.graph.Tasks[name]
+		state.status[name] = api.NodeStatus{
+			Name:    name,
+			Kind:    string(task.Kind),
+			State:   api.StatePending,
+			LogPath: instance.LogPath(req.Worktree, inst.ID, name),
+		}
+	}
+	if err := instance.SaveStatus(req.Worktree, inst.ID, req.Target, req.Mode, state.status); err != nil {
+		return nil, nil, nil, err
+	}
+	e.publish(api.Event{
+		TS:         process.NowRFC3339Nano(),
+		Type:       api.EventInstanceUpdated,
+		InstanceID: inst.ID,
+		Worktree:   req.Worktree,
+		Target:     req.Target,
+		Mode:       req.Mode,
+	})
+
+	baseRT := &project.Runtime{
+		Worktree: req.Worktree,
+		Instance: inst,
+		Mode:     req.Mode,
+		Env:      cloneMap(inst.Env),
+		EventFn: func(evt api.Event) {
+			e.publish(evt)
+		},
+		OnService: func(task string, handle *process.Handle) {
+			state.registerService(task, handle)
+		},
+	}
+	return inst, state, baseRT, nil
 }
 
 func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, baseRT *project.Runtime, state *runState, order []string) error {
@@ -634,6 +751,39 @@ func (s *runState) snapshotServices() map[string]*process.Handle {
 	return out
 }
 
+func (s *runState) stopServices(req Request, tasks []string) {
+	for _, name := range tasks {
+		task := name
+		s.mu.Lock()
+		handle, ok := s.services[task]
+		node := s.status[task]
+		if ok {
+			delete(s.services, task)
+			delete(s.inst.Processes, task)
+		}
+		s.mu.Unlock()
+		if !ok {
+			continue
+		}
+		_ = handle.Stop()
+		prev := node.State
+		s.setNodeState(task, api.StateStopped, node.LastRunKey, "", node.PID)
+		s.publishEvent(api.Event{
+			TS:            process.NowRFC3339Nano(),
+			Type:          api.EventProcessExited,
+			InstanceID:    s.inst.ID,
+			Worktree:      req.Worktree,
+			Target:        req.Target,
+			Task:          task,
+			Mode:          req.Mode,
+			PID:           node.PID,
+			State:         api.StateStopped,
+			PreviousState: prev,
+		})
+	}
+	_ = instance.Save(s.inst)
+}
+
 func (s *runState) statusSnapshot() map[string]api.NodeStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -722,6 +872,51 @@ func sortedNodeNames(m map[string]api.NodeStatus) []string {
 	return names
 }
 
+func (e *Engine) affectedWatchOrder(target string, files []string) ([]string, []string) {
+	closure, err := e.graph.TargetClosure(target)
+	if err != nil {
+		return nil, nil
+	}
+	inClosure := map[string]bool{}
+	for _, name := range closure {
+		inClosure[name] = true
+	}
+	direct := e.graph.AffectedByFiles(files)
+	filteredDirect := make([]string, 0, len(direct))
+	for _, name := range direct {
+		if inClosure[name] {
+			filteredDirect = append(filteredDirect, name)
+		}
+	}
+	if len(filteredDirect) == 0 {
+		return nil, nil
+	}
+	downstream := e.graph.Downstream(filteredDirect)
+	filtered := make([]string, 0, len(downstream))
+	for _, name := range downstream {
+		if !inClosure[name] {
+			continue
+		}
+		task := e.graph.Tasks[name]
+		if task.Kind == project.KindWarmup && !task.AllowInWatch {
+			continue
+		}
+		if task.Kind == project.KindService && task.Restart == project.RestartNever {
+			continue
+		}
+		filtered = append(filtered, name)
+	}
+	order, err := e.graph.TopoSort(filtered)
+	if err != nil {
+		return nil, filteredDirect
+	}
+	return order, filteredDirect
+}
+
+func (e *Engine) stopAllServices(req Request, inst *api.Instance, state *runState) {
+	state.stopServices(req, sortedHandles(state.snapshotServices()))
+}
+
 func (e *Engine) publish(evt api.Event) {
 	e.events.Publish(evt)
 }
@@ -739,4 +934,8 @@ func (e *Engine) publishRunFinished(result api.RunResult, worktree, errText stri
 		Error:      errText,
 		Success:    &success,
 	})
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }

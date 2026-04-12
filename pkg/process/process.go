@@ -29,8 +29,10 @@ type Result struct {
 
 type Handle struct {
 	cmd   *exec.Cmd
-	wait  chan error
+	done  chan struct{}
 	grace time.Duration
+	mu    sync.Mutex
+	err   error
 }
 
 func NowRFC3339Nano() string {
@@ -112,16 +114,24 @@ func Start(ctx context.Context, spec CommandSpec) (*Handle, error) {
 		close(waitCh)
 	}()
 
+	handle := &Handle{
+		cmd:   cmd,
+		done:  make(chan struct{}),
+		grace: defaultGrace(spec.Grace),
+	}
+	go func() {
+		err := <-waitCh
+		handle.mu.Lock()
+		handle.err = err
+		handle.mu.Unlock()
+		close(handle.done)
+	}()
 	go func() {
 		<-ctx.Done()
-		_ = stopCmd(cmd, defaultGrace(spec.Grace))
+		_ = handle.Stop()
 	}()
 
-	return &Handle{
-		cmd:   cmd,
-		wait:  waitCh,
-		grace: defaultGrace(spec.Grace),
-	}, nil
+	return handle, nil
 }
 
 func (h *Handle) PID() int {
@@ -135,14 +145,33 @@ func (h *Handle) Wait() error {
 	if h == nil {
 		return nil
 	}
-	return <-h.wait
+	<-h.done
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.err
 }
 
 func (h *Handle) Stop() error {
 	if h == nil || h.cmd == nil {
 		return nil
 	}
-	return stopCmd(h.cmd, h.grace)
+	if err := terminateCmd(h.cmd); err != nil {
+		_ = killCmd(h.cmd)
+		return nil
+	}
+	timer := time.NewTimer(h.grace)
+	defer timer.Stop()
+	select {
+	case <-h.done:
+		return nil
+	case <-timer.C:
+		_ = killCmd(h.cmd)
+		select {
+		case <-h.done:
+		case <-time.After(500 * time.Millisecond):
+		}
+		return nil
+	}
 }
 
 func scanStream(wg *sync.WaitGroup, input io.Reader, stream string, writer io.Writer, onLine func(string, string)) {

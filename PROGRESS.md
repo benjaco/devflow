@@ -5,8 +5,8 @@ Last updated: 2026-04-12
 ## Current Status
 
 - Phase: post-bootstrap core implementation
-- State: graph/cache/process/instance/ports/engine/CLI foundation implemented and tested, with bounded parallel scheduling and a typed event stream
-- Confidence: core parallel run path is working; watch mode and TUI are not implemented yet
+- State: graph/cache/process/instance/ports/engine/CLI foundation implemented and tested, with bounded parallel scheduling, a typed event stream, and polling watch mode
+- Confidence: core parallel and watch paths are working; TUI and richer operator controls are still pending
 
 ## Completed
 
@@ -34,8 +34,10 @@ Last updated: 2026-04-12
   - `pkg/engine`
 - Bounded parallel ready-queue scheduling implemented in `pkg/engine`
 - Typed engine event stream implemented for run/task/cache/process/log events
+- Polling watch mode implemented with debounced batches and selective reruns via `github.com/radovskyb/watcher`
 - CLI commands implemented:
   - `run`
+  - `watch`
   - `status`
   - `logs`
   - `instances`
@@ -54,14 +56,13 @@ Last updated: 2026-04-12
 
 ## Next Steps
 
-- Implement real watch-mode invalidation and selective reruns in `pkg/watch`
 - Expand CLI coverage for restart/stop/cache subcommands
 - Build the first usable TUI slice in `pkg/tui`
 - Replace the placeholder example adapter behavior with a more realistic adapter contract exercise
+- Add service readiness checks and richer watch restart policies
 
 ## Deferred / Known Gaps
 
-- `watch` command currently returns not implemented
 - `tui` package is a stub
 - No restart/stop/cache subcommands yet
 - Service readiness checks are not modeled yet

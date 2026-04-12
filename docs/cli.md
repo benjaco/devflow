@@ -3,6 +3,7 @@
 Implemented commands:
 
 - `devflow run <target>`
+- `devflow watch <target>`
 - `devflow status`
 - `devflow logs <task>`
 - `devflow instances`
@@ -18,7 +19,9 @@ All implemented commands support `--json`.
 Implemented `run` flags include:
 - `--json`
 - `--ci`
-- `--watch` (mode selection only; full watch behavior is still pending)
+- `--watch`
 - `--worktree`
 - `--project`
 - `--max-parallel`
+
+`watch` runs an initial watch-mode cycle, then keeps polling for changes and reruns only the affected downstream slice. In JSON mode it emits the typed event stream line-by-line.
