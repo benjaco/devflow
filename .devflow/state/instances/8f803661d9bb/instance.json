@@ -1,0 +1,19 @@
+{
+  "id": "8f803661d9bb",
+  "label": "devflow",
+  "worktree": "/Users/benjaminschultzlarsen/Desktop/devflow",
+  "createdAt": "2026-04-12T20:14:53.991769Z",
+  "ports": {
+    "backend": 53330,
+    "frontend": 53331
+  },
+  "env": {
+    "DEVFLOW_EXAMPLE_PROJECT": "go-next-monorepo",
+    "DEVFLOW_INSTANCE_ID": "8f803661d9bb",
+    "DEVFLOW_WORKTREE": "/Users/benjaminschultzlarsen/Desktop/devflow"
+  },
+  "db": {
+    "name": "app_wt_8f803661d9bb"
+  },
+  "processes": {}
+}

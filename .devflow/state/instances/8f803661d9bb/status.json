@@ -1,0 +1,20 @@
+{
+  "target": "backend-codegen",
+  "mode": "ci",
+  "nodes": {
+    "backend_codegen": {
+      "name": "backend_codegen",
+      "kind": "once",
+      "state": "done",
+      "lastRunKey": "715cd789510a29f987ae2d1bc138e0bada947de83a5d1501d0cb2200b7603fd4",
+      "logPath": "/Users/benjaminschultzlarsen/Desktop/devflow/.devflow/logs/8f803661d9bb/backend_codegen.log"
+    },
+    "warmup_node_install": {
+      "name": "warmup_node_install",
+      "kind": "warmup",
+      "state": "done",
+      "logPath": "/Users/benjaminschultzlarsen/Desktop/devflow/.devflow/logs/8f803661d9bb/warmup_node_install.log"
+    }
+  },
+  "updatedAt": "2026-04-12T20:14:54.010723Z"
+}
