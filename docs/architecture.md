@@ -97,3 +97,26 @@ Watch mode now uses a polling watcher with debounced batches. On each batch:
 - impacted services restart after their dependencies complete
 
 The current implementation is local and in-process. It intentionally prioritizes correctness and selective reruns over elaborate optimization.
+
+## Operator Controls
+
+The current operator surface now includes:
+- PID-based `stop` for tracked service tasks
+- detached supervisor launch for service-bearing runs
+- cache inspection and invalidation
+- cache garbage collection
+- limited non-service `restart`
+- detached service `restart` by restarting the last detached target
+
+Detached ownership is currently implemented by spawning a background `devflow` supervisor process and persisting:
+- supervisor PID
+- supervisor log path
+- last detached run config
+
+This is enough for:
+- `run --detach`
+- `watch --detach`
+- `stop --all` against detached runs
+- service `restart` by stopping the detached supervisor and relaunching the last detached target
+
+What is still missing is fine-grained detached control of a single service inside a multi-service detached target.

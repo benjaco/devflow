@@ -48,3 +48,32 @@ func TestSaveWritesRuntimeEnv(t *testing.T) {
 		t.Fatalf("runtime env contents = %q", string(data))
 	}
 }
+
+func TestRecordDetachedRunPersistsSupervisorAndLastRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	inst, err := Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordDetachedRun(inst, api.RunConfig{
+		Project:     "go-next-monorepo",
+		Target:      "fullstack",
+		Mode:        api.ModeWatch,
+		MaxParallel: 2,
+		Detached:    true,
+	}, 4321, filepath.Join(worktree, "supervisor.log")); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(worktree, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Supervisor.PID != 4321 {
+		t.Fatalf("unexpected supervisor pid: %d", loaded.Supervisor.PID)
+	}
+	if loaded.LastRun.Target != "fullstack" || !loaded.LastRun.Detached {
+		t.Fatalf("unexpected last run: %+v", loaded.LastRun)
+	}
+}

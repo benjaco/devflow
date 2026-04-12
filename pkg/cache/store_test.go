@@ -66,3 +66,58 @@ func TestCorruptManifestIsTreatedAsMiss(t *testing.T) {
 		t.Fatal("expected corrupt manifest to be treated as cache miss")
 	}
 }
+
+func TestListInvalidateAndGC(t *testing.T) {
+	worktree := t.TempDir()
+	store := New(filepath.Join(worktree, ".devflow", "cache"))
+	task := project.Task{
+		Name:    "gen",
+		Kind:    project.KindOnce,
+		Outputs: project.Outputs{Files: []string{"out.txt"}},
+	}
+	writeOut := func(value string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(worktree, "out.txt"), []byte(value), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeOut("one")
+	if _, err := store.Snapshot(worktree, task, "key1"); err != nil {
+		t.Fatal(err)
+	}
+	writeOut("two")
+	if _, err := store.Snapshot(worktree, task, "key2"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	removed, err := store.GC(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("expected 1 removed entry, got %d", removed)
+	}
+	entries, err = store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry after gc, got %d", len(entries))
+	}
+	if err := store.Invalidate("gen"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected empty cache after invalidate, got %d", len(entries))
+	}
+}

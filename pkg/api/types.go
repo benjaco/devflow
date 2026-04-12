@@ -34,15 +34,31 @@ type ProcessRef struct {
 	StartedAt time.Time `json:"startedAt"`
 }
 
+type SupervisorRef struct {
+	PID       int       `json:"pid"`
+	StartedAt time.Time `json:"startedAt"`
+	LogPath   string    `json:"logPath,omitempty"`
+}
+
+type RunConfig struct {
+	Project     string  `json:"project"`
+	Target      string  `json:"target"`
+	Mode        RunMode `json:"mode"`
+	MaxParallel int     `json:"maxParallel,omitempty"`
+	Detached    bool    `json:"detached,omitempty"`
+}
+
 type Instance struct {
-	ID        string                `json:"id"`
-	Label     string                `json:"label"`
-	Worktree  string                `json:"worktree"`
-	CreatedAt time.Time             `json:"createdAt"`
-	Ports     map[string]int        `json:"ports"`
-	Env       map[string]string     `json:"env"`
-	DB        DBInstance            `json:"db"`
-	Processes map[string]ProcessRef `json:"processes"`
+	ID         string                `json:"id"`
+	Label      string                `json:"label"`
+	Worktree   string                `json:"worktree"`
+	CreatedAt  time.Time             `json:"createdAt"`
+	Ports      map[string]int        `json:"ports"`
+	Env        map[string]string     `json:"env"`
+	DB         DBInstance            `json:"db"`
+	Processes  map[string]ProcessRef `json:"processes"`
+	Supervisor SupervisorRef         `json:"supervisor,omitempty"`
+	LastRun    RunConfig             `json:"lastRun,omitempty"`
 }
 
 type NodeStatus struct {

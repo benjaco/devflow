@@ -37,6 +37,12 @@ type Store struct {
 	Root string
 }
 
+type EntrySummary struct {
+	Task      string `json:"task"`
+	Key       string `json:"key"`
+	CreatedAt string `json:"createdAt"`
+}
+
 func New(root string) *Store {
 	return &Store{Root: root}
 }
@@ -152,4 +158,98 @@ func (s *Store) Restore(worktree string, taskName, key string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+func (s *Store) List() ([]EntrySummary, error) {
+	root := filepath.Join(s.Root, "entries")
+	if _, err := os.Stat(root); os.IsNotExist(err) {
+		return nil, nil
+	}
+	entries := make([]EntrySummary, 0)
+	taskDirs, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, taskDir := range taskDirs {
+		if !taskDir.IsDir() {
+			continue
+		}
+		keyDirs, err := os.ReadDir(filepath.Join(root, taskDir.Name()))
+		if err != nil {
+			return nil, err
+		}
+		for _, keyDir := range keyDirs {
+			if !keyDir.IsDir() {
+				continue
+			}
+			manifest, ok, err := s.Load(taskDir.Name(), keyDir.Name())
+			if err != nil || !ok {
+				continue
+			}
+			entries = append(entries, EntrySummary{
+				Task:      manifest.Task,
+				Key:       manifest.Key,
+				CreatedAt: manifest.CreatedAt,
+			})
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Task != entries[j].Task {
+			return entries[i].Task < entries[j].Task
+		}
+		return entries[i].Key < entries[j].Key
+	})
+	return entries, nil
+}
+
+func (s *Store) Invalidate(task string) error {
+	path := filepath.Join(s.Root, "entries")
+	if task != "" {
+		path = filepath.Join(path, task)
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+	return os.RemoveAll(path)
+}
+
+func (s *Store) GC(keepPerTask int) (int, error) {
+	if keepPerTask <= 0 {
+		keepPerTask = 1
+	}
+	root := filepath.Join(s.Root, "entries")
+	taskDirs, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	removed := 0
+	for _, taskDir := range taskDirs {
+		if !taskDir.IsDir() {
+			continue
+		}
+		taskName := taskDir.Name()
+		items, err := s.List()
+		if err != nil {
+			return removed, err
+		}
+		filtered := make([]EntrySummary, 0)
+		for _, item := range items {
+			if item.Task == taskName {
+				filtered = append(filtered, item)
+			}
+		}
+		sort.Slice(filtered, func(i, j int) bool {
+			return filtered[i].CreatedAt > filtered[j].CreatedAt
+		})
+		for i := keepPerTask; i < len(filtered); i++ {
+			if err := os.RemoveAll(s.EntryDir(filtered[i].Task, filtered[i].Key)); err != nil {
+				return removed, err
+			}
+			removed++
+		}
+	}
+	return removed, nil
 }

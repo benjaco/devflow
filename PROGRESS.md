@@ -5,8 +5,8 @@ Last updated: 2026-04-12
 ## Current Status
 
 - Phase: post-bootstrap core implementation
-- State: graph/cache/process/instance/ports/engine/CLI foundation implemented and tested, with bounded parallel scheduling, a typed event stream, and polling watch mode
-- Confidence: core parallel and watch paths are working; TUI and richer operator controls are still pending
+- State: graph/cache/process/instance/ports/engine/CLI foundation implemented and tested, with bounded parallel scheduling, a typed event stream, polling watch mode, basic operator commands, and detached supervisor control
+- Confidence: core parallel/watch/operator/detached-control paths are working; TUI and finer-grained detached service control are still pending
 
 ## Completed
 
@@ -39,6 +39,13 @@ Last updated: 2026-04-12
 - CLI commands implemented:
   - `run`
   - `watch`
+  - detached `run/watch --detach`
+  - `restart` for non-service task reruns
+  - detached service `restart` via target relaunch
+  - `stop`
+  - `cache status`
+  - `cache invalidate`
+  - `cache gc`
   - `status`
   - `logs`
   - `instances`
@@ -57,16 +64,16 @@ Last updated: 2026-04-12
 
 ## Next Steps
 
-- Expand CLI coverage for restart/stop/cache subcommands
 - Build the first usable TUI slice in `pkg/tui`
 - Replace the placeholder example adapter behavior with a more realistic adapter contract exercise
 - Add service readiness checks and richer watch restart policies
 - Implement task-defined cache-key overrides in the runtime/task model
+- Improve fine-grained detached service restart/control semantics beyond whole-target relaunch
 
 ## Deferred / Known Gaps
 
 - `tui` package is a stub
-- No restart/stop/cache subcommands yet
 - Service readiness checks are not modeled yet
 - Cache-key overrides are designed and documented but not implemented yet
+- Fine-grained detached per-service restart is not fully implemented yet
 - Example adapter is intentionally lightweight and not a full replacement for the target Nushell flows

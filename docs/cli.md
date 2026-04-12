@@ -4,6 +4,11 @@ Implemented commands:
 
 - `devflow run <target>`
 - `devflow watch <target>`
+- `devflow restart <task>`
+- `devflow stop`
+- `devflow cache status`
+- `devflow cache invalidate`
+- `devflow cache gc`
 - `devflow status`
 - `devflow logs <task>`
 - `devflow instances`
@@ -20,8 +25,17 @@ Implemented `run` flags include:
 - `--json`
 - `--ci`
 - `--watch`
+- `--detach`
 - `--worktree`
 - `--project`
 - `--max-parallel`
 
 `watch` runs an initial watch-mode cycle, then keeps polling for changes and reruns only the affected downstream slice. In JSON mode it emits the typed event stream line-by-line.
+
+`watch` also supports `--detach`.
+
+`restart` supports rerunning non-service task slices from the CLI. For service tasks, if the instance was started with a detached run, `restart` stops the detached supervisor and relaunches the last detached target.
+
+`stop` terminates persisted service PIDs for a selected task or, when used with `--all`, terminates the detached supervisor for the instance and updates persisted node state to `stopped`.
+
+`cache status` lists cache entries, `cache invalidate` removes entries globally or per task, and `cache gc` keeps only the newest N entries per task.

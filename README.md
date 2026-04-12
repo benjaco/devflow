@@ -5,6 +5,7 @@ Devflow is a local-first DAG runner for development workflows.
 It is designed for:
 - cached one-shot tasks
 - supervised long-running services
+- detached background supervision for service-bearing runs
 - worktree-scoped instance isolation
 - per-instance ports and runtime env
 - watch-mode partial reruns and selective service restarts
@@ -17,6 +18,7 @@ Early development. The current implementation focuses on the generic core:
 - content-based fingerprints
 - local snapshot cache
 - subprocess execution and service supervision
+- detached `run/watch --detach` background supervisor launching
 - worktree instances and shared port leasing
 - polling-based watch mode using `github.com/radovskyb/watcher`
 - JSON-capable CLI commands

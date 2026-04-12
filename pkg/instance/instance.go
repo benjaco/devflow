@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"syscall"
 	"time"
 
 	"devflow/internal/fsutil"
@@ -165,6 +166,59 @@ func GlobalStateRoot() (string, error) {
 
 func instancePath(worktree, instanceID string) string {
 	return filepath.Join(worktree, ".devflow", "state", "instances", instanceID)
+}
+
+func StopProcesses(inst *api.Instance, task string) ([]string, error) {
+	stopped := make([]string, 0)
+	for name, ref := range inst.Processes {
+		if task != "" && name != task {
+			continue
+		}
+		if ref.PID <= 0 {
+			continue
+		}
+		if err := syscall.Kill(-ref.PID, syscall.SIGTERM); err != nil {
+			if err := syscall.Kill(ref.PID, syscall.SIGTERM); err != nil {
+				return stopped, err
+			}
+		}
+		stopped = append(stopped, name)
+		delete(inst.Processes, name)
+	}
+	sort.Strings(stopped)
+	return stopped, Save(inst)
+}
+
+func RecordDetachedRun(inst *api.Instance, cfg api.RunConfig, supervisorPID int, logPath string) error {
+	inst.LastRun = cfg
+	inst.Supervisor = api.SupervisorRef{
+		PID:       supervisorPID,
+		StartedAt: time.Now().UTC(),
+		LogPath:   logPath,
+	}
+	return Save(inst)
+}
+
+func ClearSupervisor(inst *api.Instance) error {
+	inst.Supervisor = api.SupervisorRef{}
+	if inst.Processes == nil {
+		inst.Processes = map[string]api.ProcessRef{}
+	}
+	return Save(inst)
+}
+
+func StopSupervisor(inst *api.Instance) error {
+	if inst.Supervisor.PID <= 0 {
+		return nil
+	}
+	if err := syscall.Kill(-inst.Supervisor.PID, syscall.SIGTERM); err != nil {
+		if err := syscall.Kill(inst.Supervisor.PID, syscall.SIGTERM); err != nil {
+			return err
+		}
+	}
+	inst.Supervisor = api.SupervisorRef{}
+	inst.Processes = map[string]api.ProcessRef{}
+	return Save(inst)
 }
 
 func instanceID(realpath string) string {
