@@ -9,6 +9,7 @@
 - `pkg/fingerprint`: deterministic file, directory, env, and task-key hashing
 - `pkg/cache`: manifest, snapshot, restore, and cache lookup
 - `pkg/process`: one-shot execution, supervised services, line-buffered logs
+- `pkg/project`: also defines readiness hooks for service tasks
 - `pkg/instance`: worktree-scoped instance identity and persisted state
 - `pkg/ports`: shared port registry with lock-safe allocation
 - `pkg/engine`: bounded parallel ready-queue execution engine and status persistence
@@ -87,6 +88,42 @@ The engine now emits a typed in-process event stream for live consumers. Event c
 
 This is exposed through engine subscription rather than a dedicated CLI command for now. The goal is to keep the event envelope stable before adding TUI and MCP-facing stream surfaces.
 
+## Service Readiness
+
+Service tasks can now declare adapter-defined readiness checks.
+
+Current task-model shape:
+
+```go
+type ReadyFunc func(ctx context.Context, rt *Runtime) error
+
+type Task struct {
+    // ...
+    Ready        ReadyFunc
+    ReadyTimeout time.Duration
+}
+```
+
+Semantics:
+- readiness is optional and applies to service tasks
+- the process is started first
+- the task is only marked `running` after readiness passes
+- if readiness fails, times out, or the process exits first, the task becomes `failed`
+- a failed readiness attempt stops the service process before returning
+
+The current helper surface includes:
+- `ReadyAll(...)`
+- `ReadyFile(...)`
+- `ReadyPath(...)`
+- `ReadyTCPPort(...)`
+- `ReadyHTTPNamedPort(...)`
+
+Default behavior:
+- tasks without `Ready` are considered ready immediately after process start
+- tasks with `Ready` use a default timeout when `ReadyTimeout` is unset
+
+This keeps the core generic while letting adapters define the right readiness signal for each service.
+
 ## Watch Mode
 
 Watch mode now uses a polling watcher with debounced batches. On each batch:
@@ -94,7 +131,7 @@ Watch mode now uses a polling watcher with debounced batches. On each batch:
 - the affected downstream slice inside the target closure is computed
 - impacted running services are stopped first
 - affected one-shot tasks rerun in dependency order with normal cache semantics
-- impacted services restart after their dependencies complete
+- impacted services restart after their dependencies complete and are only considered back once readiness passes
 
 The current implementation is local and in-process. It intentionally prioritizes correctness and selective reruns over elaborate optimization.
 

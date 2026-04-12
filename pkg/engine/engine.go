@@ -384,7 +384,9 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 			}
 
 			state.setNodeState(name, api.StateReady, "", "", 0)
-			state.setNodeState(name, api.StateRunning, "", "", 0)
+			if task.Kind != project.KindService {
+				state.setNodeState(name, api.StateRunning, "", "", 0)
+			}
 
 			depKeys := state.depKeySnapshot(task.Deps)
 			rt := baseRT.WithTask(name, instance.LogPath(state.req.Worktree, state.inst.ID, name))
@@ -481,15 +483,62 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 		return taskResult{name: task.Name, err: err}
 	}
 	if task.Kind == project.KindService {
-		if !state.hasService(task.Name) {
+		handle, ok := state.serviceHandle(task.Name)
+		if !ok {
 			err := fmt.Errorf("service task %q returned without starting a service", task.Name)
 			state.setNodeState(task.Name, api.StateFailed, "", err.Error(), 0)
 			return taskResult{name: task.Name, err: err}
 		}
+		if err := e.awaitServiceReady(ctx, rt, task, handle); err != nil {
+			_ = handle.Stop()
+			state.removeService(task.Name)
+			state.setNodeState(task.Name, api.StateFailed, "", err.Error(), 0)
+			return taskResult{name: task.Name, err: err}
+		}
+		state.setNodeState(task.Name, api.StateRunning, "", "", handle.PID())
 		return taskResult{name: task.Name}
 	}
 	state.setNodeState(task.Name, api.StateDone, "", "", 0)
 	return taskResult{name: task.Name}
+}
+
+func (e *Engine) awaitServiceReady(ctx context.Context, rt *project.Runtime, task project.Task, handle *process.Handle) error {
+	if task.Ready == nil {
+		return nil
+	}
+	timeout := task.ReadyTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	readyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	readyCh := make(chan error, 1)
+	exitCh := make(chan error, 1)
+	go func() {
+		readyCh <- task.Ready(readyCtx, rt)
+	}()
+	go func() {
+		exitCh <- handle.Wait()
+	}()
+
+	select {
+	case err := <-readyCh:
+		if err != nil {
+			return err
+		}
+		return nil
+	case err := <-exitCh:
+		if err != nil {
+			return fmt.Errorf("service exited before readiness: %w", err)
+		}
+		return fmt.Errorf("service exited before readiness")
+	case <-readyCtx.Done():
+		if errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("service readiness timed out after %s", timeout)
+		}
+		return readyCtx.Err()
+	}
 }
 
 func runTask(ctx context.Context, task project.Task, rt *project.Runtime) error {
@@ -708,17 +757,28 @@ func (s *runState) registerService(task string, handle *process.Handle) {
 	s.inst.Processes[task] = api.ProcessRef{PID: handle.PID(), StartedAt: time.Now().UTC()}
 	node := s.status[task]
 	node.PID = handle.PID()
-	node.State = api.StateRunning
 	s.status[task] = node
 	_ = instance.Save(s.inst)
 	s.saveLocked()
 }
 
-func (s *runState) hasService(task string) bool {
+func (s *runState) serviceHandle(task string) (*process.Handle, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, ok := s.services[task]
-	return ok
+	handle, ok := s.services[task]
+	return handle, ok
+}
+
+func (s *runState) removeService(task string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.services, task)
+	delete(s.inst.Processes, task)
+	node := s.status[task]
+	node.PID = 0
+	s.status[task] = node
+	_ = instance.Save(s.inst)
+	s.saveLocked()
 }
 
 func (s *runState) depKeySnapshot(deps []string) []string {

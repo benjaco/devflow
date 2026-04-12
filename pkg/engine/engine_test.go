@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"devflow/pkg/api"
+	"devflow/pkg/instance"
 	"devflow/pkg/process"
 	"devflow/pkg/project"
 )
@@ -408,6 +409,148 @@ func TestWatchRerunsOnlyAffectedSlice(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for watch shutdown")
+	}
+}
+
+type readinessProject struct{}
+
+func (readinessProject) Name() string { return "readiness-project" }
+
+func (readinessProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "readiness"}, nil
+}
+
+func (readinessProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"svc"}}}
+}
+
+func (readinessProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:         "svc",
+			Kind:         project.KindService,
+			Signature:    "svc-ready-v1",
+			Ready:        project.ReadyFile(".ready/svc"),
+			ReadyTimeout: 750 * time.Millisecond,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				readyPath := rt.Abs(".ready/svc")
+				_ = os.Remove(readyPath)
+				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
+					Name: "sh",
+					Args: []string{"-c", "trap 'rm -f \"$READY_PATH\"; exit 0' INT TERM; sleep 0.2; mkdir -p \"$(dirname \"$READY_PATH\")\"; : > \"$READY_PATH\"; while true; do sleep 1; done"},
+					Dir:  rt.Worktree,
+					Env: map[string]string{
+						"READY_PATH": readyPath,
+					},
+				})
+				return err
+			},
+		},
+	}
+}
+
+type readinessTimeoutProject struct{}
+
+func (readinessTimeoutProject) Name() string { return "readiness-timeout-project" }
+
+func (readinessTimeoutProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "readiness-timeout"}, nil
+}
+
+func (readinessTimeoutProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"svc"}}}
+}
+
+func (readinessTimeoutProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:         "svc",
+			Kind:         project.KindService,
+			Signature:    "svc-timeout-v1",
+			Ready:        project.ReadyFile(".ready/never"),
+			ReadyTimeout: 250 * time.Millisecond,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
+					Name: "sh",
+					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
+					Dir:  rt.Worktree,
+				})
+				return err
+			},
+		},
+	}
+}
+
+func TestServiceReadinessMustPassBeforeSuccess(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+
+	eng, err := New(readinessProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Now()
+	out, err := eng.Run(context.Background(), Request{Target: "dev", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, stopErr := instance.StopProcesses(out.Instance, ""); stopErr != nil {
+			t.Fatalf("stop processes: %v", stopErr)
+		}
+	}()
+
+	if elapsed := time.Since(started); elapsed < 175*time.Millisecond {
+		t.Fatalf("service run completed before readiness delay elapsed: %s", elapsed)
+	}
+
+	status, err := instance.LoadStatus(worktree, out.Result.InstanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := status.Nodes["svc"]
+	if node.State != api.StateRunning {
+		t.Fatalf("expected running state after readiness, got %q", node.State)
+	}
+	if node.PID <= 0 {
+		t.Fatalf("expected tracked PID after readiness, got %d", node.PID)
+	}
+}
+
+func TestServiceReadinessTimeoutFailsRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+
+	eng, err := New(readinessTimeoutProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := eng.Run(context.Background(), Request{Target: "dev", Worktree: worktree, Mode: api.ModeCI})
+	if err == nil {
+		t.Fatal("expected readiness timeout error")
+	}
+	if out == nil {
+		t.Fatal("expected partial outcome on readiness failure")
+	}
+
+	status, statusErr := instance.LoadStatus(worktree, out.Result.InstanceID)
+	if statusErr != nil {
+		t.Fatal(statusErr)
+	}
+	node := status.Nodes["svc"]
+	if node.State != api.StateFailed {
+		t.Fatalf("expected failed state after readiness timeout, got %q", node.State)
+	}
+	if node.LastError == "" {
+		t.Fatal("expected readiness failure message to be recorded")
 	}
 }
 

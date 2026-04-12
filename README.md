@@ -5,6 +5,7 @@ Devflow is a local-first DAG runner for development workflows.
 It is designed for:
 - cached one-shot tasks
 - supervised long-running services
+- adapter-defined service readiness checks
 - detached background supervision for service-bearing runs
 - worktree-scoped instance isolation
 - per-instance ports and runtime env
@@ -18,19 +19,20 @@ Early development. The current implementation focuses on the generic core:
 - content-based fingerprints
 - local snapshot cache
 - subprocess execution and service supervision
+- service readiness gating before a service is considered running
 - detached `run/watch --detach` background supervisor launching
 - worktree instances and shared port leasing
 - polling-based watch mode using `github.com/radovskyb/watcher`
 - JSON-capable CLI commands
 
-The TUI and the richer full-stack example adapter are still intentionally minimal while the core stabilizes.
+The TUI is still minimal, but the bundled example adapter now acts as a real smoke target for the core.
 
 ## Quick Start
 
 ```bash
 go test ./...
 go run ./cmd/devflow graph list --project go-next-monorepo
-go run ./cmd/devflow run fullstack --project go-next-monorepo --json
+go run ./cmd/devflow run fullstack --project go-next-monorepo --worktree examples/go-next-monorepo/worktree --json
 ```
 
 ## Design Goals

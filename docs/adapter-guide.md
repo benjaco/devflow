@@ -9,6 +9,39 @@ An adapter defines:
 
 Tasks should stay semantic. The adapter decides which files, directories, env vars, and custom probes contribute to each fingerprint.
 
+## Service Readiness
+
+Service tasks can define an optional readiness function.
+
+Current shape:
+
+```go
+type ReadyFunc func(ctx context.Context, rt *Runtime) error
+
+type Task struct {
+    Name         string
+    Kind         Kind
+    Run          RunFunc
+    Ready        ReadyFunc
+    ReadyTimeout time.Duration
+    // ...
+}
+```
+
+Use readiness when process start is not the same as service usability.
+
+Examples:
+- wait for a TCP listener on a named port
+- poll an HTTP health endpoint
+- wait for a ready file or socket to appear
+- combine multiple checks with `ReadyAll(...)`
+
+Rules:
+- readiness should be narrow and deterministic
+- a readiness check should describe service usability, not broad system health
+- if a readiness check is configured, the engine will fail the task if it times out or the process exits first
+- tasks without a readiness check are considered ready immediately after process start
+
 ## Cache Key Overrides
 
 By default, Devflow computes cache keys automatically from the task definition, selected inputs, env, and dependency keys.

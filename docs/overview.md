@@ -10,4 +10,4 @@ The current implementation provides the generic engine layers first:
 - instance and port management
 - JSON CLI contracts
 
-Future milestones add incremental watch execution, a richer TUI, and a more realistic example adapter.
+Future milestones add a richer TUI and continue expanding the example adapter and operator surface.

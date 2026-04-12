@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"devflow/pkg/api"
 	"devflow/pkg/process"
@@ -30,6 +31,7 @@ const (
 
 type FingerprintFunc func(ctx context.Context, rt *Runtime) (string, error)
 type RunFunc func(ctx context.Context, rt *Runtime) error
+type ReadyFunc func(ctx context.Context, rt *Runtime) error
 
 type Inputs struct {
 	Files  []string
@@ -51,6 +53,8 @@ type Task struct {
 	Inputs       Inputs
 	Outputs      Outputs
 	Run          RunFunc
+	Ready        ReadyFunc
+	ReadyTimeout time.Duration
 	Cache        bool
 	Restart      RestartPolicy
 	AllowInWatch bool
