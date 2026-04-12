@@ -5,7 +5,7 @@ Last updated: 2026-04-12
 ## Current Status
 
 - Phase: post-bootstrap core implementation
-- State: graph/cache/process/instance/ports/engine/CLI foundation implemented and tested, with bounded parallel scheduling
+- State: graph/cache/process/instance/ports/engine/CLI foundation implemented and tested, with bounded parallel scheduling and a typed event stream
 - Confidence: core parallel run path is working; watch mode and TUI are not implemented yet
 
 ## Completed
@@ -33,6 +33,7 @@ Last updated: 2026-04-12
   - `pkg/event`
   - `pkg/engine`
 - Bounded parallel ready-queue scheduling implemented in `pkg/engine`
+- Typed engine event stream implemented for run/task/cache/process/log events
 - CLI commands implemented:
   - `run`
   - `status`
@@ -53,7 +54,6 @@ Last updated: 2026-04-12
 
 ## Next Steps
 
-- Add stable event stream plumbing for live status/log consumers
 - Implement real watch-mode invalidation and selective reruns in `pkg/watch`
 - Expand CLI coverage for restart/stop/cache subcommands
 - Build the first usable TUI slice in `pkg/tui`

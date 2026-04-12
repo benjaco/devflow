@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -164,4 +165,116 @@ func TestRunHonorsMaxParallelOne(t *testing.T) {
 	if got := p.maxSeen.Load(); got != 1 {
 		t.Fatalf("expected max concurrency 1, got %d", got)
 	}
+}
+
+type eventProject struct{}
+
+func (eventProject) Name() string { return "event-project" }
+
+func (eventProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "events"}, nil
+}
+
+func (eventProject) Targets() []project.Target {
+	return []project.Target{{Name: "build", RootTasks: []string{"gen"}}}
+}
+
+func (eventProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:      "gen",
+			Kind:      project.KindOnce,
+			Cache:     true,
+			Inputs:    project.Inputs{Files: []string{"input.txt"}},
+			Outputs:   project.Outputs{Files: []string{"out.txt"}},
+			Signature: "event-gen-v1",
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				if err := rt.RunCmd(ctx, "sh", "-c", "printf 'hello-event\\n'"); err != nil {
+					return err
+				}
+				return os.WriteFile(filepath.Join(rt.Worktree, "out.txt"), []byte("done"), 0o644)
+			},
+		},
+	}
+}
+
+func TestRunPublishesStructuredEvents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := New(eventProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := eng.SubscribeEvents()
+	if _, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI}); err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(events)
+	types := eventTypes(got)
+	mustContainEventType(t, types, api.EventInstanceUpdated)
+	mustContainEventType(t, types, api.EventRunStarted)
+	mustContainEventType(t, types, api.EventTaskState)
+	mustContainEventType(t, types, api.EventCacheMiss)
+	mustContainEventType(t, types, api.EventLogLine)
+	mustContainEventType(t, types, api.EventRunFinished)
+}
+
+func TestRunPublishesCacheHitOnSecondExecution(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := New(eventProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI}); err != nil {
+		t.Fatal(err)
+	}
+	events := eng.SubscribeEvents()
+	if _, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI}); err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(events)
+	types := eventTypes(got)
+	mustContainEventType(t, types, api.EventCacheHit)
+}
+
+func drainEvents(ch <-chan api.Event) []api.Event {
+	out := make([]api.Event, 0)
+	for {
+		select {
+		case evt := <-ch:
+			out = append(out, evt)
+		case <-time.After(25 * time.Millisecond):
+			return out
+		}
+	}
+}
+
+func eventTypes(events []api.Event) []api.EventType {
+	out := make([]api.EventType, 0, len(events))
+	for _, evt := range events {
+		out = append(out, evt.Type)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+func mustContainEventType(t *testing.T, types []api.EventType, want api.EventType) {
+	t.Helper()
+	for _, got := range types {
+		if got == want {
+			return
+		}
+	}
+	t.Fatalf("missing event type %q in %v", want, types)
 }

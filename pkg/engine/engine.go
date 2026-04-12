@@ -41,7 +41,7 @@ type Engine struct {
 	graph   *graph.Graph
 	cache   *cache.Store
 	ports   *ports.Manager
-	logs    event.Bus[api.LogEvent]
+	events  event.Bus[api.Event]
 }
 
 type runState struct {
@@ -52,6 +52,7 @@ type runState struct {
 	depKeys   map[string]string
 	cacheHits []string
 	services  map[string]*process.Handle
+	publish   func(api.Event)
 }
 
 type taskResult struct {
@@ -80,6 +81,10 @@ func New(p project.Project, worktree string) (*Engine, error) {
 
 func (e *Engine) Graph() *graph.Graph {
 	return e.graph
+}
+
+func (e *Engine) SubscribeEvents() <-chan api.Event {
+	return e.events.Subscribe()
 }
 
 func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
@@ -120,6 +125,7 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 		status:   map[string]api.NodeStatus{},
 		depKeys:  map[string]string{},
 		services: map[string]*process.Handle{},
+		publish:  e.publish,
 	}
 	for _, name := range order {
 		task := e.graph.Tasks[name]
@@ -133,6 +139,14 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 	if err := instance.SaveStatus(req.Worktree, inst.ID, req.Target, req.Mode, state.status); err != nil {
 		return nil, err
 	}
+	e.publish(api.Event{
+		TS:         process.NowRFC3339Nano(),
+		Type:       api.EventInstanceUpdated,
+		InstanceID: inst.ID,
+		Worktree:   req.Worktree,
+		Target:     req.Target,
+		Mode:       req.Mode,
+	})
 
 	result := api.RunResult{
 		Target:     req.Target,
@@ -150,18 +164,27 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 		Instance: inst,
 		Mode:     req.Mode,
 		Env:      cloneMap(inst.Env),
-		EventFn: func(evt api.LogEvent) {
-			e.logs.Publish(evt)
+		EventFn: func(evt api.Event) {
+			e.publish(evt)
 		},
 		OnService: func(task string, handle *process.Handle) {
 			state.registerService(task, handle)
 		},
 	}
+	e.publish(api.Event{
+		TS:         process.NowRFC3339Nano(),
+		Type:       api.EventRunStarted,
+		InstanceID: inst.ID,
+		Worktree:   req.Worktree,
+		Target:     req.Target,
+		Mode:       req.Mode,
+	})
 
 	if err := e.runReadyQueue(runCtx, cancel, baseRT, state, order); err != nil {
 		result.FailedNode = state.failedNode()
 		result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 		result.DurationMs = time.Since(started).Milliseconds()
+		e.publishRunFinished(result, req.Worktree, err.Error())
 		return &Outcome{Result: result, Instance: inst}, err
 	}
 
@@ -172,6 +195,10 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 	if len(services) > 0 && req.Mode != api.ModeCI {
 		waitErr := e.waitForServices(ctx, req, inst, state.statusSnapshot(), services)
 		if waitErr != nil && !errors.Is(waitErr, context.Canceled) {
+			result.Success = false
+			result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+			result.DurationMs = time.Since(started).Milliseconds()
+			e.publishRunFinished(result, req.Worktree, waitErr.Error())
 			return nil, waitErr
 		}
 	}
@@ -181,6 +208,7 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 	if err := instance.SaveStatus(req.Worktree, inst.ID, req.Target, req.Mode, state.statusSnapshot()); err != nil {
 		return nil, err
 	}
+	e.publishRunFinished(result, req.Worktree, "")
 	return &Outcome{Result: result, Instance: inst}, nil
 }
 
@@ -296,9 +324,29 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 		}
 		state.setLastRunKey(task.Name, key)
 		if ok, restoreErr := e.cache.Restore(rt.Worktree, task.Name, key); restoreErr == nil && ok {
+			state.publishEvent(api.Event{
+				TS:         process.NowRFC3339Nano(),
+				Type:       api.EventCacheHit,
+				InstanceID: state.inst.ID,
+				Worktree:   state.req.Worktree,
+				Target:     state.req.Target,
+				Task:       task.Name,
+				Mode:       state.req.Mode,
+				CacheKey:   key,
+			})
 			state.setNodeState(task.Name, api.StateCached, key, "", 0)
 			return taskResult{name: task.Name, key: key, cached: true}
 		}
+		state.publishEvent(api.Event{
+			TS:         process.NowRFC3339Nano(),
+			Type:       api.EventCacheMiss,
+			InstanceID: state.inst.ID,
+			Worktree:   state.req.Worktree,
+			Target:     state.req.Target,
+			Task:       task.Name,
+			Mode:       state.req.Mode,
+			CacheKey:   key,
+		})
 		if err := runTask(ctx, task, rt); err != nil {
 			state.setNodeState(task.Name, api.StateFailed, key, err.Error(), 0)
 			return taskResult{name: task.Name, key: key, err: err}
@@ -368,12 +416,36 @@ func (e *Engine) waitForServices(parent context.Context, req Request, inst *api.
 		for _, name := range sortedHandles(services) {
 			_ = services[name].Stop()
 			node := status[name]
+			prev := node.State
 			node.State = api.StateStopped
 			status[name] = node
+			e.publish(api.Event{
+				TS:            process.NowRFC3339Nano(),
+				Type:          api.EventTaskState,
+				InstanceID:    inst.ID,
+				Worktree:      req.Worktree,
+				Target:        req.Target,
+				Task:          name,
+				Mode:          req.Mode,
+				State:         api.StateStopped,
+				PreviousState: prev,
+				PID:           node.PID,
+			})
+			e.publish(api.Event{
+				TS:         process.NowRFC3339Nano(),
+				Type:       api.EventProcessExited,
+				InstanceID: inst.ID,
+				Worktree:   req.Worktree,
+				Target:     req.Target,
+				Task:       name,
+				Mode:       req.Mode,
+				PID:        node.PID,
+			})
 		}
 		return ctx.Err()
 	case ex := <-exits:
 		node := status[ex.task]
+		prev := node.State
 		if ex.err != nil {
 			node.State = api.StateFailed
 			node.LastError = ex.err.Error()
@@ -382,14 +454,61 @@ func (e *Engine) waitForServices(parent context.Context, req Request, inst *api.
 		}
 		status[ex.task] = node
 		_ = instance.SaveStatus(req.Worktree, inst.ID, req.Target, req.Mode, status)
+		e.publish(api.Event{
+			TS:            process.NowRFC3339Nano(),
+			Type:          api.EventTaskState,
+			InstanceID:    inst.ID,
+			Worktree:      req.Worktree,
+			Target:        req.Target,
+			Task:          ex.task,
+			Mode:          req.Mode,
+			State:         node.State,
+			PreviousState: prev,
+			PID:           node.PID,
+			Error:         node.LastError,
+		})
+		e.publish(api.Event{
+			TS:         process.NowRFC3339Nano(),
+			Type:       api.EventProcessExited,
+			InstanceID: inst.ID,
+			Worktree:   req.Worktree,
+			Target:     req.Target,
+			Task:       ex.task,
+			Mode:       req.Mode,
+			PID:        node.PID,
+			Error:      node.LastError,
+		})
 		for task, handle := range services {
 			if task == ex.task {
 				continue
 			}
 			_ = handle.Stop()
 			node := status[task]
+			prev := node.State
 			node.State = api.StateStopped
 			status[task] = node
+			e.publish(api.Event{
+				TS:            process.NowRFC3339Nano(),
+				Type:          api.EventTaskState,
+				InstanceID:    inst.ID,
+				Worktree:      req.Worktree,
+				Target:        req.Target,
+				Task:          task,
+				Mode:          req.Mode,
+				State:         api.StateStopped,
+				PreviousState: prev,
+				PID:           node.PID,
+			})
+			e.publish(api.Event{
+				TS:         process.NowRFC3339Nano(),
+				Type:       api.EventProcessExited,
+				InstanceID: inst.ID,
+				Worktree:   req.Worktree,
+				Target:     req.Target,
+				Task:       task,
+				Mode:       req.Mode,
+				PID:        node.PID,
+			})
 		}
 		if ex.err != nil {
 			return fmt.Errorf("service %q exited: %w", ex.task, ex.err)
@@ -402,6 +521,9 @@ func (s *runState) setNodeState(name string, state api.NodeState, lastRunKey, la
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	node := s.status[name]
+	prev := node.State
+	prevPID := node.PID
+	prevError := node.LastError
 	node.State = state
 	if lastRunKey != "" {
 		node.LastRunKey = lastRunKey
@@ -416,6 +538,22 @@ func (s *runState) setNodeState(name string, state api.NodeState, lastRunKey, la
 	}
 	s.status[name] = node
 	s.saveLocked()
+	if s.publish != nil && (prev != node.State || prevPID != node.PID || prevError != node.LastError) {
+		s.publish(api.Event{
+			TS:            process.NowRFC3339Nano(),
+			Type:          api.EventTaskState,
+			InstanceID:    s.inst.ID,
+			Worktree:      s.req.Worktree,
+			Target:        s.req.Target,
+			Task:          name,
+			Mode:          s.req.Mode,
+			State:         node.State,
+			PreviousState: prev,
+			CacheKey:      node.LastRunKey,
+			PID:           node.PID,
+			Error:         node.LastError,
+		})
+	}
 }
 
 func (s *runState) setLastRunKey(name, key string) {
@@ -437,6 +575,13 @@ func (s *runState) addCacheHit(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cacheHits = append(s.cacheHits, name)
+}
+
+func (s *runState) publishEvent(evt api.Event) {
+	if s.publish == nil {
+		return
+	}
+	s.publish(evt)
 }
 
 func (s *runState) registerService(task string, handle *process.Handle) {
@@ -575,4 +720,23 @@ func sortedNodeNames(m map[string]api.NodeStatus) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func (e *Engine) publish(evt api.Event) {
+	e.events.Publish(evt)
+}
+
+func (e *Engine) publishRunFinished(result api.RunResult, worktree, errText string) {
+	success := result.Success
+	e.publish(api.Event{
+		TS:         process.NowRFC3339Nano(),
+		Type:       api.EventRunFinished,
+		InstanceID: result.InstanceID,
+		Worktree:   worktree,
+		Target:     result.Target,
+		Mode:       result.Mode,
+		Task:       result.FailedNode,
+		Error:      errText,
+		Success:    &success,
+	})
 }

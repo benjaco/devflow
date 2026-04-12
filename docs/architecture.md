@@ -13,7 +13,7 @@
 - `pkg/ports`: shared port registry with lock-safe allocation
 - `pkg/engine`: sequential execution engine and status persistence
 - `pkg/engine`: bounded parallel ready-queue execution engine and status persistence
-- `pkg/event`: event types and an in-memory bus used by the engine
+- `pkg/event`: typed event bus used by the engine for run, task-state, cache, process, instance, and log events
 
 ## State Layout
 
@@ -27,3 +27,15 @@ Shared coordination state lives under the user cache directory:
 - `devflow/state/instance-index.json`
 
 This split keeps cache and logs local to the worktree while still allowing cross-worktree port coordination.
+
+## Event Stream
+
+The engine now emits a typed in-process event stream for live consumers. Event categories include:
+- run started / finished
+- instance updated
+- task state changed
+- cache hit / miss
+- log line
+- process exited
+
+This is exposed through engine subscription rather than a dedicated CLI command for now. The goal is to keep the event envelope stable before adding TUI and MCP-facing stream surfaces.

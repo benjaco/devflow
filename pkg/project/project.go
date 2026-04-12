@@ -86,7 +86,7 @@ type Runtime struct {
 	Env        map[string]string
 	TaskName   string
 	LogPath    string
-	EventFn    func(api.LogEvent)
+	EventFn    func(api.Event)
 	OnService  func(task string, handle *process.Handle)
 	onTaskDone func()
 }
@@ -123,10 +123,13 @@ func (rt *Runtime) RunCmdSpec(ctx context.Context, spec process.CommandSpec) err
 		if rt.EventFn == nil {
 			return
 		}
-		rt.EventFn(api.LogEvent{
+		rt.EventFn(api.Event{
 			TS:         process.NowRFC3339Nano(),
+			Type:       api.EventLogLine,
 			InstanceID: rt.Instance.ID,
+			Worktree:   rt.Worktree,
 			Task:       rt.TaskName,
+			Mode:       rt.Mode,
 			Stream:     stream,
 			Line:       line,
 		})
@@ -157,10 +160,13 @@ func (rt *Runtime) StartServiceSpec(ctx context.Context, spec process.CommandSpe
 		if rt.EventFn == nil {
 			return
 		}
-		rt.EventFn(api.LogEvent{
+		rt.EventFn(api.Event{
 			TS:         process.NowRFC3339Nano(),
+			Type:       api.EventLogLine,
 			InstanceID: rt.Instance.ID,
+			Worktree:   rt.Worktree,
 			Task:       rt.TaskName,
+			Mode:       rt.Mode,
 			Stream:     stream,
 			Line:       line,
 		})
