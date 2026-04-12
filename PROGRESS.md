@@ -5,8 +5,8 @@ Last updated: 2026-04-12
 ## Current Status
 
 - Phase: post-bootstrap core implementation
-- State: graph/cache/process/instance/ports/engine/CLI foundation implemented and tested
-- Confidence: core sequential path is working; watch mode and TUI are not implemented yet
+- State: graph/cache/process/instance/ports/engine/CLI foundation implemented and tested, with bounded parallel scheduling
+- Confidence: core parallel run path is working; watch mode and TUI are not implemented yet
 
 ## Completed
 
@@ -32,6 +32,7 @@ Last updated: 2026-04-12
   - `pkg/ports`
   - `pkg/event`
   - `pkg/engine`
+- Bounded parallel ready-queue scheduling implemented in `pkg/engine`
 - CLI commands implemented:
   - `run`
   - `status`
@@ -41,6 +42,7 @@ Last updated: 2026-04-12
   - `graph list`
   - `graph show`
   - `graph affected`
+- `run --max-parallel` wired through the CLI and engine request model
 - Example adapter added at `examples/go-next-monorepo`
 - Unit/integration-style tests added for core packages
 - Verified with `go test ./...`
@@ -51,7 +53,6 @@ Last updated: 2026-04-12
 
 ## Next Steps
 
-- Implement parallel ready-queue scheduling in `pkg/engine`
 - Add stable event stream plumbing for live status/log consumers
 - Implement real watch-mode invalidation and selective reruns in `pkg/watch`
 - Expand CLI coverage for restart/stop/cache subcommands
@@ -64,5 +65,4 @@ Last updated: 2026-04-12
 - `tui` package is a stub
 - No restart/stop/cache subcommands yet
 - Service readiness checks are not modeled yet
-- Engine is sequential, not parallel
 - Example adapter is intentionally lightweight and not a full replacement for the target Nushell flows

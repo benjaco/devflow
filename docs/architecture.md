@@ -12,6 +12,7 @@
 - `pkg/instance`: worktree-scoped instance identity and persisted state
 - `pkg/ports`: shared port registry with lock-safe allocation
 - `pkg/engine`: sequential execution engine and status persistence
+- `pkg/engine`: bounded parallel ready-queue execution engine and status persistence
 - `pkg/event`: event types and an in-memory bus used by the engine
 
 ## State Layout

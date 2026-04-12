@@ -73,6 +73,7 @@ func (a *App) runCmd(args []string) error {
 	worktree := fs.String("worktree", "", "")
 	modeWatch := fs.Bool("watch", false, "")
 	ciMode := fs.Bool("ci", false, "")
+	maxParallel := fs.Int("max-parallel", 0, "")
 	projectName := fs.String("project", defaultProject(), "")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -106,9 +107,10 @@ func (a *App) runCmd(args []string) error {
 		return err
 	}
 	outcome, runErr := eng.Run(context.Background(), engine.Request{
-		Target:   target,
-		Worktree: root,
-		Mode:     mode,
+		Target:      target,
+		Worktree:    root,
+		Mode:        mode,
+		MaxParallel: *maxParallel,
 	})
 	if outcome != nil {
 		if *jsonOut {
