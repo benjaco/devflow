@@ -62,7 +62,7 @@ Last updated: 2026-04-13
 - Example adapter added at `examples/go-next-monorepo`
 - Example adapter upgraded to a deterministic full-stack-style workflow with DB prep, codegen, services, and watch semantics
 - Example adapter now structurally uses the dedicated DB flow: restore/reset, temporary runtime, migration replay, snapshot, then final `postgres` service
-- Real `bikecoach` adapter added for an embedded-frontend + Go server workflow with dedicated per-worktree Postgres
+- Real `embedded-web-app` adapter added for an embedded-frontend + Go server workflow with dedicated per-worktree Postgres
 - Unit/integration-style tests added for core packages
 - Example-project smoke tests added for cache hits, watch reruns, and multi-worktree isolation
 - Engine tests added for readiness success and readiness timeout failure
@@ -73,12 +73,12 @@ Last updated: 2026-04-13
 - Dotenv parser tests added, and example/CLI tests now verify runtime env and service logs include `.env` values while DB overrides still win
 - CLI integration coverage added for the example adapter JSON lifecycle (`run`, `status`, `logs`, `instances`, `doctor`, `stop`)
 - CLI regression test added so `run --json` still returns execution errors instead of swallowing them after emitting JSON
-- Manual BikeCoach smoke coverage completed:
+- Manual embedded-web-app smoke coverage completed:
   - `doctor --json`
   - `graph list/show`
   - `run build-all --ci`
   - `run fullstack --ci` now fails early with a clear Docker-daemon-not-ready error if Docker is installed but not running
-  - after starting Docker, `run fullstack --ci` succeeds end to end against the real BikeCoach repo
+  - after starting Docker, `run fullstack --ci` succeeds end to end against the real local example repo
   - detached `run fullstack` starts the real backend and dedicated Postgres runtime
   - `/health` responds successfully on the assigned backend port
   - detached `stop --all` now leaves the status snapshot consistent with the stopped processes
@@ -92,11 +92,11 @@ Last updated: 2026-04-13
   - `devflow tui --worktree ...` opens a live operator console for an existing instance
   - live full-width task list with updating status and a log pane below is available
   - detached supervisor log can be viewed from inside the TUI
-  - TUI rendering has unit coverage and manual BikeCoach smoke coverage
+  - TUI rendering has unit coverage and manual embedded-web-app smoke coverage
   - TUI renderer now avoids right-edge wrap corruption in VS Code terminals and shows explicit per-task state badges plus aggregate state counts
   - TUI task ordering now pins running work first, pending/ready work next, and keeps selection stable across refreshes
   - the original manual ANSI renderer was replaced with a `tview`-based implementation for stable redraws in real terminals
-  - TUI now supports `i` on the selected task to invalidate the selected downstream cacheable slice and relaunch the current target; manually verified on BikeCoach by invalidating `build_coach`
+  - TUI now supports `i` on the selected task to invalidate the selected downstream cacheable slice and relaunch the current target; manually verified on the embedded-web-app adapter by invalidating `build_coach`
   - TUI refresh cadence is now faster overall and much faster while invalidate/rerun actions are in flight
 - Database runtime helper fixed so Docker combined-output errors are preserved and missing volume/container detection works against real daemon responses
 - Database URL generation now appends `?sslmode=disable` for the dedicated local Postgres runtime
@@ -170,4 +170,4 @@ Last updated: 2026-04-13
 
 - Fine-grained detached per-service restart is not fully implemented yet
 - The example adapter still uses a deterministic fake-DB path in normal tests; real Docker-backed coverage now exists as an opt-in module-level e2e layer rather than being part of default `go test ./...`
-- The `bikecoach` adapter is now manually validated against the local repo for build, DB prep, detached runtime, health, and shutdown flows; remaining gaps are automated Docker-backed coverage and richer control UX
+- The `embedded-web-app` adapter is now manually validated against a local repo for build, DB prep, detached runtime, health, and shutdown flows; remaining gaps are automated Docker-backed coverage and richer control UX

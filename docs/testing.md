@@ -45,13 +45,13 @@ Docker-backed integration coverage is intentionally opt-in. Enable it with:
 DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run Docker
 ```
 
-There is also now a real `bikecoach` adapter with:
+There is also now a real `embedded-web-app` adapter with:
 - unit coverage for graph shape and env finalization
-- manual smoke validation against the local BikeCoach repo
+- manual smoke validation against a local embedded-frontend Go app repo
 - verified `build-all` execution through the real repository
 - verified early failure when Docker is installed but the daemon is not running
 
 The current example coverage splits cleanly across three shapes:
 - `go-next-monorepo`: deterministic frontend + backend + DB flow
 - `web-worker-workspace`: deterministic API + worker + frontend multi-service flow
-- `bikecoach`: real repository adapter for a Go server + embedded frontend + dedicated Postgres flow
+- `embedded-web-app`: real repository adapter for a Go server + embedded frontend + dedicated Postgres flow

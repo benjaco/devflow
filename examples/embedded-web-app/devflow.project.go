@@ -1,4 +1,4 @@
-package bikecoach
+package embeddedwebapp
 
 import (
 	"context"
@@ -18,21 +18,21 @@ import (
 	"devflow/pkg/project"
 )
 
-type bikecoachProject struct{}
+type embeddedWebAppProject struct{}
 
 func init() {
-	project.Register(bikecoachProject{})
+	project.Register(embeddedWebAppProject{})
 }
 
-func (bikecoachProject) Name() string {
-	return "bikecoach"
+func (embeddedWebAppProject) Name() string {
+	return "embedded-web-app"
 }
 
-func (bikecoachProject) DefaultTarget() string {
+func (embeddedWebAppProject) DefaultTarget() string {
 	return "up"
 }
 
-func (bikecoachProject) DetectWorktree(worktree string) bool {
+func (embeddedWebAppProject) DetectWorktree(worktree string) bool {
 	required := []string{
 		"sqlc.yaml",
 		"cmd/coach/main.go",
@@ -47,13 +47,13 @@ func (bikecoachProject) DetectWorktree(worktree string) bool {
 	return true
 }
 
-func (bikecoachProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+func (embeddedWebAppProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
 	_ = ctx
 	dotenv, err := project.LoadOptionalDotEnvInWorktree(worktree, ".env")
 	if err != nil {
 		return project.InstanceConfig{}, err
 	}
-	dotenv = normalizeBikecoachEnv(dotenv)
+	dotenv = normalizeEmbeddedWebAppEnv(dotenv)
 	manager := database.New()
 
 	return project.InstanceConfig{
@@ -63,8 +63,8 @@ func (bikecoachProject) ConfigureInstance(ctx context.Context, worktree string) 
 			"ENVIRONMENT":            "development",
 			"DEV_AUTH_BYPASS":        "1",
 			"ADMIN_PORTAL_PASSWORD":  "devflow-admin",
-			"DEVFLOW_ADAPTER":        "bikecoach",
-			"DEVFLOW_ADAPTER_SOURCE": "examples/bikecoach",
+			"DEVFLOW_ADAPTER":        "embedded-web-app",
+			"DEVFLOW_ADAPTER_SOURCE": "examples/embedded-web-app",
 		}, dotenv),
 		Finalize: func(inst *api.Instance) error {
 			db := manager.Desired(inst.ID, database.Config{
@@ -72,7 +72,7 @@ func (bikecoachProject) ConfigureInstance(ctx context.Context, worktree string) 
 				Database:     "coach",
 				User:         "coach",
 				Password:     "coach",
-				SnapshotRoot: filepath.Join(inst.Worktree, ".devflow", "dbsnapshots", "bikecoach"),
+				SnapshotRoot: filepath.Join(inst.Worktree, ".devflow", "dbsnapshots", "embedded-web-app"),
 			})
 			inst.DB = db
 			inst.Env = project.MergeEnvMaps(inst.Env, map[string]string{
@@ -91,29 +91,29 @@ func (bikecoachProject) ConfigureInstance(ctx context.Context, worktree string) 
 	}, nil
 }
 
-func (bikecoachProject) Tasks() []project.Task {
-	toolsBin := bikecoachBinaryTool(
+func (embeddedWebAppProject) Tasks() []project.Task {
+	toolsBin := embeddedWebAppBinaryTool(
 		"build_tools",
-		"Build the BikeCoach tools CLI",
-		".devflow/bikecoach/bin/tools",
+		"Build the embedded web app tools CLI",
+		".devflow/embedded-web-app/bin/tools",
 		[]string{"check_build_tools", "warmup_go_download", "sqlc_generate"},
 		[]string{"go.mod", "go.sum"},
 		[]string{"cmd/tools", "internal"},
 		process.CommandSpec{
 			Name: "go",
-			Args: []string{"build", "-o", ".devflow/bikecoach/bin/tools" + exeSuffix(), "./cmd/tools"},
+			Args: []string{"build", "-o", ".devflow/embedded-web-app/bin/tools" + exeSuffix(), "./cmd/tools"},
 		},
 	)
-	coachBin := bikecoachBinaryTool(
+	coachBin := embeddedWebAppBinaryTool(
 		"build_coach",
-		"Build the BikeCoach server binary",
-		".devflow/bikecoach/bin/coach",
+		"Build the embedded web app server binary",
+		".devflow/embedded-web-app/bin/coach",
 		[]string{"check_build_tools", "warmup_go_download", "sqlc_generate", "build_frontend_main", "build_frontend_internal", "build_frontend_admin"},
 		[]string{"go.mod", "go.sum"},
 		[]string{"cmd/coach", "internal"},
 		process.CommandSpec{
 			Name: "go",
-			Args: []string{"build", "-o", ".devflow/bikecoach/bin/coach" + exeSuffix(), "./cmd/coach"},
+			Args: []string{"build", "-o", ".devflow/embedded-web-app/bin/coach" + exeSuffix(), "./cmd/coach"},
 		},
 	)
 
@@ -121,8 +121,8 @@ func (bikecoachProject) Tasks() []project.Task {
 		{
 			Name:        "check_build_tools",
 			Kind:        project.KindOnce,
-			Description: "Verify the build toolchain required for BikeCoach",
-			Signature:   "bikecoach-check-build-tools-v1",
+			Description: "Verify the build toolchain required for the embedded web app example",
+			Signature:   "embedded-web-app-check-build-tools-v1",
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				_ = ctx
 				for _, cmd := range []string{"go", "npm", "sqlc"} {
@@ -136,8 +136,8 @@ func (bikecoachProject) Tasks() []project.Task {
 		{
 			Name:        "check_db_tools",
 			Kind:        project.KindOnce,
-			Description: "Verify the database runtime tooling required for BikeCoach",
-			Signature:   "bikecoach-check-db-tools-v1",
+			Description: "Verify the database runtime tooling required for the embedded web app example",
+			Signature:   "embedded-web-app-check-db-tools-v1",
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				_ = ctx
 				if err := project.EnsureCommandExists("docker"); err != nil {
@@ -160,20 +160,20 @@ func (bikecoachProject) Tasks() []project.Task {
 			Kind:        project.KindWarmup,
 			Deps:        []string{"check_build_tools"},
 			Description: "Warm Go module downloads",
-			Signature:   "bikecoach-go-download-v1",
+			Signature:   "embedded-web-app-go-download-v1",
 			Inputs:      project.Inputs{Files: []string{"go.mod", "go.sum"}},
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				return rt.RunCmd(ctx, "go", "mod", "download")
 			},
 		},
-		bikecoachFrontendBuildTask("build_frontend_main", "frontend", "internal/web/frontend"),
-		bikecoachFrontendBuildTask("build_frontend_internal", "frontend-internal", "internal/web/internal_frontend"),
-		bikecoachFrontendBuildTask("build_frontend_admin", "frontend-admin", "internal/web/admin_frontend"),
+		embeddedWebAppFrontendBuildTask("build_frontend_main", "frontend", "internal/web/frontend"),
+		embeddedWebAppFrontendBuildTask("build_frontend_internal", "frontend-internal", "internal/web/internal_frontend"),
+		embeddedWebAppFrontendBuildTask("build_frontend_admin", "frontend-admin", "internal/web/admin_frontend"),
 		{
 			Name:        "frontend_assets",
 			Kind:        project.KindGroup,
 			Deps:        []string{"build_frontend_main", "build_frontend_internal", "build_frontend_admin"},
-			Description: "Aggregate BikeCoach embedded frontend builds",
+			Description: "Aggregate embedded web app frontend builds",
 		},
 		{
 			Name:        "sqlc_generate",
@@ -181,7 +181,7 @@ func (bikecoachProject) Tasks() []project.Task {
 			Deps:        []string{"check_build_tools"},
 			Cache:       true,
 			Description: "Generate sqlc storage bindings",
-			Signature:   "bikecoach-sqlc-generate-v1",
+			Signature:   "embedded-web-app-sqlc-generate-v1",
 			Inputs: project.Inputs{
 				Files: []string{"sqlc.yaml"},
 				Dirs:  []string{"internal/storage/queries", "internal/storage/migrations"},
@@ -198,17 +198,17 @@ func (bikecoachProject) Tasks() []project.Task {
 			Kind:        project.KindOnce,
 			Deps:        []string{"check_db_tools"},
 			Description: "Restore the nearest cached database snapshot or reset the Postgres volume",
-			Signature:   "bikecoach-prepare-db-base-v1",
+			Signature:   "embedded-web-app-prepare-db-base-v1",
 			Inputs:      project.Inputs{Dirs: []string{"internal/storage/migrations"}, Files: []string{"sqlc.yaml"}},
-			Outputs:     project.Outputs{Files: []string{".devflow/bikecoach/db/prepare.json"}},
+			Outputs:     project.Outputs{Files: []string{".devflow/embedded-web-app/db/prepare.json"}},
 			Run: func(ctx context.Context, rt *project.Runtime) error {
-				state, err := inspectBikecoachDBState(rt.Worktree)
+				state, err := inspectEmbeddedWebAppDBState(rt.Worktree)
 				if err != nil {
 					return err
 				}
 				manager := database.New()
 				var restored *database.PrismaRestoreResult
-				if bikecoachUseFakeDB() {
+				if embeddedWebAppUseFakeDB() {
 					plan, err := database.PlanPrismaRestore(rt.Instance.DB.SnapshotRoot, state)
 					if err != nil {
 						return err
@@ -227,7 +227,7 @@ func (bikecoachProject) Tasks() []project.Task {
 						}
 					}
 				}
-				return writeJSONFile(rt, ".devflow/bikecoach/db/prepare.json", map[string]any{
+				return writeJSONFile(rt, ".devflow/embedded-web-app/db/prepare.json", map[string]any{
 					"database":     rt.Instance.DB.Name,
 					"snapshotKey":  snapshotKey(restored),
 					"restored":     restored != nil,
@@ -242,12 +242,12 @@ func (bikecoachProject) Tasks() []project.Task {
 			Kind:        project.KindOnce,
 			Deps:        []string{"prepare_db_base"},
 			Description: "Start the temporary Postgres runtime used during DB preparation",
-			Signature:   "bikecoach-prepare-db-runtime-v1",
-			Inputs:      project.Inputs{Files: []string{".devflow/bikecoach/db/prepare.json"}},
-			Outputs:     project.Outputs{Files: []string{".devflow/bikecoach/db/runtime.json"}},
+			Signature:   "embedded-web-app-prepare-db-runtime-v1",
+			Inputs:      project.Inputs{Files: []string{".devflow/embedded-web-app/db/prepare.json"}},
+			Outputs:     project.Outputs{Files: []string{".devflow/embedded-web-app/db/runtime.json"}},
 			Run: func(ctx context.Context, rt *project.Runtime) error {
-				if bikecoachUseFakeDB() {
-					return writeJSONFile(rt, ".devflow/bikecoach/db/runtime.json", map[string]any{
+				if embeddedWebAppUseFakeDB() {
+					return writeJSONFile(rt, ".devflow/embedded-web-app/db/runtime.json", map[string]any{
 						"fake":      true,
 						"container": rt.Instance.DB.ContainerName,
 						"port":      rt.Instance.DB.Port,
@@ -260,7 +260,7 @@ func (bikecoachProject) Tasks() []project.Task {
 				if err := manager.WaitReady(ctx, rt.Instance.DB, 30*time.Second); err != nil {
 					return err
 				}
-				return writeJSONFile(rt, ".devflow/bikecoach/db/runtime.json", map[string]any{
+				return writeJSONFile(rt, ".devflow/embedded-web-app/db/runtime.json", map[string]any{
 					"fake":      false,
 					"container": rt.Instance.DB.ContainerName,
 					"port":      rt.Instance.DB.Port,
@@ -271,21 +271,21 @@ func (bikecoachProject) Tasks() []project.Task {
 			Name:        "db_migrate",
 			Kind:        project.KindOnce,
 			Deps:        []string{"prepare_db_runtime", "build_tools"},
-			Description: "Run BikeCoach database migrations against the prepared Postgres runtime",
-			Signature:   "bikecoach-db-migrate-v1",
-			Inputs:      project.Inputs{Dirs: []string{"internal/storage/migrations"}, Files: []string{".devflow/bikecoach/db/prepare.json"}},
-			Outputs:     project.Outputs{Files: []string{".devflow/bikecoach/db/migrate.json"}},
+			Description: "Run embedded web app database migrations against the prepared Postgres runtime",
+			Signature:   "embedded-web-app-db-migrate-v1",
+			Inputs:      project.Inputs{Dirs: []string{"internal/storage/migrations"}, Files: []string{".devflow/embedded-web-app/db/prepare.json"}},
+			Outputs:     project.Outputs{Files: []string{".devflow/embedded-web-app/db/migrate.json"}},
 			Run: func(ctx context.Context, rt *project.Runtime) error {
-				prepare, err := loadJSONMap(rt, ".devflow/bikecoach/db/prepare.json")
+				prepare, err := loadJSONMap(rt, ".devflow/embedded-web-app/db/prepare.json")
 				if err != nil {
 					return err
 				}
-				if !bikecoachUseFakeDB() {
+				if !embeddedWebAppUseFakeDB() {
 					if err := toolsBin.Run(ctx, rt, "migrate"); err != nil {
 						return err
 					}
 				}
-				return writeJSONFile(rt, ".devflow/bikecoach/db/migrate.json", map[string]any{
+				return writeJSONFile(rt, ".devflow/embedded-web-app/db/migrate.json", map[string]any{
 					"database":     rt.Instance.DB.Name,
 					"snapshotKey":  prepare["snapshotKey"],
 					"restored":     prepare["restored"],
@@ -299,15 +299,15 @@ func (bikecoachProject) Tasks() []project.Task {
 			Kind:        project.KindOnce,
 			Deps:        []string{"db_migrate"},
 			Description: "Snapshot the prepared Postgres volume for future restore",
-			Signature:   "bikecoach-snapshot-db-state-v1",
-			Inputs:      project.Inputs{Dirs: []string{"internal/storage/migrations"}, Files: []string{"sqlc.yaml", ".devflow/bikecoach/db/migrate.json"}},
-			Outputs:     project.Outputs{Files: []string{".devflow/bikecoach/db/snapshot.json"}},
+			Signature:   "embedded-web-app-snapshot-db-state-v1",
+			Inputs:      project.Inputs{Dirs: []string{"internal/storage/migrations"}, Files: []string{"sqlc.yaml", ".devflow/embedded-web-app/db/migrate.json"}},
+			Outputs:     project.Outputs{Files: []string{".devflow/embedded-web-app/db/snapshot.json"}},
 			Run: func(ctx context.Context, rt *project.Runtime) error {
-				state, err := inspectBikecoachDBState(rt.Worktree)
+				state, err := inspectEmbeddedWebAppDBState(rt.Worktree)
 				if err != nil {
 					return err
 				}
-				prepare, err := loadJSONMap(rt, ".devflow/bikecoach/db/prepare.json")
+				prepare, err := loadJSONMap(rt, ".devflow/embedded-web-app/db/prepare.json")
 				if err != nil {
 					return err
 				}
@@ -317,20 +317,20 @@ func (bikecoachProject) Tasks() []project.Task {
 						reused = true
 					}
 				}
-				if bikecoachUseFakeDB() {
+				if embeddedWebAppUseFakeDB() {
 					if !reused {
 						if _, err := database.SavePrismaSnapshot(rt.Instance.DB.SnapshotRoot, state.FullHash, state); err != nil {
 							return err
 						}
 					}
-					return writeJSONFile(rt, ".devflow/bikecoach/db/snapshot.json", map[string]any{
+					return writeJSONFile(rt, ".devflow/embedded-web-app/db/snapshot.json", map[string]any{
 						"key":    state.FullHash,
 						"reused": reused,
 						"fake":   true,
 					})
 				}
 				if reused {
-					return writeJSONFile(rt, ".devflow/bikecoach/db/snapshot.json", map[string]any{
+					return writeJSONFile(rt, ".devflow/embedded-web-app/db/snapshot.json", map[string]any{
 						"key":    state.FullHash,
 						"reused": true,
 						"fake":   false,
@@ -340,7 +340,7 @@ func (bikecoachProject) Tasks() []project.Task {
 				if err != nil {
 					return err
 				}
-				return writeJSONFile(rt, ".devflow/bikecoach/db/snapshot.json", map[string]any{
+				return writeJSONFile(rt, ".devflow/embedded-web-app/db/snapshot.json", map[string]any{
 					"key":    result.Plan.SnapshotKey,
 					"reused": false,
 					"fake":   false,
@@ -352,13 +352,13 @@ func (bikecoachProject) Tasks() []project.Task {
 			Kind:         project.KindService,
 			Deps:         []string{"snapshot_db_state"},
 			Restart:      project.RestartOnInputChange,
-			Description:  "Run the dedicated Postgres runtime for this BikeCoach worktree",
-			Signature:    "bikecoach-postgres-runtime-v1",
-			Ready:        bikecoachDBReady,
+			Description:  "Run the dedicated Postgres runtime for this embedded web app worktree",
+			Signature:    "embedded-web-app-postgres-runtime-v1",
+			Ready:        embeddedWebAppDBReady,
 			ReadyTimeout: 30 * time.Second,
 			Run: func(ctx context.Context, rt *project.Runtime) error {
-				if bikecoachUseFakeDB() {
-					readyPath := rt.Abs(".devflow/bikecoach/runtime/postgres.ready")
+				if embeddedWebAppUseFakeDB() {
+					readyPath := rt.Abs(".devflow/embedded-web-app/runtime/postgres.ready")
 					_ = os.Remove(readyPath)
 					_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
 						Name: "sh",
@@ -387,7 +387,7 @@ func (bikecoachProject) Tasks() []project.Task {
 			Name:        "build_all",
 			Kind:        project.KindGroup,
 			Deps:        []string{"frontend_assets", "build_tools", "build_coach"},
-			Description: "Aggregate BikeCoach build target",
+			Description: "Aggregate embedded web app build target",
 		},
 		{
 			Name:                      "backend_dev",
@@ -395,8 +395,8 @@ func (bikecoachProject) Tasks() []project.Task {
 			Deps:                      []string{"build_all", "postgres"},
 			Restart:                   project.RestartOnInputChange,
 			WatchRestartOnServiceDeps: true,
-			Description:               "Run the BikeCoach HTTP server with embedded frontend assets",
-			Signature:                 "bikecoach-backend-dev-v1",
+			Description:               "Run the embedded web app HTTP server with embedded frontend assets",
+			Signature:                 "embedded-web-app-backend-dev-v1",
 			Ready:                     project.ReadyHTTPNamedPort("backend", "/health", 200),
 			ReadyTimeout:              30 * time.Second,
 			Run: func(ctx context.Context, rt *project.Runtime) error {
@@ -408,39 +408,39 @@ func (bikecoachProject) Tasks() []project.Task {
 	return tasks
 }
 
-func (bikecoachProject) Targets() []project.Target {
+func (embeddedWebAppProject) Targets() []project.Target {
 	return []project.Target{
 		{
 			Name:        "build-all",
 			RootTasks:   []string{"build_all"},
-			Description: "Build BikeCoach frontend assets and Go binaries",
+			Description: "Build embedded web app frontend assets and Go binaries",
 		},
 		{
 			Name:        "db-only",
 			RootTasks:   []string{"postgres"},
-			Description: "Prepare and run the dedicated BikeCoach Postgres instance",
+			Description: "Prepare and run the dedicated embedded web app Postgres instance",
 		},
 		{
 			Name:        "fullstack",
 			RootTasks:   []string{"backend_dev"},
-			Description: "Build and run BikeCoach with a dedicated Postgres instance",
+			Description: "Build and run the embedded web app example with a dedicated Postgres instance",
 		},
 		{
 			Name:        "up",
 			RootTasks:   []string{"backend_dev"},
-			Description: "Alias for the main BikeCoach runtime target",
+			Description: "Alias for the main embedded web app runtime target",
 		},
 	}
 }
 
-func bikecoachFrontendBuildTask(name, dir, outputDir string) project.Task {
+func embeddedWebAppFrontendBuildTask(name, dir, outputDir string) project.Task {
 	return project.Task{
 		Name:        name,
 		Kind:        project.KindOnce,
 		Deps:        []string{"check_build_tools"},
 		Cache:       true,
 		Description: "Build " + dir + " into embedded frontend assets",
-		Signature:   "bikecoach-frontend-build-v1:" + dir,
+		Signature:   "embedded-web-app-frontend-build-v1:" + dir,
 		Inputs: project.Inputs{
 			Files: []string{
 				filepath.Join(dir, "package.json"),
@@ -474,7 +474,7 @@ func bikecoachFrontendBuildTask(name, dir, outputDir string) project.Task {
 	}
 }
 
-func bikecoachBinaryTool(taskName, description, output string, deps, files, dirs []string, build process.CommandSpec) project.BinaryTool {
+func embeddedWebAppBinaryTool(taskName, description, output string, deps, files, dirs []string, build process.CommandSpec) project.BinaryTool {
 	return project.BinaryTool{
 		TaskName:    taskName,
 		Description: description,
@@ -493,7 +493,7 @@ func bikecoachBinaryTool(taskName, description, output string, deps, files, dirs
 	}
 }
 
-func inspectBikecoachDBState(worktree string) (*database.PrismaState, error) {
+func inspectEmbeddedWebAppDBState(worktree string) (*database.PrismaState, error) {
 	extra := []string{}
 	if _, err := os.Stat(filepath.Join(worktree, "database_seed.sql")); err == nil {
 		extra = append(extra, "database_seed.sql")
@@ -521,7 +521,7 @@ func writeJSONFile(rt *project.Runtime, rel string, payload any) error {
 	return project.WriteFile(rt, rel, append(data, '\n'), 0o644)
 }
 
-func normalizeBikecoachEnv(dotenv map[string]string) map[string]string {
+func normalizeEmbeddedWebAppEnv(dotenv map[string]string) map[string]string {
 	if len(dotenv) == 0 {
 		return dotenv
 	}
@@ -532,13 +532,13 @@ func normalizeBikecoachEnv(dotenv map[string]string) map[string]string {
 	return out
 }
 
-func bikecoachUseFakeDB() bool {
+func embeddedWebAppUseFakeDB() bool {
 	return strings.TrimSpace(os.Getenv("DEVFLOW_BIKECOACH_FAKE_DB")) == "1"
 }
 
-func bikecoachDBReady(ctx context.Context, rt *project.Runtime) error {
-	if bikecoachUseFakeDB() {
-		return project.ReadyFile(".devflow/bikecoach/runtime/postgres.ready")(ctx, rt)
+func embeddedWebAppDBReady(ctx context.Context, rt *project.Runtime) error {
+	if embeddedWebAppUseFakeDB() {
+		return project.ReadyFile(".devflow/embedded-web-app/runtime/postgres.ready")(ctx, rt)
 	}
 	return database.New().WaitReady(ctx, rt.Instance.DB, 30*time.Second)
 }
@@ -593,7 +593,7 @@ func prefixLength(restored *database.PrismaRestoreResult) int {
 func SeedWorktree(dst string) error {
 	files := map[string]string{
 		".env":              "DATABASE_URL=postgres://coach:coach@localhost:5432/coach?sslmode=disable\nSTRAVA_CLIENT_ID=test-client\nSTRAVA_CLIENT_SECRET=test-secret\nSTRAVA_REDIRECT_URI=http://localhost:8080/oauth/callback\n",
-		"go.mod":            "module github.com/example/bikecoach\n\ngo 1.23.0\n",
+		"go.mod":            "module github.com/example/embedded-web-app\n\ngo 1.23.0\n",
 		"go.sum":            "",
 		"sqlc.yaml":         "version: \"2\"\n",
 		"cmd/coach/main.go": "package main\nfunc main() {}\n",

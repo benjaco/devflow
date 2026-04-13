@@ -1,4 +1,4 @@
-package bikecoach
+package embeddedwebapp
 
 import (
 	"context"
@@ -10,17 +10,17 @@ import (
 	"devflow/pkg/project"
 )
 
-func TestBikecoachProjectRegistered(t *testing.T) {
-	p, err := project.Lookup("bikecoach")
+func TestEmbeddedWebAppProjectRegistered(t *testing.T) {
+	p, err := project.Lookup("embedded-web-app")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := p.Name(); got != "bikecoach" {
+	if got := p.Name(); got != "embedded-web-app" {
 		t.Fatalf("unexpected project name %q", got)
 	}
 }
 
-func TestBikecoachProjectDetectionAndDefaultTarget(t *testing.T) {
+func TestEmbeddedWebAppProjectDetectionAndDefaultTarget(t *testing.T) {
 	worktree := t.TempDir()
 	if err := SeedWorktree(worktree); err != nil {
 		t.Fatal(err)
@@ -29,7 +29,7 @@ func TestBikecoachProjectDetectionAndDefaultTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := p.Name(); got != "bikecoach" {
+	if got := p.Name(); got != "embedded-web-app" {
 		t.Fatalf("unexpected detected project %q", got)
 	}
 	if got := project.PreferredTarget(p); got != "up" {
@@ -37,8 +37,8 @@ func TestBikecoachProjectDetectionAndDefaultTarget(t *testing.T) {
 	}
 }
 
-func TestBikecoachGraphValidates(t *testing.T) {
-	p := bikecoachProject{}
+func TestEmbeddedWebAppGraphValidates(t *testing.T) {
+	p := embeddedWebAppProject{}
 	g, err := graph.New(p.Tasks(), p.Targets())
 	if err != nil {
 		t.Fatal(err)
@@ -69,18 +69,18 @@ func TestBikecoachGraphValidates(t *testing.T) {
 	}
 }
 
-func TestBikecoachConfigureInstanceAppliesOverrides(t *testing.T) {
+func TestEmbeddedWebAppConfigureInstanceAppliesOverrides(t *testing.T) {
 	worktree := t.TempDir()
 	if err := SeedWorktree(worktree); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg, err := bikecoachProject{}.ConfigureInstance(context.Background(), worktree)
+	cfg, err := embeddedWebAppProject{}.ConfigureInstance(context.Background(), worktree)
 	if err != nil {
 		t.Fatal(err)
 	}
 	inst := &api.Instance{
-		ID:       "bikecoach123456",
+		ID:       "embeddedapp123",
 		Label:    filepath.Base(worktree),
 		Worktree: worktree,
 		Ports: map[string]int{

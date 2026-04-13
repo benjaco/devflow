@@ -33,7 +33,7 @@ Early development. The current implementation focuses on the generic core:
 The TUI is still minimal, but the bundled adapters now act as real smoke targets for the core:
 - `go-next-monorepo` for the deterministic in-repo example workflow
 - `web-worker-workspace` for a deterministic API + worker + frontend multi-service workflow
-- `bikecoach` for a real embedded-frontend + Go server + dedicated Postgres workflow
+- `embedded-web-app` for a real embedded-frontend + Go server + dedicated Postgres workflow
 
 ## Quick Start
 
@@ -43,7 +43,7 @@ go test ./...
 devflow
 go run ./cmd/devflow graph list --project go-next-monorepo
 go run ./cmd/devflow run fullstack --project go-next-monorepo --worktree examples/go-next-monorepo/worktree --json
-go run ./cmd/devflow run build-all --project bikecoach --worktree /path/to/bikecoach/coach --json --ci
+go run ./cmd/devflow run build-all --project embedded-web-app --worktree /path/to/project --json --ci
 ```
 
 If you want to use `devflow` locally, you still need Go installed on your machine.

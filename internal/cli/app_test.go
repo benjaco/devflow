@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	bikecoach "devflow/examples/bikecoach"
+	embeddedwebapp "devflow/examples/embedded-web-app"
 	gonextmonorepo "devflow/examples/go-next-monorepo"
 	"devflow/pkg/api"
 	"devflow/pkg/cache"
@@ -141,7 +141,7 @@ func TestDefaultLaunchPlanStartsDetachedForFreshDetectedWorktree(t *testing.T) {
 
 func TestDefaultLaunchPlanAttachesToExistingDetachedSupervisor(t *testing.T) {
 	worktree := t.TempDir()
-	if err := bikecoach.SeedWorktree(worktree); err != nil {
+	if err := embeddedwebapp.SeedWorktree(worktree); err != nil {
 		t.Fatal(err)
 	}
 	inst, err := instance.Resolve(worktree, filepath.Base(worktree))
@@ -150,7 +150,7 @@ func TestDefaultLaunchPlanAttachesToExistingDetachedSupervisor(t *testing.T) {
 	}
 	pid := os.Getpid()
 	if err := instance.RecordDetachedRun(inst, api.RunConfig{
-		Project:  "bikecoach",
+		Project:  "embedded-web-app",
 		Target:   "up",
 		Mode:     api.ModeDev,
 		Detached: true,
@@ -162,7 +162,7 @@ func TestDefaultLaunchPlanAttachesToExistingDetachedSupervisor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.projectName != "bikecoach" {
+	if plan.projectName != "embedded-web-app" {
 		t.Fatalf("unexpected project %q", plan.projectName)
 	}
 	if plan.target != "up" {
