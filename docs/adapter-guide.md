@@ -41,6 +41,34 @@ Recommended precedence:
 
 Use dotenv values for normal app configuration, but keep leased ports, instance IDs, and per-instance DB URLs under devflow control.
 
+## Interactive Task Policy
+
+Adapters should prefer non-interactive subprocesses.
+
+Rules:
+- for package installs and similar setup commands, prefer explicit confirmation flags such as `-y`, `--yes`, `--force`, or `CI=1` when the adapter has already decided the action is correct
+- do not rely on hidden stdin prompts during normal `run` or `watch` targets
+- if a task needs a real user choice, model it as an explicit command, target, or future TUI action instead of letting the process stall
+
+This is especially important for detached runs and watch mode, where a blocked prompt is easy to miss and hard to recover from.
+
+### Prisma Guidance
+
+Treat Prisma authoring and reset flows separately from normal startup.
+
+Recommended split:
+- normal DB prep:
+  - restore the nearest DB snapshot
+  - replay the remaining known migrations
+- new migration authoring:
+  - explicit action with a provided name
+  - use `prisma migrate dev --name <name>` or `prisma migrate dev --name <name> --create-only`
+- destructive reset:
+  - explicit action only
+  - use `prisma migrate reset --force`
+
+Do not make normal boot targets depend on interactive `prisma migrate dev`. From Devflow's point of view, that command can still become non-deterministic when Prisma detects drift or wants a reset decision.
+
 ## Built Binary Tools
 
 For repo-local helper executables, use the built-in binary-tool helper in `pkg/project`.

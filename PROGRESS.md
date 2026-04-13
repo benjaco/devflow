@@ -150,6 +150,10 @@ Last updated: 2026-04-13
   - detached event-stream persistence
 - Execution now accepts a task name anywhere a target is accepted by wrapping the task as a synthetic single-root target
 - The TUI now supports `t` on the selected task to retarget the detached run to that task and relaunch the instance on the selected task closure
+- Documented the task-interaction policy:
+  - normal boot/watch paths should stay non-interactive
+  - adapters should prefer explicit `-y` / `--yes` / `--force` style flags where safe
+  - Prisma migration authoring and reset flows should be explicit actions, not part of normal startup
 
 ## In Progress
 

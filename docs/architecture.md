@@ -43,6 +43,42 @@ The important rule is precedence:
 
 That allows projects to keep normal local app settings in `.env` while still ensuring the launched frontend/backend processes point at the correct per-instance Postgres runtime and leased ports.
 
+## Interactive Commands
+
+Devflow should treat subprocess interactivity as an exception, not the default execution model.
+
+Policy:
+- normal `run`, `watch`, and boot targets should be non-interactive
+- adapters should prefer explicit non-interactive flags such as `-y`, `--yes`, `--force`, or `CI=1` where that is safe
+- if a task would require a destructive or ambiguous choice, the adapter should model that as an explicit action or separate target instead of letting the process block on stdin
+
+This keeps DAG execution deterministic and prevents background runs, detached supervisors, and watch mode from hanging on hidden prompts.
+
+### Prisma-Specific Rules
+
+Prisma needs special handling because its CLI mixes normal migration application with authoring and reset flows.
+
+Rules:
+- normal startup flows should not depend on interactive `prisma migrate dev`
+- normal DB prep should restore a snapshot, then apply the known remaining migrations non-interactively
+- creating a new migration should be a separate explicit operator action because it requires a provided migration name
+- destructive reset should be a separate explicit operator action and should not happen implicitly during boot
+
+Recommended command usage:
+- create a named migration:
+  - `prisma migrate dev --name <name>`
+- create the migration without applying it yet:
+  - `prisma migrate dev --name <name> --create-only`
+- reset only when the user has explicitly chosen reset:
+  - `prisma migrate reset --force`
+
+Important limitation:
+- from Devflow's perspective, `prisma migrate dev` is still not fully deterministic in drift/reset scenarios, because Prisma may still require an operator decision
+
+Design implication:
+- migration authoring and reset flows belong in explicit commands, TUI actions, or future interactive task support
+- normal boot/watch targets should stay on the snapshot-plus-replay path instead of relying on Prisma prompts
+
 ## Database Isolation
 
 The chosen direction is now full per-worktree separation for local databases:
