@@ -15,6 +15,7 @@ import (
 
 	"devflow/internal/fsutil"
 	"devflow/pkg/api"
+	"devflow/pkg/database"
 	"devflow/pkg/instance"
 	"devflow/pkg/process"
 	"devflow/pkg/project"
@@ -36,17 +37,32 @@ func (exampleProject) ConfigureInstance(ctx context.Context, worktree string) (p
 	if err != nil {
 		return project.InstanceConfig{}, err
 	}
+	manager := database.New()
 	return project.InstanceConfig{
 		Label:     filepath.Base(worktree),
-		PortNames: []string{"backend", "frontend"},
+		PortNames: []string{"backend", "frontend", "postgres"},
 		Env: map[string]string{
 			"DEVFLOW_EXAMPLE_PROJECT": "go-next-monorepo",
-			"PGDATABASE":              fmt.Sprintf("app_wt_%s", id),
-			"DATABASE_URL":            fmt.Sprintf("postgres://devflow@localhost/app_wt_%s", id),
 		},
-		DB: api.DBInstance{
-			Name: fmt.Sprintf("app_wt_%s", id),
-			URL:  fmt.Sprintf("postgres://devflow@localhost/app_wt_%s", id),
+		Finalize: func(inst *api.Instance) error {
+			db := manager.Desired(inst.ID, database.Config{
+				HostPort:     inst.Ports["postgres"],
+				Database:     fmt.Sprintf("app_wt_%s", id),
+				User:         "devflow",
+				Password:     "devflow",
+				SnapshotRoot: filepath.Join(inst.Worktree, ".devflow", "dbsnapshots"),
+			})
+			inst.DB = db
+			if inst.Env == nil {
+				inst.Env = map[string]string{}
+			}
+			inst.Env["PGHOST"] = db.Host
+			inst.Env["PGPORT"] = strconv.Itoa(db.Port)
+			inst.Env["PGDATABASE"] = db.Name
+			inst.Env["PGUSER"] = db.User
+			inst.Env["PGPASSWORD"] = db.Password
+			inst.Env["DATABASE_URL"] = db.URL
+			return nil
 		},
 	}, nil
 }
@@ -74,45 +90,208 @@ func (exampleProject) Tasks() []project.Task {
 			"mkdir -p .devflow/example/warmup && printf 'postgres image warmup\\n' > .devflow/example/warmup/postgres-image.txt",
 		),
 		{
-			Name:        "ensure_db",
+			Name:        "prepare_db_base",
 			Kind:        project.KindOnce,
 			Deps:        []string{"warmup_pull_postgres_image"},
-			Cache:       true,
-			Inputs:      project.Inputs{Files: []string{"db/bootstrap.sql"}, Env: []string{"DEVFLOW_INSTANCE_ID", "DATABASE_URL"}},
-			Outputs:     project.Outputs{Files: []string{".devflow/example/db/identity.json"}},
-			Description: "Provision per-worktree database identity",
-			Signature:   "ensure-db-v2",
+			Inputs:      project.Inputs{Files: []string{"db/schema.prisma", "db/bootstrap.sql"}, Dirs: []string{"db/migrations"}, Env: []string{"DEVFLOW_INSTANCE_ID", "DATABASE_URL"}},
+			Outputs:     project.Outputs{Files: []string{".devflow/example/db/prepare.json"}},
+			Description: "Restore nearest DB snapshot or reset to a fresh volume",
+			Signature:   "prepare-db-base-v1",
 			Run: func(ctx context.Context, rt *project.Runtime) error {
-				_ = ctx
-				recordTrace(rt, "ensure_db")
-				return writeJSONFile(rt, ".devflow/example/db/identity.json", map[string]any{
-					"instance":    rt.Instance.ID,
-					"database":    rt.Instance.DB.Name,
-					"databaseUrl": rt.Instance.DB.URL,
+				recordTrace(rt, "prepare_db_base")
+				state, err := database.InspectPrismaState(rt.Worktree, "db/schema.prisma", "db/migrations", []string{"db/bootstrap.sql"})
+				if err != nil {
+					return err
+				}
+				manager := database.New()
+				var restored *database.PrismaRestoreResult
+				if exampleUseFakeDB() {
+					plan, err := database.PlanPrismaRestore(rt.Instance.DB.SnapshotRoot, state)
+					if err != nil {
+						return err
+					}
+					if plan.SnapshotKey != "" {
+						restored = &database.PrismaRestoreResult{Plan: plan, Metadata: plan.Snapshot}
+					}
+				} else {
+					restored, err = manager.RestoreNearestPrismaSnapshot(ctx, rt.Instance.DB, state)
+					if err != nil {
+						return err
+					}
+					if restored == nil {
+						if err := manager.DestroyRuntime(ctx, rt.Instance.DB, true); err != nil {
+							return err
+						}
+					}
+				}
+				payload := buildPreparePayload(rt, state, restored)
+				return writeJSONFile(rt, ".devflow/example/db/prepare.json", payload)
+			},
+		},
+		{
+			Name:        "prepare_db_runtime",
+			Kind:        project.KindOnce,
+			Deps:        []string{"prepare_db_base"},
+			Inputs:      project.Inputs{Files: []string{".devflow/example/db/prepare.json"}},
+			Outputs:     project.Outputs{Files: []string{".devflow/example/db/runtime.json"}},
+			Description: "Start the temporary Postgres runtime used for DB preparation",
+			Signature:   "prepare-db-runtime-v1",
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				recordTrace(rt, "prepare_db_runtime")
+				if exampleUseFakeDB() {
+					return writeJSONFile(rt, ".devflow/example/db/runtime.json", map[string]any{
+						"container": rt.Instance.DB.ContainerName,
+						"fake":      true,
+						"port":      rt.Instance.DB.Port,
+					})
+				}
+				manager := database.New()
+				if err := manager.EnsureRuntime(ctx, rt.Instance.DB); err != nil {
+					return err
+				}
+				if err := manager.WaitReady(ctx, rt.Instance.DB, 30*time.Second); err != nil {
+					return err
+				}
+				return writeJSONFile(rt, ".devflow/example/db/runtime.json", map[string]any{
+					"container": rt.Instance.DB.ContainerName,
+					"fake":      false,
+					"port":      rt.Instance.DB.Port,
 				})
 			},
 		},
 		{
 			Name:        "prisma_migrate",
 			Kind:        project.KindOnce,
-			Deps:        []string{"ensure_db"},
-			Cache:       true,
-			Inputs:      project.Inputs{Files: []string{"db/schema.prisma"}, Dirs: []string{"db/migrations"}, Env: []string{"DEVFLOW_INSTANCE_ID"}},
+			Deps:        []string{"prepare_db_runtime"},
+			Inputs:      project.Inputs{Files: []string{"db/schema.prisma", "db/bootstrap.sql", ".devflow/example/db/prepare.json"}, Dirs: []string{"db/migrations"}, Env: []string{"DEVFLOW_INSTANCE_ID"}},
 			Outputs:     project.Outputs{Files: []string{".devflow/example/db/migrate.json"}},
 			Description: "Apply prisma migrations to the local DB",
-			Signature:   "prisma-migrate-v2",
+			Signature:   "prisma-migrate-v3",
 			Run: func(ctx context.Context, rt *project.Runtime) error {
-				_ = ctx
 				recordTrace(rt, "prisma_migrate")
-				migrations, err := collectRelativeFiles(rt.Abs("db/migrations"))
+				prepare, err := loadPrepareState(rt)
 				if err != nil {
 					return err
 				}
+				remaining := remainingMigrationNames(prepare.State.Migrations, prepare.PrefixLength)
+				applied := append([]string(nil), remaining...)
+				bootstrapped := !prepare.Restored && prepare.PrefixLength == 0
+				if !exampleUseFakeDB() {
+					if bootstrapped {
+						if err := pipeSQLFile(ctx, rt, "db/bootstrap.sql"); err != nil {
+							return err
+						}
+					}
+					for _, rel := range remaining {
+						if err := pipeSQLFile(ctx, rt, filepath.Join("db/migrations", rel, "migration.sql")); err != nil {
+							return err
+						}
+					}
+				}
 				return writeJSONFile(rt, ".devflow/example/db/migrate.json", map[string]any{
-					"instance":   rt.Instance.ID,
-					"database":   rt.Instance.DB.Name,
-					"migrations": migrations,
+					"instance":      rt.Instance.ID,
+					"database":      rt.Instance.DB.Name,
+					"applied":       applied,
+					"prefixLength":  prepare.PrefixLength,
+					"snapshotKey":   prepare.SnapshotKey,
+					"restored":      prepare.Restored,
+					"exactMatch":    prepare.ExactMatch,
+					"bootstrapped":  bootstrapped,
+					"targetFullKey": prepare.State.FullHash,
 				})
+			},
+		},
+		{
+			Name:        "snapshot_db_state",
+			Kind:        project.KindOnce,
+			Deps:        []string{"prisma_migrate"},
+			Inputs:      project.Inputs{Files: []string{".devflow/example/db/prepare.json", ".devflow/example/db/migrate.json", "db/schema.prisma", "db/bootstrap.sql"}, Dirs: []string{"db/migrations"}},
+			Outputs:     project.Outputs{Files: []string{".devflow/example/db/snapshot.json"}},
+			Description: "Snapshot the prepared DB state for future restore",
+			Signature:   "snapshot-db-state-v1",
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				recordTrace(rt, "snapshot_db_state")
+				prepare, err := loadPrepareState(rt)
+				if err != nil {
+					return err
+				}
+				migrateResult, err := loadJSONMap(rt, ".devflow/example/db/migrate.json")
+				if err != nil {
+					return err
+				}
+				state, err := database.InspectPrismaState(rt.Worktree, "db/schema.prisma", "db/migrations", []string{"db/bootstrap.sql"})
+				if err != nil {
+					return err
+				}
+				appliedCount := len(stringList(migrateResult["applied"]))
+				if exampleUseFakeDB() {
+					if !prepare.ExactMatch || appliedCount > 0 || !prepare.Restored {
+						if _, err := database.SavePrismaSnapshot(rt.Instance.DB.SnapshotRoot, state.FullHash, state); err != nil {
+							return err
+						}
+					}
+					return writeJSONFile(rt, ".devflow/example/db/snapshot.json", map[string]any{
+						"key":        state.FullHash,
+						"reused":     prepare.ExactMatch && appliedCount == 0 && prepare.Restored,
+						"fake":       true,
+						"migrations": len(state.Migrations),
+					})
+				}
+				if prepare.ExactMatch && appliedCount == 0 && prepare.Restored {
+					return writeJSONFile(rt, ".devflow/example/db/snapshot.json", map[string]any{
+						"key":        prepare.SnapshotKey,
+						"reused":     true,
+						"fake":       false,
+						"migrations": len(state.Migrations),
+					})
+				}
+				result, err := database.New().SnapshotPrisma(ctx, rt.Instance.DB, state.FullHash, state)
+				if err != nil {
+					return err
+				}
+				return writeJSONFile(rt, ".devflow/example/db/snapshot.json", map[string]any{
+					"key":        result.Plan.SnapshotKey,
+					"reused":     false,
+					"fake":       false,
+					"migrations": len(state.Migrations),
+				})
+			},
+		},
+		{
+			Name:         "postgres",
+			Kind:         project.KindService,
+			Deps:         []string{"snapshot_db_state"},
+			Restart:      project.RestartOnInputChange,
+			Description:  "Run the dedicated Postgres runtime for this worktree",
+			Signature:    "postgres-runtime-v1",
+			Ready:        exampleDBReady,
+			ReadyTimeout: 30 * time.Second,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				recordTrace(rt, "postgres")
+				if exampleUseFakeDB() {
+					readyPath := rt.Abs(".devflow/example/runtime/postgres.ready")
+					_ = os.Remove(readyPath)
+					_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
+						Name: "sh",
+						Args: []string{"-c", "trap 'rm -f " + shellQuote(readyPath) + "; exit 0' INT TERM; mkdir -p " + shellQuote(filepath.Dir(readyPath)) + "; : > " + shellQuote(readyPath) + "; while true; do echo postgres:$PGPORT:$PGDATABASE; sleep 1; done"},
+						Dir:  rt.Worktree,
+						Env:  cloneEnv(rt.Env),
+					})
+					return err
+				}
+				manager := database.New()
+				if err := manager.EnsureRuntime(ctx, rt.Instance.DB); err != nil {
+					return err
+				}
+				env := cloneEnv(rt.Env)
+				env["DB_CONTAINER"] = rt.Instance.DB.ContainerName
+				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
+					Name: "sh",
+					Args: []string{"-c", "trap 'docker stop -t 10 \"$DB_CONTAINER\" >/dev/null 2>&1 || true; exit 0' INT TERM; docker logs -f \"$DB_CONTAINER\""},
+					Dir:  rt.Worktree,
+					Env:  env,
+				})
+				return err
 			},
 		},
 		{
@@ -326,7 +505,7 @@ func (exampleProject) Tasks() []project.Task {
 		{
 			Name:         "backend_dev",
 			Kind:         project.KindService,
-			Deps:         []string{"backend_codegen", "prisma_migrate"},
+			Deps:         []string{"backend_codegen", "postgres"},
 			Inputs:       project.Inputs{Dirs: []string{"backend/src", "backend/generated"}},
 			Restart:      project.RestartOnInputChange,
 			Description:  "Run local backend service",
@@ -392,8 +571,8 @@ func (exampleProject) Targets() []project.Target {
 		},
 		{
 			Name:        "db-only",
-			RootTasks:   []string{"prisma_generate"},
-			Description: "Prepare local DB artifacts only",
+			RootTasks:   []string{"postgres"},
+			Description: "Prepare and run the dedicated local Postgres runtime",
 		},
 		{
 			Name:        "frontend-stack",
@@ -442,6 +621,149 @@ func writeJSONFile(rt *project.Runtime, rel string, payload map[string]any) erro
 	}
 	data = append(data, '\n')
 	return project.WriteFile(rt, rel, data, 0o644)
+}
+
+type prepareState struct {
+	SnapshotKey  string
+	PrefixLength int
+	Restored     bool
+	ExactMatch   bool
+	State        database.PrismaState
+}
+
+func buildPreparePayload(rt *project.Runtime, state *database.PrismaState, restored *database.PrismaRestoreResult) map[string]any {
+	payload := map[string]any{
+		"database":      rt.Instance.DB.Name,
+		"snapshotKey":   "",
+		"prefixLength":  0,
+		"restored":      false,
+		"exactMatch":    false,
+		"state":         state,
+		"containerName": rt.Instance.DB.ContainerName,
+		"volumeName":    rt.Instance.DB.VolumeName,
+	}
+	if restored != nil {
+		payload["snapshotKey"] = restored.Plan.SnapshotKey
+		payload["prefixLength"] = restored.Plan.PrefixLength
+		payload["restored"] = restored.Plan.SnapshotKey != ""
+		payload["exactMatch"] = restored.Plan.ExactMatch
+	}
+	return payload
+}
+
+func loadPrepareState(rt *project.Runtime) (*prepareState, error) {
+	values, err := loadJSONMap(rt, ".devflow/example/db/prepare.json")
+	if err != nil {
+		return nil, err
+	}
+	rawState, err := json.Marshal(values["state"])
+	if err != nil {
+		return nil, err
+	}
+	var prismaState database.PrismaState
+	if err := json.Unmarshal(rawState, &prismaState); err != nil {
+		return nil, err
+	}
+	return &prepareState{
+		SnapshotKey:  stringValue(values["snapshotKey"]),
+		PrefixLength: intValue(values["prefixLength"]),
+		Restored:     boolValue(values["restored"]),
+		ExactMatch:   boolValue(values["exactMatch"]),
+		State:        prismaState,
+	}, nil
+}
+
+func loadJSONMap(rt *project.Runtime, rel string) (map[string]any, error) {
+	data, err := os.ReadFile(rt.Abs(rel))
+	if err != nil {
+		return nil, err
+	}
+	var values map[string]any
+	if err := json.Unmarshal(data, &values); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func remainingMigrationNames(migrations []database.PrismaMigration, prefixLength int) []string {
+	if prefixLength < 0 {
+		prefixLength = 0
+	}
+	if prefixLength > len(migrations) {
+		prefixLength = len(migrations)
+	}
+	out := make([]string, 0, len(migrations)-prefixLength)
+	for _, migration := range migrations[prefixLength:] {
+		out = append(out, migration.Name)
+	}
+	return out
+}
+
+func exampleUseFakeDB() bool {
+	return os.Getenv("DEVFLOW_EXAMPLE_FAKE_DB") == "1"
+}
+
+func exampleDBReady(ctx context.Context, rt *project.Runtime) error {
+	if exampleUseFakeDB() {
+		return project.ReadyFile(".devflow/example/runtime/postgres.ready")(ctx, rt)
+	}
+	return database.New().WaitReady(ctx, rt.Instance.DB, 30*time.Second)
+}
+
+func pipeSQLFile(ctx context.Context, rt *project.Runtime, rel string) error {
+	sqlFile := rt.Abs(rel)
+	return rt.RunCmdSpec(ctx, process.CommandSpec{
+		Name: "sh",
+		Args: []string{"-c", "cat \"$SQL_FILE\" | docker exec -i \"$DB_CONTAINER\" psql -U \"$PGUSER\" -d \"$PGDATABASE\" -v ON_ERROR_STOP=1"},
+		Dir:  rt.Worktree,
+		Env: mergeStringMaps(rt.Env, map[string]string{
+			"SQL_FILE":     sqlFile,
+			"DB_CONTAINER": rt.Instance.DB.ContainerName,
+			"PGUSER":       rt.Instance.DB.User,
+			"PGDATABASE":   rt.Instance.DB.Name,
+		}),
+	})
+}
+
+func mergeStringMaps(base, overlay map[string]string) map[string]string {
+	out := cloneEnv(base)
+	for key, value := range overlay {
+		out[key] = value
+	}
+	return out
+}
+
+func stringList(value any) []string {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, stringValue(item))
+	}
+	return out
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func intValue(value any) int {
+	switch v := value.(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	default:
+		return 0
+	}
+}
+
+func boolValue(value any) bool {
+	flag, _ := value.(bool)
+	return flag
 }
 
 func fileDigest(path string) (string, error) {

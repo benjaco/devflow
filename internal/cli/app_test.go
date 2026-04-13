@@ -102,6 +102,7 @@ func TestStopCommandStopsTrackedProcess(t *testing.T) {
 func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("DEVFLOW_EXAMPLE_FAKE_DB", "1")
 	worktree := t.TempDir()
 	if err := seedExampleWorktree(worktree); err != nil {
 		t.Fatal(err)

@@ -10,6 +10,7 @@
 - `pkg/cache`: manifest, snapshot, restore, and cache lookup
 - `pkg/process`: one-shot execution, supervised services, line-buffered logs
 - `pkg/project`: also defines readiness hooks for service tasks
+- `pkg/database`: Docker-backed dedicated Postgres runtime and snapshot helpers
 - `pkg/instance`: worktree-scoped instance identity and persisted state
 - `pkg/ports`: shared port registry with lock-safe allocation
 - `pkg/engine`: bounded parallel ready-queue execution engine and status persistence
@@ -28,6 +29,37 @@ Shared coordination state lives under the user cache directory:
 - `devflow/state/instance-index.json`
 
 This split keeps cache and logs local to the worktree while still allowing cross-worktree port coordination.
+
+## Database Isolation
+
+The chosen direction is now full per-worktree separation for local databases:
+- one Postgres container per worktree instance
+- one dedicated host port per worktree instance
+- one dedicated Docker volume per worktree instance
+
+The new `pkg/database` package provides the runtime primitives for that model:
+- derive deterministic per-instance container and volume names
+- ensure the container is running
+- wait for readiness via `pg_isready`
+- stop or destroy the runtime
+- snapshot and restore the Postgres data volume
+- inspect Prisma schema/migration state and choose the nearest cached migration-prefix snapshot
+
+This keeps DB isolation strong and avoids shared-cluster coupling between worktrees.
+
+What this package does not decide:
+- when to clone remote state versus run a bootstrap script
+- which schema fingerprint should own the snapshot key
+
+Those decisions belong in adapter policy layered on top of the runtime module. The package now provides the snapshot-planning primitives; the adapter still needs to decide when to clone remote state, when to snapshot, and when to fall back to a fresh bootstrap.
+
+The bundled example adapter now exercises this shape structurally:
+- inspect Prisma state
+- restore the nearest snapshot or reset the volume
+- start a temporary DB runtime
+- replay remaining migrations
+- snapshot the prepared state
+- start the final per-instance Postgres service for app runtime
 
 ## Cache Keys
 

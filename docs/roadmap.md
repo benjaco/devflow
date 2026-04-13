@@ -13,6 +13,7 @@
 
 1. Parallel scheduler and richer status/event streaming
 2. Watch mode invalidation and selective reruns
-3. TUI with task/log panes
-4. Richer example adapter for the full-stack workflow
-5. MCP wrapper over the stable CLI surface
+3. Integrate the dedicated per-instance Postgres runtime into the example and real adapter workflow
+4. TUI with task/log panes
+5. Richer example adapter for the full-stack workflow
+6. MCP wrapper over the stable CLI surface

@@ -8,6 +8,7 @@ The current implementation provides the generic engine layers first:
 - snapshot-based local cache
 - process supervision
 - instance and port management
+- a dedicated Postgres runtime module for per-worktree container isolation
 - JSON CLI contracts
 
 Future milestones add a richer TUI and continue expanding the example adapter and operator surface.

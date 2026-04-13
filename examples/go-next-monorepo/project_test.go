@@ -2,6 +2,7 @@ package gonextmonorepo
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,6 +15,7 @@ import (
 func TestExampleProjectCachesOnSecondRun(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("DEVFLOW_EXAMPLE_FAKE_DB", "1")
 	worktree := seededWorktree(t)
 
 	eng, err := engine.New(exampleProject{}, worktree)
@@ -47,11 +49,16 @@ func TestExampleProjectCachesOnSecondRun(t *testing.T) {
 	assertFileExists(t, filepath.Join(worktree, "backend/generated/openapi-external.json"))
 	assertFileExists(t, filepath.Join(worktree, "frontend/generated/api-client.json"))
 	assertFileExists(t, filepath.Join(worktree, ".devflow/example/db/migrate.json"))
+	prepare := readJSONMap(t, filepath.Join(worktree, ".devflow/example/db/prepare.json"))
+	if got, ok := prepare["exactMatch"].(bool); !ok || !got {
+		t.Fatalf("expected second run to reuse exact DB snapshot, got %v", prepare)
+	}
 }
 
 func TestExampleProjectIsolatesTwoWorktrees(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("DEVFLOW_EXAMPLE_FAKE_DB", "1")
 	worktreeA := seededWorktree(t)
 	worktreeB := seededWorktree(t)
 
@@ -94,11 +101,15 @@ func TestExampleProjectIsolatesTwoWorktrees(t *testing.T) {
 	if first.out.Instance.Ports["frontend"] == second.out.Instance.Ports["frontend"] {
 		t.Fatalf("expected distinct frontend ports: %v vs %v", first.out.Instance.Ports, second.out.Instance.Ports)
 	}
+	if first.out.Instance.Ports["postgres"] == second.out.Instance.Ports["postgres"] {
+		t.Fatalf("expected distinct postgres ports: %v vs %v", first.out.Instance.Ports, second.out.Instance.Ports)
+	}
 }
 
 func TestExampleProjectWatchSelectiveReruns(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("DEVFLOW_EXAMPLE_FAKE_DB", "1")
 	worktree := seededWorktree(t)
 	eng, err := engine.New(exampleProject{}, worktree)
 	if err != nil {
@@ -119,6 +130,7 @@ func TestExampleProjectWatchSelectiveReruns(t *testing.T) {
 
 	waitFor(t, 5*time.Second, func() bool {
 		return traceCount(worktree, "prisma_migrate") == 1 &&
+			traceCount(worktree, "postgres") == 1 &&
 			traceCount(worktree, "backend_dev") == 1 &&
 			traceCount(worktree, "frontend_dev") == 1 &&
 			traceCount(worktree, "frontend_codegen") == 1
@@ -127,10 +139,10 @@ func TestExampleProjectWatchSelectiveReruns(t *testing.T) {
 
 	rewriteFile(t, filepath.Join(worktree, "db/migrations/001_init.sql"), "CREATE TABLE widgets(id INTEGER PRIMARY KEY, name TEXT NOT NULL, slug TEXT);\n")
 	ok := waitForBool(5*time.Second, func() bool {
-		return traceCount(worktree, "prisma_migrate") == 2 && traceCount(worktree, "backend_dev") == 2
+		return traceCount(worktree, "prisma_migrate") == 2 && traceCount(worktree, "postgres") == 2 && traceCount(worktree, "backend_dev") == 2
 	})
 	if !ok {
-		t.Fatalf("migration change did not rerun expected slice: prisma_migrate=%d backend_dev=%d frontend_dev=%d frontend_codegen=%d", traceCount(worktree, "prisma_migrate"), traceCount(worktree, "backend_dev"), traceCount(worktree, "frontend_dev"), traceCount(worktree, "frontend_codegen"))
+		t.Fatalf("migration change did not rerun expected slice: prisma_migrate=%d postgres=%d backend_dev=%d frontend_dev=%d frontend_codegen=%d", traceCount(worktree, "prisma_migrate"), traceCount(worktree, "postgres"), traceCount(worktree, "backend_dev"), traceCount(worktree, "frontend_dev"), traceCount(worktree, "frontend_codegen"))
 	}
 	if got := traceCount(worktree, "frontend_dev"); got != 1 {
 		t.Fatalf("unexpected frontend restart after migration change: %d", got)
@@ -201,4 +213,17 @@ func rewriteFile(t *testing.T, path, contents string) {
 	if err := os.Chtimes(path, now, now); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func readJSONMap(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload
 }

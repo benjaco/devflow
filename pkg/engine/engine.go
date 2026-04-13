@@ -276,6 +276,11 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 			return nil, nil, nil, err
 		}
 	}
+	if cfg.Finalize != nil {
+		if err := cfg.Finalize(inst); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	if err := instance.Save(inst); err != nil {
 		return nil, nil, nil, err
 	}

@@ -37,6 +37,8 @@ Last updated: 2026-04-13
 - Polling watch mode implemented with debounced batches and selective reruns via `github.com/radovskyb/watcher`
 - Service readiness hooks implemented for service tasks, with generic ready-file/TCP/HTTP helpers and engine-enforced readiness timeouts
 - Generic built-binary helper implemented in `pkg/project` for cacheable helper-binary builds plus later `Run`/`Start` execution
+- Generic Docker-backed `pkg/database` module implemented for dedicated per-instance Postgres containers, ports, volumes, and snapshot/restore primitives
+- Prisma schema-aware snapshot inspection and nearest migration-prefix restore planning implemented in `pkg/database`
 - Per-task cache-key override semantics documented for future implementation
 - CLI commands implemented:
   - `run`
@@ -58,10 +60,13 @@ Last updated: 2026-04-13
 - `run --max-parallel` wired through the CLI and engine request model
 - Example adapter added at `examples/go-next-monorepo`
 - Example adapter upgraded to a deterministic full-stack-style workflow with DB prep, codegen, services, and watch semantics
+- Example adapter now structurally uses the dedicated DB flow: restore/reset, temporary runtime, migration replay, snapshot, then final `postgres` service
 - Unit/integration-style tests added for core packages
 - Example-project smoke tests added for cache hits, watch reruns, and multi-worktree isolation
 - Engine tests added for readiness success and readiness timeout failure
 - Built-binary helper tests added for direct build/run/start behavior and engine-level cache restore
+- Database module tests added for per-instance identity, runtime ensure behavior, and snapshot/restore planning
+- Prisma snapshot tests added for exact-match and nearest-prefix restore selection
 - CLI integration coverage added for the example adapter JSON lifecycle (`run`, `status`, `logs`, `instances`, `doctor`, `stop`)
 - Verified with `go test ./...`
 
@@ -82,4 +87,5 @@ Last updated: 2026-04-13
 - `tui` package is a stub
 - Cache-key overrides are designed and documented but not implemented yet
 - Fine-grained detached per-service restart is not fully implemented yet
+- The example adapter uses a deterministic fake-DB path in tests; the real Docker-backed path exists but is not yet covered by automated integration tests
 - Example adapter is synthetic and local-only; it validates semantics but does not invoke real external tools or databases

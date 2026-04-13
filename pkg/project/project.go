@@ -74,6 +74,7 @@ type InstanceConfig struct {
 	PortNames []string
 	Env       map[string]string
 	DB        api.DBInstance
+	Finalize  func(inst *api.Instance) error
 }
 
 type Project interface {
