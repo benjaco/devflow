@@ -7,6 +7,7 @@ It is designed for:
 - supervised long-running services
 - adapter-defined service readiness checks
 - detached background supervision for service-bearing runs
+- a terminal UI for inspecting a live instance
 - worktree-scoped instance isolation
 - per-instance ports and runtime env
 - watch-mode partial reruns and selective service restarts
@@ -24,6 +25,7 @@ Early development. The current implementation focuses on the generic core:
 - Docker-backed database runtime helpers for dedicated per-instance Postgres containers and snapshots
 - dotenv loading so adapter instances can start from `.env` and then apply devflow-owned overrides
 - detached `run/watch --detach` background supervisor launching
+- `tui` for task selection and live log inspection
 - worktree instances and shared port leasing
 - polling-based watch mode using `github.com/radovskyb/watcher`
 - JSON-capable CLI commands

@@ -88,6 +88,16 @@ Last updated: 2026-04-13
   - `status` now reports instance/worktree/mode, derived local URLs, sanitized DB details, and detached supervisor liveness
   - `status` reconciles dead detached supervisors by clearing stale supervisor metadata and marking nonterminal nodes `stopped`
   - stopping an already-dead detached supervisor no longer errors with `no such process`
+- First usable TUI slice implemented:
+  - `devflow tui --worktree ...` opens a live operator console for an existing instance
+  - live full-width task list with updating status and a log pane below is available
+  - detached supervisor log can be viewed from inside the TUI
+  - TUI rendering has unit coverage and manual BikeCoach smoke coverage
+  - TUI renderer now avoids right-edge wrap corruption in VS Code terminals and shows explicit per-task state badges plus aggregate state counts
+  - TUI task ordering now pins running work first, pending/ready work next, and keeps selection stable across refreshes
+  - the original manual ANSI renderer was replaced with a `tview`-based implementation for stable redraws in real terminals
+  - TUI now supports `i` on the selected task to invalidate the selected downstream cacheable slice and relaunch the current target; manually verified on BikeCoach by invalidating `build_coach`
+  - TUI refresh cadence is now faster overall and much faster while invalidate/rerun actions are in flight
 - Database runtime helper fixed so Docker combined-output errors are preserved and missing volume/container detection works against real daemon responses
 - Database URL generation now appends `?sslmode=disable` for the dedicated local Postgres runtime
 - Verified with `go test ./...`
@@ -98,14 +108,12 @@ Last updated: 2026-04-13
 
 ## Next Steps
 
-- Build the first usable TUI slice in `pkg/tui`
 - Add richer watch restart policies now that service readiness exists
 - Implement task-defined cache-key overrides in the runtime/task model
 - Improve fine-grained detached service restart/control semantics beyond whole-target relaunch
 
 ## Deferred / Known Gaps
 
-- `tui` package is a stub
 - Cache-key overrides are designed and documented but not implemented yet
 - Fine-grained detached per-service restart is not fully implemented yet
 - The example adapter uses a deterministic fake-DB path in tests; the real Docker-backed path exists but is not yet covered by automated integration tests

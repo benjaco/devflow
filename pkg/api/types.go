@@ -99,16 +99,16 @@ type RunResult struct {
 }
 
 type StatusResult struct {
-	InstanceID string             `json:"instanceId"`
-	Worktree   string             `json:"worktree,omitempty"`
-	Target     string             `json:"target"`
-	Mode       RunMode            `json:"mode,omitempty"`
-	UpdatedAt  time.Time          `json:"updatedAt,omitempty"`
-	Ports      map[string]int     `json:"ports,omitempty"`
-	DB         DBInstance         `json:"db,omitempty"`
-	URLs       map[string]string  `json:"urls,omitempty"`
-	Supervisor *SupervisorStatus  `json:"supervisor,omitempty"`
-	Nodes      []NodeStatus       `json:"nodes"`
+	InstanceID string            `json:"instanceId"`
+	Worktree   string            `json:"worktree,omitempty"`
+	Target     string            `json:"target"`
+	Mode       RunMode           `json:"mode,omitempty"`
+	UpdatedAt  time.Time         `json:"updatedAt,omitempty"`
+	Ports      map[string]int    `json:"ports,omitempty"`
+	DB         DBInstance        `json:"db,omitempty"`
+	URLs       map[string]string `json:"urls,omitempty"`
+	Supervisor *SupervisorStatus `json:"supervisor,omitempty"`
+	Nodes      []NodeStatus      `json:"nodes"`
 }
 
 type LogEvent struct {

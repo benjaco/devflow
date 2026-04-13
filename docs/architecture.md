@@ -233,4 +233,14 @@ The operator surface now also reconciles detached state when queried:
 - if the persisted detached supervisor PID is no longer alive, `status` clears the supervisor record and marks nonterminal nodes as `stopped`
 - `logs supervisor` reads the persisted supervisor log directly
 
+The first usable TUI slice is now implemented as a local terminal console over persisted instance state. It currently provides:
+- live polling refresh
+- task selection
+- selected-task details
+- task log tail
+- supervisor log toggle
+- instance/worktree/runtime header
+- stable terminal rendering via a real TUI library instead of manual ANSI frame painting
+- invalidate-and-rerun from the selected task by invalidating the selected downstream cacheable once-task slice and relaunching the current target
+
 What is still missing is fine-grained detached control of a single service inside a multi-service detached target.

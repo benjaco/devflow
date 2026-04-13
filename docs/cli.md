@@ -13,6 +13,7 @@ Implemented commands:
 - `devflow logs <task>`
 - `devflow instances`
 - `devflow doctor`
+- `devflow tui`
 - `devflow graph list`
 - `devflow graph show <target>`
 - `devflow graph affected --files ...`
@@ -47,5 +48,18 @@ Implemented `run` flags include:
 - detached supervisor PID/liveness/log path when present
 
 `logs` supports task logs as before and also accepts `supervisor` to read the detached supervisor log directly.
+
+`tui` now opens a live operator console for an existing instance. The first slice includes:
+- instance/runtime header
+- live task list with selection
+- selected-task metadata
+- live tail of the selected task log
+- toggle to the detached supervisor log
+- running tasks pinned first and pending work directly below them
+- `i` on the selected task invalidates the selected downstream cacheable slice and relaunches the current target
+
+Implemented `tui` flags include:
+- `--worktree`
+- `--instance`
 
 `cache status` lists cache entries, `cache invalidate` removes entries globally or per task, and `cache gc` keeps only the newest N entries per task.

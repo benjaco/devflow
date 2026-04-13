@@ -64,7 +64,7 @@ func (a *App) Run(args []string) error {
 	case "watch":
 		return a.watchCmd(args[1:])
 	case "tui":
-		return tui.Run()
+		return a.tuiCmd(args[1:])
 	default:
 		return a.usage()
 	}
@@ -873,6 +873,20 @@ func (a *App) graphCmd(args []string) error {
 	default:
 		return fmt.Errorf("usage: devflow graph <list|show|affected>")
 	}
+}
+
+func (a *App) tuiCmd(args []string) error {
+	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	worktree := fs.String("worktree", "", "")
+	instanceID := fs.String("instance", "", "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return tui.Run(tui.Options{
+		Worktree:   *worktree,
+		InstanceID: *instanceID,
+	})
 }
 
 func (a *App) graphListCmd(args []string) error {
