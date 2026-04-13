@@ -30,6 +30,19 @@ Shared coordination state lives under the user cache directory:
 
 This split keeps cache and logs local to the worktree while still allowing cross-worktree port coordination.
 
+## Runtime Env
+
+Instance env is now explicit and layered:
+- optional `.env` file values loaded by the adapter
+- adapter-defined static env
+- devflow-managed instance overrides such as ports and database connection values
+
+The important rule is precedence:
+- dotenv values are the base
+- devflow-managed runtime values win
+
+That allows projects to keep normal local app settings in `.env` while still ensuring the launched frontend/backend processes point at the correct per-instance Postgres runtime and leased ports.
+
 ## Database Isolation
 
 The chosen direction is now full per-worktree separation for local databases:
@@ -214,5 +227,10 @@ This is enough for:
 - `watch --detach`
 - `stop --all` against detached runs
 - service `restart` by stopping the detached supervisor and relaunching the last detached target
+
+The operator surface now also reconciles detached state when queried:
+- `status` includes supervisor PID/liveness plus sanitized instance metadata such as ports, URLs, and DB identity
+- if the persisted detached supervisor PID is no longer alive, `status` clears the supervisor record and marks nonterminal nodes as `stopped`
+- `logs supervisor` reads the persisted supervisor log directly
 
 What is still missing is fine-grained detached control of a single service inside a multi-service detached target.

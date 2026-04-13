@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +18,38 @@ import (
 	"devflow/pkg/process"
 	"devflow/pkg/project"
 )
+
+type failCLIProject struct{}
+
+func (failCLIProject) Name() string { return "cli-fail-project" }
+
+func (failCLIProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "cli-fail"}, nil
+}
+
+func (failCLIProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name: "fail",
+			Kind: project.KindOnce,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				_ = rt
+				return fmt.Errorf("boom")
+			},
+		},
+	}
+}
+
+func (failCLIProject) Targets() []project.Target {
+	return []project.Target{{Name: "build", RootTasks: []string{"fail"}}}
+}
+
+func init() {
+	project.Register(failCLIProject{})
+}
 
 func TestGraphListJSON(t *testing.T) {
 	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
@@ -28,6 +62,14 @@ func TestGraphListJSON(t *testing.T) {
 	}
 	if _, ok := payload["tasks"]; !ok {
 		t.Fatalf("missing tasks: %v", payload)
+	}
+}
+
+func TestRunJSONStillReturnsExecutionError(t *testing.T) {
+	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	err := app.Run([]string{"run", "build", "--json", "--ci", "--project", "cli-fail-project", "--worktree", t.TempDir()})
+	if err == nil {
+		t.Fatal("expected run command to return task failure even with --json")
 	}
 }
 
@@ -138,6 +180,21 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 		}
 		_, _ = instance.StopProcesses(inst, "")
 	})
+	runtimeEnvPath := filepath.Join(worktree, ".devflow", "state", "instances", runResult.InstanceID, "runtime.env")
+	runtimeEnv, err := os.ReadFile(runtimeEnvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeEnvText := string(runtimeEnv)
+	if !strings.Contains(runtimeEnvText, "EXAMPLE_SHARED_FLAG=from-dotenv\n") {
+		t.Fatalf("expected dotenv value in runtime env: %q", runtimeEnvText)
+	}
+	if strings.Contains(runtimeEnvText, "PGPORT=9999\n") {
+		t.Fatalf("expected devflow-managed PGPORT override in runtime env: %q", runtimeEnvText)
+	}
+	if !strings.Contains(runtimeEnvText, "NEXTAUTH_URL=http://devflow.local.test\n") {
+		t.Fatalf("expected NEXTAUTH_URL from dotenv in runtime env: %q", runtimeEnvText)
+	}
 
 	statusStdout := &bytes.Buffer{}
 	app = &App{Stdout: statusStdout, Stderr: &bytes.Buffer{}}
@@ -150,6 +207,19 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 	}
 	if status.InstanceID != runResult.InstanceID {
 		t.Fatalf("unexpected status instance ID: got %q want %q", status.InstanceID, runResult.InstanceID)
+	}
+	realWorktree, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		realWorktree = worktree
+	}
+	if status.Worktree != realWorktree {
+		t.Fatalf("unexpected status worktree: got %q want %q", status.Worktree, realWorktree)
+	}
+	if status.URLs["backend"] == "" || status.URLs["frontend"] == "" {
+		t.Fatalf("expected status URLs to be populated: %+v", status.URLs)
+	}
+	if status.DB.Password != "" || status.DB.URL != "" {
+		t.Fatalf("expected status DB details to be sanitized: %+v", status.DB)
 	}
 	if len(status.Nodes) == 0 {
 		t.Fatal("expected status nodes")
@@ -181,6 +251,83 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 	if _, ok := logEvents[0]["line"]; !ok {
 		t.Fatalf("expected log line payload: %v", logEvents[0])
 	}
+	if !strings.Contains(logEvents[0]["line"], "backend-dotenv") {
+		t.Fatalf("expected backend log line to include dotenv flag, got %q", logEvents[0]["line"])
+	}
+
+	frontendLogsStdout := &bytes.Buffer{}
+	app = &App{Stdout: frontendLogsStdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"logs", "frontend_dev", "--json", "--worktree", worktree, "--tail", "5"}); err != nil {
+		t.Fatal(err)
+	}
+	frontendLogEvents := decodeJSONLines(t, frontendLogsStdout.Bytes())
+	if len(frontendLogEvents) == 0 {
+		t.Fatal("expected frontend log events from logs command")
+	}
+	if !strings.Contains(frontendLogEvents[0]["line"], "frontend-dotenv") {
+		t.Fatalf("expected frontend log line to include dotenv flag, got %q", frontendLogEvents[0]["line"])
+	}
+	if !strings.Contains(frontendLogEvents[0]["line"], "http://devflow.local.test") {
+		t.Fatalf("expected frontend log line to include NEXTAUTH_URL from dotenv, got %q", frontendLogEvents[0]["line"])
+	}
+
+	inst, err := instance.Load(worktree, runResult.InstanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisorCtx, supervisorCancel := context.WithCancel(context.Background())
+	defer supervisorCancel()
+	supervisorHandle, err := process.Start(supervisorCtx, process.CommandSpec{
+		Name: "sh",
+		Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
+		Dir:  worktree,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		supervisorCancel()
+		_ = supervisorHandle.Wait()
+	}()
+	if err := instance.RecordDetachedRun(inst, api.RunConfig{
+		Project:  "go-next-monorepo",
+		Target:   "fullstack",
+		Mode:     api.ModeDev,
+		Detached: true,
+	}, supervisorHandle.PID(), filepath.Join(worktree, ".devflow", "logs", runResult.InstanceID, "supervisor.log")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".devflow", "logs", runResult.InstanceID, "supervisor.log"), []byte("supervisor line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	statusStdout = &bytes.Buffer{}
+	app = &App{Stdout: statusStdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"status", "--json", "--worktree", worktree}); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(statusStdout.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Supervisor == nil || !status.Supervisor.Alive {
+		t.Fatalf("expected live supervisor in status: %+v", status.Supervisor)
+	}
+
+	supervisorLogsStdout := &bytes.Buffer{}
+	app = &App{Stdout: supervisorLogsStdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"logs", "supervisor", "--json", "--worktree", worktree, "--tail", "5"}); err != nil {
+		t.Fatal(err)
+	}
+	supervisorLogEvents := decodeJSONLines(t, supervisorLogsStdout.Bytes())
+	if len(supervisorLogEvents) == 0 {
+		t.Fatal("expected supervisor log events from logs command")
+	}
+	if got := supervisorLogEvents[0]["task"]; got != "supervisor" {
+		t.Fatalf("unexpected supervisor logs task: %v", got)
+	}
+	if supervisorLogEvents[0]["line"] != "supervisor line" {
+		t.Fatalf("unexpected supervisor log line: %q", supervisorLogEvents[0]["line"])
+	}
 
 	instancesStdout := &bytes.Buffer{}
 	app = &App{Stdout: instancesStdout, Stderr: &bytes.Buffer{}}
@@ -193,6 +340,11 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 	}
 	if !containsInstance(instancesList, runResult.InstanceID) {
 		t.Fatalf("expected instances list to contain %q: %+v", runResult.InstanceID, instancesList)
+	}
+	for _, item := range instancesList {
+		if item.ID == runResult.InstanceID && (item.DB.Password != "" || item.DB.URL != "") {
+			t.Fatalf("expected instance DB details to be sanitized: %+v", item.DB)
+		}
 	}
 
 	doctorStdout := &bytes.Buffer{}
@@ -221,7 +373,7 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopped, ok := stopPayload["stopped"].([]any)
-	if !ok || len(stopped) < 2 {
+	if !ok || len(stopped) != 1 || stopped[0] != "supervisor" {
 		t.Fatalf("expected stopped service list in stop payload: %v", stopPayload)
 	}
 

@@ -48,6 +48,13 @@ type SupervisorRef struct {
 	LogPath   string    `json:"logPath,omitempty"`
 }
 
+type SupervisorStatus struct {
+	PID       int       `json:"pid,omitempty"`
+	Alive     bool      `json:"alive"`
+	StartedAt time.Time `json:"startedAt,omitempty"`
+	LogPath   string    `json:"logPath,omitempty"`
+}
+
 type RunConfig struct {
 	Project     string  `json:"project"`
 	Target      string  `json:"target"`
@@ -92,9 +99,16 @@ type RunResult struct {
 }
 
 type StatusResult struct {
-	InstanceID string       `json:"instanceId"`
-	Target     string       `json:"target"`
-	Nodes      []NodeStatus `json:"nodes"`
+	InstanceID string             `json:"instanceId"`
+	Worktree   string             `json:"worktree,omitempty"`
+	Target     string             `json:"target"`
+	Mode       RunMode            `json:"mode,omitempty"`
+	UpdatedAt  time.Time          `json:"updatedAt,omitempty"`
+	Ports      map[string]int     `json:"ports,omitempty"`
+	DB         DBInstance         `json:"db,omitempty"`
+	URLs       map[string]string  `json:"urls,omitempty"`
+	Supervisor *SupervisorStatus  `json:"supervisor,omitempty"`
+	Nodes      []NodeStatus       `json:"nodes"`
 }
 
 type LogEvent struct {

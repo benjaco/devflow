@@ -12,3 +12,7 @@ The current implementation provides the generic engine layers first:
 - JSON CLI contracts
 
 Future milestones add a richer TUI and continue expanding the example adapter and operator surface.
+
+Current bundled adapters cover two distinct validation shapes:
+- `go-next-monorepo`: deterministic in-repo example for repeatable tests
+- `bikecoach`: real Go server with embedded Vite frontends plus dedicated per-worktree Postgres

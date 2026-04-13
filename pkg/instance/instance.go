@@ -3,6 +3,7 @@ package instance
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -130,7 +131,7 @@ func List() ([]api.InstanceSummary, error) {
 			Label:    inst.Label,
 			Worktree: inst.Worktree,
 			Ports:    inst.Ports,
-			DB:       inst.DB,
+			DB:       DisplayDB(inst.DB),
 		}
 		if state, err := LoadStatus(worktree, id); err == nil {
 			summary.Target = state.Target
@@ -142,6 +143,12 @@ func List() ([]api.InstanceSummary, error) {
 		out = append(out, summary)
 	}
 	return out, nil
+}
+
+func DisplayDB(db api.DBInstance) api.DBInstance {
+	db.URL = ""
+	db.Password = ""
+	return db
 }
 
 func LogPath(worktree, instanceID, task string) string {
@@ -178,7 +185,7 @@ func StopProcesses(inst *api.Instance, task string) ([]string, error) {
 			continue
 		}
 		if err := syscall.Kill(-ref.PID, syscall.SIGTERM); err != nil {
-			if err := syscall.Kill(ref.PID, syscall.SIGTERM); err != nil {
+			if err := syscall.Kill(ref.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 				return stopped, err
 			}
 		}
@@ -212,13 +219,20 @@ func StopSupervisor(inst *api.Instance) error {
 		return nil
 	}
 	if err := syscall.Kill(-inst.Supervisor.PID, syscall.SIGTERM); err != nil {
-		if err := syscall.Kill(inst.Supervisor.PID, syscall.SIGTERM); err != nil {
+		if err := syscall.Kill(inst.Supervisor.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 			return err
 		}
 	}
 	inst.Supervisor = api.SupervisorRef{}
 	inst.Processes = map[string]api.ProcessRef{}
 	return Save(inst)
+}
+
+func ProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
 }
 
 func instanceID(realpath string) string {

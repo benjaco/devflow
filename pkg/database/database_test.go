@@ -29,7 +29,7 @@ func TestDesiredBuildsDedicatedInstanceIdentity(t *testing.T) {
 	if db.Port != 55432 {
 		t.Fatalf("unexpected port: %d", db.Port)
 	}
-	if !strings.Contains(db.URL, "@127.0.0.1:55432/app_wt_abc123") {
+	if !strings.Contains(db.URL, "@127.0.0.1:55432/app_wt_abc123?sslmode=disable") {
 		t.Fatalf("unexpected database URL: %q", db.URL)
 	}
 }
@@ -149,6 +149,16 @@ func TestRestoreSnapshotRecreatesVolumeAndUntars(t *testing.T) {
 func TestSnapshotKeySkipsEmptyParts(t *testing.T) {
 	if got := SnapshotKey("db", "", "schema", "v1"); got != "db_schema_v1" {
 		t.Fatalf("unexpected snapshot key %q", got)
+	}
+}
+
+func TestCommandErrContainsMatchesWrappedCombinedOutput(t *testing.T) {
+	err := &commandOutputError{
+		err:    errors.New("exit status 1"),
+		output: []byte("Error response from daemon: get devflow-pgdata-abc: no such volume\n"),
+	}
+	if !volumeMissing(err) {
+		t.Fatal("expected wrapped combined output to match missing volume detection")
 	}
 }
 

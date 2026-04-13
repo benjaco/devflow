@@ -403,6 +403,10 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 			}(task, name, depKeys, rt)
 		}
 
+		if completed >= len(order) {
+			break
+		}
+
 		if running == 0 {
 			if failed {
 				break

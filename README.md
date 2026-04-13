@@ -22,12 +22,15 @@ Early development. The current implementation focuses on the generic core:
 - service readiness gating before a service is considered running
 - built-in binary-tool helpers for cacheable helper-binary builds and later execution
 - Docker-backed database runtime helpers for dedicated per-instance Postgres containers and snapshots
+- dotenv loading so adapter instances can start from `.env` and then apply devflow-owned overrides
 - detached `run/watch --detach` background supervisor launching
 - worktree instances and shared port leasing
 - polling-based watch mode using `github.com/radovskyb/watcher`
 - JSON-capable CLI commands
 
-The TUI is still minimal, but the bundled example adapter now acts as a real smoke target for the core.
+The TUI is still minimal, but the bundled adapters now act as real smoke targets for the core:
+- `go-next-monorepo` for the deterministic in-repo example workflow
+- `bikecoach` for a real embedded-frontend + Go server + dedicated Postgres workflow
 
 ## Quick Start
 
@@ -35,6 +38,7 @@ The TUI is still minimal, but the bundled example adapter now acts as a real smo
 go test ./...
 go run ./cmd/devflow graph list --project go-next-monorepo
 go run ./cmd/devflow run fullstack --project go-next-monorepo --worktree examples/go-next-monorepo/worktree --json
+go run ./cmd/devflow run build-all --project bikecoach --worktree /path/to/bikecoach/coach --json --ci
 ```
 
 ## Design Goals

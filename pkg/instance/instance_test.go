@@ -77,3 +77,27 @@ func TestRecordDetachedRunPersistsSupervisorAndLastRun(t *testing.T) {
 		t.Fatalf("unexpected last run: %+v", loaded.LastRun)
 	}
 }
+
+func TestStopSupervisorIgnoresMissingProcess(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	inst, err := Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.Supervisor = api.SupervisorRef{PID: 999999}
+	if err := Save(inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := StopSupervisor(inst); err != nil {
+		t.Fatalf("expected missing supervisor process to be ignored, got %v", err)
+	}
+	loaded, err := Load(worktree, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Supervisor.PID != 0 {
+		t.Fatalf("expected supervisor to be cleared, got %+v", loaded.Supervisor)
+	}
+}

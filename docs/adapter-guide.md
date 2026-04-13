@@ -9,6 +9,38 @@ An adapter defines:
 
 Tasks should stay semantic. The adapter decides which files, directories, env vars, and custom probes contribute to each fingerprint.
 
+## Dotenv Loading
+
+Adapters can now load `.env` files directly through `pkg/project`.
+
+Example:
+
+```go
+dotenv, err := project.LoadOptionalDotEnvInWorktree(worktree, ".env")
+if err != nil {
+    return project.InstanceConfig{}, err
+}
+
+return project.InstanceConfig{
+    Env: project.MergeEnvMaps(dotenv, map[string]string{
+        "DEVFLOW_PROJECT": "my-project",
+    }),
+    Finalize: func(inst *api.Instance) error {
+        inst.Env = project.MergeEnvMaps(inst.Env, map[string]string{
+            "DATABASE_URL": computedDatabaseURL,
+        })
+        return nil
+    },
+}
+```
+
+Recommended precedence:
+- `.env`
+- adapter defaults
+- devflow-owned runtime overrides
+
+Use dotenv values for normal app configuration, but keep leased ports, instance IDs, and per-instance DB URLs under devflow control.
+
 ## Built Binary Tools
 
 For repo-local helper executables, use the built-in binary-tool helper in `pkg/project`.

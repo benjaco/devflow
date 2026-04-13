@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"devflow/internal/fsutil"
 	"devflow/pkg/api"
 	"devflow/pkg/cache"
 	"devflow/pkg/engine"
@@ -41,6 +43,8 @@ func (a *App) Run(args []string) error {
 		return a.runCmd(args[1:])
 	case "__internal_exec":
 		return a.internalExecCmd(args[1:])
+	case "__internal_supervise":
+		return a.internalSuperviseCmd(args[1:])
 	case "restart":
 		return a.restartCmd(args[1:])
 	case "stop":
@@ -137,7 +141,10 @@ func (a *App) runCmd(args []string) error {
 	})
 	if outcome != nil {
 		if *jsonOut {
-			return writeJSON(a.Stdout, outcome.Result)
+			if err := writeJSON(a.Stdout, outcome.Result); err != nil {
+				return err
+			}
+			return runErr
 		}
 		_, _ = fmt.Fprintf(a.Stdout, "target=%s instance=%s success=%v cache_hits=%d\n", outcome.Result.Target, outcome.Result.InstanceID, outcome.Result.Success, len(outcome.Result.CacheHits))
 	}
@@ -205,21 +212,15 @@ func (a *App) executeWatch(target string, jsonOut bool, worktreeFlag, projectNam
 }
 
 func (a *App) internalExecCmd(args []string) error {
-	fs := flag.NewFlagSet("__internal_exec", flag.ContinueOnError)
-	fs.SetOutput(a.Stderr)
-	target := fs.String("target", "", "")
-	projectName := fs.String("project", "", "")
-	worktree := fs.String("worktree", "", "")
-	mode := fs.String("mode", string(api.ModeDev), "")
-	maxParallel := fs.Int("max-parallel", 0, "")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	root, err := resolveWorktree(*worktree)
+	req, err := parseInternalExecArgs(args, a.Stderr)
 	if err != nil {
 		return err
 	}
-	p, err := project.Lookup(*projectName)
+	root, err := resolveWorktree(req.worktree)
+	if err != nil {
+		return err
+	}
+	p, err := project.Lookup(req.projectName)
 	if err != nil {
 		return err
 	}
@@ -227,19 +228,118 @@ func (a *App) internalExecCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	req := engine.Request{
-		Target:      *target,
+	runReq := engine.Request{
+		Target:      req.target,
 		Worktree:    root,
-		Mode:        api.RunMode(*mode),
-		MaxParallel: *maxParallel,
+		Mode:        api.RunMode(req.mode),
+		MaxParallel: req.maxParallel,
 	}
-	switch req.Mode {
+	switch runReq.Mode {
 	case api.ModeWatch:
-		return eng.Watch(context.Background(), req)
+		return eng.Watch(context.Background(), runReq)
 	default:
-		_, err := eng.Run(context.Background(), req)
+		_, err := eng.Run(context.Background(), runReq)
 		return err
 	}
+}
+
+func (a *App) internalSuperviseCmd(args []string) error {
+	fs := flag.NewFlagSet("__internal_exec", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	target := fs.String("target", "", "")
+	projectName := fs.String("project", "", "")
+	worktree := fs.String("worktree", "", "")
+	mode := fs.String("mode", string(api.ModeDev), "")
+	maxParallel := fs.Int("max-parallel", 0, "")
+	logPath := fs.String("log-path", "", "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *logPath == "" {
+		return fmt.Errorf("missing --log-path for __internal_supervise")
+	}
+	root, err := resolveWorktree(*worktree)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(*logPath), 0o755); err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(*logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+	writeSupervisorLine(logFile, "supervisor started target=%s mode=%s project=%s worktree=%s", *target, *mode, *projectName, root)
+
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(executable,
+		"__internal_exec",
+		"--target", *target,
+		"--project", *projectName,
+		"--worktree", root,
+		"--mode", *mode,
+		"--max-parallel", fmt.Sprintf("%d", *maxParallel),
+	)
+	cmd.Dir = root
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		writeSupervisorLine(logFile, "supervisor failed to start child: %v", err)
+		return err
+	}
+	writeSupervisorLine(logFile, "child pid=%d", cmd.Process.Pid)
+
+	done := make(chan struct{}, 2)
+	go copySupervisorStream(logFile, "stdout", stdout, done)
+	go copySupervisorStream(logFile, "stderr", stderr, done)
+	<-done
+	<-done
+	err = cmd.Wait()
+	if err != nil {
+		writeSupervisorLine(logFile, "supervisor finished with error: %v", err)
+		return err
+	}
+	writeSupervisorLine(logFile, "supervisor finished successfully")
+	return nil
+}
+
+type internalExecRequest struct {
+	target      string
+	projectName string
+	worktree    string
+	mode        string
+	maxParallel int
+}
+
+func parseInternalExecArgs(args []string, stderr io.Writer) (internalExecRequest, error) {
+	fs := flag.NewFlagSet("__internal_exec", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	target := fs.String("target", "", "")
+	projectName := fs.String("project", "", "")
+	worktree := fs.String("worktree", "", "")
+	mode := fs.String("mode", string(api.ModeDev), "")
+	maxParallel := fs.Int("max-parallel", 0, "")
+	if err := fs.Parse(args); err != nil {
+		return internalExecRequest{}, err
+	}
+	return internalExecRequest{
+		target:      *target,
+		projectName: *projectName,
+		worktree:    *worktree,
+		mode:        *mode,
+		maxParallel: *maxParallel,
+	}, nil
 }
 
 func (a *App) executeDetached(target, projectName, worktreeFlag string, mode api.RunMode, maxParallel int, jsonOut bool) error {
@@ -251,19 +351,9 @@ func (a *App) executeDetached(target, projectName, worktreeFlag string, mode api
 	if err != nil {
 		return err
 	}
-	executable, err := os.Executable()
+	executable, err := detachedExecutable(root)
 	if err != nil {
 		return err
-	}
-	args := []string{
-		"__internal_exec",
-		"--target", target,
-		"--project", projectName,
-		"--worktree", root,
-		"--mode", string(mode),
-	}
-	if maxParallel > 0 {
-		args = append(args, "--max-parallel", fmt.Sprintf("%d", maxParallel))
 	}
 	logPath := filepath.Join(root, ".devflow", "logs", inst.ID, "supervisor.log")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
@@ -275,7 +365,17 @@ func (a *App) executeDetached(target, projectName, worktreeFlag string, mode api
 	}
 	defer logFile.Close()
 
-	cmd := exec.Command(executable, args...)
+	cmd := exec.Command(executable,
+		"__internal_supervise",
+		"--target", target,
+		"--project", projectName,
+		"--worktree", root,
+		"--mode", string(mode),
+		"--log-path", logPath,
+	)
+	if maxParallel > 0 {
+		cmd.Args = append(cmd.Args, "--max-parallel", fmt.Sprintf("%d", maxParallel))
+	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Dir = root
@@ -412,9 +512,11 @@ func (a *App) stopCmd(args []string) error {
 		taskName = *task
 	}
 	if *all && inst.Supervisor.PID > 0 {
+		supervisorPID := inst.Supervisor.PID
 		if err := instance.StopSupervisor(inst); err != nil {
 			return err
 		}
+		waitForPIDExit(supervisorPID, 5*time.Second)
 		if err := markAllStoppedNodes(root, id); err != nil {
 			return err
 		}
@@ -561,9 +663,31 @@ func (a *App) statusCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	inst, err := instance.Load(root, id)
+	if err != nil {
+		return err
+	}
 	state, err := instance.LoadStatus(root, id)
 	if err != nil {
 		return err
+	}
+	supervisor := supervisorStatus(inst)
+	if supervisor != nil && !supervisor.Alive {
+		if err := instance.ClearSupervisor(inst); err != nil {
+			return err
+		}
+		if err := markAllStoppedNodes(root, id); err != nil {
+			return err
+		}
+		inst, err = instance.Load(root, id)
+		if err != nil {
+			return err
+		}
+		state, err = instance.LoadStatus(root, id)
+		if err != nil {
+			return err
+		}
+		supervisor = supervisorStatus(inst)
 	}
 	nodes := make([]api.NodeStatus, 0, len(state.Nodes))
 	for _, node := range state.Nodes {
@@ -572,12 +696,44 @@ func (a *App) statusCmd(args []string) error {
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
 	out := api.StatusResult{
 		InstanceID: id,
+		Worktree:   root,
 		Target:     state.Target,
+		Mode:       state.Mode,
+		UpdatedAt:  state.UpdatedAt,
+		Ports:      inst.Ports,
+		DB:         instance.DisplayDB(inst.DB),
+		URLs:       instanceURLs(inst),
+		Supervisor: supervisor,
 		Nodes:      nodes,
 	}
 	if *jsonOut {
 		return writeJSON(a.Stdout, out)
 	}
+	_, _ = fmt.Fprintf(a.Stdout, "instance: %s  target: %s  mode: %s\n", out.InstanceID, out.Target, out.Mode)
+	_, _ = fmt.Fprintf(a.Stdout, "worktree: %s\n", out.Worktree)
+	if len(out.URLs) > 0 {
+		keys := make([]string, 0, len(out.URLs))
+		for name := range out.URLs {
+			keys = append(keys, name)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, name := range keys {
+			parts = append(parts, fmt.Sprintf("%s=%s", name, out.URLs[name]))
+		}
+		_, _ = fmt.Fprintf(a.Stdout, "urls: %s\n", strings.Join(parts, "  "))
+	}
+	if out.DB.Name != "" {
+		_, _ = fmt.Fprintf(a.Stdout, "db: %s host=%s port=%d container=%s\n", out.DB.Name, out.DB.Host, out.DB.Port, out.DB.ContainerName)
+	}
+	if out.Supervisor != nil {
+		state := "stopped"
+		if out.Supervisor.Alive {
+			state = "running"
+		}
+		_, _ = fmt.Fprintf(a.Stdout, "supervisor: %s pid=%d log=%s\n", state, out.Supervisor.PID, out.Supervisor.LogPath)
+	}
+	_, _ = fmt.Fprintln(a.Stdout)
 	for _, node := range nodes {
 		_, _ = fmt.Fprintf(a.Stdout, "%-20s %-10s %s\n", node.Name, node.Kind, node.State)
 	}
@@ -613,7 +769,11 @@ func (a *App) logsCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	lines, err := readLastLines(instance.LogPath(root, id, task), *tail)
+	logPath, err := resolveLogPath(root, id, task)
+	if err != nil {
+		return err
+	}
+	lines, err := readLastLines(logPath, *tail)
 	if err != nil {
 		return err
 	}
@@ -629,7 +789,7 @@ func (a *App) logsCmd(args []string) error {
 		}
 	}
 	if *follow {
-		return followFile(a.Stdout, instance.LogPath(root, id, task), *jsonOut, task)
+		return followFile(a.Stdout, logPath, *jsonOut, task)
 	}
 	return nil
 }
@@ -911,13 +1071,28 @@ func markAllStoppedNodes(worktree, instanceID string) error {
 		return nil
 	}
 	for name, node := range state.Nodes {
-		if node.Kind == "service" {
+		switch node.State {
+		case api.StatePending, api.StateReady, api.StateRunning, api.StateDirty:
 			node.State = api.StateStopped
 			node.PID = 0
 			state.Nodes[name] = node
 		}
 	}
 	return instance.SaveStatus(worktree, instanceID, state.Target, state.Mode, state.Nodes)
+}
+
+func resolveLogPath(worktree, instanceID, task string) (string, error) {
+	if task != "supervisor" {
+		return instance.LogPath(worktree, instanceID, task), nil
+	}
+	inst, err := instance.Load(worktree, instanceID)
+	if err != nil {
+		return "", err
+	}
+	if inst.Supervisor.LogPath != "" {
+		return inst.Supervisor.LogPath, nil
+	}
+	return filepath.Join(worktree, ".devflow", "logs", instanceID, "supervisor.log"), nil
 }
 
 func writeJSON(w io.Writer, v any) error {
@@ -928,6 +1103,79 @@ func writeJSON(w io.Writer, v any) error {
 	data = append(data, '\n')
 	_, err = w.Write(data)
 	return err
+}
+
+func detachedExecutable(worktree string) (string, error) {
+	current, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	target := filepath.Join(worktree, ".devflow", "bin", "devflow-launcher")
+	if err := fsutil.CopyFile(current, target); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(target, 0o755); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+func copySupervisorStream(logFile *os.File, stream string, input io.Reader, done chan<- struct{}) {
+	defer func() { done <- struct{}{} }()
+	scanner := bufio.NewScanner(input)
+	for scanner.Scan() {
+		writeSupervisorLine(logFile, "%s: %s", stream, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		writeSupervisorLine(logFile, "%s scan error: %v", stream, err)
+	}
+}
+
+func writeSupervisorLine(logFile *os.File, format string, args ...any) {
+	if logFile == nil {
+		return
+	}
+	line := fmt.Sprintf(format, args...)
+	_, _ = fmt.Fprintf(logFile, "%s %s\n", time.Now().UTC().Format(time.RFC3339), line)
+}
+
+func waitForPIDExit(pid int, timeout time.Duration) {
+	if pid <= 0 || timeout <= 0 {
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); err != nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func supervisorStatus(inst *api.Instance) *api.SupervisorStatus {
+	if inst == nil || inst.Supervisor.PID <= 0 {
+		return nil
+	}
+	return &api.SupervisorStatus{
+		PID:       inst.Supervisor.PID,
+		Alive:     instance.ProcessAlive(inst.Supervisor.PID),
+		StartedAt: inst.Supervisor.StartedAt,
+		LogPath:   inst.Supervisor.LogPath,
+	}
+}
+
+func instanceURLs(inst *api.Instance) map[string]string {
+	if inst == nil {
+		return nil
+	}
+	urls := map[string]string{}
+	if port := inst.Ports["backend"]; port > 0 {
+		urls["backend"] = fmt.Sprintf("http://127.0.0.1:%d", port)
+	}
+	if port := inst.Ports["frontend"]; port > 0 {
+		urls["frontend"] = fmt.Sprintf("http://127.0.0.1:%d", port)
+	}
+	return urls
 }
 
 func writeJSONLine(w io.Writer, v any) error {

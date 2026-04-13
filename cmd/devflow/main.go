@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	_ "devflow/examples/bikecoach"
 	_ "devflow/examples/go-next-monorepo"
 	"devflow/internal/cli"
 )

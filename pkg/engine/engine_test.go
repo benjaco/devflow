@@ -169,6 +169,56 @@ func TestRunHonorsMaxParallelOne(t *testing.T) {
 	}
 }
 
+type groupTailProject struct{}
+
+func (groupTailProject) Name() string { return "group-tail-project" }
+
+func (groupTailProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "group-tail"}, nil
+}
+
+func (groupTailProject) Targets() []project.Target {
+	return []project.Target{{Name: "build", RootTasks: []string{"bundle"}}}
+}
+
+func (groupTailProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name: "compile",
+			Kind: project.KindOnce,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				_ = rt
+				return nil
+			},
+		},
+		{
+			Name: "bundle",
+			Kind: project.KindGroup,
+			Deps: []string{"compile"},
+		},
+	}
+}
+
+func TestRunDoesNotStallWhenGroupTaskIsLastNode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	eng, err := New(groupTailProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.Result.Success {
+		t.Fatalf("expected success, got %+v", outcome.Result)
+	}
+}
+
 type eventProject struct{}
 
 func (eventProject) Name() string { return "event-project" }

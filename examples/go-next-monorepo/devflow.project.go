@@ -37,13 +37,17 @@ func (exampleProject) ConfigureInstance(ctx context.Context, worktree string) (p
 	if err != nil {
 		return project.InstanceConfig{}, err
 	}
+	dotenv, err := project.LoadOptionalDotEnvInWorktree(worktree, ".env")
+	if err != nil {
+		return project.InstanceConfig{}, err
+	}
 	manager := database.New()
 	return project.InstanceConfig{
 		Label:     filepath.Base(worktree),
 		PortNames: []string{"backend", "frontend", "postgres"},
-		Env: map[string]string{
+		Env: project.MergeEnvMaps(dotenv, map[string]string{
 			"DEVFLOW_EXAMPLE_PROJECT": "go-next-monorepo",
-		},
+		}),
 		Finalize: func(inst *api.Instance) error {
 			db := manager.Desired(inst.ID, database.Config{
 				HostPort:     inst.Ports["postgres"],
@@ -56,12 +60,14 @@ func (exampleProject) ConfigureInstance(ctx context.Context, worktree string) (p
 			if inst.Env == nil {
 				inst.Env = map[string]string{}
 			}
-			inst.Env["PGHOST"] = db.Host
-			inst.Env["PGPORT"] = strconv.Itoa(db.Port)
-			inst.Env["PGDATABASE"] = db.Name
-			inst.Env["PGUSER"] = db.User
-			inst.Env["PGPASSWORD"] = db.Password
-			inst.Env["DATABASE_URL"] = db.URL
+			inst.Env = project.MergeEnvMaps(inst.Env, map[string]string{
+				"PGHOST":       db.Host,
+				"PGPORT":       strconv.Itoa(db.Port),
+				"PGDATABASE":   db.Name,
+				"PGUSER":       db.User,
+				"PGPASSWORD":   db.Password,
+				"DATABASE_URL": db.URL,
+			})
 			return nil
 		},
 	}, nil
@@ -521,7 +527,7 @@ func (exampleProject) Tasks() []project.Task {
 				_ = os.Remove(readyPath)
 				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
 					Name: "sh",
-					Args: []string{"-c", "trap 'rm -f " + shellQuote(readyPath) + "; exit 0' INT TERM; mkdir -p " + shellQuote(filepath.Dir(readyPath)) + "; : > " + shellQuote(readyPath) + "; while true; do echo backend:$BACKEND_PORT:$DATABASE_URL; sleep 1; done"},
+					Args: []string{"-c", "trap 'rm -f " + shellQuote(readyPath) + "; exit 0' INT TERM; mkdir -p " + shellQuote(filepath.Dir(readyPath)) + "; : > " + shellQuote(readyPath) + "; while true; do echo backend:$BACKEND_PORT:$DATABASE_URL:$EXAMPLE_BACKEND_FLAG; sleep 1; done"},
 					Dir:  rt.Worktree,
 					Env:  env,
 				})
@@ -547,7 +553,7 @@ func (exampleProject) Tasks() []project.Task {
 				_ = os.Remove(readyPath)
 				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
 					Name: "sh",
-					Args: []string{"-c", "trap 'rm -f " + shellQuote(readyPath) + "; exit 0' INT TERM; mkdir -p " + shellQuote(filepath.Dir(readyPath)) + "; : > " + shellQuote(readyPath) + "; while true; do echo frontend:$FRONTEND_PORT:$BACKEND_PORT; sleep 1; done"},
+					Args: []string{"-c", "trap 'rm -f " + shellQuote(readyPath) + "; exit 0' INT TERM; mkdir -p " + shellQuote(filepath.Dir(readyPath)) + "; : > " + shellQuote(readyPath) + "; while true; do echo frontend:$FRONTEND_PORT:$BACKEND_PORT:$NEXTAUTH_URL:$EXAMPLE_FRONTEND_FLAG; sleep 1; done"},
 					Dir:  rt.Worktree,
 					Env:  env,
 				})

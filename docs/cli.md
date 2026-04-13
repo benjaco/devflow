@@ -38,4 +38,14 @@ Implemented `run` flags include:
 
 `stop` terminates persisted service PIDs for a selected task or, when used with `--all`, terminates the detached supervisor for the instance and updates persisted node state to `stopped`.
 
+`status` now reports instance metadata in both text and JSON forms, including:
+- worktree
+- target and mode
+- assigned ports
+- sanitized DB details
+- derived local URLs such as `backend`
+- detached supervisor PID/liveness/log path when present
+
+`logs` supports task logs as before and also accepts `supervisor` to read the detached supervisor log directly.
+
 `cache status` lists cache entries, `cache invalidate` removes entries globally or per task, and `cache gc` keeps only the newest N entries per task.

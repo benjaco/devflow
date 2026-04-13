@@ -52,6 +52,23 @@ type Runner interface {
 	CombinedOutput(ctx context.Context, name string, args ...string) ([]byte, error)
 }
 
+type commandOutputError struct {
+	err    error
+	output []byte
+}
+
+func (e *commandOutputError) Error() string {
+	text := strings.TrimSpace(string(e.output))
+	if text == "" {
+		return e.err.Error()
+	}
+	return e.err.Error() + ": " + text
+}
+
+func (e *commandOutputError) Unwrap() error {
+	return e.err
+}
+
 type Manager struct {
 	runner Runner
 }
@@ -327,9 +344,9 @@ func postgresURL(host string, port int, user, password, database string) string 
 		auth += ":" + password
 	}
 	if port > 0 {
-		return "postgres://" + auth + "@" + host + ":" + strconv.Itoa(port) + "/" + database
+		return "postgres://" + auth + "@" + host + ":" + strconv.Itoa(port) + "/" + database + "?sslmode=disable"
 	}
-	return "postgres://" + auth + "@" + host + "/" + database
+	return "postgres://" + auth + "@" + host + "/" + database + "?sslmode=disable"
 }
 
 func containerMissing(err error) bool {
@@ -344,16 +361,25 @@ func commandErrContains(err error, fragment string) bool {
 	if err == nil {
 		return false
 	}
+	fragment = strings.ToLower(fragment)
+	var outputErr *commandOutputError
+	if errors.As(err, &outputErr) {
+		return strings.Contains(strings.ToLower(string(outputErr.output)), fragment) || strings.Contains(strings.ToLower(outputErr.err.Error()), fragment)
+	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return strings.Contains(string(exitErr.Stderr), fragment)
+		return strings.Contains(strings.ToLower(string(exitErr.Stderr)), fragment)
 	}
-	return strings.Contains(err.Error(), fragment)
+	return strings.Contains(strings.ToLower(err.Error()), fragment)
 }
 
 type execRunner struct{}
 
 func (execRunner) CombinedOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
-	return cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return out, &commandOutputError{err: err, output: out}
+	}
+	return out, nil
 }
