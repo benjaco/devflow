@@ -31,6 +31,24 @@ func (exampleProject) Name() string {
 	return "go-next-monorepo"
 }
 
+func (exampleProject) DefaultTarget() string {
+	return "fullstack"
+}
+
+func (exampleProject) DetectWorktree(worktree string) bool {
+	required := []string{
+		"backend/sqlc.yaml",
+		"frontend/codegen.config.json",
+		"db/schema.prisma",
+	}
+	for _, rel := range required {
+		if _, err := os.Stat(filepath.Join(worktree, rel)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func (exampleProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
 	_ = ctx
 	id, _, err := instance.IDForWorktree(worktree)

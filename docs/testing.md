@@ -28,14 +28,16 @@ Devflow uses three testing layers:
 
 ## Example/Smoke Coverage
 
-The bundled example adapter is now a deterministic full-stack-style smoke target. Current smoke coverage includes:
+The bundled example adapters are now deterministic smoke targets. Current smoke coverage includes:
 - repeated runs with cache hits
 - watch-mode selective reruns
+- watch-mode file pickup verification that starts watch mode, edits a real file, and asserts the watch cycle event plus the affected rerun
 - service readiness via ready-file probes on the example backend/frontend services
 - DB snapshot reuse and dedicated postgres port isolation in the fake-DB example path
 - multi-worktree DB and port isolation
+- a second multi-service workflow shape with API, worker, and frontend services that exercises broader downstream restart behavior
 
-The example remains synthetic and local-only on purpose so tests stay deterministic and non-flaky.
+The deterministic examples remain synthetic and local-only on purpose so tests stay deterministic and non-flaky.
 
 Docker-backed integration coverage is intentionally opt-in. Enable it with:
 
@@ -48,3 +50,8 @@ There is also now a real `bikecoach` adapter with:
 - manual smoke validation against the local BikeCoach repo
 - verified `build-all` execution through the real repository
 - verified early failure when Docker is installed but the daemon is not running
+
+The current example coverage splits cleanly across three shapes:
+- `go-next-monorepo`: deterministic frontend + backend + DB flow
+- `web-worker-workspace`: deterministic API + worker + frontend multi-service flow
+- `bikecoach`: real repository adapter for a Go server + embedded frontend + dedicated Postgres flow

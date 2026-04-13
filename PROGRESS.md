@@ -108,6 +108,24 @@ Last updated: 2026-04-13
 - Verified locally with:
   - `go test ./...`
   - `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run Docker -v`
+- Added a second deterministic e2e example adapter at `examples/web-worker-workspace` covering:
+  - API + worker + frontend services in one target
+  - shared contract codegen with downstream service restarts
+  - dedicated per-worktree DB prep/snapshot flow
+  - multi-worktree port and DB isolation
+  - watch-mode reruns across multiple long-running services
+- Added a repo-local `devflow` launcher script plus bare-`devflow` CLI behavior:
+  - builds the local binary into `.devflow/bin/devflow`
+  - auto-detects the current worktree project
+  - chooses the adapter default target
+  - starts a detached run when needed
+  - opens the TUI directly
+- Installed `/usr/local/bin/devflow` as a symlink to the repo-local launcher on this machine
+- Added watch pickup coverage in the deterministic example suite:
+  - starts watch mode
+  - edits a real input file
+  - verifies the watch cycle event is emitted
+  - verifies the affected service reruns
 
 ## In Progress
 
@@ -117,7 +135,6 @@ Last updated: 2026-04-13
 
 - Add richer watch restart policies now that service readiness exists
 - Improve fine-grained detached service restart/control semantics beyond whole-target relaunch
-- Add a second e2e example project that stresses a different workflow shape than BikeCoach
 - Hook the TUI directly to the engine event stream instead of polling
 - Expand TUI operator actions with confirmations and rerun/stop/restart controls
 - Add stronger JSON contract tests for status/instances/events

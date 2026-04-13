@@ -15,4 +15,5 @@ Future milestones add a richer TUI and continue expanding the example adapter an
 
 Current bundled adapters cover two distinct validation shapes:
 - `go-next-monorepo`: deterministic in-repo example for repeatable tests
+- `web-worker-workspace`: deterministic multi-service API + worker + frontend example
 - `bikecoach`: real Go server with embedded Vite frontends plus dedicated per-worktree Postgres

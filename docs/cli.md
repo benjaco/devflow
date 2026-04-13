@@ -2,6 +2,7 @@
 
 Implemented commands:
 
+- `devflow` (default launcher behavior)
 - `devflow run <target>`
 - `devflow watch <target>`
 - `devflow restart <task>`
@@ -19,6 +20,14 @@ Implemented commands:
 - `devflow graph affected --files ...`
 
 All implemented commands support `--json`.
+
+Running bare `devflow` now acts as the default operator entry path:
+- it uses the repo-local launcher script
+- rebuilds the local binary when the `devflow` source tree is newer than `.devflow/bin/devflow`
+- auto-detects the current worktree project when possible
+- chooses the project's preferred default target (`up`, `fullstack`, or the adapter-defined default)
+- if no detached supervisor is live for the current worktree, starts that target detached
+- opens the TUI for the current worktree
 
 `run` provisions an instance, executes the target closure, restores cacheable one-shot tasks when possible, and keeps supervised services alive until interrupted.
 

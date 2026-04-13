@@ -28,6 +28,25 @@ func (bikecoachProject) Name() string {
 	return "bikecoach"
 }
 
+func (bikecoachProject) DefaultTarget() string {
+	return "up"
+}
+
+func (bikecoachProject) DetectWorktree(worktree string) bool {
+	required := []string{
+		"sqlc.yaml",
+		"cmd/coach/main.go",
+		"frontend/package.json",
+		"frontend-admin/package.json",
+	}
+	for _, rel := range required {
+		if _, err := os.Stat(filepath.Join(worktree, rel)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func (bikecoachProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
 	_ = ctx
 	dotenv, err := project.LoadOptionalDotEnvInWorktree(worktree, ".env")
@@ -572,33 +591,33 @@ func prefixLength(restored *database.PrismaRestoreResult) int {
 
 func SeedWorktree(dst string) error {
 	files := map[string]string{
-		".env": "DATABASE_URL=postgres://coach:coach@localhost:5432/coach?sslmode=disable\nSTRAVA_CLIENT_ID=test-client\nSTRAVA_CLIENT_SECRET=test-secret\nSTRAVA_REDIRECT_URI=http://localhost:8080/oauth/callback\n",
-		"go.mod": "module github.com/example/bikecoach\n\ngo 1.23.0\n",
-		"go.sum": "",
-		"sqlc.yaml": "version: \"2\"\n",
+		".env":              "DATABASE_URL=postgres://coach:coach@localhost:5432/coach?sslmode=disable\nSTRAVA_CLIENT_ID=test-client\nSTRAVA_CLIENT_SECRET=test-secret\nSTRAVA_REDIRECT_URI=http://localhost:8080/oauth/callback\n",
+		"go.mod":            "module github.com/example/bikecoach\n\ngo 1.23.0\n",
+		"go.sum":            "",
+		"sqlc.yaml":         "version: \"2\"\n",
 		"cmd/coach/main.go": "package main\nfunc main() {}\n",
 		"cmd/tools/main.go": "package main\nfunc main() {}\n",
-		"internal/storage/migrations/001_init.up.sql": "create table widgets(id serial primary key);\n",
+		"internal/storage/migrations/001_init.up.sql":   "create table widgets(id serial primary key);\n",
 		"internal/storage/migrations/001_init.down.sql": "drop table widgets;\n",
-		"internal/storage/queries/widgets.sql": "-- name: ListWidgets :many\nselect 1;\n",
-		"frontend/package.json": "{\n  \"name\": \"frontend\",\n  \"scripts\": {\"build\": \"echo main\"}\n}\n",
-		"frontend/package-lock.json": "{}\n",
-		"frontend/tsconfig.json": "{}\n",
-		"frontend/vite.config.ts": "export default {}\n",
-		"frontend/index.html": "<html></html>\n",
-		"frontend/src/main.tsx": "console.log('main')\n",
-		"frontend-internal/package.json": "{\n  \"name\": \"frontend-internal\",\n  \"scripts\": {\"build\": \"echo internal\"}\n}\n",
-		"frontend-internal/package-lock.json": "{}\n",
-		"frontend-internal/tsconfig.json": "{}\n",
-		"frontend-internal/vite.config.ts": "export default {}\n",
-		"frontend-internal/index.html": "<html></html>\n",
-		"frontend-internal/src/main.tsx": "console.log('internal')\n",
-		"frontend-admin/package.json": "{\n  \"name\": \"frontend-admin\",\n  \"scripts\": {\"build\": \"echo admin\"}\n}\n",
-		"frontend-admin/package-lock.json": "{}\n",
-		"frontend-admin/tsconfig.json": "{}\n",
-		"frontend-admin/vite.config.ts": "export default {}\n",
-		"frontend-admin/index.html": "<html></html>\n",
-		"frontend-admin/src/main.tsx": "console.log('admin')\n",
+		"internal/storage/queries/widgets.sql":          "-- name: ListWidgets :many\nselect 1;\n",
+		"frontend/package.json":                         "{\n  \"name\": \"frontend\",\n  \"scripts\": {\"build\": \"echo main\"}\n}\n",
+		"frontend/package-lock.json":                    "{}\n",
+		"frontend/tsconfig.json":                        "{}\n",
+		"frontend/vite.config.ts":                       "export default {}\n",
+		"frontend/index.html":                           "<html></html>\n",
+		"frontend/src/main.tsx":                         "console.log('main')\n",
+		"frontend-internal/package.json":                "{\n  \"name\": \"frontend-internal\",\n  \"scripts\": {\"build\": \"echo internal\"}\n}\n",
+		"frontend-internal/package-lock.json":           "{}\n",
+		"frontend-internal/tsconfig.json":               "{}\n",
+		"frontend-internal/vite.config.ts":              "export default {}\n",
+		"frontend-internal/index.html":                  "<html></html>\n",
+		"frontend-internal/src/main.tsx":                "console.log('internal')\n",
+		"frontend-admin/package.json":                   "{\n  \"name\": \"frontend-admin\",\n  \"scripts\": {\"build\": \"echo admin\"}\n}\n",
+		"frontend-admin/package-lock.json":              "{}\n",
+		"frontend-admin/tsconfig.json":                  "{}\n",
+		"frontend-admin/vite.config.ts":                 "export default {}\n",
+		"frontend-admin/index.html":                     "<html></html>\n",
+		"frontend-admin/src/main.tsx":                   "console.log('admin')\n",
 	}
 	for rel, contents := range files {
 		path := filepath.Join(dst, rel)

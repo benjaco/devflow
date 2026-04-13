@@ -36,7 +36,7 @@ func New() *App {
 
 func (a *App) Run(args []string) error {
 	if len(args) == 0 {
-		return a.usage()
+		return a.defaultEntry()
 	}
 	switch args[0] {
 	case "run", "up":
@@ -68,6 +68,62 @@ func (a *App) Run(args []string) error {
 	default:
 		return a.usage()
 	}
+}
+
+func (a *App) defaultEntry() error {
+	root, err := resolveWorktree("")
+	if err != nil {
+		return err
+	}
+	plan, err := a.defaultLaunchPlan(root)
+	if err != nil {
+		return err
+	}
+	if plan.startDetached {
+		if err := a.executeDetached(plan.target, plan.projectName, root, api.ModeDev, 0, false); err != nil {
+			return err
+		}
+	}
+	return tui.Run(tui.Options{Worktree: root, InstanceID: plan.instanceID})
+}
+
+type launchPlan struct {
+	projectName   string
+	target        string
+	instanceID    string
+	startDetached bool
+}
+
+func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
+	p, err := project.Detect(root)
+	if err != nil {
+		return launchPlan{}, fmt.Errorf("devflow default launch requires a detectable project in %s: %w", root, err)
+	}
+	target := project.PreferredTarget(p)
+	if target == "" {
+		return launchPlan{}, fmt.Errorf("project %q does not define a default target", p.Name())
+	}
+	instanceID, _, err := instance.IDForWorktree(root)
+	if err != nil {
+		return launchPlan{}, err
+	}
+	plan := launchPlan{
+		projectName: p.Name(),
+		target:      target,
+		instanceID:  instanceID,
+	}
+	inst, err := instance.Load(root, instanceID)
+	if err != nil {
+		if os.IsNotExist(err) {
+			plan.startDetached = true
+			return plan, nil
+		}
+		return launchPlan{}, err
+	}
+	if !instance.ProcessAlive(inst.Supervisor.PID) {
+		plan.startDetached = true
+	}
+	return plan, nil
 }
 
 func (a *App) usage() error {

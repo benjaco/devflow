@@ -2,6 +2,7 @@ package project
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"sync"
 )
@@ -10,6 +11,14 @@ var (
 	registryMu sync.RWMutex
 	registry   = map[string]Project{}
 )
+
+type WorktreeDetector interface {
+	DetectWorktree(worktree string) bool
+}
+
+type DefaultTargeter interface {
+	DefaultTarget() string
+}
 
 func Register(p Project) {
 	registryMu.Lock()
@@ -44,4 +53,73 @@ func Names() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func Detect(worktree string) (Project, error) {
+	worktree = filepath.Clean(worktree)
+	names := Names()
+	matches := make([]Project, 0, 1)
+	for _, name := range names {
+		p := registry[name]
+		detector, ok := p.(WorktreeDetector)
+		if !ok {
+			continue
+		}
+		if detector.DetectWorktree(worktree) {
+			matches = append(matches, p)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		return nil, fmt.Errorf("unable to detect project for worktree %q", worktree)
+	default:
+		names := make([]string, 0, len(matches))
+		for _, p := range matches {
+			names = append(names, p.Name())
+		}
+		sort.Strings(names)
+		return nil, fmt.Errorf("ambiguous project detection for %q: %s", worktree, stringsJoin(names, ", "))
+	}
+}
+
+func PreferredTarget(p Project) string {
+	if targeter, ok := p.(DefaultTargeter); ok {
+		if target := targeter.DefaultTarget(); target != "" {
+			return target
+		}
+	}
+	targets := p.Targets()
+	priority := []string{"up", "fullstack", "frontend-stack", "services", "dev", "default"}
+	for _, want := range priority {
+		for _, target := range targets {
+			if target.Name == want {
+				return target.Name
+			}
+		}
+	}
+	if len(targets) == 1 {
+		return targets[0].Name
+	}
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
+		names = append(names, target.Name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0]
+}
+
+func stringsJoin(items []string, sep string) string {
+	if len(items) == 0 {
+		return ""
+	}
+	out := items[0]
+	for _, item := range items[1:] {
+		out += sep + item
+	}
+	return out
 }

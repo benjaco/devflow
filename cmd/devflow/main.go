@@ -6,6 +6,7 @@ import (
 
 	_ "devflow/examples/bikecoach"
 	_ "devflow/examples/go-next-monorepo"
+	_ "devflow/examples/web-worker-workspace"
 	"devflow/internal/cli"
 )
 

@@ -20,6 +20,23 @@ func TestBikecoachProjectRegistered(t *testing.T) {
 	}
 }
 
+func TestBikecoachProjectDetectionAndDefaultTarget(t *testing.T) {
+	worktree := t.TempDir()
+	if err := SeedWorktree(worktree); err != nil {
+		t.Fatal(err)
+	}
+	p, err := project.Detect(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Name(); got != "bikecoach" {
+		t.Fatalf("unexpected detected project %q", got)
+	}
+	if got := project.PreferredTarget(p); got != "up" {
+		t.Fatalf("unexpected default target %q", got)
+	}
+}
+
 func TestBikecoachGraphValidates(t *testing.T) {
 	p := bikecoachProject{}
 	g, err := graph.New(p.Tasks(), p.Targets())
@@ -67,7 +84,7 @@ func TestBikecoachConfigureInstanceAppliesOverrides(t *testing.T) {
 		Label:    filepath.Base(worktree),
 		Worktree: worktree,
 		Ports: map[string]int{
-			"backend": 4010,
+			"backend":  4010,
 			"postgres": 55444,
 		},
 		Env: cfg.Env,
@@ -91,4 +108,3 @@ func TestBikecoachConfigureInstanceAppliesOverrides(t *testing.T) {
 		t.Fatalf("expected DEV_AUTH_BYPASS default, got %q", got)
 	}
 }
-

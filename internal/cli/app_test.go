@@ -11,7 +11,8 @@ import (
 	"testing"
 	"time"
 
-	_ "devflow/examples/go-next-monorepo"
+	bikecoach "devflow/examples/bikecoach"
+	gonextmonorepo "devflow/examples/go-next-monorepo"
 	"devflow/pkg/api"
 	"devflow/pkg/cache"
 	"devflow/pkg/instance"
@@ -70,6 +71,61 @@ func TestRunJSONStillReturnsExecutionError(t *testing.T) {
 	err := app.Run([]string{"run", "build", "--json", "--ci", "--project", "cli-fail-project", "--worktree", t.TempDir()})
 	if err == nil {
 		t.Fatal("expected run command to return task failure even with --json")
+	}
+}
+
+func TestDefaultLaunchPlanStartsDetachedForFreshDetectedWorktree(t *testing.T) {
+	worktree := t.TempDir()
+	if err := gonextmonorepo.SeedWorktree(worktree); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	plan, err := app.defaultLaunchPlan(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.projectName != "go-next-monorepo" {
+		t.Fatalf("unexpected project %q", plan.projectName)
+	}
+	if plan.target != "fullstack" {
+		t.Fatalf("unexpected target %q", plan.target)
+	}
+	if !plan.startDetached {
+		t.Fatal("expected fresh worktree to start detached")
+	}
+}
+
+func TestDefaultLaunchPlanAttachesToExistingDetachedSupervisor(t *testing.T) {
+	worktree := t.TempDir()
+	if err := bikecoach.SeedWorktree(worktree); err != nil {
+		t.Fatal(err)
+	}
+	inst, err := instance.Resolve(worktree, filepath.Base(worktree))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := os.Getpid()
+	if err := instance.RecordDetachedRun(inst, api.RunConfig{
+		Project:  "bikecoach",
+		Target:   "up",
+		Mode:     api.ModeDev,
+		Detached: true,
+	}, pid, filepath.Join(worktree, ".devflow", "logs", inst.ID, "supervisor.log")); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	plan, err := app.defaultLaunchPlan(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.projectName != "bikecoach" {
+		t.Fatalf("unexpected project %q", plan.projectName)
+	}
+	if plan.target != "up" {
+		t.Fatalf("unexpected target %q", plan.target)
+	}
+	if plan.startDetached {
+		t.Fatal("expected existing live supervisor to reuse current instance")
 	}
 }
 

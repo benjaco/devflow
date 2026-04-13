@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+BIN="$ROOT/.devflow/bin/devflow"
+
+mkdir -p "$(dirname "$BIN")"
+
+needs_build=0
+if [[ ! -x "$BIN" ]]; then
+  needs_build=1
+elif [[ "$ROOT/go.mod" -nt "$BIN" || "$ROOT/go.sum" -nt "$BIN" ]]; then
+  needs_build=1
+else
+  while IFS= read -r file; do
+    if [[ "$file" -nt "$BIN" ]]; then
+      needs_build=1
+      break
+    fi
+  done < <(find "$ROOT/cmd" "$ROOT/internal" "$ROOT/pkg" "$ROOT/examples" -type f -name '*.go' | sort)
+fi
+
+if [[ "$needs_build" -eq 1 ]]; then
+  (cd "$ROOT" && go build -o "$BIN" ./cmd/devflow)
+fi
+
+exec "$BIN" "$@"
