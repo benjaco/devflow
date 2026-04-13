@@ -42,6 +42,10 @@ Implemented `run` flags include:
 
 `watch` runs an initial watch-mode cycle, then keeps polling for changes and reruns only the affected downstream slice. In JSON mode it emits the typed event stream line-by-line.
 
+For watch-cycle events:
+- `files` is the raw changed file list from the watcher batch
+- `affectedTasks` is the directly affected task list derived from those file changes
+
 `watch` also supports `--detach`.
 
 `restart` supports rerunning non-service task slices from the CLI. For service tasks, if the instance was started with a detached run, `restart` stops the detached supervisor and relaunches the last detached target.
@@ -66,6 +70,8 @@ Implemented `run` flags include:
 - toggle to the detached supervisor log
 - running tasks pinned first and pending work directly below them
 - `i` on the selected task invalidates the selected downstream cacheable slice and relaunches the current target
+- `t` on the selected task updates the detached run target to that task and relaunches the instance on the selected task closure
+- primary live refresh from the persisted detached event stream at `.devflow/state/instances/<instance-id>/events.jsonl`
 
 Implemented `tui` flags include:
 - `--worktree`

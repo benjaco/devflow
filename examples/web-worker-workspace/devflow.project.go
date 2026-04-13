@@ -419,15 +419,16 @@ func (workspaceProject) Tasks() []project.Task {
 			Description: "Aggregate contract, app, and worker build outputs",
 		},
 		{
-			Name:         "backend_dev",
-			Kind:         project.KindService,
-			Deps:         []string{"backend_codegen", "postgres"},
-			Inputs:       project.Inputs{Dirs: []string{"backend/src", "backend/generated"}},
-			Restart:      project.RestartOnInputChange,
-			Description:  "Run the local API service",
-			Signature:    "web-worker-backend-dev-v1",
-			Ready:        project.ReadyFile(".devflow/web-worker-workspace/runtime/backend.ready"),
-			ReadyTimeout: 3 * time.Second,
+			Name:                      "backend_dev",
+			Kind:                      project.KindService,
+			Deps:                      []string{"backend_codegen", "postgres"},
+			Inputs:                    project.Inputs{Dirs: []string{"backend/src", "backend/generated"}},
+			Restart:                   project.RestartOnInputChange,
+			WatchRestartOnServiceDeps: true,
+			Description:               "Run the local API service",
+			Signature:                 "web-worker-backend-dev-v1",
+			Ready:                     project.ReadyFile(".devflow/web-worker-workspace/runtime/backend.ready"),
+			ReadyTimeout:              3 * time.Second,
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				recordTrace(rt, "backend_dev")
 				readyPath := rt.Abs(".devflow/web-worker-workspace/runtime/backend.ready")
@@ -442,15 +443,16 @@ func (workspaceProject) Tasks() []project.Task {
 			},
 		},
 		{
-			Name:         "worker_dev",
-			Kind:         project.KindService,
-			Deps:         []string{"worker_bundle", "postgres"},
-			Inputs:       project.Inputs{Dirs: []string{"worker/src", "worker/generated"}},
-			Restart:      project.RestartOnInputChange,
-			Description:  "Run the local background worker",
-			Signature:    "web-worker-worker-dev-v1",
-			Ready:        project.ReadyFile(".devflow/web-worker-workspace/runtime/worker.ready"),
-			ReadyTimeout: 3 * time.Second,
+			Name:                      "worker_dev",
+			Kind:                      project.KindService,
+			Deps:                      []string{"worker_bundle", "postgres"},
+			Inputs:                    project.Inputs{Dirs: []string{"worker/src", "worker/generated"}},
+			Restart:                   project.RestartOnInputChange,
+			WatchRestartOnServiceDeps: true,
+			Description:               "Run the local background worker",
+			Signature:                 "web-worker-worker-dev-v1",
+			Ready:                     project.ReadyFile(".devflow/web-worker-workspace/runtime/worker.ready"),
+			ReadyTimeout:              3 * time.Second,
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				recordTrace(rt, "worker_dev")
 				readyPath := rt.Abs(".devflow/web-worker-workspace/runtime/worker.ready")

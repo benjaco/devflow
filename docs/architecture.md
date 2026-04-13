@@ -160,6 +160,15 @@ The engine now emits a typed in-process event stream for live consumers. Event c
 
 This is exposed through engine subscription rather than a dedicated CLI command for now. The goal is to keep the event envelope stable before adding TUI and MCP-facing stream surfaces.
 
+For watch cycles specifically:
+- `files` now carries the raw changed worktree-relative file paths from the watcher batch
+- `affectedTasks` carries the directly affected task names derived from those file changes
+
+Detached runs now also persist the engine event stream to:
+- `.devflow/state/instances/<instance-id>/events.jsonl`
+
+The TUI uses that persisted event stream as its primary live-update signal.
+
 ## Service Readiness
 
 Service tasks can now declare adapter-defined readiness checks.
@@ -204,6 +213,12 @@ Watch mode now uses a polling watcher with debounced batches. On each batch:
 - impacted running services are stopped first
 - affected one-shot tasks rerun in dependency order with normal cache semantics
 - impacted services restart after their dependencies complete and are only considered back once readiness passes
+
+Watch propagation now treats service-to-service dependency edges specially:
+- service restarts do not automatically cascade into downstream services by default
+- a downstream service must opt into that behavior with `WatchRestartOnServiceDeps`
+
+This prevents backend-service bounces from needlessly forcing frontend-service restarts, while still allowing explicit infrastructure-style dependencies such as `postgres -> backend`.
 
 The current implementation is local and in-process. It intentionally prioritizes correctness and selective reruns over elaborate optimization.
 

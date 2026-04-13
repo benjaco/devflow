@@ -139,3 +139,12 @@ func TestDownstreamInvalidateTasksOnlyReturnsCacheableOnceTasksInTargetClosure(t
 		t.Fatalf("unexpected invalidate tasks: got %q want %q", got, want)
 	}
 }
+
+func TestRenderFooterIncludesRetargetKey(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	d.setStatus("[green]ready")
+	text := d.footer.GetText(false)
+	if !strings.Contains(text, "t retarget to selected task") {
+		t.Fatalf("expected footer to advertise retarget key, got %q", text)
+	}
+}

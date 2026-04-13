@@ -223,10 +223,12 @@ func TestWorkspaceWatchSelectiveReruns(t *testing.T) {
 		return traceCount(worktree, "db_migrate") == 2 &&
 			traceCount(worktree, "postgres") == 2 &&
 			traceCount(worktree, "backend_dev") == 3 &&
-			traceCount(worktree, "worker_dev") == 4 &&
-			traceCount(worktree, "frontend_dev") == 3
+			traceCount(worktree, "worker_dev") == 4
 	}) {
 		t.Fatalf("db change did not rerun expected slice: db_migrate=%d postgres=%d backend_dev=%d worker_dev=%d frontend_dev=%d", traceCount(worktree, "db_migrate"), traceCount(worktree, "postgres"), traceCount(worktree, "backend_dev"), traceCount(worktree, "worker_dev"), traceCount(worktree, "frontend_dev"))
+	}
+	if got := traceCount(worktree, "frontend_dev"); got != 2 {
+		t.Fatalf("unexpected frontend restart after DB change: %d", got)
 	}
 
 	cancel()

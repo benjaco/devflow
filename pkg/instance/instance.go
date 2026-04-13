@@ -155,6 +155,10 @@ func LogPath(worktree, instanceID, task string) string {
 	return filepath.Join(worktree, ".devflow", "logs", instanceID, task+".log")
 }
 
+func EventsPath(worktree, instanceID string) string {
+	return filepath.Join(instancePath(worktree, instanceID), "events.jsonl")
+}
+
 func CacheRoot(worktree string) string {
 	return filepath.Join(worktree, ".devflow", "cache")
 }

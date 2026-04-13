@@ -527,15 +527,16 @@ func (exampleProject) Tasks() []project.Task {
 			},
 		},
 		{
-			Name:         "backend_dev",
-			Kind:         project.KindService,
-			Deps:         []string{"backend_codegen", "postgres"},
-			Inputs:       project.Inputs{Dirs: []string{"backend/src", "backend/generated"}},
-			Restart:      project.RestartOnInputChange,
-			Description:  "Run local backend service",
-			Signature:    "backend-dev-v2",
-			Ready:        project.ReadyFile(".devflow/example/runtime/backend.ready"),
-			ReadyTimeout: 3 * time.Second,
+			Name:                      "backend_dev",
+			Kind:                      project.KindService,
+			Deps:                      []string{"backend_codegen", "postgres"},
+			Inputs:                    project.Inputs{Dirs: []string{"backend/src", "backend/generated"}},
+			Restart:                   project.RestartOnInputChange,
+			WatchRestartOnServiceDeps: true,
+			Description:               "Run local backend service",
+			Signature:                 "backend-dev-v2",
+			Ready:                     project.ReadyFile(".devflow/example/runtime/backend.ready"),
+			ReadyTimeout:              3 * time.Second,
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				recordTrace(rt, "backend_dev")
 				env := cloneEnv(rt.Env)

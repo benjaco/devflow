@@ -390,14 +390,15 @@ func (bikecoachProject) Tasks() []project.Task {
 			Description: "Aggregate BikeCoach build target",
 		},
 		{
-			Name:         "backend_dev",
-			Kind:         project.KindService,
-			Deps:         []string{"build_all", "postgres"},
-			Restart:      project.RestartOnInputChange,
-			Description:  "Run the BikeCoach HTTP server with embedded frontend assets",
-			Signature:    "bikecoach-backend-dev-v1",
-			Ready:        project.ReadyHTTPNamedPort("backend", "/health", 200),
-			ReadyTimeout: 30 * time.Second,
+			Name:                      "backend_dev",
+			Kind:                      project.KindService,
+			Deps:                      []string{"build_all", "postgres"},
+			Restart:                   project.RestartOnInputChange,
+			WatchRestartOnServiceDeps: true,
+			Description:               "Run the BikeCoach HTTP server with embedded frontend assets",
+			Signature:                 "bikecoach-backend-dev-v1",
+			Ready:                     project.ReadyHTTPNamedPort("backend", "/health", 200),
+			ReadyTimeout:              30 * time.Second,
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				_, err := coachBin.StartSpec(ctx, rt, project.BinaryExecSpec{Grace: 10 * time.Second})
 				return err

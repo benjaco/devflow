@@ -462,6 +462,186 @@ func TestWatchRerunsOnlyAffectedSlice(t *testing.T) {
 	}
 }
 
+func TestWatchCycleEventsReportChangedFilesAndAffectedTasks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "a.txt"), []byte("a1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "b.txt"), []byte("b1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &watchProject{}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := eng.SubscribeEvents()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Watch(ctx, Request{Target: "dev", Worktree: worktree, Mode: api.ModeWatch, MaxParallel: 2})
+	}()
+
+	waitFor(t, 3*time.Second, func() bool {
+		return p.aRuns.Load() == 1 && p.serviceRuns.Load() == 1
+	})
+	time.Sleep(500 * time.Millisecond)
+
+	if err := os.WriteFile(filepath.Join(worktree, "a.txt"), []byte("a2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawStart bool
+	var sawDone bool
+	waitFor(t, 4*time.Second, func() bool {
+		for {
+			select {
+			case evt := <-events:
+				if evt.Type == api.EventWatchCycleStart && stringSliceHas(evt.Files, "a.txt") {
+					sawStart = len(evt.AffectedTasks) == 1 && evt.AffectedTasks[0] == "a"
+				}
+				if evt.Type == api.EventWatchCycleDone && stringSliceHas(evt.Files, "a.txt") {
+					sawDone = len(evt.AffectedTasks) == 1 && evt.AffectedTasks[0] == "a" && evt.Success != nil && *evt.Success
+				}
+			default:
+				return sawStart && sawDone && p.aRuns.Load() == 2 && p.serviceRuns.Load() == 2
+			}
+		}
+	})
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("watch returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for watch shutdown")
+	}
+}
+
+type watchServiceChainProject struct {
+	buildRuns atomic.Int32
+	apiRuns   atomic.Int32
+	uiRuns    atomic.Int32
+}
+
+func (p *watchServiceChainProject) Name() string { return "watch-service-chain-project" }
+
+func (p *watchServiceChainProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "watch-chain"}, nil
+}
+
+func (p *watchServiceChainProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"ui"}}}
+}
+
+func (p *watchServiceChainProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:      "build",
+			Kind:      project.KindOnce,
+			Inputs:    project.Inputs{Files: []string{"input.txt"}},
+			Outputs:   project.Outputs{Files: []string{"build.out"}},
+			Cache:     true,
+			Signature: "watch-chain-build-v1",
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				p.buildRuns.Add(1)
+				return os.WriteFile(filepath.Join(rt.Worktree, "build.out"), []byte("build"), 0o644)
+			},
+		},
+		{
+			Name:      "api",
+			Kind:      project.KindService,
+			Deps:      []string{"build"},
+			Restart:   project.RestartOnInputChange,
+			Signature: "watch-chain-api-v1",
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				p.apiRuns.Add(1)
+				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
+					Name: "sh",
+					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
+					Dir:  rt.Worktree,
+					Env:  rt.Env,
+				})
+				return err
+			},
+		},
+		{
+			Name:      "ui",
+			Kind:      project.KindService,
+			Deps:      []string{"api"},
+			Restart:   project.RestartOnInputChange,
+			Signature: "watch-chain-ui-v1",
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				p.uiRuns.Add(1)
+				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
+					Name: "sh",
+					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
+					Dir:  rt.Worktree,
+					Env:  rt.Env,
+				})
+				return err
+			},
+		},
+	}
+}
+
+func TestWatchDoesNotPropagateAcrossServiceDependencies(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &watchServiceChainProject{}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Watch(ctx, Request{Target: "dev", Worktree: worktree, Mode: api.ModeWatch, MaxParallel: 2})
+	}()
+
+	waitFor(t, 3*time.Second, func() bool {
+		return p.buildRuns.Load() == 1 && p.apiRuns.Load() == 1 && p.uiRuns.Load() == 1
+	})
+	time.Sleep(500 * time.Millisecond)
+
+	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 4*time.Second, func() bool {
+		return p.buildRuns.Load() == 2 && p.apiRuns.Load() == 2
+	})
+	if got := p.uiRuns.Load(); got != 1 {
+		t.Fatalf("expected downstream service not to restart from service-to-service propagation, got %d", got)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("watch returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for watch shutdown")
+	}
+}
+
 type readinessProject struct{}
 
 func (readinessProject) Name() string { return "readiness-project" }
@@ -783,6 +963,15 @@ func waitForBool(timeout time.Duration, fn func() bool) bool {
 			return true
 		}
 		time.Sleep(25 * time.Millisecond)
+	}
+	return false
+}
+
+func stringSliceHas(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
 	}
 	return false
 }

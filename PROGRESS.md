@@ -138,6 +138,18 @@ Last updated: 2026-04-13
   - custom fingerprint changes
   - task-definition/signature changes
   - collected file-input hash changes after file edits
+- Refined watch semantics:
+  - watch-cycle events now report raw changed files in `files`
+  - directly affected task names are now reported separately in `affectedTasks`
+  - service-to-service watch restart propagation is now opt-in via `WatchRestartOnServiceDeps`
+- Detached runs now persist engine events to `.devflow/state/instances/<instance-id>/events.jsonl`
+- The TUI now uses the persisted event stream as its primary live-update trigger instead of relying on fast global polling
+- Added regression coverage for:
+  - watch event payload shape
+  - service-to-service watch propagation defaults
+  - detached event-stream persistence
+- Execution now accepts a task name anywhere a target is accepted by wrapping the task as a synthetic single-root target
+- The TUI now supports `t` on the selected task to retarget the detached run to that task and relaunch the instance on the selected task closure
 
 ## In Progress
 
@@ -147,7 +159,6 @@ Last updated: 2026-04-13
 
 - Add richer watch restart policies now that service readiness exists
 - Improve fine-grained detached service restart/control semantics beyond whole-target relaunch
-- Hook the TUI directly to the engine event stream instead of polling
 - Expand TUI operator actions with confirmations and rerun/stop/restart controls
 - Add stronger JSON contract tests for status/instances/events
 

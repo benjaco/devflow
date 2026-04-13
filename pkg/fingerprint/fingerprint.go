@@ -139,29 +139,31 @@ func CollectTaskInputs(ctx context.Context, worktree string, task project.Task, 
 
 func TaskSignature(task project.Task) (string, error) {
 	payload := struct {
-		Name         string                `json:"name"`
-		Kind         project.Kind          `json:"kind"`
-		Deps         []string              `json:"deps"`
-		Inputs       project.Inputs        `json:"inputs"`
-		Outputs      project.Outputs       `json:"outputs"`
-		Cache        bool                  `json:"cache"`
-		Restart      project.RestartPolicy `json:"restart"`
-		AllowInWatch bool                  `json:"allowInWatch"`
-		Tags         []string              `json:"tags"`
-		Description  string                `json:"description"`
-		Signature    string                `json:"signature"`
+		Name                      string                `json:"name"`
+		Kind                      project.Kind          `json:"kind"`
+		Deps                      []string              `json:"deps"`
+		Inputs                    project.Inputs        `json:"inputs"`
+		Outputs                   project.Outputs       `json:"outputs"`
+		Cache                     bool                  `json:"cache"`
+		Restart                   project.RestartPolicy `json:"restart"`
+		WatchRestartOnServiceDeps bool                  `json:"watchRestartOnServiceDeps"`
+		AllowInWatch              bool                  `json:"allowInWatch"`
+		Tags                      []string              `json:"tags"`
+		Description               string                `json:"description"`
+		Signature                 string                `json:"signature"`
 	}{
-		Name:         task.Name,
-		Kind:         task.Kind,
-		Deps:         append([]string(nil), task.Deps...),
-		Inputs:       task.Inputs,
-		Outputs:      task.Outputs,
-		Cache:        task.Cache,
-		Restart:      task.Restart,
-		AllowInWatch: task.AllowInWatch,
-		Tags:         append([]string(nil), task.Tags...),
-		Description:  task.Description,
-		Signature:    task.Signature,
+		Name:                      task.Name,
+		Kind:                      task.Kind,
+		Deps:                      append([]string(nil), task.Deps...),
+		Inputs:                    task.Inputs,
+		Outputs:                   task.Outputs,
+		Cache:                     task.Cache,
+		Restart:                   task.Restart,
+		WatchRestartOnServiceDeps: task.WatchRestartOnServiceDeps,
+		AllowInWatch:              task.AllowInWatch,
+		Tags:                      append([]string(nil), task.Tags...),
+		Description:               task.Description,
+		Signature:                 task.Signature,
 	}
 	sort.Strings(payload.Deps)
 	sort.Strings(payload.Tags)

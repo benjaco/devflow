@@ -30,6 +30,7 @@ type Event struct {
 	CacheKey      string    `json:"cacheKey,omitempty"`
 	PID           int       `json:"pid,omitempty"`
 	Files         []string  `json:"files,omitempty"`
+	AffectedTasks []string  `json:"affectedTasks,omitempty"`
 	Error         string    `json:"error,omitempty"`
 	Success       *bool     `json:"success,omitempty"`
 }

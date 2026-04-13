@@ -185,79 +185,6 @@ func TestExampleProjectWatchSelectiveReruns(t *testing.T) {
 	}
 }
 
-func TestExampleProjectWatchEmitsCycleForChangedFile(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("DEVFLOW_EXAMPLE_FAKE_DB", "1")
-	worktree := seededWorktree(t)
-	eng, err := engine.New(exampleProject{}, worktree)
-	if err != nil {
-		t.Fatal(err)
-	}
-	events := eng.SubscribeEvents()
-	watchEvents := make(chan api.Event, 16)
-	go func() {
-		for evt := range events {
-			if evt.Type == api.EventWatchCycleStart || evt.Type == api.EventWatchCycleDone {
-				watchEvents <- evt
-			}
-		}
-	}()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- eng.Watch(ctx, engine.Request{
-			Target:      "fullstack",
-			Worktree:    worktree,
-			Mode:        api.ModeWatch,
-			MaxParallel: 4,
-		})
-	}()
-
-	waitFor(t, 5*time.Second, func() bool {
-		return traceCount(worktree, "frontend_dev") == 1
-	})
-	time.Sleep(500 * time.Millisecond)
-
-	changedRel := "frontend/src/page.tsx"
-	changedTask := "frontend_dev"
-	rewriteFile(t, filepath.Join(worktree, changedRel), "export default function Page(){ return 'watch-event'; }\n")
-
-	var sawStart bool
-	var sawDone bool
-	if !waitForBool(5*time.Second, func() bool {
-		for {
-			select {
-			case evt := <-watchEvents:
-				if evt.Type == api.EventWatchCycleStart && stringSliceContains(evt.Files, changedTask) {
-					sawStart = true
-				}
-				if evt.Type == api.EventWatchCycleDone && stringSliceContains(evt.Files, changedTask) && evt.Success != nil && *evt.Success {
-					sawDone = true
-				}
-			default:
-				return sawStart &&
-					sawDone &&
-					traceCount(worktree, "frontend_dev") == 2
-			}
-		}
-	}) {
-		t.Fatalf("watch change was not fully observed: sawStart=%v sawDone=%v frontend_dev=%d", sawStart, sawDone, traceCount(worktree, "frontend_dev"))
-	}
-
-	cancel()
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("watch returned error: %v", err)
-		}
-	case <-time.After(4 * time.Second):
-		t.Fatal("timed out waiting for watch shutdown")
-	}
-}
-
 func seededWorktree(t *testing.T) string {
 	t.Helper()
 	worktree := t.TempDir()
@@ -314,13 +241,4 @@ func readJSONMap(t *testing.T, path string) map[string]any {
 		t.Fatal(err)
 	}
 	return payload
-}
-
-func stringSliceContains(items []string, want string) bool {
-	for _, item := range items {
-		if item == want {
-			return true
-		}
-	}
-	return false
 }

@@ -1,6 +1,7 @@
 package project
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -18,6 +19,11 @@ type WorktreeDetector interface {
 
 type DefaultTargeter interface {
 	DefaultTarget() string
+}
+
+type syntheticTargetProject struct {
+	base   Project
+	target Target
 }
 
 func Register(p Project) {
@@ -111,6 +117,37 @@ func PreferredTarget(p Project) string {
 		return ""
 	}
 	return names[0]
+}
+
+func ResolveExecutionProject(p Project, target string) (Project, string, error) {
+	if target == "" {
+		return nil, "", fmt.Errorf("missing target")
+	}
+	for _, item := range p.Targets() {
+		if item.Name == target {
+			return p, target, nil
+		}
+	}
+	for _, task := range p.Tasks() {
+		if task.Name == target {
+			return syntheticTargetProject{
+				base:   p,
+				target: Target{Name: target, RootTasks: []string{target}},
+			}, target, nil
+		}
+	}
+	return nil, "", fmt.Errorf("unknown target or task %q", target)
+}
+
+func (p syntheticTargetProject) Name() string  { return p.base.Name() }
+func (p syntheticTargetProject) Tasks() []Task { return p.base.Tasks() }
+func (p syntheticTargetProject) ConfigureInstance(ctx context.Context, worktree string) (InstanceConfig, error) {
+	return p.base.ConfigureInstance(ctx, worktree)
+}
+func (p syntheticTargetProject) Targets() []Target {
+	targets := append([]Target(nil), p.base.Targets()...)
+	targets = append(targets, p.target)
+	return targets
 }
 
 func stringsJoin(items []string, sep string) string {

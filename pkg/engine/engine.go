@@ -159,18 +159,19 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 			if len(batch.Files) == 0 {
 				continue
 			}
-			affectedOrder, changed := e.affectedWatchOrder(req.Target, batch.Files)
+			affectedOrder, changedTasks := e.affectedWatchOrder(req.Target, batch.Files)
 			if len(affectedOrder) == 0 {
 				continue
 			}
 			e.publish(api.Event{
-				TS:         process.NowRFC3339Nano(),
-				Type:       api.EventWatchCycleStart,
-				InstanceID: inst.ID,
-				Worktree:   req.Worktree,
-				Target:     req.Target,
-				Mode:       req.Mode,
-				Files:      changed,
+				TS:            process.NowRFC3339Nano(),
+				Type:          api.EventWatchCycleStart,
+				InstanceID:    inst.ID,
+				Worktree:      req.Worktree,
+				Target:        req.Target,
+				Mode:          req.Mode,
+				Files:         append([]string(nil), batch.Files...),
+				AffectedTasks: changedTasks,
 			})
 			state.stopServices(req, affectedOrder)
 			success := true
@@ -178,14 +179,15 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 				success = false
 			}
 			e.publish(api.Event{
-				TS:         process.NowRFC3339Nano(),
-				Type:       api.EventWatchCycleDone,
-				InstanceID: inst.ID,
-				Worktree:   req.Worktree,
-				Target:     req.Target,
-				Mode:       req.Mode,
-				Files:      changed,
-				Success:    boolPtr(success),
+				TS:            process.NowRFC3339Nano(),
+				Type:          api.EventWatchCycleDone,
+				InstanceID:    inst.ID,
+				Worktree:      req.Worktree,
+				Target:        req.Target,
+				Mode:          req.Mode,
+				Files:         append([]string(nil), batch.Files...),
+				AffectedTasks: changedTasks,
+				Success:       boolPtr(success),
 			})
 		}
 	}
@@ -952,6 +954,15 @@ func sortedNodeNames(m map[string]api.NodeStatus) []string {
 	return names
 }
 
+func sortedBoolKeys(m map[string]bool) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (e *Engine) affectedWatchOrder(target string, files []string) ([]string, []string) {
 	closure, err := e.graph.TargetClosure(target)
 	if err != nil {
@@ -971,7 +982,7 @@ func (e *Engine) affectedWatchOrder(target string, files []string) ([]string, []
 	if len(filteredDirect) == 0 {
 		return nil, nil
 	}
-	downstream := e.graph.Downstream(filteredDirect)
+	downstream := e.watchDownstream(filteredDirect)
 	filtered := make([]string, 0, len(downstream))
 	for _, name := range downstream {
 		if !inClosure[name] {
@@ -991,6 +1002,33 @@ func (e *Engine) affectedWatchOrder(target string, files []string) ([]string, []
 		return nil, filteredDirect
 	}
 	return order, filteredDirect
+}
+
+func (e *Engine) watchDownstream(names []string) []string {
+	seen := map[string]bool{}
+	queue := append([]string(nil), names...)
+	reverse := map[string][]string{}
+	for _, task := range e.graph.Tasks {
+		for _, dep := range task.Deps {
+			reverse[dep] = append(reverse[dep], task.Name)
+		}
+	}
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		current := e.graph.Tasks[name]
+		for _, child := range reverse[name] {
+			if current.Kind == project.KindService && e.graph.Tasks[child].Kind == project.KindService && !e.graph.Tasks[child].WatchRestartOnServiceDeps {
+				continue
+			}
+			queue = append(queue, child)
+		}
+	}
+	return sortedBoolKeys(seen)
 }
 
 func (e *Engine) stopAllServices(req Request, inst *api.Instance, state *runState) {

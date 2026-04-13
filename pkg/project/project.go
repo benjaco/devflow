@@ -48,21 +48,22 @@ type Outputs struct {
 }
 
 type Task struct {
-	Name             string
-	Kind             Kind
-	Deps             []string
-	Inputs           Inputs
-	Outputs          Outputs
-	Run              RunFunc
-	Ready            ReadyFunc
-	ReadyTimeout     time.Duration
-	Cache            bool
-	Restart          RestartPolicy
-	AllowInWatch     bool
-	Tags             []string
-	Description      string
-	Signature        string
-	CacheKeyOverride CacheKeyFunc
+	Name                      string
+	Kind                      Kind
+	Deps                      []string
+	Inputs                    Inputs
+	Outputs                   Outputs
+	Run                       RunFunc
+	Ready                     ReadyFunc
+	ReadyTimeout              time.Duration
+	Cache                     bool
+	Restart                   RestartPolicy
+	WatchRestartOnServiceDeps bool
+	AllowInWatch              bool
+	Tags                      []string
+	Description               string
+	Signature                 string
+	CacheKeyOverride          CacheKeyFunc
 }
 
 type Target struct {

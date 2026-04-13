@@ -21,6 +21,7 @@ import (
 )
 
 type failCLIProject struct{}
+type taskTargetCLIProject struct{}
 
 func (failCLIProject) Name() string { return "cli-fail-project" }
 
@@ -48,8 +49,36 @@ func (failCLIProject) Targets() []project.Target {
 	return []project.Target{{Name: "build", RootTasks: []string{"fail"}}}
 }
 
+func (taskTargetCLIProject) Name() string { return "cli-task-target-project" }
+
+func (taskTargetCLIProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "cli-task-target"}, nil
+}
+
+func (taskTargetCLIProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:    "gen",
+			Kind:    project.KindOnce,
+			Cache:   true,
+			Outputs: project.Outputs{Files: []string{"gen.txt"}},
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				return os.WriteFile(filepath.Join(rt.Worktree, "gen.txt"), []byte("ok"), 0o644)
+			},
+		},
+	}
+}
+
+func (taskTargetCLIProject) Targets() []project.Target {
+	return []project.Target{{Name: "build", RootTasks: []string{"gen"}}}
+}
+
 func init() {
 	project.Register(failCLIProject{})
+	project.Register(taskTargetCLIProject{})
 }
 
 func TestGraphListJSON(t *testing.T) {
@@ -71,6 +100,21 @@ func TestRunJSONStillReturnsExecutionError(t *testing.T) {
 	err := app.Run([]string{"run", "build", "--json", "--ci", "--project", "cli-fail-project", "--worktree", t.TempDir()})
 	if err == nil {
 		t.Fatal("expected run command to return task failure even with --json")
+	}
+}
+
+func TestRunAcceptsTaskNameAsSyntheticTarget(t *testing.T) {
+	worktree := t.TempDir()
+	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"run", "gen", "--json", "--ci", "--project", "cli-task-target-project", "--worktree", worktree}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(worktree, "gen.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "ok" {
+		t.Fatalf("unexpected generated data %q", string(data))
 	}
 }
 
@@ -126,6 +170,43 @@ func TestDefaultLaunchPlanAttachesToExistingDetachedSupervisor(t *testing.T) {
 	}
 	if plan.startDetached {
 		t.Fatal("expected existing live supervisor to reuse current instance")
+	}
+}
+
+func TestStartEventCapturePersistsJSONLines(t *testing.T) {
+	worktree := t.TempDir()
+	instanceID, _, err := instance.IDForWorktree(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan api.Event, 4)
+	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	stop, err := app.startEventCapture(worktree, instanceID, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events <- api.Event{Type: api.EventRunStarted, InstanceID: instanceID, Target: "fullstack"}
+	events <- api.Event{Type: api.EventWatchCycleStart, InstanceID: instanceID, Files: []string{"frontend/src/page.tsx"}, AffectedTasks: []string{"frontend_dev"}}
+	stop()
+
+	data, err := os.ReadFile(instance.EventsPath(worktree, instanceID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 persisted event lines, got %d", len(lines))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(lines[1], &payload); err != nil {
+		t.Fatal(err)
+	}
+	if got := payload["type"]; got != string(api.EventWatchCycleStart) {
+		t.Fatalf("unexpected event type %v", got)
+	}
+	affected, ok := payload["affectedTasks"].([]any)
+	if !ok || len(affected) != 1 || affected[0] != "frontend_dev" {
+		t.Fatalf("unexpected affectedTasks payload: %v", payload["affectedTasks"])
 	}
 }
 

@@ -185,12 +185,16 @@ func (a *App) runCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	eng, err := engine.New(p, root)
+	execProject, resolvedTarget, err := project.ResolveExecutionProject(p, target)
+	if err != nil {
+		return err
+	}
+	eng, err := engine.New(execProject, root)
 	if err != nil {
 		return err
 	}
 	outcome, runErr := eng.Run(context.Background(), engine.Request{
-		Target:      target,
+		Target:      resolvedTarget,
 		Worktree:    root,
 		Mode:        mode,
 		MaxParallel: *maxParallel,
@@ -247,7 +251,11 @@ func (a *App) executeWatch(target string, jsonOut bool, worktreeFlag, projectNam
 	if err != nil {
 		return err
 	}
-	eng, err := engine.New(p, root)
+	execProject, resolvedTarget, err := project.ResolveExecutionProject(p, target)
+	if err != nil {
+		return err
+	}
+	eng, err := engine.New(execProject, root)
 	if err != nil {
 		return err
 	}
@@ -260,7 +268,7 @@ func (a *App) executeWatch(target string, jsonOut bool, worktreeFlag, projectNam
 		}()
 	}
 	return eng.Watch(context.Background(), engine.Request{
-		Target:      target,
+		Target:      resolvedTarget,
 		Worktree:    root,
 		Mode:        api.ModeWatch,
 		MaxParallel: maxParallel,
@@ -280,12 +288,25 @@ func (a *App) internalExecCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	eng, err := engine.New(p, root)
+	execProject, resolvedTarget, err := project.ResolveExecutionProject(p, req.target)
 	if err != nil {
 		return err
 	}
+	eng, err := engine.New(execProject, root)
+	if err != nil {
+		return err
+	}
+	instanceID, _, err := instance.IDForWorktree(root)
+	if err != nil {
+		return err
+	}
+	stopEvents, err := a.startEventCapture(root, instanceID, eng.SubscribeEvents())
+	if err != nil {
+		return err
+	}
+	defer stopEvents()
 	runReq := engine.Request{
-		Target:      req.target,
+		Target:      resolvedTarget,
 		Worktree:    root,
 		Mode:        api.RunMode(req.mode),
 		MaxParallel: req.maxParallel,
@@ -297,6 +318,42 @@ func (a *App) internalExecCmd(args []string) error {
 		_, err := eng.Run(context.Background(), runReq)
 		return err
 	}
+}
+
+func (a *App) startEventCapture(worktree, instanceID string, events <-chan api.Event) (func(), error) {
+	path := instance.EventsPath(worktree, instanceID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer file.Close()
+		for {
+			select {
+			case evt := <-events:
+				_ = writeJSONLine(file, evt)
+			case <-stop:
+				for {
+					select {
+					case evt := <-events:
+						_ = writeJSONLine(file, evt)
+					default:
+						return
+					}
+				}
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}, nil
 }
 
 func (a *App) internalSuperviseCmd(args []string) error {

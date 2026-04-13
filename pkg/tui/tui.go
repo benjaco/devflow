@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,6 +22,7 @@ import (
 	"devflow/pkg/graph"
 	"devflow/pkg/instance"
 	"devflow/pkg/project"
+	"devflow/pkg/watch"
 )
 
 type Options struct {
@@ -39,6 +43,7 @@ type snapshot struct {
 type dashboard struct {
 	root              string
 	instanceID        string
+	eventsPath        string
 	app               *tview.Application
 	header            *tview.TextView
 	tasks             *tview.Table
@@ -49,11 +54,11 @@ type dashboard struct {
 	currentNodes      []api.NodeStatus
 	statusMessage     string
 	busy              bool
+	eventOffset       int64
 }
 
 const (
-	idleRefreshInterval = 200 * time.Millisecond
-	busyRefreshInterval = 75 * time.Millisecond
+	fallbackRefreshInterval = 2 * time.Second
 )
 
 func Run(opts Options) error {
@@ -65,9 +70,10 @@ func Run(opts Options) error {
 	if err := d.refresh(); err != nil {
 		return err
 	}
-	stopRefresh := make(chan struct{})
-	go d.refreshLoop(stopRefresh)
-	defer close(stopRefresh)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.eventLoop(ctx)
+	go d.fallbackRefreshLoop(ctx)
 	return d.app.Run()
 }
 
@@ -75,6 +81,7 @@ func newDashboard(root, instanceID string) *dashboard {
 	d := &dashboard{
 		root:       root,
 		instanceID: instanceID,
+		eventsPath: instance.EventsPath(root, instanceID),
 		app:        tview.NewApplication(),
 		header:     tview.NewTextView(),
 		tasks:      tview.NewTable(),
@@ -128,17 +135,48 @@ func newDashboard(root, instanceID string) *dashboard {
 	return d
 }
 
-func (d *dashboard) refreshLoop(stop <-chan struct{}) {
+func (d *dashboard) fallbackRefreshLoop(ctx context.Context) {
 	for {
-		wait := idleRefreshInterval
-		if d.busy {
-			wait = busyRefreshInterval
-		}
 		select {
-		case <-stop:
+		case <-ctx.Done():
 			return
-		case <-time.After(wait):
+		case <-time.After(fallbackRefreshInterval):
 			d.app.QueueUpdateDraw(func() {
+				_ = d.refresh()
+			})
+		}
+	}
+}
+
+func (d *dashboard) eventLoop(ctx context.Context) {
+	dir := filepath.Dir(d.eventsPath)
+	runner, err := watch.New(watch.Options{
+		Root:         dir,
+		Debounce:     40 * time.Millisecond,
+		PollInterval: 40 * time.Millisecond,
+	})
+	if err != nil {
+		return
+	}
+	batches, errs, err := runner.Start(ctx)
+	if err != nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-errs:
+		case batch, ok := <-batches:
+			if !ok {
+				return
+			}
+			if !stringSliceContains(batch.Files, "events.jsonl") {
+				continue
+			}
+			events := d.readNewEvents()
+			d.app.QueueUpdateDraw(func() {
+				d.applyEvents(events)
 				_ = d.refresh()
 			})
 		}
@@ -173,6 +211,9 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 			return nil
 		case 'i':
 			d.triggerInvalidateSelected()
+			return nil
+		case 't':
+			d.triggerRetargetSelected()
 			return nil
 		}
 	case tcell.KeyDown:
@@ -286,7 +327,7 @@ func (d *dashboard) renderFooter() {
 	if status == "" {
 		status = "[green]ready"
 	}
-	d.footer.SetText("q quit  j/k move  g/G top/bottom  l toggle selected/supervisor log  i invalidate+rerun downstream\n" + status)
+	d.footer.SetText("q quit  j/k move  g/G top/bottom  l toggle selected/supervisor log  i invalidate+rerun downstream  t retarget to selected task\n" + status)
 }
 
 func (d *dashboard) triggerInvalidateSelected() {
@@ -312,6 +353,34 @@ func (d *dashboard) triggerInvalidateSelected() {
 				return
 			}
 			d.setStatus(fmt.Sprintf("[green]invalidated downstream from %s and relaunched target", selected))
+			_ = d.refresh()
+		})
+	}()
+}
+
+func (d *dashboard) triggerRetargetSelected() {
+	if d.busy {
+		d.setStatus("[yellow]action already running")
+		return
+	}
+	node := findSelectedNode(d.currentNodes, d.selectedName)
+	if node == nil {
+		d.setStatus("[red]no task selected")
+		return
+	}
+	d.busy = true
+	d.setStatus(fmt.Sprintf("[yellow]retargeting detached run to %s...", node.Name))
+	_ = d.refresh()
+	selected := node.Name
+	go func() {
+		err := retargetAndRelaunch(d.root, d.instanceID, selected)
+		d.app.QueueUpdateDraw(func() {
+			d.busy = false
+			if err != nil {
+				d.setStatus(fmt.Sprintf("[red]retarget failed: %v", err))
+				return
+			}
+			d.setStatus(fmt.Sprintf("[green]retargeted detached run to %s", selected))
 			_ = d.refresh()
 		})
 	}()
@@ -412,6 +481,70 @@ func renderHeader(snap snapshot) []string {
 			counts[api.StateFailed],
 			counts[api.StateStopped],
 		),
+	}
+}
+
+func (d *dashboard) readNewEvents() []api.Event {
+	info, err := os.Stat(d.eventsPath)
+	if err != nil {
+		return nil
+	}
+	if info.Size() < d.eventOffset {
+		d.eventOffset = 0
+	}
+	file, err := os.Open(d.eventsPath)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	if _, err := file.Seek(d.eventOffset, 0); err != nil {
+		return nil
+	}
+	reader := bufio.NewReader(file)
+	out := make([]api.Event, 0, 8)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			d.eventOffset += int64(len(line))
+			var evt api.Event
+			if jsonErr := json.Unmarshal(line, &evt); jsonErr == nil {
+				out = append(out, evt)
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	return out
+}
+
+func (d *dashboard) applyEvents(events []api.Event) {
+	if len(events) == 0 {
+		return
+	}
+	for _, evt := range events {
+		switch evt.Type {
+		case api.EventWatchCycleStart:
+			d.setStatus(fmt.Sprintf("[yellow]watch: files=%s affected=%s", strings.Join(evt.Files, ","), strings.Join(evt.AffectedTasks, ",")))
+		case api.EventWatchCycleDone:
+			if evt.Success != nil && *evt.Success {
+				d.setStatus(fmt.Sprintf("[green]watch complete: files=%s", strings.Join(evt.Files, ",")))
+			} else {
+				d.setStatus(fmt.Sprintf("[red]watch failed: files=%s", strings.Join(evt.Files, ",")))
+			}
+		case api.EventRunStarted:
+			d.setStatus(fmt.Sprintf("[yellow]run started: %s", evt.Target))
+		case api.EventRunFinished:
+			if evt.Success != nil && *evt.Success {
+				d.setStatus(fmt.Sprintf("[green]run finished: %s", evt.Target))
+			} else {
+				d.setStatus(fmt.Sprintf("[red]run failed: %s", evt.Error))
+			}
+		case api.EventTaskState:
+			if evt.State == api.StateFailed && evt.Task != "" {
+				d.setStatus(fmt.Sprintf("[red]%s failed: %s", evt.Task, evt.Error))
+			}
+		}
 	}
 }
 
@@ -531,6 +664,15 @@ func instanceURLs(inst *api.Instance) map[string]string {
 	return urls
 }
 
+func stringSliceContains(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
 func markAllStoppedNodes(worktree, instanceID string) error {
 	state, err := instance.LoadStatus(worktree, instanceID)
 	if err != nil {
@@ -581,6 +723,32 @@ func invalidateAndRerunDownstream(root, instanceID, task string) error {
 		waitForPIDExit(supervisorPID, 5*time.Second)
 	}
 	_, err = launchDetached(root, inst, inst.LastRun.Target, inst.LastRun.Project, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+	return err
+}
+
+func retargetAndRelaunch(root, instanceID, task string) error {
+	inst, err := instance.Load(root, instanceID)
+	if err != nil {
+		return err
+	}
+	if inst.LastRun.Project == "" {
+		return fmt.Errorf("instance has no recorded project to relaunch")
+	}
+	p, err := project.Lookup(inst.LastRun.Project)
+	if err != nil {
+		return err
+	}
+	if _, _, err := project.ResolveExecutionProject(p, task); err != nil {
+		return err
+	}
+	if inst.Supervisor.PID > 0 {
+		supervisorPID := inst.Supervisor.PID
+		if err := instance.StopSupervisor(inst); err != nil {
+			return err
+		}
+		waitForPIDExit(supervisorPID, 5*time.Second)
+	}
+	_, err = launchDetached(root, inst, task, inst.LastRun.Project, inst.LastRun.Mode, inst.LastRun.MaxParallel)
 	return err
 }
 
