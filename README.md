@@ -38,12 +38,21 @@ The TUI is still minimal, but the bundled adapters now act as real smoke targets
 ## Quick Start
 
 ```bash
+go build ./cmd/devflow
 go test ./...
 devflow
 go run ./cmd/devflow graph list --project go-next-monorepo
 go run ./cmd/devflow run fullstack --project go-next-monorepo --worktree examples/go-next-monorepo/worktree --json
 go run ./cmd/devflow run build-all --project bikecoach --worktree /path/to/bikecoach/coach --json --ci
 ```
+
+If you want to use `devflow` locally, you still need Go installed on your machine.
+GitHub Actions only verifies that the repo builds in CI; it does not remove the need for a local Go toolchain when you want to build or run the tool yourself.
+
+The local flow is:
+- install Go
+- clone the repo
+- run `go build ./cmd/devflow` or just use the repo-local `devflow` launcher script
 
 Bare `devflow` is now a local launcher:
 - it rebuilds the local `devflow` binary into `.devflow/bin/devflow` when sources change

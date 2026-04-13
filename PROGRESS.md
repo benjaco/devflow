@@ -126,6 +126,11 @@ Last updated: 2026-04-13
   - edits a real input file
   - verifies the watch cycle event is emitted
   - verifies the affected service reruns
+- Added a GitHub Actions workflow at `.github/workflows/build.yml` that:
+  - sets up Go from `go.mod`
+  - runs `go test ./...`
+  - builds `./cmd/devflow`
+- Updated the README to state clearly that GitHub Actions does not replace installing Go locally when you want to build or run `devflow` yourself
 
 ## In Progress
 
