@@ -112,3 +112,123 @@ func TestTaskKeyOverrideRejectsEmptyValue(t *testing.T) {
 		t.Fatal("expected empty override value to fail")
 	}
 }
+
+func TestTaskKeyChangesWhenDependencyKeysChange(t *testing.T) {
+	task := project.Task{Name: "gen", Kind: project.KindOnce}
+	first, err := TaskKey(TaskKeyInput{Task: task, DepKeys: []string{"dep-a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := TaskKey(TaskKeyInput{Task: task, DepKeys: []string{"dep-b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("expected task key to change when dependency keys change")
+	}
+}
+
+func TestTaskKeyChangesWhenInputHashesChange(t *testing.T) {
+	task := project.Task{Name: "gen", Kind: project.KindOnce}
+	first, err := TaskKey(TaskKeyInput{Task: task, InputHashes: []string{"file:a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := TaskKey(TaskKeyInput{Task: task, InputHashes: []string{"file:b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("expected task key to change when input hashes change")
+	}
+}
+
+func TestTaskKeyChangesWhenEnvValuesChange(t *testing.T) {
+	task := project.Task{Name: "gen", Kind: project.KindOnce}
+	first, err := TaskKey(TaskKeyInput{Task: task, EnvValues: []string{"FOO=a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := TaskKey(TaskKeyInput{Task: task, EnvValues: []string{"FOO=b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("expected task key to change when env values change")
+	}
+}
+
+func TestTaskKeyChangesWhenCustomFingerprintsChange(t *testing.T) {
+	task := project.Task{Name: "gen", Kind: project.KindOnce}
+	first, err := TaskKey(TaskKeyInput{Task: task, CustomFingerprints: []string{"semantic-a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := TaskKey(TaskKeyInput{Task: task, CustomFingerprints: []string{"semantic-b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("expected task key to change when custom fingerprints change")
+	}
+}
+
+func TestTaskKeyChangesWhenTaskDefinitionChanges(t *testing.T) {
+	first, err := TaskKey(TaskKeyInput{
+		Task: project.Task{
+			Name:      "gen",
+			Kind:      project.KindOnce,
+			Signature: "v1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := TaskKey(TaskKeyInput{
+		Task: project.Task{
+			Name:      "gen",
+			Kind:      project.KindOnce,
+			Signature: "v2",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("expected task key to change when task definition changes")
+	}
+}
+
+func TestCollectTaskInputsHashChangesWhenFileChanges(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "input.txt")
+	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rt := &project.Runtime{
+		Worktree: root,
+		Env:      map[string]string{},
+	}
+	task := project.Task{
+		Name:   "gen",
+		Kind:   project.KindOnce,
+		Inputs: project.Inputs{Files: []string{"input.txt"}},
+	}
+	first, _, _, err := CollectTaskInputs(context.Background(), root, task, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("goodbye"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second, _, _, err := CollectTaskInputs(context.Background(), root, task, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("unexpected input hash counts: %v vs %v", first, second)
+	}
+	if first[0] == second[0] {
+		t.Fatalf("expected collected input hash to change after file edit: %v vs %v", first, second)
+	}
+}

@@ -131,6 +131,13 @@ Last updated: 2026-04-13
   - runs `go test ./...`
   - builds `./cmd/devflow`
 - Updated the README to state clearly that GitHub Actions does not replace installing Go locally when you want to build or run `devflow` yourself
+- Added focused task-hashing tests in `pkg/fingerprint` covering:
+  - dependency key changes
+  - input hash changes
+  - env value changes
+  - custom fingerprint changes
+  - task-definition/signature changes
+  - collected file-input hash changes after file edits
 
 ## In Progress
 
