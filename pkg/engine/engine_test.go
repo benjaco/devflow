@@ -695,6 +695,80 @@ func TestBinaryToolBuildTaskCachesAndRestoresArtifact(t *testing.T) {
 	}
 }
 
+type overrideCacheProject struct{}
+
+func (overrideCacheProject) Name() string { return "override-cache-project" }
+
+func (overrideCacheProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{
+		Label: "override-cache",
+		Env: map[string]string{
+			"SEMANTIC_KEY": "v1",
+			"PAYLOAD":      "override-payload",
+		},
+	}, nil
+}
+
+func (overrideCacheProject) Targets() []project.Target {
+	return []project.Target{{Name: "build", RootTasks: []string{"gen"}}}
+}
+
+func (overrideCacheProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:    "gen",
+			Kind:    project.KindOnce,
+			Cache:   true,
+			Inputs:  project.Inputs{Files: []string{"missing-input.txt"}},
+			Outputs: project.Outputs{Files: []string{"out.txt"}},
+			CacheKeyOverride: func(ctx context.Context, rt *project.Runtime) (string, error) {
+				_ = ctx
+				return "semantic:" + rt.Env["SEMANTIC_KEY"], nil
+			},
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				return os.WriteFile(rt.Abs("out.txt"), []byte(rt.Env["PAYLOAD"]), 0o644)
+			},
+		},
+	}
+}
+
+func TestCacheKeyOverrideBypassesAutomaticInputsAndRestores(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+
+	eng, err := New(overrideCacheProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Result.CacheHits) != 0 {
+		t.Fatalf("unexpected first-run cache hits: %v", first.Result.CacheHits)
+	}
+	if got, err := os.ReadFile(filepath.Join(worktree, "out.txt")); err != nil || string(got) != "override-payload" {
+		t.Fatalf("unexpected first run output %q err=%v", string(got), err)
+	}
+	if err := os.Remove(filepath.Join(worktree, "out.txt")); err != nil {
+		t.Fatal(err)
+	}
+	second, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Result.CacheHits) != 1 || second.Result.CacheHits[0] != "gen" {
+		t.Fatalf("unexpected second-run cache hits: %v", second.Result.CacheHits)
+	}
+	if got, err := os.ReadFile(filepath.Join(worktree, "out.txt")); err != nil || string(got) != "override-payload" {
+		t.Fatalf("expected cached override output to be restored, got %q err=%v", string(got), err)
+	}
+}
+
 func waitFor(t *testing.T, timeout time.Duration, fn func() bool) {
 	t.Helper()
 	if !waitForBool(timeout, fn) {

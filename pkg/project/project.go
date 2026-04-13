@@ -30,6 +30,7 @@ const (
 )
 
 type FingerprintFunc func(ctx context.Context, rt *Runtime) (string, error)
+type CacheKeyFunc func(ctx context.Context, rt *Runtime) (string, error)
 type RunFunc func(ctx context.Context, rt *Runtime) error
 type ReadyFunc func(ctx context.Context, rt *Runtime) error
 
@@ -47,20 +48,21 @@ type Outputs struct {
 }
 
 type Task struct {
-	Name         string
-	Kind         Kind
-	Deps         []string
-	Inputs       Inputs
-	Outputs      Outputs
-	Run          RunFunc
-	Ready        ReadyFunc
-	ReadyTimeout time.Duration
-	Cache        bool
-	Restart      RestartPolicy
-	AllowInWatch bool
-	Tags         []string
-	Description  string
-	Signature    string
+	Name             string
+	Kind             Kind
+	Deps             []string
+	Inputs           Inputs
+	Outputs          Outputs
+	Run              RunFunc
+	Ready            ReadyFunc
+	ReadyTimeout     time.Duration
+	Cache            bool
+	Restart          RestartPolicy
+	AllowInWatch     bool
+	Tags             []string
+	Description      string
+	Signature        string
+	CacheKeyOverride CacheKeyFunc
 }
 
 type Target struct {
@@ -94,6 +96,7 @@ type Runtime struct {
 	EventFn    func(api.Event)
 	OnService  func(task string, handle *process.Handle)
 	onTaskDone func()
+	DepKeys    []string
 }
 
 func (rt *Runtime) Abs(path string) string {

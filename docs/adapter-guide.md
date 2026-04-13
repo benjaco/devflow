@@ -121,7 +121,7 @@ By default, Devflow computes cache keys automatically from the task definition, 
 
 For tasks with a better domain-specific notion of identity, the design allows a per-task cache-key override. This is intended for cases where the adapter can compute a more correct semantic key than generic file/env hashing.
 
-Planned shape:
+Current shape:
 
 ```go
 type CacheKeyFunc func(ctx context.Context, rt *Runtime) (string, error)

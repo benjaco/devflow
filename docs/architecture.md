@@ -89,7 +89,7 @@ The default cache key is derived automatically from:
 
 Some tasks can compute a better semantic cache identity than the generic automatic key. The design therefore allows a cacheable one-shot task to define its own cache-key function.
 
-Planned task-model shape:
+Current task-model shape:
 
 ```go
 type CacheKeyFunc func(ctx context.Context, rt *Runtime) (string, error)

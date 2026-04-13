@@ -100,7 +100,14 @@ Last updated: 2026-04-13
   - TUI refresh cadence is now faster overall and much faster while invalidate/rerun actions are in flight
 - Database runtime helper fixed so Docker combined-output errors are preserved and missing volume/container detection works against real daemon responses
 - Database URL generation now appends `?sslmode=disable` for the dedicated local Postgres runtime
-- Verified with `go test ./...`
+- Task-defined cache-key overrides are now implemented in the core task/runtime model
+- Override-key unit coverage added in `pkg/fingerprint` and engine-level cache-restore coverage added in `pkg/engine`
+- Opt-in real Docker-backed integration coverage added in `pkg/database` for:
+  - dedicated Postgres runtime snapshot/restore
+  - Prisma snapshot metadata plus nearest restore
+- Verified locally with:
+  - `go test ./...`
+  - `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run Docker -v`
 
 ## In Progress
 
@@ -109,12 +116,14 @@ Last updated: 2026-04-13
 ## Next Steps
 
 - Add richer watch restart policies now that service readiness exists
-- Implement task-defined cache-key overrides in the runtime/task model
 - Improve fine-grained detached service restart/control semantics beyond whole-target relaunch
+- Add a second e2e example project that stresses a different workflow shape than BikeCoach
+- Hook the TUI directly to the engine event stream instead of polling
+- Expand TUI operator actions with confirmations and rerun/stop/restart controls
+- Add stronger JSON contract tests for status/instances/events
 
 ## Deferred / Known Gaps
 
-- Cache-key overrides are designed and documented but not implemented yet
 - Fine-grained detached per-service restart is not fully implemented yet
-- The example adapter uses a deterministic fake-DB path in tests; the real Docker-backed path exists but is not yet covered by automated integration tests
+- The example adapter still uses a deterministic fake-DB path in normal tests; real Docker-backed coverage now exists as an opt-in module-level e2e layer rather than being part of default `go test ./...`
 - The `bikecoach` adapter is now manually validated against the local repo for build, DB prep, detached runtime, health, and shutdown flows; remaining gaps are automated Docker-backed coverage and richer control UX

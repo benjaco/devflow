@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -23,6 +24,7 @@ type TaskKeyInput struct {
 	InputHashes        []string
 	EnvValues          []string
 	CustomFingerprints []string
+	Override           string
 }
 
 func HashFile(path string) (string, error) {
@@ -178,6 +180,12 @@ func TaskSignature(task project.Task) (string, error) {
 }
 
 func TaskKey(in TaskKeyInput) (string, error) {
+	if in.Task.CacheKeyOverride != nil {
+		if strings.TrimSpace(in.Override) == "" {
+			return "", fmt.Errorf("task %q cache key override returned empty value", in.Task.Name)
+		}
+		return OverrideTaskKey(in.Task.Name, in.Override), nil
+	}
 	sig, err := TaskSignature(in.Task)
 	if err != nil {
 		return "", err
@@ -192,6 +200,10 @@ func TaskKey(in TaskKeyInput) (string, error) {
 	parts = append(parts, cloneSorted(in.EnvValues)...)
 	parts = append(parts, cloneSorted(in.CustomFingerprints)...)
 	return hashStrings(parts), nil
+}
+
+func OverrideTaskKey(taskName, override string) string {
+	return hashStrings([]string{EngineKeyVersion, taskName, override})
 }
 
 func ignored(path string, ignore []string) bool {

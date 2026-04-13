@@ -82,3 +82,33 @@ func TestCollectTaskInputsIncludesEnvAndCustom(t *testing.T) {
 		t.Fatalf("unexpected inputs: hashes=%v env=%v custom=%v", hashes, envValues, custom)
 	}
 }
+
+func TestTaskKeyOverrideIsSaltedByTaskName(t *testing.T) {
+	first, err := TaskKey(TaskKeyInput{
+		Task:     project.Task{Name: "gen_a", Kind: project.KindOnce, Cache: true, CacheKeyOverride: func(ctx context.Context, rt *project.Runtime) (string, error) { return "semantic", nil }},
+		Override: "semantic",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := TaskKey(TaskKeyInput{
+		Task:     project.Task{Name: "gen_b", Kind: project.KindOnce, Cache: true, CacheKeyOverride: func(ctx context.Context, rt *project.Runtime) (string, error) { return "semantic", nil }},
+		Override: "semantic",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("expected override keys to differ across task names: %s", first)
+	}
+}
+
+func TestTaskKeyOverrideRejectsEmptyValue(t *testing.T) {
+	_, err := TaskKey(TaskKeyInput{
+		Task:     project.Task{Name: "gen", Kind: project.KindOnce, Cache: true, CacheKeyOverride: func(ctx context.Context, rt *project.Runtime) (string, error) { return "", nil }},
+		Override: "",
+	})
+	if err == nil {
+		t.Fatal("expected empty override value to fail")
+	}
+}

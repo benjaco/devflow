@@ -23,6 +23,8 @@ Devflow uses three testing layers:
 - CLI JSON output shape, including command-level lifecycle coverage for `run`, `status`, `logs`, `instances`, `doctor`, and `stop`
 - sequential engine execution with cache hits
 - polling watch batching and selective watch reruns
+- opt-in real Docker-backed database runtime snapshot/restore coverage in `pkg/database`
+- opt-in real Docker-backed Prisma snapshot metadata + restore coverage in `pkg/database`
 
 ## Example/Smoke Coverage
 
@@ -34,6 +36,12 @@ The bundled example adapter is now a deterministic full-stack-style smoke target
 - multi-worktree DB and port isolation
 
 The example remains synthetic and local-only on purpose so tests stay deterministic and non-flaky.
+
+Docker-backed integration coverage is intentionally opt-in. Enable it with:
+
+```bash
+DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run Docker
+```
 
 There is also now a real `bikecoach` adapter with:
 - unit coverage for graph shape and env finalization

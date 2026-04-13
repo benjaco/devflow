@@ -395,6 +395,7 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 
 			depKeys := state.depKeySnapshot(task.Deps)
 			rt := baseRT.WithTask(name, instance.LogPath(state.req.Worktree, state.inst.ID, name))
+			rt.DepKeys = append([]string(nil), depKeys...)
 			wg.Add(1)
 			running++
 			go func(task project.Task, taskName string, depSnapshot []string, runtime *project.Runtime) {
@@ -558,6 +559,16 @@ func runTask(ctx context.Context, task project.Task, rt *project.Runtime) error 
 }
 
 func (e *Engine) taskKey(ctx context.Context, rt *project.Runtime, task project.Task, depKeys []string) (string, error) {
+	if task.CacheKeyOverride != nil {
+		value, err := task.CacheKeyOverride(ctx, rt)
+		if err != nil {
+			return "", err
+		}
+		return fingerprint.TaskKey(fingerprint.TaskKeyInput{
+			Task:     task,
+			Override: value,
+		})
+	}
 	inputHashes, envValues, custom, err := fingerprint.CollectTaskInputs(ctx, rt.Worktree, task, rt)
 	if err != nil {
 		return "", err
