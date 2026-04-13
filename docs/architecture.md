@@ -79,6 +79,27 @@ Design implication:
 - migration authoring and reset flows belong in explicit commands, TUI actions, or future interactive task support
 - normal boot/watch targets should stay on the snapshot-plus-replay path instead of relying on Prisma prompts
 
+### Implemented Interactive Prompt Path
+
+Devflow now supports prompt-driven interactive one-shot commands without blocking invisibly in detached mode.
+
+Current behavior:
+- tasks can mark a subprocess command as interactive through `process.CommandSpec`
+- the command declares expected prompt patterns and prompt kinds
+- when a prompt pattern is detected in subprocess output, the engine emits an `interaction_requested` event
+- the engine waits for an answer file under the instance state directory
+- when an answer arrives, the engine writes it back to the subprocess stdin and emits `interaction_answered`
+
+The current transport is file-backed:
+- request metadata is carried on the event stream
+- answers are written to `.devflow/state/instances/<instance-id>/interactions/<prompt-id>.json`
+
+This is enough for detached runs and the TUI to cooperate without shared in-memory state.
+
+Current limitation:
+- this is prompt-pattern and stdin based, not full TTY emulation
+- commands that require a true terminal rather than prompt/answer stdin handling still need a future PTY-specific path
+
 ## Database Isolation
 
 The chosen direction is now full per-worktree separation for local databases:
@@ -193,6 +214,7 @@ The engine now emits a typed in-process event stream for live consumers. Event c
 - cache hit / miss
 - log line
 - process exited
+- interaction requested / answered / cancelled
 
 This is exposed through engine subscription rather than a dedicated CLI command for now. The goal is to keep the event envelope stable before adding TUI and MCP-facing stream surfaces.
 
@@ -293,5 +315,6 @@ The first usable TUI slice is now implemented as a local terminal console over p
 - instance/worktree/runtime header
 - stable terminal rendering via a real TUI library instead of manual ANSI frame painting
 - invalidate-and-rerun from the selected task by invalidating the selected downstream cacheable once-task slice and relaunching the current target
+- prompt popups for interactive confirm and text questions emitted by the running supervisor
 
 What is still missing is fine-grained detached control of a single service inside a multi-service detached target.

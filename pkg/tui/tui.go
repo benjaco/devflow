@@ -21,6 +21,7 @@ import (
 	"devflow/pkg/cache"
 	"devflow/pkg/graph"
 	"devflow/pkg/instance"
+	"devflow/pkg/process"
 	"devflow/pkg/project"
 	"devflow/pkg/watch"
 )
@@ -45,6 +46,7 @@ type dashboard struct {
 	instanceID        string
 	eventsPath        string
 	app               *tview.Application
+	pages             *tview.Pages
 	header            *tview.TextView
 	tasks             *tview.Table
 	logs              *tview.TextView
@@ -55,6 +57,7 @@ type dashboard struct {
 	statusMessage     string
 	busy              bool
 	eventOffset       int64
+	activePromptID    string
 }
 
 const (
@@ -126,10 +129,12 @@ func newDashboard(root, instanceID string) *dashboard {
 		AddItem(d.tasks, 0, 2, true).
 		AddItem(d.logs, 0, 3, false).
 		AddItem(d.footer, 3, 0, false)
+	d.pages = tview.NewPages().
+		AddPage("main", layout, true, true)
 
 	d.setStatus("[green]ready")
 
-	d.app.SetRoot(layout, true)
+	d.app.SetRoot(d.pages, true)
 	d.app.SetFocus(d.tasks)
 	d.app.SetInputCapture(d.handleKeys)
 	return d
@@ -544,8 +549,78 @@ func (d *dashboard) applyEvents(events []api.Event) {
 			if evt.State == api.StateFailed && evt.Task != "" {
 				d.setStatus(fmt.Sprintf("[red]%s failed: %s", evt.Task, evt.Error))
 			}
+		case api.EventInteractionReq:
+			d.openPrompt(evt)
+		case api.EventInteractionAck, api.EventInteractionStop:
+			if evt.PromptID == d.activePromptID {
+				d.closePrompt()
+			}
 		}
 	}
+}
+
+func (d *dashboard) openPrompt(evt api.Event) {
+	if evt.PromptID == "" || evt.PromptID == d.activePromptID {
+		return
+	}
+	d.activePromptID = evt.PromptID
+	switch evt.PromptKind {
+	case string(process.PromptConfirm):
+		modal := tview.NewModal().
+			SetText(evt.Prompt).
+			AddButtons([]string{"Yes", "No"}).
+			SetDoneFunc(func(_ int, label string) {
+				answer := "n"
+				if label == "Yes" {
+					answer = "y"
+				}
+				if err := instance.WriteInteractionAnswer(d.root, d.instanceID, evt.PromptID, answer); err != nil {
+					d.setStatus(fmt.Sprintf("[red]failed to answer prompt: %v", err))
+					return
+				}
+				d.setStatus(fmt.Sprintf("[yellow]answered %s with %s", evt.Task, answer))
+				d.closePrompt()
+			})
+		d.pages.AddPage("prompt", modal, true, true)
+		d.app.SetFocus(modal)
+	default:
+		var input *tview.InputField
+		input = tview.NewInputField().
+			SetLabel(evt.Prompt + " ").
+			SetDoneFunc(func(key tcell.Key) {
+				if key != tcell.KeyEnter {
+					return
+				}
+				value := input.GetText()
+				if err := instance.WriteInteractionAnswer(d.root, d.instanceID, evt.PromptID, value); err != nil {
+					d.setStatus(fmt.Sprintf("[red]failed to answer prompt: %v", err))
+					return
+				}
+				d.setStatus(fmt.Sprintf("[yellow]answered %s prompt", evt.Task))
+				d.closePrompt()
+			})
+		frame := tview.NewFrame(input).
+			SetBorders(1, 1, 1, 1, 1, 1).
+			AddText("Interactive Prompt", true, tview.AlignCenter, tcell.ColorWhite)
+		d.pages.AddPage("prompt", centered(frame, 80, 7), true, true)
+		d.app.SetFocus(input)
+	}
+}
+
+func (d *dashboard) closePrompt() {
+	d.activePromptID = ""
+	d.pages.RemovePage("prompt")
+	d.app.SetFocus(d.tasks)
+}
+
+func centered(p tview.Primitive, width, height int) tview.Primitive {
+	return tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 0, 1, false).
+			AddItem(p, height, 1, true).
+			AddItem(nil, 0, 1, false), width, 1, true).
+		AddItem(nil, 0, 1, false)
 }
 
 func renderLogPanel(snap snapshot, selectedName string) []string {

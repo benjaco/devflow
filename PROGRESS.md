@@ -154,6 +154,14 @@ Last updated: 2026-04-13
   - normal boot/watch paths should stay non-interactive
   - adapters should prefer explicit `-y` / `--yes` / `--force` style flags where safe
   - Prisma migration authoring and reset flows should be explicit actions, not part of normal startup
+- Interactive prompt support implemented for prompt-driven commands:
+  - `process.CommandSpec` now supports interactive prompt patterns and prompt handlers
+  - the engine emits `interaction_requested` / `interaction_answered` / `interaction_cancelled`
+  - detached runs receive answers through per-instance interaction files
+  - the TUI now opens confirm and text-input popups for interactive prompts
+- Added a real prompt CLI fixture at `internal/testutil/promptcli` plus test coverage for:
+  - process-level prompt detection and answer forwarding
+  - engine-level prompt events and instance answer-file integration
 
 ## In Progress
 

@@ -332,6 +332,9 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 		OnService: func(task string, handle *process.Handle) {
 			state.registerService(task, handle)
 		},
+		OnPrompt: func(task string, prompt process.PromptRequest) (process.PromptResponse, error) {
+			return e.waitForPromptAnswer(ctx, req, inst.ID, task, prompt)
+		},
 	}
 	return inst, state, baseRT, nil
 }
@@ -558,6 +561,63 @@ func runTask(ctx context.Context, task project.Task, rt *project.Runtime) error 
 		return nil
 	}
 	return task.Run(ctx, rt)
+}
+
+func (e *Engine) waitForPromptAnswer(ctx context.Context, req Request, instanceID, task string, prompt process.PromptRequest) (process.PromptResponse, error) {
+	e.publish(api.Event{
+		TS:         process.NowRFC3339Nano(),
+		Type:       api.EventInteractionReq,
+		InstanceID: instanceID,
+		Worktree:   req.Worktree,
+		Target:     req.Target,
+		Task:       task,
+		Mode:       req.Mode,
+		PromptID:   prompt.ID,
+		PromptKind: string(prompt.Kind),
+		Prompt:     prompt.Prompt,
+	})
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			e.publish(api.Event{
+				TS:         process.NowRFC3339Nano(),
+				Type:       api.EventInteractionStop,
+				InstanceID: instanceID,
+				Worktree:   req.Worktree,
+				Target:     req.Target,
+				Task:       task,
+				Mode:       req.Mode,
+				PromptID:   prompt.ID,
+				PromptKind: string(prompt.Kind),
+				Prompt:     prompt.Prompt,
+				Error:      ctx.Err().Error(),
+			})
+			return process.PromptResponse{}, ctx.Err()
+		case <-ticker.C:
+			value, ok, err := instance.ConsumeInteractionAnswer(req.Worktree, instanceID, prompt.ID)
+			if err != nil {
+				return process.PromptResponse{}, err
+			}
+			if !ok {
+				continue
+			}
+			e.publish(api.Event{
+				TS:         process.NowRFC3339Nano(),
+				Type:       api.EventInteractionAck,
+				InstanceID: instanceID,
+				Worktree:   req.Worktree,
+				Target:     req.Target,
+				Task:       task,
+				Mode:       req.Mode,
+				PromptID:   prompt.ID,
+				PromptKind: string(prompt.Kind),
+				Prompt:     prompt.Prompt,
+			})
+			return process.PromptResponse{Value: value}, nil
+		}
+	}
 }
 
 func (e *Engine) taskKey(ctx context.Context, rt *project.Runtime, task project.Task, depKeys []string) (string, error) {

@@ -52,6 +52,28 @@ Rules:
 
 This is especially important for detached runs and watch mode, where a blocked prompt is easy to miss and hard to recover from.
 
+When a task truly does need prompt/answer interaction, the adapter can use interactive command specs instead of raw shell blocking:
+
+```go
+return rt.RunCmdSpec(ctx, process.CommandSpec{
+    Name:        "my-tool",
+    Args:        []string{"setup"},
+    Interactive: true,
+    Prompts: []process.PromptSpec{
+        {Pattern: "Continue? [y/N]: ", Prompt: "Continue?", Kind: process.PromptConfirm},
+        {Pattern: "Name: ", Prompt: "Name", Kind: process.PromptText},
+    },
+})
+```
+
+Semantics:
+- Devflow watches subprocess output for the declared prompt patterns
+- matching prompts become `interaction_requested` events
+- detached runs can then be answered from the TUI
+- the answer is written back to subprocess stdin and recorded as `interaction_answered`
+
+This path should still be the exception, not the default adapter style.
+
 ### Prisma Guidance
 
 Treat Prisma authoring and reset flows separately from normal startup.

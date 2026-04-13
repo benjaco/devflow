@@ -13,6 +13,9 @@ const (
 	EventCacheHit        EventType = "cache_hit"
 	EventCacheMiss       EventType = "cache_miss"
 	EventProcessExited   EventType = "process_exited"
+	EventInteractionReq  EventType = "interaction_requested"
+	EventInteractionAck  EventType = "interaction_answered"
+	EventInteractionStop EventType = "interaction_cancelled"
 )
 
 type Event struct {
@@ -31,6 +34,9 @@ type Event struct {
 	PID           int       `json:"pid,omitempty"`
 	Files         []string  `json:"files,omitempty"`
 	AffectedTasks []string  `json:"affectedTasks,omitempty"`
+	PromptID      string    `json:"promptId,omitempty"`
+	PromptKind    string    `json:"promptKind,omitempty"`
+	Prompt        string    `json:"prompt,omitempty"`
 	Error         string    `json:"error,omitempty"`
 	Success       *bool     `json:"success,omitempty"`
 }

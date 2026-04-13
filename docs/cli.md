@@ -71,7 +71,10 @@ For watch-cycle events:
 - running tasks pinned first and pending work directly below them
 - `i` on the selected task invalidates the selected downstream cacheable slice and relaunches the current target
 - `t` on the selected task updates the detached run target to that task and relaunches the instance on the selected task closure
+- popup confirm and text prompts for interactive tasks that emit `interaction_requested` events
 - primary live refresh from the persisted detached event stream at `.devflow/state/instances/<instance-id>/events.jsonl`
+
+Interactive prompt answers are written back through the instance interaction directory, so detached runs can still receive operator input from the TUI.
 
 Implemented `tui` flags include:
 - `--worktree`
