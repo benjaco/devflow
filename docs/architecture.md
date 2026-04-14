@@ -144,11 +144,40 @@ What this package does not decide:
 - when to clone remote state versus run a bootstrap script
 - which schema fingerprint should own the snapshot key
 
-Those decisions belong in adapter policy layered on top of the runtime module. The package now provides the snapshot-planning primitives; the adapter still needs to decide when to clone remote state, when to snapshot, and when to fall back to a fresh bootstrap.
+Those decisions belong in adapter policy layered on top of the runtime module. The package now provides the snapshot-planning primitives plus a source-policy hook for snapshot misses; the adapter still needs to decide which base source to use, when to snapshot, and which inputs define the base fingerprint.
+
+### DB Source Policies
+
+Snapshot misses should rebuild from a configured base source, not from an implicit reset action.
+
+Current shape:
+
+```go
+type SourcePolicy interface {
+    Name() string
+    PrepareBase(ctx context.Context, db api.DBInstance, opts PrepareOptions) error
+}
+```
+
+Behavior:
+- first try an exact or nearest-prefix snapshot restore
+- if that fails, destroy the current runtime/volume
+- if a source policy is configured:
+  - start a temporary local Postgres runtime
+  - apply the source policy
+  - stop the runtime
+- then continue with normal migration replay and snapshotting
+
+This matches the intended operator model:
+- reuse the latest compatible local volume when possible
+- otherwise rebuild from a configured base source such as:
+  - a remote dev clone script
+  - a local bootstrap/startup script later
+- never "skip" a changed migration in the middle; restore falls back only by valid prefix
 
 The bundled example adapter now exercises this shape structurally:
 - inspect Prisma state
-- restore the nearest snapshot or reset the volume
+- restore the nearest snapshot or recreate from the configured base source
 - start a temporary DB runtime
 - replay remaining migrations
 - snapshot the prepared state

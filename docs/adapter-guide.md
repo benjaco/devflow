@@ -72,6 +72,39 @@ Recommended precedence:
 
 Use dotenv values for normal app configuration, but keep leased ports, instance IDs, and per-instance DB URLs under devflow control.
 
+## DB Source Policies
+
+When a DB snapshot miss happens, the adapter should rebuild from a configured base source instead of implying a reset command.
+
+Current shape:
+
+```go
+policy := database.CommandSourcePolicy{
+    PolicyName: "clone-dev",
+    Spec: process.CommandSpec{
+        Name: "sh",
+        Args: []string{"-c", "./scripts/clone-dev.sh"},
+    },
+}
+
+prepared, err := database.New().PreparePrismaBase(ctx, inst.DB, state, policy, database.PrepareOptions{
+    Worktree: worktree,
+    Env:      env,
+})
+```
+
+Semantics:
+- Devflow first tries exact or nearest-prefix snapshot restore
+- if no compatible snapshot exists, it recreates the local volume
+- if a source policy is configured, it starts a temporary Postgres runtime and applies that policy
+- then the adapter can replay only the remaining migrations and snapshot the result
+
+This is the right abstraction for:
+- clone-from-dev scripts today
+- local bootstrap/startup scripts later
+
+It is not a "reset DB" operator action. The goal is to reuse the best compatible local state or rebuild a new base automatically.
+
 ## Interactive Task Policy
 
 Adapters should prefer non-interactive subprocesses.

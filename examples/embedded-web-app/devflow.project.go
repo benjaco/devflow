@@ -237,7 +237,7 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 			Name:        "prepare_db_base",
 			Kind:        project.KindOnce,
 			Deps:        []string{"check_db_tools"},
-			Description: "Restore the nearest cached database snapshot or reset the Postgres volume",
+			Description: "Restore the nearest cached database snapshot or recreate from the configured base source",
 			Signature:   "embedded-web-app-prepare-db-base-v1",
 			Inputs:      project.Inputs{Dirs: []string{"internal/storage/migrations"}, Files: []string{"sqlc.yaml"}},
 			Outputs:     project.Outputs{Files: []string{".devflow/embedded-web-app/db/prepare.json"}},
@@ -246,34 +246,54 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 				if err != nil {
 					return err
 				}
-				manager := database.New()
-				var restored *database.PrismaRestoreResult
+				var prepared *database.PrismaBaseResult
 				if embeddedWebAppUseFakeDB() {
 					plan, err := database.PlanPrismaRestore(rt.Instance.DB.SnapshotRoot, state)
 					if err != nil {
 						return err
 					}
 					if plan.SnapshotKey != "" {
-						restored = &database.PrismaRestoreResult{Plan: plan, Metadata: plan.Snapshot}
+						prepared = &database.PrismaBaseResult{
+							Restored: &database.PrismaRestoreResult{Plan: plan, Metadata: plan.Snapshot},
+						}
+					} else {
+						prepared = &database.PrismaBaseResult{Recreated: true}
 					}
 				} else {
-					restored, err = manager.RestoreNearestPrismaSnapshot(ctx, rt.Instance.DB, state)
+					prepared, err = database.New().PreparePrismaBase(ctx, rt.Instance.DB, state, nil, database.PrepareOptions{
+						Worktree: rt.Worktree,
+						Env:      cloneEnv(rt.Env),
+						LogPath:  rt.LogPath,
+						OnLine: func(stream, line string) {
+							if rt.EventFn == nil {
+								return
+							}
+							rt.EventFn(api.Event{
+								TS:         process.NowRFC3339Nano(),
+								Type:       api.EventLogLine,
+								InstanceID: rt.Instance.ID,
+								Worktree:   rt.Worktree,
+								Task:       rt.TaskName,
+								Mode:       rt.Mode,
+								Stream:     stream,
+								Line:       line,
+							})
+						},
+					})
 					if err != nil {
 						return err
 					}
-					if restored == nil {
-						if err := manager.DestroyRuntime(ctx, rt.Instance.DB, true); err != nil {
-							return err
-						}
-					}
 				}
 				return writeJSONFile(rt, ".devflow/embedded-web-app/db/prepare.json", map[string]any{
-					"database":     rt.Instance.DB.Name,
-					"snapshotKey":  snapshotKey(restored),
-					"restored":     restored != nil,
-					"exactMatch":   exactMatch(restored),
-					"prefixLength": prefixLength(restored),
-					"state":        state,
+					"database":      rt.Instance.DB.Name,
+					"snapshotKey":   snapshotKey(prepared),
+					"restored":      prepared != nil && prepared.Restored != nil,
+					"exactMatch":    exactMatch(prepared),
+					"prefixLength":  prefixLength(prepared),
+					"recreated":     prepared != nil && prepared.Recreated,
+					"sourceApplied": prepared != nil && prepared.SourceApplied,
+					"sourcePolicy":  sourcePolicy(prepared),
+					"state":         state,
 				})
 			},
 		},
@@ -612,22 +632,29 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func snapshotKey(restored *database.PrismaRestoreResult) string {
-	if restored == nil {
+func snapshotKey(prepared *database.PrismaBaseResult) string {
+	if prepared == nil || prepared.Restored == nil {
 		return ""
 	}
-	return restored.Plan.SnapshotKey
+	return prepared.Restored.Plan.SnapshotKey
 }
 
-func exactMatch(restored *database.PrismaRestoreResult) bool {
-	return restored != nil && restored.Plan.ExactMatch
+func exactMatch(prepared *database.PrismaBaseResult) bool {
+	return prepared != nil && prepared.Restored != nil && prepared.Restored.Plan.ExactMatch
 }
 
-func prefixLength(restored *database.PrismaRestoreResult) int {
-	if restored == nil {
+func prefixLength(prepared *database.PrismaBaseResult) int {
+	if prepared == nil || prepared.Restored == nil {
 		return 0
 	}
-	return restored.Plan.PrefixLength
+	return prepared.Restored.Plan.PrefixLength
+}
+
+func sourcePolicy(prepared *database.PrismaBaseResult) string {
+	if prepared == nil {
+		return ""
+	}
+	return prepared.SourcePolicy
 }
 
 func SeedWorktree(dst string) error {

@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-04-13
+Last updated: 2026-04-14
 
 ## Current Status
 
@@ -177,10 +177,34 @@ Last updated: 2026-04-13
   - platform-script installation of a fake command
   - install verification failure when the command is still missing
   - CLI `deps status/install` JSON behavior
+- Added a DB source-policy abstraction in `pkg/database`:
+  - snapshot misses now recreate from a configured base source instead of implying a reset action
+  - `PreparePrismaBase` now handles restore-or-recreate orchestration
+  - adapters can plug in base rebuild behavior through `SourcePolicy`, `SourcePolicyFunc`, or `CommandSourcePolicy`
+- Added DB-source regression coverage for:
+  - restore hit skips base-source execution
+  - snapshot miss recreates and applies the configured source policy
+  - snapshot miss without a source policy recreates an empty local volume state
+- Updated the bundled example adapters so `prepare_db_base` now reports:
+  - restore vs recreate
+  - source-applied vs snapshot-restored
+  - source-policy name when a base source is used
+- Fixed TUI invalidate regressions:
+  - invalidate now resolves synthetic task targets correctly before computing the closure
+  - invalidating a selected `group` task now invalidates its cacheable input slice instead of producing an empty invalidation set
+- Improved TUI invalidate feedback:
+  - invalidate now writes a transitional status snapshot before relaunch
+  - invalidated tasks immediately show as `dirty`
+  - impacted downstream groups/services immediately show as pending instead of stale cached/done state
+  - the TUI now redraws immediately after writing that transitional status instead of waiting for the relaunch to finish
+- Added TUI regression coverage for:
+  - selected `group` invalidation behavior
+  - synthetic task-target execution graphs
+  - transitional invalidate status updates
 
 ## In Progress
 
-- No active implementation in progress
+- No active implementation work recorded
 
 ## Next Steps
 

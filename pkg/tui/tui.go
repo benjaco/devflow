@@ -350,7 +350,12 @@ func (d *dashboard) triggerInvalidateSelected() {
 	_ = d.refresh()
 	selected := node.Name
 	go func() {
-		err := invalidateAndRerunDownstream(d.root, d.instanceID, selected)
+		err := invalidateAndRerunDownstream(d.root, d.instanceID, selected, func() {
+			d.app.QueueUpdateDraw(func() {
+				d.setStatus(fmt.Sprintf("[yellow]invalidated downstream from %s, relaunching...", selected))
+				_ = d.refresh()
+			})
+		})
 		d.app.QueueUpdateDraw(func() {
 			d.busy = false
 			if err != nil {
@@ -764,7 +769,7 @@ func markAllStoppedNodes(worktree, instanceID string) error {
 	return instance.SaveStatus(worktree, instanceID, state.Target, state.Mode, state.Nodes)
 }
 
-func invalidateAndRerunDownstream(root, instanceID, task string) error {
+func invalidateAndRerunDownstream(root, instanceID, task string, onTransition func()) error {
 	inst, err := instance.Load(root, instanceID)
 	if err != nil {
 		return err
@@ -772,17 +777,19 @@ func invalidateAndRerunDownstream(root, instanceID, task string) error {
 	if inst.LastRun.Project == "" || inst.LastRun.Target == "" {
 		return fmt.Errorf("instance has no recorded project/target to relaunch")
 	}
-	p, err := project.Lookup(inst.LastRun.Project)
+	g, resolvedTarget, err := executionGraph(inst.LastRun.Project, inst.LastRun.Target)
 	if err != nil {
 		return err
 	}
-	g, err := graph.New(p.Tasks(), p.Targets())
+	toInvalidate, err := downstreamInvalidateTasks(g, resolvedTarget, task)
 	if err != nil {
 		return err
 	}
-	toInvalidate, err := downstreamInvalidateTasks(g, inst.LastRun.Target, task)
-	if err != nil {
+	if err := writeInvalidateTransition(root, instanceID, resolvedTarget, g, toInvalidate); err != nil {
 		return err
+	}
+	if onTransition != nil {
+		onTransition()
 	}
 	store := cache.New(instance.CacheRoot(root))
 	for _, name := range toInvalidate {
@@ -836,19 +843,118 @@ func downstreamInvalidateTasks(g *graph.Graph, target, selected string) ([]strin
 	for _, name := range closure {
 		inClosure[name] = true
 	}
-	downstream := g.Downstream([]string{selected})
-	out := make([]string, 0, len(downstream))
-	for _, name := range downstream {
-		if !inClosure[name] {
+	selectedTask, ok := g.Tasks[selected]
+	if !ok {
+		return nil, fmt.Errorf("unknown task %q", selected)
+	}
+	candidates := []string{}
+	if selectedTask.Kind == project.KindGroup {
+		candidates = g.Upstream([]string{selected})
+	} else {
+		candidates = g.Downstream([]string{selected})
+	}
+	out := collectInvalidateTasks(g, inClosure, candidates)
+	sort.Strings(out)
+	return out, nil
+}
+
+func collectInvalidateTasks(g *graph.Graph, inClosure map[string]bool, names []string) []string {
+	out := make([]string, 0, len(names))
+	seen := map[string]bool{}
+	for _, name := range names {
+		if !inClosure[name] || seen[name] {
 			continue
 		}
 		task := g.Tasks[name]
 		if task.Kind == project.KindOnce && task.Cache {
 			out = append(out, name)
+			seen[name] = true
 		}
+	}
+	return out
+}
+
+func writeInvalidateTransition(root, instanceID, target string, g *graph.Graph, invalidated []string) error {
+	state, err := instance.LoadStatus(root, instanceID)
+	if err != nil {
+		return err
+	}
+	impacted, err := impactedRerunTasks(g, target, invalidated)
+	if err != nil {
+		return err
+	}
+	invalidatedSet := make(map[string]bool, len(invalidated))
+	for _, name := range invalidated {
+		invalidatedSet[name] = true
+	}
+	impactedSet := make(map[string]bool, len(impacted))
+	for _, name := range impacted {
+		impactedSet[name] = true
+	}
+	for name, node := range state.Nodes {
+		if invalidatedSet[name] {
+			node.State = api.StateDirty
+			node.LastRunKey = ""
+			node.LastError = ""
+			node.PID = 0
+			state.Nodes[name] = node
+			continue
+		}
+		if !impactedSet[name] {
+			continue
+		}
+		node.LastError = ""
+		node.PID = 0
+		switch node.Kind {
+		case string(project.KindService):
+			node.State = api.StatePending
+		case string(project.KindGroup), string(project.KindWarmup), string(project.KindOnce):
+			if node.State != api.StateDirty {
+				node.State = api.StatePending
+			}
+		}
+		state.Nodes[name] = node
+	}
+	return instance.SaveStatus(root, instanceID, state.Target, state.Mode, state.Nodes)
+}
+
+func impactedRerunTasks(g *graph.Graph, target string, invalidated []string) ([]string, error) {
+	closure, err := g.TargetClosure(target)
+	if err != nil {
+		return nil, err
+	}
+	inClosure := make(map[string]bool, len(closure))
+	for _, name := range closure {
+		inClosure[name] = true
+	}
+	downstream := g.Downstream(invalidated)
+	out := make([]string, 0, len(downstream))
+	seen := make(map[string]bool, len(downstream))
+	for _, name := range downstream {
+		if !inClosure[name] || seen[name] {
+			continue
+		}
+		out = append(out, name)
+		seen[name] = true
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func executionGraph(projectName, target string) (*graph.Graph, string, error) {
+	p, err := project.Lookup(projectName)
+	if err != nil {
+		return nil, "", err
+	}
+	execProject, resolvedTarget, err := project.ResolveExecutionProject(p, target)
+	if err != nil {
+		return nil, "", err
+	}
+	g, err := graph.New(execProject.Tasks(), execProject.Targets())
+	if err != nil {
+		return nil, "", err
+	}
+	return g, resolvedTarget, nil
 }
 
 func launchDetached(root string, inst *api.Instance, target, projectName string, mode api.RunMode, maxParallel int) (int, error) {
