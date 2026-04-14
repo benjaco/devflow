@@ -22,6 +22,7 @@ Devflow uses three testing layers:
 - Prisma schema/migration inspection and nearest-prefix snapshot planning coverage
 - dotenv parsing and merged runtime-env coverage with devflow-managed DB overrides
 - CLI JSON output shape, including command-level lifecycle coverage for `run`, `status`, `logs`, `instances`, `doctor`, and `stop`
+- dependency detection and platform-script install coverage in `pkg/project` and `internal/cli`
 - engine-level interactive prompt event plus answer-file integration coverage
 - sequential engine execution with cache hits
 - polling watch batching and selective watch reruns

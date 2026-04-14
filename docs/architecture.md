@@ -100,6 +100,29 @@ Current limitation:
 - this is prompt-pattern and stdin based, not full TTY emulation
 - commands that require a true terminal rather than prompt/answer stdin handling still need a future PTY-specific path
 
+## Dependency Installation
+
+Adapters can now define project-scoped command dependencies together with platform-specific install scripts.
+
+Current shape:
+
+```go
+type Dependency struct {
+    Name        string
+    Command     string
+    Description string
+    Install     map[string]InstallScript
+}
+```
+
+Semantics:
+- dependency status is determined by checking whether the command is available on `PATH`
+- `deps install` only runs installers for commands that are currently missing
+- after an installer runs, Devflow re-checks that the command now resolves
+- install scripts are selected by platform (`darwin`, `linux`, `windows`, or `unix`)
+
+This keeps dependency policy adapter-defined while giving the core CLI a stable install surface for humans, CI, and future agents.
+
 ## Database Isolation
 
 The chosen direction is now full per-worktree separation for local databases:

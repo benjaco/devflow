@@ -14,6 +14,7 @@ Implemented commands:
 - `devflow logs <task>`
 - `devflow instances`
 - `devflow doctor`
+- `devflow deps`
 - `devflow tui`
 - `devflow graph list`
 - `devflow graph show <target>`
@@ -51,6 +52,10 @@ For watch-cycle events:
 `restart` supports rerunning non-service task slices from the CLI. For service tasks, if the instance was started with a detached run, `restart` stops the detached supervisor and relaunches the last detached target.
 
 `stop` terminates persisted service PIDs for a selected task or, when used with `--all`, terminates the detached supervisor for the instance and updates persisted node state to `stopped`.
+
+`deps status` reports adapter-defined command dependencies, whether they are already installed, and whether a platform install script is available.
+
+`deps install` runs adapter-defined install scripts only for missing dependencies and then re-checks that each installed command is now available on `PATH`.
 
 `status` now reports instance metadata in both text and JSON forms, including:
 - worktree

@@ -162,6 +162,21 @@ Last updated: 2026-04-13
 - Added a real prompt CLI fixture at `internal/testutil/promptcli` plus test coverage for:
   - process-level prompt detection and answer forwarding
   - engine-level prompt events and instance answer-file integration
+- Project-scoped dependency installation implemented:
+  - adapters can define command dependencies plus platform-specific install scripts
+  - `devflow deps status` reports installed vs missing vs installable dependencies
+  - `devflow deps install` installs only missing commands and re-checks that they are now on `PATH`
+  - `doctor` now reports missing adapter dependencies
+- The embedded-web-app adapter now declares real dependency requirements for:
+  - `go`
+  - `npm`
+  - `sqlc`
+  - `docker`
+- Added dependency coverage for:
+  - installed vs missing detection
+  - platform-script installation of a fake command
+  - install verification failure when the command is still missing
+  - CLI `deps status/install` JSON behavior
 
 ## In Progress
 

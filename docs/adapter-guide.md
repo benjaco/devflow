@@ -9,6 +9,37 @@ An adapter defines:
 
 Tasks should stay semantic. The adapter decides which files, directories, env vars, and custom probes contribute to each fingerprint.
 
+## Dependency Installation
+
+Adapters can expose required tool commands through `DependencyProvider`.
+
+Example:
+
+```go
+func (myProject) Dependencies() []project.Dependency {
+    return []project.Dependency{
+        {
+            Name:    "sqlc",
+            Command: "sqlc",
+            Install: map[string]project.InstallScript{
+                "darwin": {Script: "brew install sqlc"},
+                "linux":  {Script: "go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest"},
+            },
+        },
+    }
+}
+```
+
+That enables:
+- `devflow deps status --project my-project`
+- `devflow deps install --project my-project`
+- richer `doctor` output for missing prerequisites
+
+Rules:
+- `Command` should be the binary name Devflow can verify on `PATH`
+- install scripts should be platform-specific and idempotent when practical
+- installers should leave the command actually available on `PATH`, because Devflow re-checks the command after install
+
 ## Dotenv Loading
 
 Adapters can now load `.env` files directly through `pkg/project`.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ import (
 
 type failCLIProject struct{}
 type taskTargetCLIProject struct{}
+type depsCLIProject struct{}
 
 func (failCLIProject) Name() string { return "cli-fail-project" }
 
@@ -76,9 +78,45 @@ func (taskTargetCLIProject) Targets() []project.Target {
 	return []project.Target{{Name: "build", RootTasks: []string{"gen"}}}
 }
 
+func (depsCLIProject) Name() string { return "cli-deps-project" }
+
+func (depsCLIProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "cli-deps"}, nil
+}
+
+func (depsCLIProject) Tasks() []project.Task { return nil }
+
+func (depsCLIProject) Targets() []project.Target {
+	return []project.Target{{Name: "noop", RootTasks: nil}}
+}
+
+func (depsCLIProject) Dependencies() []project.Dependency {
+	marker := filepath.Join(os.TempDir(), "devflow-cli-deps-installed.txt")
+	bin := filepath.Join(os.TempDir(), "devflow-cli-missing-tool")
+	installer := strings.Join([]string{
+		"echo installed > " + shellQuote(marker),
+		"cat > " + shellQuote(bin) + " <<'EOF'",
+		"#!/bin/sh",
+		"exit 0",
+		"EOF",
+		"chmod +x " + shellQuote(bin),
+	}, "\n")
+	return []project.Dependency{
+		{Name: "shell", Command: "sh"},
+		{
+			Name:    "missing-tool",
+			Command: "devflow-cli-missing-tool",
+			Install: map[string]project.InstallScript{runtime.GOOS: {Script: installer}},
+		},
+	}
+}
+
 func init() {
 	project.Register(failCLIProject{})
 	project.Register(taskTargetCLIProject{})
+	project.Register(depsCLIProject{})
 }
 
 func TestGraphListJSON(t *testing.T) {
@@ -116,6 +154,41 @@ func TestRunAcceptsTaskNameAsSyntheticTarget(t *testing.T) {
 	if string(data) != "ok" {
 		t.Fatalf("unexpected generated data %q", string(data))
 	}
+}
+
+func TestDepsStatusAndInstallJSON(t *testing.T) {
+	marker := filepath.Join(os.TempDir(), "devflow-cli-deps-installed.txt")
+	_ = os.Remove(marker)
+	bin := filepath.Join(os.TempDir(), "devflow-cli-missing-tool")
+	_ = os.Remove(bin)
+	t.Setenv("PATH", os.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	statusOut := &bytes.Buffer{}
+	app := &App{Stdout: statusOut, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"deps", "status", "--json", "--project", "cli-deps-project", "--worktree", t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	var statusPayload map[string]any
+	if err := json.Unmarshal(statusOut.Bytes(), &statusPayload); err != nil {
+		t.Fatal(err)
+	}
+	deps, ok := statusPayload["dependencies"].([]any)
+	if !ok || len(deps) != 2 {
+		t.Fatalf("unexpected deps payload: %+v", statusPayload)
+	}
+
+	installOut := &bytes.Buffer{}
+	app = &App{Stdout: installOut, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"deps", "install", "--json", "--project", "cli-deps-project", "--worktree", t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected install marker to be written: %v", err)
+	}
+}
+
+func shellQuote(value string) string {
+	return "'" + value + "'"
 }
 
 func TestDefaultLaunchPlanStartsDetachedForFreshDetectedWorktree(t *testing.T) {

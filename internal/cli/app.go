@@ -59,6 +59,8 @@ func (a *App) Run(args []string) error {
 		return a.instancesCmd(args[1:])
 	case "doctor":
 		return a.doctorCmd(args[1:])
+	case "deps":
+		return a.depsCmd(args[1:])
 	case "graph":
 		return a.graphCmd(args[1:])
 	case "watch":
@@ -127,7 +129,7 @@ func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
 }
 
 func (a *App) usage() error {
-	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|restart|stop|cache|status|logs|instances|doctor|graph|tui>")
+	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|restart|stop|cache|status|logs|instances|doctor|deps|graph|tui>")
 	return flag.ErrHelp
 }
 
@@ -963,6 +965,27 @@ func (a *App) doctorCmd(args []string) error {
 			"tasks: " + fmt.Sprintf("%d", len(eng.Graph().Tasks)),
 		},
 	}
+	deps := project.DependenciesFor(p)
+	if len(deps) > 0 {
+		statuses := project.CheckDependencies(deps)
+		missing := make([]string, 0)
+		for _, status := range statuses {
+			if status.Installed {
+				continue
+			}
+			result.ChecksPassed = false
+			if status.Installable {
+				missing = append(missing, status.Name+" (installable)")
+			} else {
+				missing = append(missing, status.Name)
+			}
+		}
+		if len(missing) == 0 {
+			result.Checks = append(result.Checks, fmt.Sprintf("dependencies: ok (%d)", len(statuses)))
+		} else {
+			result.Warnings = append(result.Warnings, "missing dependencies: "+strings.Join(missing, ", "))
+		}
+	}
 	if *jsonOut {
 		return writeJSON(a.Stdout, result)
 	}
@@ -970,6 +993,108 @@ func (a *App) doctorCmd(args []string) error {
 		_, _ = fmt.Fprintln(a.Stdout, check)
 	}
 	return nil
+}
+
+func (a *App) depsCmd(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: devflow deps <status|install>")
+	}
+	switch args[0] {
+	case "status":
+		return a.depsStatusCmd(args[1:])
+	case "install":
+		return a.depsInstallCmd(args[1:])
+	default:
+		return fmt.Errorf("usage: devflow deps <status|install>")
+	}
+}
+
+func (a *App) depsStatusCmd(args []string) error {
+	fs := flag.NewFlagSet("deps status", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	jsonOut := fs.Bool("json", false, "")
+	projectName := fs.String("project", defaultProject(), "")
+	worktree := fs.String("worktree", "", "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	root, err := resolveWorktree(*worktree)
+	if err != nil {
+		return err
+	}
+	p, err := project.Lookup(*projectName)
+	if err != nil {
+		return err
+	}
+	statuses := project.CheckDependencies(project.DependenciesFor(p))
+	payload := map[string]any{
+		"worktree":     root,
+		"project":      p.Name(),
+		"dependencies": statuses,
+	}
+	if *jsonOut {
+		return writeJSON(a.Stdout, payload)
+	}
+	for _, status := range statuses {
+		state := "missing"
+		if status.Installed {
+			state = "installed"
+		}
+		installable := ""
+		if !status.Installed && status.Installable {
+			installable = " installable"
+		}
+		_, _ = fmt.Fprintf(a.Stdout, "%-16s %-10s %s%s\n", status.Name, state, status.Command, installable)
+	}
+	return nil
+}
+
+func (a *App) depsInstallCmd(args []string) error {
+	fs := flag.NewFlagSet("deps install", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	jsonOut := fs.Bool("json", false, "")
+	projectName := fs.String("project", defaultProject(), "")
+	worktree := fs.String("worktree", "", "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	root, err := resolveWorktree(*worktree)
+	if err != nil {
+		return err
+	}
+	p, err := project.Lookup(*projectName)
+	if err != nil {
+		return err
+	}
+	result, installErr := project.InstallMissingDependencies(context.Background(), root, project.DependenciesFor(p), func(stream, line string) {
+		if *jsonOut {
+			return
+		}
+		_, _ = fmt.Fprintf(a.Stdout, "%s: %s\n", stream, line)
+	})
+	payload := map[string]any{
+		"worktree":       root,
+		"project":        p.Name(),
+		"installed":      result.Installed,
+		"alreadyPresent": result.AlreadyPresent,
+		"missingInstall": result.MissingInstall,
+	}
+	if *jsonOut {
+		if err := writeJSON(a.Stdout, payload); err != nil {
+			return err
+		}
+		return installErr
+	}
+	if len(result.Installed) > 0 {
+		_, _ = fmt.Fprintf(a.Stdout, "installed: %s\n", strings.Join(result.Installed, ", "))
+	}
+	if len(result.AlreadyPresent) > 0 {
+		_, _ = fmt.Fprintf(a.Stdout, "already present: %s\n", strings.Join(result.AlreadyPresent, ", "))
+	}
+	if len(result.MissingInstall) > 0 {
+		_, _ = fmt.Fprintf(a.Stdout, "missing install scripts: %s\n", strings.Join(result.MissingInstall, ", "))
+	}
+	return installErr
 }
 
 func (a *App) graphCmd(args []string) error {

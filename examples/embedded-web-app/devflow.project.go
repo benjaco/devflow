@@ -32,6 +32,51 @@ func (embeddedWebAppProject) DefaultTarget() string {
 	return "up"
 }
 
+func (embeddedWebAppProject) Dependencies() []project.Dependency {
+	return []project.Dependency{
+		{
+			Name:        "go",
+			Command:     "go",
+			Description: "Go toolchain for building server binaries and helper tools",
+			Install: map[string]project.InstallScript{
+				"darwin":  {Script: "brew install go"},
+				"linux":   {Script: "if command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y golang-go; else echo 'unsupported linux package manager for Go'; exit 1; fi"},
+				"windows": {Shell: "powershell", Script: "choco install golang -y"},
+			},
+		},
+		{
+			Name:        "npm",
+			Command:     "npm",
+			Description: "Node.js package manager for embedded frontend builds",
+			Install: map[string]project.InstallScript{
+				"darwin":  {Script: "brew install node"},
+				"linux":   {Script: "if command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y nodejs npm; else echo 'unsupported linux package manager for Node.js'; exit 1; fi"},
+				"windows": {Shell: "powershell", Script: "choco install nodejs -y"},
+			},
+		},
+		{
+			Name:        "sqlc",
+			Command:     "sqlc",
+			Description: "sqlc code generator for storage bindings",
+			Install: map[string]project.InstallScript{
+				"darwin":  {Script: "brew install sqlc"},
+				"linux":   {Script: "if command -v go >/dev/null 2>&1; then GOBIN=${HOME}/.local/bin go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest; else echo 'Go is required to install sqlc on linux'; exit 1; fi"},
+				"windows": {Shell: "powershell", Script: "if (Get-Command go -ErrorAction SilentlyContinue) { go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest } else { Write-Error 'Go is required to install sqlc on Windows'; exit 1 }"},
+			},
+		},
+		{
+			Name:        "docker",
+			Command:     "docker",
+			Description: "Docker runtime for dedicated Postgres containers",
+			Install: map[string]project.InstallScript{
+				"darwin":  {Script: "brew install --cask docker"},
+				"linux":   {Script: "if command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y docker.io; else echo 'unsupported linux package manager for Docker'; exit 1; fi"},
+				"windows": {Shell: "powershell", Script: "choco install docker-desktop -y"},
+			},
+		},
+	}
+}
+
 func (embeddedWebAppProject) DetectWorktree(worktree string) bool {
 	required := []string{
 		"sqlc.yaml",
@@ -125,12 +170,7 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 			Signature:   "embedded-web-app-check-build-tools-v1",
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				_ = ctx
-				for _, cmd := range []string{"go", "npm", "sqlc"} {
-					if err := project.EnsureCommandExists(cmd); err != nil {
-						return err
-					}
-				}
-				return nil
+				return project.EnsureDependencies(embeddedWebAppProject{}.Dependencies(), "go", "npm", "sqlc")
 			},
 		},
 		{
@@ -140,7 +180,7 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 			Signature:   "embedded-web-app-check-db-tools-v1",
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				_ = ctx
-				if err := project.EnsureCommandExists("docker"); err != nil {
+				if err := project.EnsureDependencies(embeddedWebAppProject{}.Dependencies(), "docker"); err != nil {
 					return err
 				}
 				cmd := exec.Command("docker", "info")

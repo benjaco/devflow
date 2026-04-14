@@ -24,6 +24,7 @@ Early development. The current implementation focuses on the generic core:
 - built-in binary-tool helpers for cacheable helper-binary builds and later execution
 - Docker-backed database runtime helpers for dedicated per-instance Postgres containers and snapshots
 - dotenv loading so adapter instances can start from `.env` and then apply devflow-owned overrides
+- project-scoped dependency checks and platform-specific dependency installers
 - detached `run/watch --detach` background supervisor launching
 - `tui` for task selection and live log inspection
 - worktree instances and shared port leasing
@@ -59,6 +60,11 @@ Bare `devflow` is now a local launcher:
 - it detects the current worktree project
 - it starts the project's default target detached if nothing is already running
 - it opens the TUI for that worktree
+
+Dependency management is also built in:
+- `devflow deps status --project <name>` checks the adapter's required tool commands
+- `devflow deps install --project <name>` runs platform-specific install scripts for missing tools
+- `devflow doctor --project <name>` now reports missing adapter dependencies
 
 ## Design Goals
 
