@@ -13,15 +13,16 @@ const (
 type NodeState string
 
 const (
-	StatePending NodeState = "pending"
-	StateReady   NodeState = "ready"
-	StateRunning NodeState = "running"
-	StateCached  NodeState = "cached"
-	StateDone    NodeState = "done"
-	StateFailed  NodeState = "failed"
-	StateStopped NodeState = "stopped"
-	StateDirty   NodeState = "dirty"
-	StateSkipped NodeState = "skipped"
+	StatePending  NodeState = "pending"
+	StateReady    NodeState = "ready"
+	StateRunning  NodeState = "running"
+	StateCached   NodeState = "cached"
+	StateDone     NodeState = "done"
+	StateFailed   NodeState = "failed"
+	StateCanceled NodeState = "canceled"
+	StateStopped  NodeState = "stopped"
+	StateDirty    NodeState = "dirty"
+	StateSkipped  NodeState = "skipped"
 )
 
 type DBInstance struct {

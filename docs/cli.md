@@ -14,6 +14,7 @@ Implemented commands:
 - `devflow logs <task>`
 - `devflow instances`
 - `devflow doctor`
+- `devflow deps`
 - `devflow tui`
 - `devflow graph list`
 - `devflow graph show <target>`
@@ -23,11 +24,15 @@ All implemented commands support `--json`.
 
 Running bare `devflow` now acts as the default operator entry path:
 - it uses the repo-local launcher script
-- rebuilds the local binary when the `devflow` source tree is newer than `.devflow/bin/devflow`
-- auto-detects the current worktree project when possible
+- rebuilds the bootstrap binary when the core `devflow` source tree is newer than the repo-local `.devflow/bin/devflow`
+- requires `./devflow.project.go` in the selected worktree
+- compiles a worktree-local binary into `<worktree>/.devflow/bin/devflow-local` when the project file or core sources are newer
+- `exec`s into that worktree-local binary for all normal commands
 - chooses the project's preferred default target (`up`, `fullstack`, or the adapter-defined default)
 - if no detached supervisor is live for the current worktree, starts that target detached
 - opens the TUI for the current worktree
+
+There is currently no built-in adapter fallback. Missing `devflow.project.go` is a hard error.
 
 `run` provisions an instance, executes the target closure, restores cacheable one-shot tasks when possible, and keeps supervised services alive until interrupted.
 
@@ -52,6 +57,10 @@ For watch-cycle events:
 
 `stop` terminates persisted service PIDs for a selected task or, when used with `--all`, terminates the detached supervisor for the instance and updates persisted node state to `stopped`.
 
+`deps status` reports adapter-defined command dependencies, whether they are already installed, and whether a platform install script is available.
+
+`deps install` runs adapter-defined install scripts only for missing dependencies and then re-checks that each installed command is now available on `PATH`.
+
 `status` now reports instance metadata in both text and JSON forms, including:
 - worktree
 - target and mode
@@ -60,7 +69,13 @@ For watch-cycle events:
 - derived local URLs such as `backend`
 - detached supervisor PID/liveness/log path when present
 
+Task states now distinguish:
+- `failed`: the task itself failed
+- `canceled`: the task was interrupted because another task failed or the run was canceled
+
 `logs` supports task logs as before and also accepts `supervisor` to read the detached supervisor log directly.
+
+Task log files now represent the current run attempt for that task. They are truncated when a task starts again, so older successful output does not stay mixed into a newer failed or canceled attempt.
 
 `tui` now opens a live operator console for an existing instance. The first slice includes:
 - instance/runtime header
@@ -71,7 +86,10 @@ For watch-cycle events:
 - running tasks pinned first and pending work directly below them
 - `i` on the selected task invalidates the selected downstream cacheable slice and relaunches the current target
 - `t` on the selected task updates the detached run target to that task and relaunches the instance on the selected task closure
+- popup confirm and text prompts for interactive tasks that emit `interaction_requested` events
 - primary live refresh from the persisted detached event stream at `.devflow/state/instances/<instance-id>/events.jsonl`
+
+Interactive prompt answers are written back through the instance interaction directory, so detached runs can still receive operator input from the TUI.
 
 Implemented `tui` flags include:
 - `--worktree`

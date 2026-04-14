@@ -114,7 +114,7 @@ func (workspaceProject) Tasks() []project.Task {
 			Deps:        []string{"warmup_worker_cache"},
 			Inputs:      project.Inputs{Files: []string{"db/schema.prisma", "db/bootstrap.sql"}, Dirs: []string{"db/migrations"}, Env: []string{"DEVFLOW_INSTANCE_ID", "DATABASE_URL"}},
 			Outputs:     project.Outputs{Files: []string{".devflow/web-worker-workspace/db/prepare.json"}},
-			Description: "Restore nearest DB snapshot or reset to a fresh dedicated volume",
+			Description: "Restore the nearest DB snapshot or recreate from the configured base source",
 			Signature:   "web-worker-prepare-db-base-v1",
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				recordTrace(rt, "prepare_db_base")
@@ -122,28 +122,45 @@ func (workspaceProject) Tasks() []project.Task {
 				if err != nil {
 					return err
 				}
-				manager := database.New()
-				var restored *database.PrismaRestoreResult
+				var prepared *database.PrismaBaseResult
 				if useFakeDB() {
 					plan, err := database.PlanPrismaRestore(rt.Instance.DB.SnapshotRoot, state)
 					if err != nil {
 						return err
 					}
 					if plan.SnapshotKey != "" {
-						restored = &database.PrismaRestoreResult{Plan: plan, Metadata: plan.Snapshot}
+						prepared = &database.PrismaBaseResult{
+							Restored: &database.PrismaRestoreResult{Plan: plan, Metadata: plan.Snapshot},
+						}
+					} else {
+						prepared = &database.PrismaBaseResult{Recreated: true}
 					}
 				} else {
-					restored, err = manager.RestoreNearestPrismaSnapshot(ctx, rt.Instance.DB, state)
+					prepared, err = database.New().PreparePrismaBase(ctx, rt.Instance.DB, state, nil, database.PrepareOptions{
+						Worktree: rt.Worktree,
+						Env:      cloneEnv(rt.Env),
+						LogPath:  rt.LogPath,
+						OnLine: func(stream, line string) {
+							if rt.EventFn == nil {
+								return
+							}
+							rt.EventFn(api.Event{
+								TS:         process.NowRFC3339Nano(),
+								Type:       api.EventLogLine,
+								InstanceID: rt.Instance.ID,
+								Worktree:   rt.Worktree,
+								Task:       rt.TaskName,
+								Mode:       rt.Mode,
+								Stream:     stream,
+								Line:       line,
+							})
+						},
+					})
 					if err != nil {
 						return err
 					}
-					if restored == nil {
-						if err := manager.DestroyRuntime(ctx, rt.Instance.DB, true); err != nil {
-							return err
-						}
-					}
 				}
-				return writeJSONFile(rt, ".devflow/web-worker-workspace/db/prepare.json", buildPreparePayload(rt, state, restored))
+				return writeJSONFile(rt, ".devflow/web-worker-workspace/db/prepare.json", buildPreparePayload(rt, state, prepared))
 			},
 		},
 		{
@@ -545,29 +562,40 @@ func SeedWorktree(dst string) error {
 }
 
 type prepareState struct {
-	SnapshotKey  string
-	PrefixLength int
-	Restored     bool
-	ExactMatch   bool
-	State        database.PrismaState
+	SnapshotKey   string
+	PrefixLength  int
+	Restored      bool
+	ExactMatch    bool
+	Recreated     bool
+	SourceApplied bool
+	SourcePolicy  string
+	State         database.PrismaState
 }
 
-func buildPreparePayload(rt *project.Runtime, state *database.PrismaState, restored *database.PrismaRestoreResult) map[string]any {
+func buildPreparePayload(rt *project.Runtime, state *database.PrismaState, prepared *database.PrismaBaseResult) map[string]any {
 	payload := map[string]any{
 		"database":      rt.Instance.DB.Name,
 		"snapshotKey":   "",
 		"prefixLength":  0,
 		"restored":      false,
 		"exactMatch":    false,
+		"recreated":     false,
+		"sourceApplied": false,
+		"sourcePolicy":  "",
 		"state":         state,
 		"containerName": rt.Instance.DB.ContainerName,
 		"volumeName":    rt.Instance.DB.VolumeName,
 	}
-	if restored != nil {
-		payload["snapshotKey"] = restored.Plan.SnapshotKey
-		payload["prefixLength"] = restored.Plan.PrefixLength
-		payload["restored"] = restored.Plan.SnapshotKey != ""
-		payload["exactMatch"] = restored.Plan.ExactMatch
+	if prepared != nil {
+		payload["recreated"] = prepared.Recreated
+		payload["sourceApplied"] = prepared.SourceApplied
+		payload["sourcePolicy"] = prepared.SourcePolicy
+		if prepared.Restored != nil {
+			payload["snapshotKey"] = prepared.Restored.Plan.SnapshotKey
+			payload["prefixLength"] = prepared.Restored.Plan.PrefixLength
+			payload["restored"] = prepared.Restored.Plan.SnapshotKey != ""
+			payload["exactMatch"] = prepared.Restored.Plan.ExactMatch
+		}
 	}
 	return payload
 }
@@ -586,11 +614,14 @@ func loadPrepareState(rt *project.Runtime) (*prepareState, error) {
 		return nil, err
 	}
 	return &prepareState{
-		SnapshotKey:  stringValue(values["snapshotKey"]),
-		PrefixLength: intValue(values["prefixLength"]),
-		Restored:     boolValue(values["restored"]),
-		ExactMatch:   boolValue(values["exactMatch"]),
-		State:        prismaState,
+		SnapshotKey:   stringValue(values["snapshotKey"]),
+		PrefixLength:  intValue(values["prefixLength"]),
+		Restored:      boolValue(values["restored"]),
+		ExactMatch:    boolValue(values["exactMatch"]),
+		Recreated:     boolValue(values["recreated"]),
+		SourceApplied: boolValue(values["sourceApplied"]),
+		SourcePolicy:  stringValue(values["sourcePolicy"]),
+		State:         prismaState,
 	}, nil
 }
 

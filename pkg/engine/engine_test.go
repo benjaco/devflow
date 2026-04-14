@@ -2,9 +2,13 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -217,6 +221,177 @@ func TestRunDoesNotStallWhenGroupTaskIsLastNode(t *testing.T) {
 	if !outcome.Result.Success {
 		t.Fatalf("expected success, got %+v", outcome.Result)
 	}
+}
+
+type cancelSiblingProject struct{}
+
+func (cancelSiblingProject) Name() string { return "cancel-sibling-project" }
+
+func (cancelSiblingProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "cancel-sibling"}, nil
+}
+
+func (cancelSiblingProject) Targets() []project.Target {
+	return []project.Target{{Name: "build", RootTasks: []string{"join"}}}
+}
+
+func (cancelSiblingProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name: "fail_fast",
+			Kind: project.KindOnce,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				return fmt.Errorf("boom")
+			},
+		},
+		{
+			Name: "slow",
+			Kind: project.KindOnce,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				return rt.RunCmdSpec(ctx, process.CommandSpec{
+					Name: "sh",
+					Args: []string{"-c", "sleep 5"},
+					Dir:  rt.Worktree,
+				})
+			},
+		},
+		{
+			Name: "join",
+			Kind: project.KindOnce,
+			Deps: []string{"fail_fast", "slow"},
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				return nil
+			},
+		},
+	}
+}
+
+func TestCanceledSiblingUsesCanceledState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	eng, err := New(cancelSiblingProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI, MaxParallel: 2})
+	if err == nil {
+		t.Fatal("expected run to fail")
+	}
+	if out == nil {
+		t.Fatal("expected partial outcome")
+	}
+	status, err := instance.LoadStatus(worktree, out.Result.InstanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := status.Nodes["fail_fast"].State; got != api.StateFailed {
+		t.Fatalf("expected fail_fast to be failed, got %q", got)
+	}
+	if got := status.Nodes["slow"].State; got != api.StateCanceled {
+		t.Fatalf("expected slow to be canceled, got %q", got)
+	}
+	if got := status.Nodes["slow"].LastError; got != "canceled" {
+		t.Fatalf("expected slow last error to be canceled, got %q", got)
+	}
+}
+
+type interactiveProject struct{}
+
+func (interactiveProject) Name() string { return "interactive-project" }
+
+func (interactiveProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "interactive"}, nil
+}
+
+func (interactiveProject) Targets() []project.Target {
+	return []project.Target{{Name: "build", RootTasks: []string{"prompt"}}}
+}
+
+func (interactiveProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name: "prompt",
+			Kind: project.KindOnce,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				return rt.RunCmdSpec(ctx, process.CommandSpec{
+					Name:        buildPromptCLIForEngine(tRepoRoot()),
+					Dir:         rt.Worktree,
+					Env:         rt.Env,
+					Interactive: true,
+					Prompts: []process.PromptSpec{
+						{Pattern: "Continue? [y/N]: ", Prompt: "Continue?", Kind: process.PromptConfirm},
+						{Pattern: "Name: ", Prompt: "Name", Kind: process.PromptText},
+					},
+				})
+			},
+		},
+	}
+}
+
+func TestRunInteractiveTaskAnswersViaInstanceFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	eng, err := New(interactiveProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := eng.SubscribeEvents()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for evt := range events {
+			if evt.Type != api.EventInteractionReq {
+				continue
+			}
+			answer := "y"
+			if evt.PromptKind == string(process.PromptText) {
+				answer = "Ada"
+			}
+			if err := instance.WriteInteractionAnswer(worktree, evt.InstanceID, evt.PromptID, answer); err != nil {
+				t.Errorf("write interaction answer: %v", err)
+				return
+			}
+		}
+	}()
+	outcome, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.Result.Success {
+		t.Fatalf("expected success, got %+v", outcome.Result)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		lines, err := os.ReadFile(instance.LogPath(worktree, outcome.Instance.ID, "prompt"))
+		return err == nil && string(lines) != "" && strings.Contains(string(lines), "Hello, Ada")
+	})
+}
+
+func repoRoot() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("failed to resolve repo root")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+}
+
+func buildPromptCLIForEngine(root string) string {
+	bin := filepath.Join(os.TempDir(), "devflow-promptcli-test")
+	cmd := exec.Command("go", "build", "-o", bin, "./internal/testutil/promptcli")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		panic("build prompt cli: " + err.Error() + "\n" + string(out))
+	}
+	return bin
+}
+
+func tRepoRoot() string {
+	return repoRoot()
 }
 
 type eventProject struct{}

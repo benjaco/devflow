@@ -98,6 +98,7 @@ type Runtime struct {
 	OnService  func(task string, handle *process.Handle)
 	onTaskDone func()
 	DepKeys    []string
+	OnPrompt   func(task string, req process.PromptRequest) (process.PromptResponse, error)
 }
 
 func (rt *Runtime) Abs(path string) string {
@@ -143,6 +144,11 @@ func (rt *Runtime) RunCmdSpec(ctx context.Context, spec process.CommandSpec) err
 			Line:       line,
 		})
 	}
+	if spec.OnPrompt == nil && rt.OnPrompt != nil {
+		spec.OnPrompt = func(req process.PromptRequest) (process.PromptResponse, error) {
+			return rt.OnPrompt(rt.TaskName, req)
+		}
+	}
 
 	_, err := process.Run(ctx, spec)
 	return err
@@ -179,6 +185,11 @@ func (rt *Runtime) StartServiceSpec(ctx context.Context, spec process.CommandSpe
 			Stream:     stream,
 			Line:       line,
 		})
+	}
+	if spec.OnPrompt == nil && rt.OnPrompt != nil {
+		spec.OnPrompt = func(req process.PromptRequest) (process.PromptResponse, error) {
+			return rt.OnPrompt(rt.TaskName, req)
+		}
 	}
 
 	handle, err := process.Start(ctx, spec)

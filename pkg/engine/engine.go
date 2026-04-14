@@ -332,6 +332,9 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 		OnService: func(task string, handle *process.Handle) {
 			state.registerService(task, handle)
 		},
+		OnPrompt: func(task string, prompt process.PromptRequest) (process.PromptResponse, error) {
+			return e.waitForPromptAnswer(ctx, req, inst.ID, task, prompt)
+		},
 	}
 	return inst, state, baseRT, nil
 }
@@ -450,7 +453,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 	if task.Cache {
 		key, err := e.taskKey(ctx, rt, task, depKeys)
 		if err != nil {
-			state.setNodeState(task.Name, api.StateFailed, "", err.Error(), 0)
+			state.setErrorState(task.Name, ctx, "", err, 0)
 			return taskResult{name: task.Name, err: err}
 		}
 		state.setLastRunKey(task.Name, key)
@@ -479,11 +482,11 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			CacheKey:   key,
 		})
 		if err := runTask(ctx, task, rt); err != nil {
-			state.setNodeState(task.Name, api.StateFailed, key, err.Error(), 0)
+			state.setErrorState(task.Name, ctx, key, err, 0)
 			return taskResult{name: task.Name, key: key, err: err}
 		}
 		if _, err := e.cache.Snapshot(rt.Worktree, task, key); err != nil {
-			state.setNodeState(task.Name, api.StateFailed, key, err.Error(), 0)
+			state.setErrorState(task.Name, ctx, key, err, 0)
 			return taskResult{name: task.Name, key: key, err: err}
 		}
 		state.setNodeState(task.Name, api.StateDone, key, "", 0)
@@ -491,20 +494,20 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 	}
 
 	if err := runTask(ctx, task, rt); err != nil {
-		state.setNodeState(task.Name, api.StateFailed, "", err.Error(), 0)
+		state.setErrorState(task.Name, ctx, "", err, 0)
 		return taskResult{name: task.Name, err: err}
 	}
 	if task.Kind == project.KindService {
 		handle, ok := state.serviceHandle(task.Name)
 		if !ok {
 			err := fmt.Errorf("service task %q returned without starting a service", task.Name)
-			state.setNodeState(task.Name, api.StateFailed, "", err.Error(), 0)
+			state.setErrorState(task.Name, ctx, "", err, 0)
 			return taskResult{name: task.Name, err: err}
 		}
 		if err := e.awaitServiceReady(ctx, rt, task, handle); err != nil {
 			_ = handle.Stop()
 			state.removeService(task.Name)
-			state.setNodeState(task.Name, api.StateFailed, "", err.Error(), 0)
+			state.setErrorState(task.Name, ctx, "", err, 0)
 			return taskResult{name: task.Name, err: err}
 		}
 		state.setNodeState(task.Name, api.StateRunning, "", "", handle.PID())
@@ -558,6 +561,63 @@ func runTask(ctx context.Context, task project.Task, rt *project.Runtime) error 
 		return nil
 	}
 	return task.Run(ctx, rt)
+}
+
+func (e *Engine) waitForPromptAnswer(ctx context.Context, req Request, instanceID, task string, prompt process.PromptRequest) (process.PromptResponse, error) {
+	e.publish(api.Event{
+		TS:         process.NowRFC3339Nano(),
+		Type:       api.EventInteractionReq,
+		InstanceID: instanceID,
+		Worktree:   req.Worktree,
+		Target:     req.Target,
+		Task:       task,
+		Mode:       req.Mode,
+		PromptID:   prompt.ID,
+		PromptKind: string(prompt.Kind),
+		Prompt:     prompt.Prompt,
+	})
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			e.publish(api.Event{
+				TS:         process.NowRFC3339Nano(),
+				Type:       api.EventInteractionStop,
+				InstanceID: instanceID,
+				Worktree:   req.Worktree,
+				Target:     req.Target,
+				Task:       task,
+				Mode:       req.Mode,
+				PromptID:   prompt.ID,
+				PromptKind: string(prompt.Kind),
+				Prompt:     prompt.Prompt,
+				Error:      ctx.Err().Error(),
+			})
+			return process.PromptResponse{}, ctx.Err()
+		case <-ticker.C:
+			value, ok, err := instance.ConsumeInteractionAnswer(req.Worktree, instanceID, prompt.ID)
+			if err != nil {
+				return process.PromptResponse{}, err
+			}
+			if !ok {
+				continue
+			}
+			e.publish(api.Event{
+				TS:         process.NowRFC3339Nano(),
+				Type:       api.EventInteractionAck,
+				InstanceID: instanceID,
+				Worktree:   req.Worktree,
+				Target:     req.Target,
+				Task:       task,
+				Mode:       req.Mode,
+				PromptID:   prompt.ID,
+				PromptKind: string(prompt.Kind),
+				Prompt:     prompt.Prompt,
+			})
+			return process.PromptResponse{Value: value}, nil
+		}
+	}
 }
 
 func (e *Engine) taskKey(ctx context.Context, rt *project.Runtime, task project.Task, depKeys []string) (string, error) {
@@ -635,8 +695,8 @@ func (e *Engine) waitForServices(parent context.Context, req Request, inst *api.
 		node := status[ex.task]
 		prev := node.State
 		if ex.err != nil {
-			node.State = api.StateFailed
-			node.LastError = ex.err.Error()
+			node.State = classifyTaskError(ctx, ex.err)
+			node.LastError = displayTaskError(ctx, ex.err)
 		} else {
 			node.State = api.StateStopped
 		}
@@ -742,6 +802,30 @@ func (s *runState) setNodeState(name string, state api.NodeState, lastRunKey, la
 			Error:         node.LastError,
 		})
 	}
+}
+
+func (s *runState) setErrorState(name string, ctx context.Context, lastRunKey string, err error, pid int) {
+	s.setNodeState(name, classifyTaskError(ctx, err), lastRunKey, displayTaskError(ctx, err), pid)
+}
+
+func classifyTaskError(ctx context.Context, err error) api.NodeState {
+	if err == nil {
+		return api.StateDone
+	}
+	if errors.Is(err, context.Canceled) || (ctx != nil && errors.Is(ctx.Err(), context.Canceled)) {
+		return api.StateCanceled
+	}
+	return api.StateFailed
+}
+
+func displayTaskError(ctx context.Context, err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.Canceled) || (ctx != nil && errors.Is(ctx.Err(), context.Canceled)) {
+		return "canceled"
+	}
+	return err.Error()
 }
 
 func (s *runState) setLastRunKey(name, key string) {

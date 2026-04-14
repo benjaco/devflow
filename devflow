@@ -30,4 +30,6 @@ if [[ "$needs_build" -eq 1 ]]; then
   (cd "$ROOT" && go build -o "$BIN" ./cmd/devflow)
 fi
 
+export DEVFLOW_BOOTSTRAP_ENTRY=1
+export DEVFLOW_BOOTSTRAP_ROOT="$ROOT"
 exec "$BIN" "$@"

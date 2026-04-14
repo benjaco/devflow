@@ -21,6 +21,7 @@ import (
 	"devflow/pkg/cache"
 	"devflow/pkg/graph"
 	"devflow/pkg/instance"
+	"devflow/pkg/process"
 	"devflow/pkg/project"
 	"devflow/pkg/watch"
 )
@@ -45,6 +46,7 @@ type dashboard struct {
 	instanceID        string
 	eventsPath        string
 	app               *tview.Application
+	pages             *tview.Pages
 	header            *tview.TextView
 	tasks             *tview.Table
 	logs              *tview.TextView
@@ -55,6 +57,7 @@ type dashboard struct {
 	statusMessage     string
 	busy              bool
 	eventOffset       int64
+	activePromptID    string
 }
 
 const (
@@ -114,6 +117,27 @@ func newDashboard(root, instanceID string) *dashboard {
 		SetWrap(false).
 		SetBorder(true).
 		SetTitle(" Logs ")
+	d.logs.SetScrollable(true)
+
+	d.tasks.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		switch action {
+		case tview.MouseScrollUp:
+			d.scrollLogs(-3)
+			return tview.MouseConsumed, nil
+		case tview.MouseScrollDown:
+			d.scrollLogs(3)
+			return tview.MouseConsumed, nil
+		default:
+			return action, event
+		}
+	})
+	d.logs.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		switch action {
+		case tview.MouseScrollUp, tview.MouseScrollDown, tview.MouseLeftClick:
+			d.app.SetFocus(d.logs)
+		}
+		return action, event
+	})
 
 	d.footer.
 		SetDynamicColors(true).
@@ -126,11 +150,14 @@ func newDashboard(root, instanceID string) *dashboard {
 		AddItem(d.tasks, 0, 2, true).
 		AddItem(d.logs, 0, 3, false).
 		AddItem(d.footer, 3, 0, false)
+	d.pages = tview.NewPages().
+		AddPage("main", layout, true, true)
 
 	d.setStatus("[green]ready")
 
-	d.app.SetRoot(layout, true)
-	d.app.SetFocus(d.tasks)
+	d.app.EnableMouse(true)
+	d.app.SetRoot(d.pages, true)
+	d.app.SetFocus(d.logs)
 	d.app.SetInputCapture(d.handleKeys)
 	return d
 }
@@ -317,6 +344,18 @@ func (d *dashboard) updateLogsFromSnapshot(snap snapshot) {
 	d.logs.SetText(strings.Join(lines, "\n"))
 }
 
+func (d *dashboard) scrollLogs(delta int) {
+	if delta == 0 {
+		return
+	}
+	row, col := d.logs.GetScrollOffset()
+	nextRow := row + delta
+	if nextRow < 0 {
+		nextRow = 0
+	}
+	d.logs.ScrollTo(nextRow, col)
+}
+
 func (d *dashboard) setStatus(msg string) {
 	d.statusMessage = msg
 	d.renderFooter()
@@ -345,7 +384,12 @@ func (d *dashboard) triggerInvalidateSelected() {
 	_ = d.refresh()
 	selected := node.Name
 	go func() {
-		err := invalidateAndRerunDownstream(d.root, d.instanceID, selected)
+		err := invalidateAndRerunDownstream(d.root, d.instanceID, selected, func() {
+			d.app.QueueUpdateDraw(func() {
+				d.setStatus(fmt.Sprintf("[yellow]invalidated downstream from %s, relaunching...", selected))
+				_ = d.refresh()
+			})
+		})
 		d.app.QueueUpdateDraw(func() {
 			d.busy = false
 			if err != nil {
@@ -393,7 +437,14 @@ func loadSnapshot(root, instanceID string, showSupervisor bool, selectedName str
 	}
 	state, err := instance.LoadStatus(root, instanceID)
 	if err != nil {
-		return snapshot{}, err
+		if !os.IsNotExist(err) {
+			return snapshot{}, err
+		}
+		state = &instance.State{
+			Target: inst.LastRun.Target,
+			Mode:   inst.LastRun.Mode,
+			Nodes:  map[string]api.NodeStatus{},
+		}
 	}
 	supervisor := supervisorStatus(inst)
 	if supervisor != nil && !supervisor.Alive {
@@ -472,13 +523,14 @@ func renderHeader(snap snapshot) []string {
 		fmt.Sprintf("[yellow]worktree[-]: %s", snap.instance.Worktree),
 		fmt.Sprintf("[yellow]db[-]: %s host=%s port=%d container=%s", snap.instance.DB.Name, snap.instance.DB.Host, snap.instance.DB.Port, snap.instance.DB.ContainerName),
 		fmt.Sprintf("[yellow]urls[-]: %s", strings.Join(urlParts, "    ")),
-		fmt.Sprintf("[yellow]%s[-]    [yellow]states[-]: RUN=%d WAIT=%d CACHE=%d DONE=%d FAIL=%d STOP=%d",
+		fmt.Sprintf("[yellow]%s[-]    [yellow]states[-]: RUN=%d WAIT=%d CACHE=%d DONE=%d FAIL=%d CANC=%d STOP=%d",
 			supervisorText,
 			counts[api.StateRunning],
 			counts[api.StatePending]+counts[api.StateReady]+counts[api.StateDirty],
 			counts[api.StateCached],
 			counts[api.StateDone],
 			counts[api.StateFailed],
+			counts[api.StateCanceled],
 			counts[api.StateStopped],
 		),
 	}
@@ -544,8 +596,78 @@ func (d *dashboard) applyEvents(events []api.Event) {
 			if evt.State == api.StateFailed && evt.Task != "" {
 				d.setStatus(fmt.Sprintf("[red]%s failed: %s", evt.Task, evt.Error))
 			}
+		case api.EventInteractionReq:
+			d.openPrompt(evt)
+		case api.EventInteractionAck, api.EventInteractionStop:
+			if evt.PromptID == d.activePromptID {
+				d.closePrompt()
+			}
 		}
 	}
+}
+
+func (d *dashboard) openPrompt(evt api.Event) {
+	if evt.PromptID == "" || evt.PromptID == d.activePromptID {
+		return
+	}
+	d.activePromptID = evt.PromptID
+	switch evt.PromptKind {
+	case string(process.PromptConfirm):
+		modal := tview.NewModal().
+			SetText(evt.Prompt).
+			AddButtons([]string{"Yes", "No"}).
+			SetDoneFunc(func(_ int, label string) {
+				answer := "n"
+				if label == "Yes" {
+					answer = "y"
+				}
+				if err := instance.WriteInteractionAnswer(d.root, d.instanceID, evt.PromptID, answer); err != nil {
+					d.setStatus(fmt.Sprintf("[red]failed to answer prompt: %v", err))
+					return
+				}
+				d.setStatus(fmt.Sprintf("[yellow]answered %s with %s", evt.Task, answer))
+				d.closePrompt()
+			})
+		d.pages.AddPage("prompt", modal, true, true)
+		d.app.SetFocus(modal)
+	default:
+		var input *tview.InputField
+		input = tview.NewInputField().
+			SetLabel(evt.Prompt + " ").
+			SetDoneFunc(func(key tcell.Key) {
+				if key != tcell.KeyEnter {
+					return
+				}
+				value := input.GetText()
+				if err := instance.WriteInteractionAnswer(d.root, d.instanceID, evt.PromptID, value); err != nil {
+					d.setStatus(fmt.Sprintf("[red]failed to answer prompt: %v", err))
+					return
+				}
+				d.setStatus(fmt.Sprintf("[yellow]answered %s prompt", evt.Task))
+				d.closePrompt()
+			})
+		frame := tview.NewFrame(input).
+			SetBorders(1, 1, 1, 1, 1, 1).
+			AddText("Interactive Prompt", true, tview.AlignCenter, tcell.ColorWhite)
+		d.pages.AddPage("prompt", centered(frame, 80, 7), true, true)
+		d.app.SetFocus(input)
+	}
+}
+
+func (d *dashboard) closePrompt() {
+	d.activePromptID = ""
+	d.pages.RemovePage("prompt")
+	d.app.SetFocus(d.tasks)
+}
+
+func centered(p tview.Primitive, width, height int) tview.Primitive {
+	return tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 0, 1, false).
+			AddItem(p, height, 1, true).
+			AddItem(nil, 0, 1, false), width, 1, true).
+		AddItem(nil, 0, 1, false)
 }
 
 func renderLogPanel(snap snapshot, selectedName string) []string {
@@ -689,25 +811,31 @@ func markAllStoppedNodes(worktree, instanceID string) error {
 	return instance.SaveStatus(worktree, instanceID, state.Target, state.Mode, state.Nodes)
 }
 
-func invalidateAndRerunDownstream(root, instanceID, task string) error {
+func invalidateAndRerunDownstream(root, instanceID, task string, onTransition func()) error {
 	inst, err := instance.Load(root, instanceID)
 	if err != nil {
 		return err
 	}
-	if inst.LastRun.Project == "" || inst.LastRun.Target == "" {
+	projectName, p, err := resolveRelaunchProject(root, inst)
+	if err != nil {
+		return err
+	}
+	if inst.LastRun.Target == "" {
 		return fmt.Errorf("instance has no recorded project/target to relaunch")
 	}
-	p, err := project.Lookup(inst.LastRun.Project)
+	g, resolvedTarget, err := executionGraphForProject(p, inst.LastRun.Target)
 	if err != nil {
 		return err
 	}
-	g, err := graph.New(p.Tasks(), p.Targets())
+	toInvalidate, err := downstreamInvalidateTasks(g, resolvedTarget, task)
 	if err != nil {
 		return err
 	}
-	toInvalidate, err := downstreamInvalidateTasks(g, inst.LastRun.Target, task)
-	if err != nil {
+	if err := writeInvalidateTransition(root, instanceID, resolvedTarget, g, toInvalidate); err != nil {
 		return err
+	}
+	if onTransition != nil {
+		onTransition()
 	}
 	store := cache.New(instance.CacheRoot(root))
 	for _, name := range toInvalidate {
@@ -722,7 +850,7 @@ func invalidateAndRerunDownstream(root, instanceID, task string) error {
 		}
 		waitForPIDExit(supervisorPID, 5*time.Second)
 	}
-	_, err = launchDetached(root, inst, inst.LastRun.Target, inst.LastRun.Project, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+	_, err = launchDetached(root, inst, inst.LastRun.Target, projectName, inst.LastRun.Mode, inst.LastRun.MaxParallel)
 	return err
 }
 
@@ -731,10 +859,7 @@ func retargetAndRelaunch(root, instanceID, task string) error {
 	if err != nil {
 		return err
 	}
-	if inst.LastRun.Project == "" {
-		return fmt.Errorf("instance has no recorded project to relaunch")
-	}
-	p, err := project.Lookup(inst.LastRun.Project)
+	projectName, p, err := resolveRelaunchProject(root, inst)
 	if err != nil {
 		return err
 	}
@@ -748,7 +873,7 @@ func retargetAndRelaunch(root, instanceID, task string) error {
 		}
 		waitForPIDExit(supervisorPID, 5*time.Second)
 	}
-	_, err = launchDetached(root, inst, task, inst.LastRun.Project, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+	_, err = launchDetached(root, inst, task, projectName, inst.LastRun.Mode, inst.LastRun.MaxParallel)
 	return err
 }
 
@@ -761,19 +886,151 @@ func downstreamInvalidateTasks(g *graph.Graph, target, selected string) ([]strin
 	for _, name := range closure {
 		inClosure[name] = true
 	}
-	downstream := g.Downstream([]string{selected})
-	out := make([]string, 0, len(downstream))
-	for _, name := range downstream {
-		if !inClosure[name] {
+	selectedTask, ok := g.Tasks[selected]
+	if !ok {
+		return nil, fmt.Errorf("unknown task %q", selected)
+	}
+	candidates := []string{}
+	if selectedTask.Kind == project.KindGroup {
+		candidates = g.Upstream([]string{selected})
+	} else {
+		candidates = g.Downstream([]string{selected})
+	}
+	out := collectInvalidateTasks(g, inClosure, candidates)
+	sort.Strings(out)
+	return out, nil
+}
+
+func collectInvalidateTasks(g *graph.Graph, inClosure map[string]bool, names []string) []string {
+	out := make([]string, 0, len(names))
+	seen := map[string]bool{}
+	for _, name := range names {
+		if !inClosure[name] || seen[name] {
 			continue
 		}
 		task := g.Tasks[name]
 		if task.Kind == project.KindOnce && task.Cache {
 			out = append(out, name)
+			seen[name] = true
 		}
+	}
+	return out
+}
+
+func writeInvalidateTransition(root, instanceID, target string, g *graph.Graph, invalidated []string) error {
+	state, err := instance.LoadStatus(root, instanceID)
+	if err != nil {
+		return err
+	}
+	impacted, err := impactedRerunTasks(g, target, invalidated)
+	if err != nil {
+		return err
+	}
+	invalidatedSet := make(map[string]bool, len(invalidated))
+	for _, name := range invalidated {
+		invalidatedSet[name] = true
+	}
+	impactedSet := make(map[string]bool, len(impacted))
+	for _, name := range impacted {
+		impactedSet[name] = true
+	}
+	for name, node := range state.Nodes {
+		if invalidatedSet[name] {
+			node.State = api.StateDirty
+			node.LastRunKey = ""
+			node.LastError = ""
+			node.PID = 0
+			state.Nodes[name] = node
+			continue
+		}
+		if !impactedSet[name] {
+			continue
+		}
+		node.LastError = ""
+		node.PID = 0
+		switch node.Kind {
+		case string(project.KindService):
+			node.State = api.StatePending
+		case string(project.KindGroup), string(project.KindWarmup), string(project.KindOnce):
+			if node.State != api.StateDirty {
+				node.State = api.StatePending
+			}
+		}
+		state.Nodes[name] = node
+	}
+	return instance.SaveStatus(root, instanceID, state.Target, state.Mode, state.Nodes)
+}
+
+func impactedRerunTasks(g *graph.Graph, target string, invalidated []string) ([]string, error) {
+	closure, err := g.TargetClosure(target)
+	if err != nil {
+		return nil, err
+	}
+	inClosure := make(map[string]bool, len(closure))
+	for _, name := range closure {
+		inClosure[name] = true
+	}
+	downstream := g.Downstream(invalidated)
+	out := make([]string, 0, len(downstream))
+	seen := make(map[string]bool, len(downstream))
+	for _, name := range downstream {
+		if !inClosure[name] || seen[name] {
+			continue
+		}
+		out = append(out, name)
+		seen[name] = true
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func executionGraph(projectName, target string) (*graph.Graph, string, error) {
+	p, err := project.Lookup(projectName)
+	if err != nil {
+		return nil, "", err
+	}
+	return executionGraphForProject(p, target)
+}
+
+func executionGraphForProject(p project.Project, target string) (*graph.Graph, string, error) {
+	execProject, resolvedTarget, err := project.ResolveExecutionProject(p, target)
+	if err != nil {
+		return nil, "", err
+	}
+	g, err := graph.New(execProject.Tasks(), execProject.Targets())
+	if err != nil {
+		return nil, "", err
+	}
+	return g, resolvedTarget, nil
+}
+
+func resolveRelaunchProject(worktree string, inst *api.Instance) (string, project.Project, error) {
+	if inst != nil {
+		name := strings.TrimSpace(inst.LastRun.Project)
+		if name != "" {
+			if p, err := project.Lookup(name); err == nil {
+				return name, p, nil
+			}
+		}
+	}
+	names := project.Names()
+	if len(names) == 1 {
+		p, err := project.Lookup(names[0])
+		if err != nil {
+			return "", nil, err
+		}
+		return names[0], p, nil
+	}
+	if strings.TrimSpace(worktree) != "" {
+		p, err := project.Detect(worktree)
+		if err == nil {
+			return p.Name(), p, nil
+		}
+	}
+	if inst != nil && strings.TrimSpace(inst.LastRun.Project) != "" {
+		return "", nil, fmt.Errorf("instance recorded project %q is no longer registered", inst.LastRun.Project)
+	}
+	return "", nil, fmt.Errorf("unable to resolve project for relaunch")
 }
 
 func launchDetached(root string, inst *api.Instance, target, projectName string, mode api.RunMode, maxParallel int) (int, error) {
@@ -861,6 +1118,8 @@ func stateBadge(state api.NodeState) string {
 		return "DONE"
 	case api.StateFailed:
 		return "FAIL"
+	case api.StateCanceled:
+		return "CANC"
 	case api.StateStopped:
 		return "STOP"
 	case api.StateSkipped:
@@ -882,6 +1141,8 @@ func stateColor(state api.NodeState) tcell.Color {
 		return tcell.ColorWhite
 	case api.StateFailed:
 		return tcell.ColorIndianRed
+	case api.StateCanceled:
+		return tcell.ColorOrange
 	case api.StateStopped:
 		return tcell.ColorGray
 	case api.StateSkipped:
@@ -899,16 +1160,18 @@ func taskStatePriority(state api.NodeState) int {
 		return 1
 	case api.StateFailed:
 		return 2
-	case api.StateCached:
+	case api.StateCanceled:
 		return 3
-	case api.StateDone:
+	case api.StateCached:
 		return 4
-	case api.StateStopped:
+	case api.StateDone:
 		return 5
-	case api.StateSkipped:
+	case api.StateStopped:
 		return 6
-	default:
+	case api.StateSkipped:
 		return 7
+	default:
+		return 8
 	}
 }
 

@@ -159,6 +159,33 @@ func EventsPath(worktree, instanceID string) string {
 	return filepath.Join(instancePath(worktree, instanceID), "events.jsonl")
 }
 
+func InteractionAnswerPath(worktree, instanceID, promptID string) string {
+	return filepath.Join(instancePath(worktree, instanceID), "interactions", promptID+".json")
+}
+
+func WriteInteractionAnswer(worktree, instanceID, promptID, value string) error {
+	path := InteractionAnswerPath(worktree, instanceID, promptID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return jsonutil.WriteFileAtomic(path, map[string]string{"value": value})
+}
+
+func ConsumeInteractionAnswer(worktree, instanceID, promptID string) (string, bool, error) {
+	path := InteractionAnswerPath(worktree, instanceID, promptID)
+	var payload map[string]string
+	if err := jsonutil.ReadFile(path, &payload); err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return "", false, err
+	}
+	return payload["value"], true, nil
+}
+
 func CacheRoot(worktree string) string {
 	return filepath.Join(worktree, ".devflow", "cache")
 }

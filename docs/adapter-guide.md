@@ -1,6 +1,19 @@
 # Adapter Guide
 
-Projects integrate with Devflow by implementing `pkg/project.Project`.
+Projects integrate with Devflow by implementing `pkg/project.Project` in a project-local `devflow.project.go`.
+
+Current runtime model:
+- the project repo owns `./devflow.project.go`
+- `devflow` compiles that file together with the core CLI into a worktree-local binary
+- `devflow` then transfers execution into that local binary
+- there is currently no built-in adapter fallback
+
+Current first-version constraint:
+- `devflow.project.go` must be self-contained
+- use `package main`
+- register the project in `init()`
+- importing `devflow/pkg/...` and standard library packages is supported
+- arbitrary companion Go files from the project repo are not loaded yet
 
 An adapter defines:
 - tasks
@@ -8,6 +21,83 @@ An adapter defines:
 - instance configuration
 
 Tasks should stay semantic. The adapter decides which files, directories, env vars, and custom probes contribute to each fingerprint.
+
+Minimal shape:
+
+```go
+package main
+
+import (
+    "context"
+
+    "devflow/pkg/project"
+)
+
+type myProject struct{}
+
+func init() {
+    project.Register(myProject{})
+}
+
+func (myProject) Name() string { return "my-project" }
+
+func (myProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+    _ = ctx
+    _ = worktree
+    return project.InstanceConfig{Label: "my-project"}, nil
+}
+
+func (myProject) Tasks() []project.Task {
+    return []project.Task{
+        {
+            Name: "build",
+            Kind: project.KindOnce,
+            Run: func(ctx context.Context, rt *project.Runtime) error {
+                _ = ctx
+                _ = rt
+                return nil
+            },
+        },
+    }
+}
+
+func (myProject) Targets() []project.Target {
+    return []project.Target{
+        {Name: "up", RootTasks: []string{"build"}},
+    }
+}
+```
+
+## Dependency Installation
+
+Adapters can expose required tool commands through `DependencyProvider`.
+
+Example:
+
+```go
+func (myProject) Dependencies() []project.Dependency {
+    return []project.Dependency{
+        {
+            Name:    "sqlc",
+            Command: "sqlc",
+            Install: map[string]project.InstallScript{
+                "darwin": {Script: "brew install sqlc"},
+                "linux":  {Script: "go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest"},
+            },
+        },
+    }
+}
+```
+
+That enables:
+- `devflow deps status --project my-project`
+- `devflow deps install --project my-project`
+- richer `doctor` output for missing prerequisites
+
+Rules:
+- `Command` should be the binary name Devflow can verify on `PATH`
+- install scripts should be platform-specific and idempotent when practical
+- installers should leave the command actually available on `PATH`, because Devflow re-checks the command after install
 
 ## Dotenv Loading
 
@@ -40,6 +130,89 @@ Recommended precedence:
 - devflow-owned runtime overrides
 
 Use dotenv values for normal app configuration, but keep leased ports, instance IDs, and per-instance DB URLs under devflow control.
+
+## DB Source Policies
+
+When a DB snapshot miss happens, the adapter should rebuild from a configured base source instead of implying a reset command.
+
+Current shape:
+
+```go
+policy := database.CommandSourcePolicy{
+    PolicyName: "clone-dev",
+    Spec: process.CommandSpec{
+        Name: "sh",
+        Args: []string{"-c", "./scripts/clone-dev.sh"},
+    },
+}
+
+prepared, err := database.New().PreparePrismaBase(ctx, inst.DB, state, policy, database.PrepareOptions{
+    Worktree: worktree,
+    Env:      env,
+})
+```
+
+Semantics:
+- Devflow first tries exact or nearest-prefix snapshot restore
+- if no compatible snapshot exists, it recreates the local volume
+- if a source policy is configured, it starts a temporary Postgres runtime and applies that policy
+- then the adapter can replay only the remaining migrations and snapshot the result
+
+This is the right abstraction for:
+- clone-from-dev scripts today
+- local bootstrap/startup scripts later
+
+It is not a "reset DB" operator action. The goal is to reuse the best compatible local state or rebuild a new base automatically.
+
+## Interactive Task Policy
+
+Adapters should prefer non-interactive subprocesses.
+
+Rules:
+- for package installs and similar setup commands, prefer explicit confirmation flags such as `-y`, `--yes`, `--force`, or `CI=1` when the adapter has already decided the action is correct
+- do not rely on hidden stdin prompts during normal `run` or `watch` targets
+- if a task needs a real user choice, model it as an explicit command, target, or future TUI action instead of letting the process stall
+
+This is especially important for detached runs and watch mode, where a blocked prompt is easy to miss and hard to recover from.
+
+When a task truly does need prompt/answer interaction, the adapter can use interactive command specs instead of raw shell blocking:
+
+```go
+return rt.RunCmdSpec(ctx, process.CommandSpec{
+    Name:        "my-tool",
+    Args:        []string{"setup"},
+    Interactive: true,
+    Prompts: []process.PromptSpec{
+        {Pattern: "Continue? [y/N]: ", Prompt: "Continue?", Kind: process.PromptConfirm},
+        {Pattern: "Name: ", Prompt: "Name", Kind: process.PromptText},
+    },
+})
+```
+
+Semantics:
+- Devflow watches subprocess output for the declared prompt patterns
+- matching prompts become `interaction_requested` events
+- detached runs can then be answered from the TUI
+- the answer is written back to subprocess stdin and recorded as `interaction_answered`
+
+This path should still be the exception, not the default adapter style.
+
+### Prisma Guidance
+
+Treat Prisma authoring and reset flows separately from normal startup.
+
+Recommended split:
+- normal DB prep:
+  - restore the nearest DB snapshot
+  - replay the remaining known migrations
+- new migration authoring:
+  - explicit action with a provided name
+  - use `prisma migrate dev --name <name>` or `prisma migrate dev --name <name> --create-only`
+- destructive reset:
+  - explicit action only
+  - use `prisma migrate reset --force`
+
+Do not make normal boot targets depend on interactive `prisma migrate dev`. From Devflow's point of view, that command can still become non-deterministic when Prisma detects drift or wants a reset decision.
 
 ## Built Binary Tools
 

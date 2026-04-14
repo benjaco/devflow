@@ -17,6 +17,33 @@
 - `pkg/event`: typed event bus used by the engine for run, task-state, cache, process, instance, and log events
 - `pkg/watch`: polling-based file watching and debounced change batching built on `github.com/radovskyb/watcher`
 
+## Local Project Bootstrap
+
+Runtime project configuration is now project-local.
+
+Flow:
+- the repo-level `devflow` launcher builds the bootstrap CLI in the `devflow` repo
+- when invoked in a project worktree, the bootstrap CLI looks for `./devflow.project.go`
+- if the file is missing, the command fails
+- if the file exists, the bootstrap CLI compiles a worktree-local full CLI binary
+- execution is then transferred into that compiled local binary for all normal commands
+
+Current local binary location:
+- `<worktree>/.devflow/bin/devflow-local`
+
+Current generated build location:
+- `<devflow-repo>/.devflow/localbuild/<worktree-hash>/`
+
+Current first-version constraint:
+- `devflow.project.go` is compiled as a self-contained `package main` file
+- the project should register itself in `init()`
+- this version does not yet load arbitrary companion adapter Go files from the project repo
+
+This model intentionally avoids:
+- built-in runtime adapter registries
+- runtime JSON adapter protocols
+- dynamic plugin loading tricks
+
 ## State Layout
 
 Per-worktree state lives under `.devflow/`:
@@ -43,6 +70,86 @@ The important rule is precedence:
 
 That allows projects to keep normal local app settings in `.env` while still ensuring the launched frontend/backend processes point at the correct per-instance Postgres runtime and leased ports.
 
+## Interactive Commands
+
+Devflow should treat subprocess interactivity as an exception, not the default execution model.
+
+Policy:
+- normal `run`, `watch`, and boot targets should be non-interactive
+- adapters should prefer explicit non-interactive flags such as `-y`, `--yes`, `--force`, or `CI=1` where that is safe
+- if a task would require a destructive or ambiguous choice, the adapter should model that as an explicit action or separate target instead of letting the process block on stdin
+
+This keeps DAG execution deterministic and prevents background runs, detached supervisors, and watch mode from hanging on hidden prompts.
+
+### Prisma-Specific Rules
+
+Prisma needs special handling because its CLI mixes normal migration application with authoring and reset flows.
+
+Rules:
+- normal startup flows should not depend on interactive `prisma migrate dev`
+- normal DB prep should restore a snapshot, then apply the known remaining migrations non-interactively
+- creating a new migration should be a separate explicit operator action because it requires a provided migration name
+- destructive reset should be a separate explicit operator action and should not happen implicitly during boot
+
+Recommended command usage:
+- create a named migration:
+  - `prisma migrate dev --name <name>`
+- create the migration without applying it yet:
+  - `prisma migrate dev --name <name> --create-only`
+- reset only when the user has explicitly chosen reset:
+  - `prisma migrate reset --force`
+
+Important limitation:
+- from Devflow's perspective, `prisma migrate dev` is still not fully deterministic in drift/reset scenarios, because Prisma may still require an operator decision
+
+Design implication:
+- migration authoring and reset flows belong in explicit commands, TUI actions, or future interactive task support
+- normal boot/watch targets should stay on the snapshot-plus-replay path instead of relying on Prisma prompts
+
+### Implemented Interactive Prompt Path
+
+Devflow now supports prompt-driven interactive one-shot commands without blocking invisibly in detached mode.
+
+Current behavior:
+- tasks can mark a subprocess command as interactive through `process.CommandSpec`
+- the command declares expected prompt patterns and prompt kinds
+- when a prompt pattern is detected in subprocess output, the engine emits an `interaction_requested` event
+- the engine waits for an answer file under the instance state directory
+- when an answer arrives, the engine writes it back to the subprocess stdin and emits `interaction_answered`
+
+The current transport is file-backed:
+- request metadata is carried on the event stream
+- answers are written to `.devflow/state/instances/<instance-id>/interactions/<prompt-id>.json`
+
+This is enough for detached runs and the TUI to cooperate without shared in-memory state.
+
+Current limitation:
+- this is prompt-pattern and stdin based, not full TTY emulation
+- commands that require a true terminal rather than prompt/answer stdin handling still need a future PTY-specific path
+
+## Dependency Installation
+
+Adapters can now define project-scoped command dependencies together with platform-specific install scripts.
+
+Current shape:
+
+```go
+type Dependency struct {
+    Name        string
+    Command     string
+    Description string
+    Install     map[string]InstallScript
+}
+```
+
+Semantics:
+- dependency status is determined by checking whether the command is available on `PATH`
+- `deps install` only runs installers for commands that are currently missing
+- after an installer runs, Devflow re-checks that the command now resolves
+- install scripts are selected by platform (`darwin`, `linux`, `windows`, or `unix`)
+
+This keeps dependency policy adapter-defined while giving the core CLI a stable install surface for humans, CI, and future agents.
+
 ## Database Isolation
 
 The chosen direction is now full per-worktree separation for local databases:
@@ -64,11 +171,40 @@ What this package does not decide:
 - when to clone remote state versus run a bootstrap script
 - which schema fingerprint should own the snapshot key
 
-Those decisions belong in adapter policy layered on top of the runtime module. The package now provides the snapshot-planning primitives; the adapter still needs to decide when to clone remote state, when to snapshot, and when to fall back to a fresh bootstrap.
+Those decisions belong in adapter policy layered on top of the runtime module. The package now provides the snapshot-planning primitives plus a source-policy hook for snapshot misses; the adapter still needs to decide which base source to use, when to snapshot, and which inputs define the base fingerprint.
+
+### DB Source Policies
+
+Snapshot misses should rebuild from a configured base source, not from an implicit reset action.
+
+Current shape:
+
+```go
+type SourcePolicy interface {
+    Name() string
+    PrepareBase(ctx context.Context, db api.DBInstance, opts PrepareOptions) error
+}
+```
+
+Behavior:
+- first try an exact or nearest-prefix snapshot restore
+- if that fails, destroy the current runtime/volume
+- if a source policy is configured:
+  - start a temporary local Postgres runtime
+  - apply the source policy
+  - stop the runtime
+- then continue with normal migration replay and snapshotting
+
+This matches the intended operator model:
+- reuse the latest compatible local volume when possible
+- otherwise rebuild from a configured base source such as:
+  - a remote dev clone script
+  - a local bootstrap/startup script later
+- never "skip" a changed migration in the middle; restore falls back only by valid prefix
 
 The bundled example adapter now exercises this shape structurally:
 - inspect Prisma state
-- restore the nearest snapshot or reset the volume
+- restore the nearest snapshot or recreate from the configured base source
 - start a temporary DB runtime
 - replay remaining migrations
 - snapshot the prepared state
@@ -157,6 +293,7 @@ The engine now emits a typed in-process event stream for live consumers. Event c
 - cache hit / miss
 - log line
 - process exited
+- interaction requested / answered / cancelled
 
 This is exposed through engine subscription rather than a dedicated CLI command for now. The goal is to keep the event envelope stable before adding TUI and MCP-facing stream surfaces.
 
@@ -257,5 +394,6 @@ The first usable TUI slice is now implemented as a local terminal console over p
 - instance/worktree/runtime header
 - stable terminal rendering via a real TUI library instead of manual ANSI frame painting
 - invalidate-and-rerun from the selected task by invalidating the selected downstream cacheable once-task slice and relaunching the current target
+- prompt popups for interactive confirm and text questions emitted by the running supervisor
 
 What is still missing is fine-grained detached control of a single service inside a multi-service detached target.

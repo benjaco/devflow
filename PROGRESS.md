@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-04-13
+Last updated: 2026-04-14
 
 ## Current Status
 
@@ -62,7 +62,7 @@ Last updated: 2026-04-13
 - Example adapter added at `examples/go-next-monorepo`
 - Example adapter upgraded to a deterministic full-stack-style workflow with DB prep, codegen, services, and watch semantics
 - Example adapter now structurally uses the dedicated DB flow: restore/reset, temporary runtime, migration replay, snapshot, then final `postgres` service
-- Real `bikecoach` adapter added for an embedded-frontend + Go server workflow with dedicated per-worktree Postgres
+- Real `embedded-web-app` adapter added for an embedded-frontend + Go server workflow with dedicated per-worktree Postgres
 - Unit/integration-style tests added for core packages
 - Example-project smoke tests added for cache hits, watch reruns, and multi-worktree isolation
 - Engine tests added for readiness success and readiness timeout failure
@@ -73,12 +73,12 @@ Last updated: 2026-04-13
 - Dotenv parser tests added, and example/CLI tests now verify runtime env and service logs include `.env` values while DB overrides still win
 - CLI integration coverage added for the example adapter JSON lifecycle (`run`, `status`, `logs`, `instances`, `doctor`, `stop`)
 - CLI regression test added so `run --json` still returns execution errors instead of swallowing them after emitting JSON
-- Manual BikeCoach smoke coverage completed:
+- Manual embedded-web-app smoke coverage completed:
   - `doctor --json`
   - `graph list/show`
   - `run build-all --ci`
   - `run fullstack --ci` now fails early with a clear Docker-daemon-not-ready error if Docker is installed but not running
-  - after starting Docker, `run fullstack --ci` succeeds end to end against the real BikeCoach repo
+  - after starting Docker, `run fullstack --ci` succeeds end to end against the real local example repo
   - detached `run fullstack` starts the real backend and dedicated Postgres runtime
   - `/health` responds successfully on the assigned backend port
   - detached `stop --all` now leaves the status snapshot consistent with the stopped processes
@@ -92,11 +92,11 @@ Last updated: 2026-04-13
   - `devflow tui --worktree ...` opens a live operator console for an existing instance
   - live full-width task list with updating status and a log pane below is available
   - detached supervisor log can be viewed from inside the TUI
-  - TUI rendering has unit coverage and manual BikeCoach smoke coverage
+  - TUI rendering has unit coverage and manual embedded-web-app smoke coverage
   - TUI renderer now avoids right-edge wrap corruption in VS Code terminals and shows explicit per-task state badges plus aggregate state counts
   - TUI task ordering now pins running work first, pending/ready work next, and keeps selection stable across refreshes
   - the original manual ANSI renderer was replaced with a `tview`-based implementation for stable redraws in real terminals
-  - TUI now supports `i` on the selected task to invalidate the selected downstream cacheable slice and relaunch the current target; manually verified on BikeCoach by invalidating `build_coach`
+  - TUI now supports `i` on the selected task to invalidate the selected downstream cacheable slice and relaunch the current target; manually verified on the embedded-web-app adapter by invalidating `build_coach`
   - TUI refresh cadence is now faster overall and much faster while invalidate/rerun actions are in flight
 - Database runtime helper fixed so Docker combined-output errors are preserved and missing volume/container detection works against real daemon responses
 - Database URL generation now appends `?sslmode=disable` for the dedicated local Postgres runtime
@@ -150,15 +150,91 @@ Last updated: 2026-04-13
   - detached event-stream persistence
 - Execution now accepts a task name anywhere a target is accepted by wrapping the task as a synthetic single-root target
 - The TUI now supports `t` on the selected task to retarget the detached run to that task and relaunch the instance on the selected task closure
+- Documented the task-interaction policy:
+  - normal boot/watch paths should stay non-interactive
+  - adapters should prefer explicit `-y` / `--yes` / `--force` style flags where safe
+  - Prisma migration authoring and reset flows should be explicit actions, not part of normal startup
+- Interactive prompt support implemented for prompt-driven commands:
+  - `process.CommandSpec` now supports interactive prompt patterns and prompt handlers
+  - the engine emits `interaction_requested` / `interaction_answered` / `interaction_cancelled`
+  - detached runs receive answers through per-instance interaction files
+  - the TUI now opens confirm and text-input popups for interactive prompts
+- Added a real prompt CLI fixture at `internal/testutil/promptcli` plus test coverage for:
+  - process-level prompt detection and answer forwarding
+  - engine-level prompt events and instance answer-file integration
+- Project-scoped dependency installation implemented:
+  - adapters can define command dependencies plus platform-specific install scripts
+  - `devflow deps status` reports installed vs missing vs installable dependencies
+  - `devflow deps install` installs only missing commands and re-checks that they are now on `PATH`
+  - `doctor` now reports missing adapter dependencies
+- The embedded-web-app adapter now declares real dependency requirements for:
+  - `go`
+  - `npm`
+  - `sqlc`
+  - `docker`
+- Added dependency coverage for:
+  - installed vs missing detection
+  - platform-script installation of a fake command
+  - install verification failure when the command is still missing
+  - CLI `deps status/install` JSON behavior
+- Added a DB source-policy abstraction in `pkg/database`:
+  - snapshot misses now recreate from a configured base source instead of implying a reset action
+  - `PreparePrismaBase` now handles restore-or-recreate orchestration
+  - adapters can plug in base rebuild behavior through `SourcePolicy`, `SourcePolicyFunc`, or `CommandSourcePolicy`
+- Added DB-source regression coverage for:
+  - restore hit skips base-source execution
+  - snapshot miss recreates and applies the configured source policy
+  - snapshot miss without a source policy recreates an empty local volume state
+- Updated the bundled example adapters so `prepare_db_base` now reports:
+  - restore vs recreate
+  - source-applied vs snapshot-restored
+  - source-policy name when a base source is used
+- Fixed TUI invalidate regressions:
+  - invalidate now resolves synthetic task targets correctly before computing the closure
+  - invalidating a selected `group` task now invalidates its cacheable input slice instead of producing an empty invalidation set
+- Improved TUI invalidate feedback:
+  - invalidate now writes a transitional status snapshot before relaunch
+  - invalidated tasks immediately show as `dirty`
+  - impacted downstream groups/services immediately show as pending instead of stale cached/done state
+  - the TUI now redraws immediately after writing that transitional status instead of waiting for the relaunch to finish
+- Improved TUI log interaction:
+  - the log pane is now the default focus when the TUI opens
+  - mouse-wheel scrolling over the task table now scrolls the log pane instead of the task list
+- Distinct task-cancellation handling implemented:
+  - tasks interrupted by parent-run cancellation now persist as `canceled` instead of `failed`
+  - the TUI now renders `canceled` separately from real failures
+- Task logs now represent the current attempt:
+  - task log files are truncated at task start so old successful output does not stay mixed into a newer failed or canceled run
+- Added TUI regression coverage for:
+  - selected `group` invalidation behavior
+  - synthetic task-target execution graphs
+  - transitional invalidate status updates
+- Runtime adapter loading now uses a project-local `devflow.project.go` bootstrap flow:
+  - the repo-level launcher exports bootstrap context
+  - the bootstrap CLI requires `devflow.project.go` in the selected worktree
+  - the bootstrap CLI compiles `<worktree>/.devflow/bin/devflow-local` when stale
+  - all normal commands are then executed by `exec`-ing into that local binary
+  - the main runtime binary no longer links built-in example adapters
+- Added bootstrap integration coverage for:
+  - missing local `devflow.project.go` hard failure
+  - successful local binary build and command forwarding
+  - local binary rebuild when `devflow.project.go` changes
+- Fixed TUI `i` and `t` relaunch actions after the move to project-local adapters:
+  - stale persisted project names now fall back to the current detected/local project
+  - relaunch heals old detached instance state on the next invalidate or retarget action
+- Fixed the clean-run startup race after deleting `.devflow`:
+  - bare `devflow` now waits briefly for the first detached `status.json`
+  - the TUI now tolerates a missing initial `status.json` and shows a placeholder instance state until the first status snapshot arrives
 
 ## In Progress
 
-- No active implementation in progress
+- No active implementation work recorded
 
 ## Next Steps
 
 - Add richer watch restart policies now that service readiness exists
 - Improve fine-grained detached service restart/control semantics beyond whole-target relaunch
+- Extend project-local adapter loading beyond a single self-contained `devflow.project.go` file when the first version needs companion adapter files
 - Expand TUI operator actions with confirmations and rerun/stop/restart controls
 - Add stronger JSON contract tests for status/instances/events
 
@@ -166,4 +242,4 @@ Last updated: 2026-04-13
 
 - Fine-grained detached per-service restart is not fully implemented yet
 - The example adapter still uses a deterministic fake-DB path in normal tests; real Docker-backed coverage now exists as an opt-in module-level e2e layer rather than being part of default `go test ./...`
-- The `bikecoach` adapter is now manually validated against the local repo for build, DB prep, detached runtime, health, and shutdown flows; remaining gaps are automated Docker-backed coverage and richer control UX
+- The `embedded-web-app` adapter is now manually validated against a local repo for build, DB prep, detached runtime, health, and shutdown flows; remaining gaps are automated Docker-backed coverage and richer control UX
