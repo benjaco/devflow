@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -244,6 +246,184 @@ func TestDefaultLaunchPlanAttachesToExistingDetachedSupervisor(t *testing.T) {
 	if plan.startDetached {
 		t.Fatal("expected existing live supervisor to reuse current instance")
 	}
+}
+
+var (
+	bootstrapBuildOnce sync.Once
+	bootstrapBinary    string
+	bootstrapBuildErr  error
+)
+
+func TestBootstrapExecsLocalProjectBinary(t *testing.T) {
+	worktree := t.TempDir()
+	writeLocalProjectFile(t, worktree, localProjectSource("local-bootstrap-project", "up"))
+
+	output, err := runBootstrapCommand(t, worktree, "graph", "list", "--json")
+	if err != nil {
+		t.Fatalf("bootstrap command failed: %v\n%s", err, output)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("failed to decode output %q: %v", output, err)
+	}
+	targets, ok := payload["targets"].([]any)
+	if !ok || len(targets) == 0 {
+		t.Fatalf("unexpected targets payload: %+v", payload)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, ".devflow", "bin", "devflow-local")); err != nil {
+		t.Fatalf("expected local binary to be built: %v", err)
+	}
+}
+
+func TestBootstrapFailsWithoutLocalProjectFile(t *testing.T) {
+	worktree := t.TempDir()
+	output, err := runBootstrapCommand(t, worktree, "graph", "list", "--json")
+	if err == nil {
+		t.Fatalf("expected bootstrap command to fail without local project file, got output %q", output)
+	}
+	if !strings.Contains(output, "devflow.project.go not found") {
+		t.Fatalf("unexpected error output: %q", output)
+	}
+}
+
+func TestBootstrapRebuildsWhenLocalProjectChanges(t *testing.T) {
+	worktree := t.TempDir()
+	projectPath := filepath.Join(worktree, localProjectFile)
+	writeLocalProjectFile(t, worktree, localProjectSource("local-rebuild-project", "up"))
+
+	if _, err := runBootstrapCommand(t, worktree, "graph", "list", "--json"); err != nil {
+		t.Fatalf("initial bootstrap command failed: %v", err)
+	}
+	binaryPath := filepath.Join(worktree, ".devflow", "bin", "devflow-local")
+	before, err := os.Stat(binaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated := localProjectSource("local-rebuild-project", "build")
+	if err := os.WriteFile(projectPath, []byte(updated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := before.ModTime().Add(2 * time.Second)
+	if err := os.Chtimes(projectPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := runBootstrapCommand(t, worktree, "graph", "list", "--json")
+	if err != nil {
+		t.Fatalf("rebuild bootstrap command failed: %v\n%s", err, output)
+	}
+	after, err := os.Stat(binaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().After(before.ModTime()) {
+		t.Fatalf("expected local binary modtime to increase: before=%s after=%s", before.ModTime(), after.ModTime())
+	}
+	if !strings.Contains(output, "\"build\"") {
+		t.Fatalf("expected updated target in output, got %q", output)
+	}
+}
+
+func buildBootstrapBinary(t *testing.T) string {
+	t.Helper()
+	bootstrapBuildOnce.Do(func() {
+		repoRoot, err := repoRoot()
+		if err != nil {
+			bootstrapBuildErr = err
+			return
+		}
+		dir, err := os.MkdirTemp("", "devflow-bootstrap-bin-*")
+		if err != nil {
+			bootstrapBuildErr = err
+			return
+		}
+		path := filepath.Join(dir, "devflow-test-bootstrap")
+		cmd := exec.Command("go", "build", "-o", path, "./cmd/devflow")
+		cmd.Dir = repoRoot
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			bootstrapBuildErr = fmt.Errorf("bootstrap build failed: %w\n%s", err, strings.TrimSpace(string(output)))
+			return
+		}
+		bootstrapBinary = path
+	})
+	if bootstrapBuildErr != nil {
+		t.Fatal(bootstrapBuildErr)
+	}
+	return bootstrapBinary
+}
+
+func runBootstrapCommand(t *testing.T, worktree string, args ...string) (string, error) {
+	t.Helper()
+	repoRoot, err := repoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(buildBootstrapBinary(t), args...)
+	cmd.Dir = worktree
+	cmd.Env = withEnv(os.Environ(), envBootstrapEntry, "1")
+	cmd.Env = withEnv(cmd.Env, envBootstrapRoot, repoRoot)
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
+func repoRoot() (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(filepath.Join(wd, "..", ".."))
+}
+
+func writeLocalProjectFile(t *testing.T, worktree, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(worktree, localProjectFile), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func localProjectSource(name, target string) string {
+	return fmt.Sprintf(`package main
+
+import (
+	"context"
+
+	"devflow/pkg/project"
+)
+
+type localProject struct{}
+
+func init() {
+	project.Register(localProject{})
+}
+
+func (localProject) Name() string { return %q }
+
+func (localProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "local"}, nil
+}
+
+func (localProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name: "noop",
+			Kind: project.KindOnce,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				_ = rt
+				return nil
+			},
+		},
+	}
+}
+
+func (localProject) Targets() []project.Target {
+	return []project.Target{{Name: %q, RootTasks: []string{"noop"}}}
+}
+`, name, target)
 }
 
 func TestStartEventCapturePersistsJSONLines(t *testing.T) {

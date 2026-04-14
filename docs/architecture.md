@@ -17,6 +17,33 @@
 - `pkg/event`: typed event bus used by the engine for run, task-state, cache, process, instance, and log events
 - `pkg/watch`: polling-based file watching and debounced change batching built on `github.com/radovskyb/watcher`
 
+## Local Project Bootstrap
+
+Runtime project configuration is now project-local.
+
+Flow:
+- the repo-level `devflow` launcher builds the bootstrap CLI in the `devflow` repo
+- when invoked in a project worktree, the bootstrap CLI looks for `./devflow.project.go`
+- if the file is missing, the command fails
+- if the file exists, the bootstrap CLI compiles a worktree-local full CLI binary
+- execution is then transferred into that compiled local binary for all normal commands
+
+Current local binary location:
+- `<worktree>/.devflow/bin/devflow-local`
+
+Current generated build location:
+- `<devflow-repo>/.devflow/localbuild/<worktree-hash>/`
+
+Current first-version constraint:
+- `devflow.project.go` is compiled as a self-contained `package main` file
+- the project should register itself in `init()`
+- this version does not yet load arbitrary companion adapter Go files from the project repo
+
+This model intentionally avoids:
+- built-in runtime adapter registries
+- runtime JSON adapter protocols
+- dynamic plugin loading tricks
+
 ## State Layout
 
 Per-worktree state lives under `.devflow/`:

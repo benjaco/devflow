@@ -24,11 +24,15 @@ All implemented commands support `--json`.
 
 Running bare `devflow` now acts as the default operator entry path:
 - it uses the repo-local launcher script
-- rebuilds the local binary when the `devflow` source tree is newer than `.devflow/bin/devflow`
-- auto-detects the current worktree project when possible
+- rebuilds the bootstrap binary when the core `devflow` source tree is newer than the repo-local `.devflow/bin/devflow`
+- requires `./devflow.project.go` in the selected worktree
+- compiles a worktree-local binary into `<worktree>/.devflow/bin/devflow-local` when the project file or core sources are newer
+- `exec`s into that worktree-local binary for all normal commands
 - chooses the project's preferred default target (`up`, `fullstack`, or the adapter-defined default)
 - if no detached supervisor is live for the current worktree, starts that target detached
 - opens the TUI for the current worktree
+
+There is currently no built-in adapter fallback. Missing `devflow.project.go` is a hard error.
 
 `run` provisions an instance, executes the target closure, restores cacheable one-shot tasks when possible, and keeps supervised services alive until interrupted.
 

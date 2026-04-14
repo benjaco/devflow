@@ -437,7 +437,14 @@ func loadSnapshot(root, instanceID string, showSupervisor bool, selectedName str
 	}
 	state, err := instance.LoadStatus(root, instanceID)
 	if err != nil {
-		return snapshot{}, err
+		if !os.IsNotExist(err) {
+			return snapshot{}, err
+		}
+		state = &instance.State{
+			Target: inst.LastRun.Target,
+			Mode:   inst.LastRun.Mode,
+			Nodes:  map[string]api.NodeStatus{},
+		}
 	}
 	supervisor := supervisorStatus(inst)
 	if supervisor != nil && !supervisor.Alive {
@@ -809,10 +816,14 @@ func invalidateAndRerunDownstream(root, instanceID, task string, onTransition fu
 	if err != nil {
 		return err
 	}
-	if inst.LastRun.Project == "" || inst.LastRun.Target == "" {
+	projectName, p, err := resolveRelaunchProject(root, inst)
+	if err != nil {
+		return err
+	}
+	if inst.LastRun.Target == "" {
 		return fmt.Errorf("instance has no recorded project/target to relaunch")
 	}
-	g, resolvedTarget, err := executionGraph(inst.LastRun.Project, inst.LastRun.Target)
+	g, resolvedTarget, err := executionGraphForProject(p, inst.LastRun.Target)
 	if err != nil {
 		return err
 	}
@@ -839,7 +850,7 @@ func invalidateAndRerunDownstream(root, instanceID, task string, onTransition fu
 		}
 		waitForPIDExit(supervisorPID, 5*time.Second)
 	}
-	_, err = launchDetached(root, inst, inst.LastRun.Target, inst.LastRun.Project, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+	_, err = launchDetached(root, inst, inst.LastRun.Target, projectName, inst.LastRun.Mode, inst.LastRun.MaxParallel)
 	return err
 }
 
@@ -848,10 +859,7 @@ func retargetAndRelaunch(root, instanceID, task string) error {
 	if err != nil {
 		return err
 	}
-	if inst.LastRun.Project == "" {
-		return fmt.Errorf("instance has no recorded project to relaunch")
-	}
-	p, err := project.Lookup(inst.LastRun.Project)
+	projectName, p, err := resolveRelaunchProject(root, inst)
 	if err != nil {
 		return err
 	}
@@ -865,7 +873,7 @@ func retargetAndRelaunch(root, instanceID, task string) error {
 		}
 		waitForPIDExit(supervisorPID, 5*time.Second)
 	}
-	_, err = launchDetached(root, inst, task, inst.LastRun.Project, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+	_, err = launchDetached(root, inst, task, projectName, inst.LastRun.Mode, inst.LastRun.MaxParallel)
 	return err
 }
 
@@ -981,6 +989,10 @@ func executionGraph(projectName, target string) (*graph.Graph, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	return executionGraphForProject(p, target)
+}
+
+func executionGraphForProject(p project.Project, target string) (*graph.Graph, string, error) {
 	execProject, resolvedTarget, err := project.ResolveExecutionProject(p, target)
 	if err != nil {
 		return nil, "", err
@@ -990,6 +1002,35 @@ func executionGraph(projectName, target string) (*graph.Graph, string, error) {
 		return nil, "", err
 	}
 	return g, resolvedTarget, nil
+}
+
+func resolveRelaunchProject(worktree string, inst *api.Instance) (string, project.Project, error) {
+	if inst != nil {
+		name := strings.TrimSpace(inst.LastRun.Project)
+		if name != "" {
+			if p, err := project.Lookup(name); err == nil {
+				return name, p, nil
+			}
+		}
+	}
+	names := project.Names()
+	if len(names) == 1 {
+		p, err := project.Lookup(names[0])
+		if err != nil {
+			return "", nil, err
+		}
+		return names[0], p, nil
+	}
+	if strings.TrimSpace(worktree) != "" {
+		p, err := project.Detect(worktree)
+		if err == nil {
+			return p.Name(), p, nil
+		}
+	}
+	if inst != nil && strings.TrimSpace(inst.LastRun.Project) != "" {
+		return "", nil, fmt.Errorf("instance recorded project %q is no longer registered", inst.LastRun.Project)
+	}
+	return "", nil, fmt.Errorf("unable to resolve project for relaunch")
 }
 
 func launchDetached(root string, inst *api.Instance, target, projectName string, mode api.RunMode, maxParallel int) (int, error) {

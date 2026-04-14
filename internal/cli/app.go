@@ -35,6 +35,9 @@ func New() *App {
 }
 
 func (a *App) Run(args []string) error {
+	if shouldExecLocalProject(args) {
+		return a.execLocalProject(args)
+	}
 	if len(args) == 0 {
 		return a.defaultEntry()
 	}
@@ -85,6 +88,7 @@ func (a *App) defaultEntry() error {
 		if err := a.executeDetached(plan.target, plan.projectName, root, api.ModeDev, 0, false); err != nil {
 			return err
 		}
+		waitForInitialStatus(root, plan.instanceID, 3*time.Second)
 	}
 	return tui.Run(tui.Options{Worktree: root, InstanceID: plan.instanceID})
 }
@@ -97,7 +101,7 @@ type launchPlan struct {
 }
 
 func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
-	p, err := project.Detect(root)
+	p, err := resolvedProject("", root)
 	if err != nil {
 		return launchPlan{}, fmt.Errorf("devflow default launch requires a detectable project in %s: %w", root, err)
 	}
@@ -1229,6 +1233,23 @@ func defaultProject() string {
 	return names[0]
 }
 
+func resolvedProject(name, worktree string) (project.Project, error) {
+	if strings.TrimSpace(name) != "" {
+		return project.Lookup(name)
+	}
+	names := project.Names()
+	if len(names) == 1 {
+		return project.Lookup(names[0])
+	}
+	if strings.TrimSpace(worktree) != "" {
+		return project.Detect(worktree)
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no project is registered")
+	}
+	return nil, fmt.Errorf("multiple projects are registered; pass --project explicitly")
+}
+
 type restartProject struct {
 	base   project.Project
 	target project.Target
@@ -1401,6 +1422,19 @@ func waitForPIDExit(pid int, timeout time.Duration) {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func waitForInitialStatus(worktree, instanceID string, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := instance.LoadStatus(worktree, instanceID); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

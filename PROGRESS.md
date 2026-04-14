@@ -209,6 +209,22 @@ Last updated: 2026-04-14
   - selected `group` invalidation behavior
   - synthetic task-target execution graphs
   - transitional invalidate status updates
+- Runtime adapter loading now uses a project-local `devflow.project.go` bootstrap flow:
+  - the repo-level launcher exports bootstrap context
+  - the bootstrap CLI requires `devflow.project.go` in the selected worktree
+  - the bootstrap CLI compiles `<worktree>/.devflow/bin/devflow-local` when stale
+  - all normal commands are then executed by `exec`-ing into that local binary
+  - the main runtime binary no longer links built-in example adapters
+- Added bootstrap integration coverage for:
+  - missing local `devflow.project.go` hard failure
+  - successful local binary build and command forwarding
+  - local binary rebuild when `devflow.project.go` changes
+- Fixed TUI `i` and `t` relaunch actions after the move to project-local adapters:
+  - stale persisted project names now fall back to the current detected/local project
+  - relaunch heals old detached instance state on the next invalidate or retarget action
+- Fixed the clean-run startup race after deleting `.devflow`:
+  - bare `devflow` now waits briefly for the first detached `status.json`
+  - the TUI now tolerates a missing initial `status.json` and shows a placeholder instance state until the first status snapshot arrives
 
 ## In Progress
 
@@ -218,6 +234,7 @@ Last updated: 2026-04-14
 
 - Add richer watch restart policies now that service readiness exists
 - Improve fine-grained detached service restart/control semantics beyond whole-target relaunch
+- Extend project-local adapter loading beyond a single self-contained `devflow.project.go` file when the first version needs companion adapter files
 - Expand TUI operator actions with confirmations and rerun/stop/restart controls
 - Add stronger JSON contract tests for status/instances/events
 

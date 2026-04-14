@@ -1,6 +1,19 @@
 # Adapter Guide
 
-Projects integrate with Devflow by implementing `pkg/project.Project`.
+Projects integrate with Devflow by implementing `pkg/project.Project` in a project-local `devflow.project.go`.
+
+Current runtime model:
+- the project repo owns `./devflow.project.go`
+- `devflow` compiles that file together with the core CLI into a worktree-local binary
+- `devflow` then transfers execution into that local binary
+- there is currently no built-in adapter fallback
+
+Current first-version constraint:
+- `devflow.project.go` must be self-contained
+- use `package main`
+- register the project in `init()`
+- importing `devflow/pkg/...` and standard library packages is supported
+- arbitrary companion Go files from the project repo are not loaded yet
 
 An adapter defines:
 - tasks
@@ -8,6 +21,52 @@ An adapter defines:
 - instance configuration
 
 Tasks should stay semantic. The adapter decides which files, directories, env vars, and custom probes contribute to each fingerprint.
+
+Minimal shape:
+
+```go
+package main
+
+import (
+    "context"
+
+    "devflow/pkg/project"
+)
+
+type myProject struct{}
+
+func init() {
+    project.Register(myProject{})
+}
+
+func (myProject) Name() string { return "my-project" }
+
+func (myProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+    _ = ctx
+    _ = worktree
+    return project.InstanceConfig{Label: "my-project"}, nil
+}
+
+func (myProject) Tasks() []project.Task {
+    return []project.Task{
+        {
+            Name: "build",
+            Kind: project.KindOnce,
+            Run: func(ctx context.Context, rt *project.Runtime) error {
+                _ = ctx
+                _ = rt
+                return nil
+            },
+        },
+    }
+}
+
+func (myProject) Targets() []project.Target {
+    return []project.Target{
+        {Name: "up", RootTasks: []string{"build"}},
+    }
+}
+```
 
 ## Dependency Installation
 
