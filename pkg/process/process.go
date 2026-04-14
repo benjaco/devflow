@@ -102,6 +102,9 @@ func Run(ctx context.Context, spec CommandSpec) (Result, error) {
 	err = cmd.Wait()
 	wg.Wait()
 	if err != nil {
+		if ctx.Err() != nil {
+			return Result{ExitCode: -1}, ctx.Err()
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return Result{ExitCode: exitErr.ExitCode()}, fmt.Errorf("%s exited with code %d", spec.Name, exitErr.ExitCode())
 		}
@@ -238,6 +241,9 @@ func runInteractive(ctx context.Context, spec CommandSpec) (Result, error) {
 	}
 	err = handle.Wait()
 	if err != nil {
+		if ctx.Err() != nil {
+			return Result{ExitCode: -1}, ctx.Err()
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return Result{ExitCode: exitErr.ExitCode()}, fmt.Errorf("%s exited with code %d", spec.Name, exitErr.ExitCode())
 		}
@@ -484,7 +490,7 @@ func logWriter(path string) (io.Writer, func() error, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, nil, err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, nil, err
 	}

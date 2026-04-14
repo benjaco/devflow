@@ -14,6 +14,7 @@ Devflow uses three testing layers:
 ## Integration Tests
 
 - subprocess stdout/stderr capture
+- per-task log truncation so logs reflect the current run attempt
 - interactive prompt detection and answer forwarding with a real prompt CLI fixture
 - service lifecycle management
 - service readiness success and timeout behavior
@@ -25,6 +26,7 @@ Devflow uses three testing layers:
 - dependency detection and platform-script install coverage in `pkg/project` and `internal/cli`
 - engine-level interactive prompt event plus answer-file integration coverage
 - sequential engine execution with cache hits
+- distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work
 - polling watch batching and selective watch reruns
 - opt-in real Docker-backed database runtime snapshot/restore coverage in `pkg/database`
 - opt-in real Docker-backed Prisma snapshot metadata + restore coverage in `pkg/database`

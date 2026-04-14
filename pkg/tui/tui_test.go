@@ -243,6 +243,17 @@ func TestRenderFooterIncludesRetargetKey(t *testing.T) {
 	}
 }
 
+func TestScrollLogsClampsAtTop(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	d.logs.SetText(strings.Repeat("line\n", 50))
+	d.logs.ScrollTo(10, 0)
+	d.scrollLogs(-100)
+	row, _ := d.logs.GetScrollOffset()
+	if row != 0 {
+		t.Fatalf("expected log scroll to clamp at top, got row %d", row)
+	}
+}
+
 type testProject struct {
 	name    string
 	tasks   []project.Task

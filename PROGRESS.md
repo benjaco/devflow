@@ -197,6 +197,14 @@ Last updated: 2026-04-14
   - invalidated tasks immediately show as `dirty`
   - impacted downstream groups/services immediately show as pending instead of stale cached/done state
   - the TUI now redraws immediately after writing that transitional status instead of waiting for the relaunch to finish
+- Improved TUI log interaction:
+  - the log pane is now the default focus when the TUI opens
+  - mouse-wheel scrolling over the task table now scrolls the log pane instead of the task list
+- Distinct task-cancellation handling implemented:
+  - tasks interrupted by parent-run cancellation now persist as `canceled` instead of `failed`
+  - the TUI now renders `canceled` separately from real failures
+- Task logs now represent the current attempt:
+  - task log files are truncated at task start so old successful output does not stay mixed into a newer failed or canceled run
 - Added TUI regression coverage for:
   - selected `group` invalidation behavior
   - synthetic task-target execution graphs

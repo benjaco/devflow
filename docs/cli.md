@@ -65,7 +65,13 @@ For watch-cycle events:
 - derived local URLs such as `backend`
 - detached supervisor PID/liveness/log path when present
 
+Task states now distinguish:
+- `failed`: the task itself failed
+- `canceled`: the task was interrupted because another task failed or the run was canceled
+
 `logs` supports task logs as before and also accepts `supervisor` to read the detached supervisor log directly.
+
+Task log files now represent the current run attempt for that task. They are truncated when a task starts again, so older successful output does not stay mixed into a newer failed or canceled attempt.
 
 `tui` now opens a live operator console for an existing instance. The first slice includes:
 - instance/runtime header

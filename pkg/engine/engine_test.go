@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -219,6 +220,81 @@ func TestRunDoesNotStallWhenGroupTaskIsLastNode(t *testing.T) {
 	}
 	if !outcome.Result.Success {
 		t.Fatalf("expected success, got %+v", outcome.Result)
+	}
+}
+
+type cancelSiblingProject struct{}
+
+func (cancelSiblingProject) Name() string { return "cancel-sibling-project" }
+
+func (cancelSiblingProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "cancel-sibling"}, nil
+}
+
+func (cancelSiblingProject) Targets() []project.Target {
+	return []project.Target{{Name: "build", RootTasks: []string{"join"}}}
+}
+
+func (cancelSiblingProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name: "fail_fast",
+			Kind: project.KindOnce,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				return fmt.Errorf("boom")
+			},
+		},
+		{
+			Name: "slow",
+			Kind: project.KindOnce,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				return rt.RunCmdSpec(ctx, process.CommandSpec{
+					Name: "sh",
+					Args: []string{"-c", "sleep 5"},
+					Dir:  rt.Worktree,
+				})
+			},
+		},
+		{
+			Name: "join",
+			Kind: project.KindOnce,
+			Deps: []string{"fail_fast", "slow"},
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				return nil
+			},
+		},
+	}
+}
+
+func TestCanceledSiblingUsesCanceledState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	eng, err := New(cancelSiblingProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI, MaxParallel: 2})
+	if err == nil {
+		t.Fatal("expected run to fail")
+	}
+	if out == nil {
+		t.Fatal("expected partial outcome")
+	}
+	status, err := instance.LoadStatus(worktree, out.Result.InstanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := status.Nodes["fail_fast"].State; got != api.StateFailed {
+		t.Fatalf("expected fail_fast to be failed, got %q", got)
+	}
+	if got := status.Nodes["slow"].State; got != api.StateCanceled {
+		t.Fatalf("expected slow to be canceled, got %q", got)
+	}
+	if got := status.Nodes["slow"].LastError; got != "canceled" {
+		t.Fatalf("expected slow last error to be canceled, got %q", got)
 	}
 }
 

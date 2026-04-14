@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -87,6 +88,32 @@ func TestRunInteractiveAnswersPrompts(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected greeting in output, got %v", lines)
+	}
+}
+
+func TestRunTruncatesLogPerAttempt(t *testing.T) {
+	root := t.TempDir()
+	logPath := filepath.Join(root, "task.log")
+	if _, err := Run(context.Background(), CommandSpec{
+		Name:    "sh",
+		Args:    []string{"-c", "printf 'first\\n'"},
+		LogPath: logPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(context.Background(), CommandSpec{
+		Name:    "sh",
+		Args:    []string{"-c", "printf 'second\\n'"},
+		LogPath: logPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "stdout: second" {
+		t.Fatalf("expected truncated current-run log, got %q", got)
 	}
 }
 

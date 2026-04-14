@@ -117,6 +117,27 @@ func newDashboard(root, instanceID string) *dashboard {
 		SetWrap(false).
 		SetBorder(true).
 		SetTitle(" Logs ")
+	d.logs.SetScrollable(true)
+
+	d.tasks.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		switch action {
+		case tview.MouseScrollUp:
+			d.scrollLogs(-3)
+			return tview.MouseConsumed, nil
+		case tview.MouseScrollDown:
+			d.scrollLogs(3)
+			return tview.MouseConsumed, nil
+		default:
+			return action, event
+		}
+	})
+	d.logs.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		switch action {
+		case tview.MouseScrollUp, tview.MouseScrollDown, tview.MouseLeftClick:
+			d.app.SetFocus(d.logs)
+		}
+		return action, event
+	})
 
 	d.footer.
 		SetDynamicColors(true).
@@ -134,8 +155,9 @@ func newDashboard(root, instanceID string) *dashboard {
 
 	d.setStatus("[green]ready")
 
+	d.app.EnableMouse(true)
 	d.app.SetRoot(d.pages, true)
-	d.app.SetFocus(d.tasks)
+	d.app.SetFocus(d.logs)
 	d.app.SetInputCapture(d.handleKeys)
 	return d
 }
@@ -322,6 +344,18 @@ func (d *dashboard) updateLogsFromSnapshot(snap snapshot) {
 	d.logs.SetText(strings.Join(lines, "\n"))
 }
 
+func (d *dashboard) scrollLogs(delta int) {
+	if delta == 0 {
+		return
+	}
+	row, col := d.logs.GetScrollOffset()
+	nextRow := row + delta
+	if nextRow < 0 {
+		nextRow = 0
+	}
+	d.logs.ScrollTo(nextRow, col)
+}
+
 func (d *dashboard) setStatus(msg string) {
 	d.statusMessage = msg
 	d.renderFooter()
@@ -482,13 +516,14 @@ func renderHeader(snap snapshot) []string {
 		fmt.Sprintf("[yellow]worktree[-]: %s", snap.instance.Worktree),
 		fmt.Sprintf("[yellow]db[-]: %s host=%s port=%d container=%s", snap.instance.DB.Name, snap.instance.DB.Host, snap.instance.DB.Port, snap.instance.DB.ContainerName),
 		fmt.Sprintf("[yellow]urls[-]: %s", strings.Join(urlParts, "    ")),
-		fmt.Sprintf("[yellow]%s[-]    [yellow]states[-]: RUN=%d WAIT=%d CACHE=%d DONE=%d FAIL=%d STOP=%d",
+		fmt.Sprintf("[yellow]%s[-]    [yellow]states[-]: RUN=%d WAIT=%d CACHE=%d DONE=%d FAIL=%d CANC=%d STOP=%d",
 			supervisorText,
 			counts[api.StateRunning],
 			counts[api.StatePending]+counts[api.StateReady]+counts[api.StateDirty],
 			counts[api.StateCached],
 			counts[api.StateDone],
 			counts[api.StateFailed],
+			counts[api.StateCanceled],
 			counts[api.StateStopped],
 		),
 	}
@@ -1042,6 +1077,8 @@ func stateBadge(state api.NodeState) string {
 		return "DONE"
 	case api.StateFailed:
 		return "FAIL"
+	case api.StateCanceled:
+		return "CANC"
 	case api.StateStopped:
 		return "STOP"
 	case api.StateSkipped:
@@ -1063,6 +1100,8 @@ func stateColor(state api.NodeState) tcell.Color {
 		return tcell.ColorWhite
 	case api.StateFailed:
 		return tcell.ColorIndianRed
+	case api.StateCanceled:
+		return tcell.ColorOrange
 	case api.StateStopped:
 		return tcell.ColorGray
 	case api.StateSkipped:
@@ -1080,16 +1119,18 @@ func taskStatePriority(state api.NodeState) int {
 		return 1
 	case api.StateFailed:
 		return 2
-	case api.StateCached:
+	case api.StateCanceled:
 		return 3
-	case api.StateDone:
+	case api.StateCached:
 		return 4
-	case api.StateStopped:
+	case api.StateDone:
 		return 5
-	case api.StateSkipped:
+	case api.StateStopped:
 		return 6
-	default:
+	case api.StateSkipped:
 		return 7
+	default:
+		return 8
 	}
 }
 
