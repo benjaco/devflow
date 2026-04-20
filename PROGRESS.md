@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-04-14
+Last updated: 2026-04-20
 
 ## Current Status
 
@@ -225,6 +225,40 @@ Last updated: 2026-04-14
 - Fixed the clean-run startup race after deleting `.devflow`:
   - bare `devflow` now waits briefly for the first detached `status.json`
   - the TUI now tolerates a missing initial `status.json` and shows a placeholder instance state until the first status snapshot arrives
+- Hardened the project-local bootstrap path:
+  - local `devflow.project.go` rebuild decisions now use a content build key instead of mtimes
+  - worktree-local binaries are now replaced atomically after successful builds
+  - timestamp-only file touches no longer trigger unnecessary local CLI rebuilds
+- Added hardening coverage and soak verification for:
+  - repeated bootstrap/local-project CLI runs
+  - repeated TUI package tests
+  - repeated watch/example workflow tests across the deterministic adapters
+- Cache and port allocation roots now use the Git common dir for sibling worktree sharing:
+  - task cache is now rooted at `<git-common-dir>/devflow/cache`
+  - port allocation registry is now rooted at `<git-common-dir>/devflow/state/ports.json`
+  - non-git temp-dir/test flows still fall back safely to the previous local/global roots
+- Added real `git worktree` regression coverage proving sibling worktrees share:
+  - cache root resolution
+  - port registry path resolution
+- Added fallback regression coverage so non-git worktrees still use:
+  - local `.devflow/cache`
+  - global shared `ports.json` state
+- Added bootstrap regression coverage proving:
+  - timestamp-only local-project touches do not rebuild
+  - failed local-project rebuilds keep the previous local binary intact
+- Hardened watch stability coverage:
+  - example watch tests no longer force future mtimes with `os.Chtimes`
+  - `web-worker-workspace` watch assertions now wait for stable expected counts
+  - engine coverage now checks output-suppression filtering deterministically
+- Simplified the `web-worker-workspace` service watch inputs so generated dirs are driven by upstream task dependencies instead of duplicate direct watch inputs
+- Re-verified stability with repeated runs:
+  - `go test ./internal/cli -count=10`
+  - `go test ./pkg/instance ./pkg/ports -count=25`
+  - `go test ./pkg/engine -run 'TestWatchOutputSuppressorFiltersOutputFilesAndDirs|TestWatchRerunsOnlyAffectedSlice|TestWatchDoesNotPropagateAcrossServiceDependencies' -count=20`
+  - `go test ./examples/go-next-monorepo -run TestExampleProjectWatchSelectiveReruns -count=10`
+  - `go test ./examples/web-worker-workspace -run TestWorkspaceWatchSelectiveReruns -count=10`
+  - `go test ./examples/go-next-monorepo ./examples/web-worker-workspace ./examples/embedded-web-app -count=3`
+  - `go test ./...`
 
 ## In Progress
 

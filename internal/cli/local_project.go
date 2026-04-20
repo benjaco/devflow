@@ -2,6 +2,8 @@ package cli
 
 import (
 	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"os"
@@ -87,20 +89,24 @@ func ensureLocalProjectBinary(bootstrapRoot, worktree string) (string, error) {
 	}
 
 	target := filepath.Join(worktree, ".devflow", "bin", "devflow-local")
-	needsBuild, err := localBinaryNeedsBuild(bootstrapRoot, projectPath, target)
+	buildKey, err := localBuildKey(bootstrapRoot, projectPath)
+	if err != nil {
+		return "", err
+	}
+	needsBuild, err := localBinaryNeedsBuild(target, buildKey)
 	if err != nil {
 		return "", err
 	}
 	if !needsBuild {
 		return target, nil
 	}
-	if err := buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target); err != nil {
+	if err := buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target, buildKey); err != nil {
 		return "", err
 	}
 	return target, nil
 }
 
-func localBinaryNeedsBuild(bootstrapRoot, projectPath, target string) (bool, error) {
+func localBinaryNeedsBuild(target, buildKey string) (bool, error) {
 	targetInfo, err := os.Stat(target)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -108,18 +114,19 @@ func localBinaryNeedsBuild(bootstrapRoot, projectPath, target string) (bool, err
 		}
 		return false, err
 	}
-	sources, err := localBuildSources(bootstrapRoot, projectPath)
+	keyPath := localBuildKeyPath(target)
+	data, err := os.ReadFile(keyPath)
 	if err != nil {
-		return false, err
-	}
-	for _, path := range sources {
-		info, err := os.Stat(path)
-		if err != nil {
-			return false, err
-		}
-		if info.ModTime().After(targetInfo.ModTime()) {
+		if os.IsNotExist(err) {
 			return true, nil
 		}
+		return false, err
+	}
+	if strings.TrimSpace(string(data)) != buildKey {
+		return true, nil
+	}
+	if targetInfo.Size() == 0 {
+		return true, nil
 	}
 	return false, nil
 }
@@ -151,7 +158,38 @@ func localBuildSources(bootstrapRoot, projectPath string) ([]string, error) {
 	return sources, nil
 }
 
-func buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target string) error {
+func localBuildKey(bootstrapRoot, projectPath string) (string, error) {
+	sources, err := localBuildSources(bootstrapRoot, projectPath)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	for _, path := range sources {
+		rel, err := filepath.Rel(bootstrapRoot, path)
+		if err != nil {
+			return "", err
+		}
+		if _, err := hash.Write([]byte(filepath.ToSlash(rel))); err != nil {
+			return "", err
+		}
+		if _, err := hash.Write([]byte{0}); err != nil {
+			return "", err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		if _, err := hash.Write(data); err != nil {
+			return "", err
+		}
+		if _, err := hash.Write([]byte{0}); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target, buildKey string) error {
 	buildDir := localBuildDir(bootstrapRoot, worktree)
 	if err := os.RemoveAll(buildDir); err != nil {
 		return err
@@ -162,6 +200,8 @@ func buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target string
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
+	tmpTarget := target + ".tmp"
+	_ = os.Remove(tmpTarget)
 	if err := os.WriteFile(filepath.Join(buildDir, "main.go"), []byte(localBuildMainSource()), 0o644); err != nil {
 		return err
 	}
@@ -176,17 +216,22 @@ func buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target string
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("go", "build", "-o", target, "./"+filepath.ToSlash(rel))
+	cmd := exec.Command("go", "build", "-o", tmpTarget, "./"+filepath.ToSlash(rel))
 	cmd.Dir = bootstrapRoot
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		_ = os.Remove(tmpTarget)
 		trimmed := strings.TrimSpace(string(output))
 		if trimmed == "" {
 			return fmt.Errorf("failed to build local devflow binary from %s: %w", projectPath, err)
 		}
 		return fmt.Errorf("failed to build local devflow binary from %s: %w\n%s", projectPath, err, trimmed)
 	}
-	return nil
+	if err := os.Rename(tmpTarget, target); err != nil {
+		_ = os.Remove(tmpTarget)
+		return err
+	}
+	return writeBuildKey(target, buildKey)
 }
 
 func localBuildDir(bootstrapRoot, worktree string) string {
@@ -230,4 +275,17 @@ func withEnv(env []string, key, value string) []string {
 		out = append(out, prefix+value)
 	}
 	return out
+}
+
+func localBuildKeyPath(target string) string {
+	return target + ".buildkey"
+}
+
+func writeBuildKey(target, buildKey string) error {
+	path := localBuildKeyPath(target)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(buildKey+"\n"), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

@@ -47,15 +47,20 @@ This model intentionally avoids:
 ## State Layout
 
 Per-worktree state lives under `.devflow/`:
-- `.devflow/cache`
 - `.devflow/logs/<instance-id>/`
 - `.devflow/state/instances/<instance-id>/`
 
-Shared coordination state lives under the user cache directory:
-- `devflow/state/ports.json`
+Repo-shared state for sibling git worktrees now lives under the Git common dir from:
+- `git rev-parse --git-common-dir`
+
+Current shared paths:
+- `<git-common-dir>/devflow/cache`
+- `<git-common-dir>/devflow/state/ports.json`
+
+Global coordination state that is not repo-specific still lives under the user cache directory:
 - `devflow/state/instance-index.json`
 
-This split keeps cache and logs local to the worktree while still allowing cross-worktree port coordination.
+This split keeps runtime logs and instance state local to the worktree while letting sibling worktrees in the same repo share cache entries and port allocations.
 
 ## Runtime Env
 

@@ -27,6 +27,14 @@ func NewDefault() (*Manager, error) {
 	return &Manager{Path: filepath.Join(root, "ports.json")}, nil
 }
 
+func NewDefaultForWorktree(worktree string) (*Manager, error) {
+	root, err := instance.RepoSharedStateRoot(worktree)
+	if err != nil {
+		return nil, err
+	}
+	return &Manager{Path: filepath.Join(root, "ports.json")}, nil
+}
+
 func (m *Manager) Allocate(instanceID string, names []string) (map[string]int, error) {
 	lockFile, err := lock.Acquire(m.Path + ".lock")
 	if err != nil {

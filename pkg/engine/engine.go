@@ -63,12 +63,19 @@ type taskResult struct {
 	err    error
 }
 
+type watchOutputSuppressor struct {
+	files map[string]time.Time
+	dirs  map[string]time.Time
+}
+
+const watchOutputSuppressTTL = 2 * time.Second
+
 func New(p project.Project, worktree string) (*Engine, error) {
 	g, err := graph.New(p.Tasks(), p.Targets())
 	if err != nil {
 		return nil, err
 	}
-	pm, err := ports.NewDefault()
+	pm, err := ports.NewDefaultForWorktree(worktree)
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +138,10 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 	if err != nil {
 		return err
 	}
+	suppressor := watchOutputSuppressor{
+		files: map[string]time.Time{},
+		dirs:  map[string]time.Time{},
+	}
 
 	for {
 		select {
@@ -156,10 +167,11 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 				e.stopAllServices(req, inst, state)
 				return nil
 			}
-			if len(batch.Files) == 0 {
+			files := suppressor.Filter(batch.Files)
+			if len(files) == 0 {
 				continue
 			}
-			affectedOrder, changedTasks := e.affectedWatchOrder(req.Target, batch.Files)
+			affectedOrder, changedTasks := e.affectedWatchOrder(req.Target, files)
 			if len(affectedOrder) == 0 {
 				continue
 			}
@@ -170,7 +182,7 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 				Worktree:      req.Worktree,
 				Target:        req.Target,
 				Mode:          req.Mode,
-				Files:         append([]string(nil), batch.Files...),
+				Files:         append([]string(nil), files...),
 				AffectedTasks: changedTasks,
 			})
 			state.stopServices(req, affectedOrder)
@@ -178,6 +190,7 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 			if err := e.runReadyQueue(ctx, func() {}, baseRT, state, affectedOrder); err != nil {
 				success = false
 			}
+			suppressor.Record(e.graph, affectedOrder, watchOutputSuppressTTL)
 			e.publish(api.Event{
 				TS:            process.NowRFC3339Nano(),
 				Type:          api.EventWatchCycleDone,
@@ -185,7 +198,7 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 				Worktree:      req.Worktree,
 				Target:        req.Target,
 				Mode:          req.Mode,
-				Files:         append([]string(nil), batch.Files...),
+				Files:         append([]string(nil), files...),
 				AffectedTasks: changedTasks,
 				Success:       boolPtr(success),
 			})
@@ -1027,6 +1040,80 @@ func sortedHandles(m map[string]*process.Handle) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func (s *watchOutputSuppressor) Record(g *graph.Graph, taskNames []string, ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	expiresAt := time.Now().Add(ttl)
+	for _, name := range taskNames {
+		task, ok := g.Tasks[name]
+		if !ok {
+			continue
+		}
+		for _, file := range task.Outputs.Files {
+			normalized := normalizeWatchPath(file)
+			s.files[normalized] = expiresAt
+			if dir := normalizeWatchPath(filepath.Dir(normalized)); dir != "." && dir != "" {
+				s.dirs[dir] = expiresAt
+			}
+		}
+		for _, dir := range task.Outputs.Dirs {
+			s.dirs[normalizeWatchPath(dir)] = expiresAt
+		}
+	}
+}
+
+func (s *watchOutputSuppressor) Filter(files []string) []string {
+	now := time.Now()
+	for path, expiresAt := range s.files {
+		if !expiresAt.After(now) {
+			delete(s.files, path)
+		}
+	}
+	for path, expiresAt := range s.dirs {
+		if !expiresAt.After(now) {
+			delete(s.dirs, path)
+		}
+	}
+	filtered := make([]string, 0, len(files))
+	for _, file := range files {
+		normalized := normalizeWatchPath(file)
+		if expiresAt, ok := s.files[normalized]; ok && expiresAt.After(now) {
+			continue
+		}
+		suppressed := false
+		for dir, expiresAt := range s.dirs {
+			if !expiresAt.After(now) {
+				continue
+			}
+			if watchPathHasPrefix(normalized, dir) {
+				suppressed = true
+				break
+			}
+		}
+		if !suppressed {
+			filtered = append(filtered, file)
+		}
+	}
+	return filtered
+}
+
+func normalizeWatchPath(path string) string {
+	return filepath.ToSlash(filepath.Clean(path))
+}
+
+func watchPathHasPrefix(path, prefix string) bool {
+	path = normalizeWatchPath(path)
+	prefix = normalizeWatchPath(prefix)
+	if prefix == "." || prefix == "" {
+		return true
+	}
+	if path == prefix {
+		return true
+	}
+	return len(path) > len(prefix) && path[:len(prefix)] == prefix && path[len(prefix)] == '/'
 }
 
 func sortedNodeNames(m map[string]api.NodeStatus) []string {

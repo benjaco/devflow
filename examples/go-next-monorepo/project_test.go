@@ -224,10 +224,6 @@ func rewriteFile(t *testing.T, path, contents string) {
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().Add(2 * time.Second)
-	if err := os.Chtimes(path, now, now); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func readJSONMap(t *testing.T, path string) map[string]any {

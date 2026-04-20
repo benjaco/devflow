@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"devflow/pkg/api"
+	"devflow/pkg/graph"
 	"devflow/pkg/instance"
 	"devflow/pkg/process"
 	"devflow/pkg/project"
@@ -706,6 +707,11 @@ type watchServiceChainProject struct {
 	uiRuns    atomic.Int32
 }
 
+type watchGeneratedOutputProject struct {
+	bundleRuns  atomic.Int32
+	serviceRuns atomic.Int32
+}
+
 func (p *watchServiceChainProject) Name() string { return "watch-service-chain-project" }
 
 func (p *watchServiceChainProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
@@ -814,6 +820,78 @@ func TestWatchDoesNotPropagateAcrossServiceDependencies(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for watch shutdown")
+	}
+}
+
+func (p *watchGeneratedOutputProject) Name() string { return "watch-generated-output-project" }
+
+func (p *watchGeneratedOutputProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "watch-generated"}, nil
+}
+
+func (p *watchGeneratedOutputProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"svc"}}}
+}
+
+func (p *watchGeneratedOutputProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:      "bundle",
+			Kind:      project.KindOnce,
+			Cache:     true,
+			Inputs:    project.Inputs{Files: []string{"src.txt"}},
+			Outputs:   project.Outputs{Files: []string{"generated/out.txt"}},
+			Signature: "watch-generated-bundle-v1",
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				p.bundleRuns.Add(1)
+				data, err := os.ReadFile(filepath.Join(rt.Worktree, "src.txt"))
+				if err != nil {
+					return err
+				}
+				if err := os.MkdirAll(filepath.Join(rt.Worktree, "generated"), 0o755); err != nil {
+					return err
+				}
+				return os.WriteFile(filepath.Join(rt.Worktree, "generated", "out.txt"), data, 0o644)
+			},
+		},
+		{
+			Name:      "svc",
+			Kind:      project.KindService,
+			Deps:      []string{"bundle"},
+			Inputs:    project.Inputs{Dirs: []string{"generated"}},
+			Restart:   project.RestartOnInputChange,
+			Signature: "watch-generated-svc-v1",
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				p.serviceRuns.Add(1)
+				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
+					Name: "sh",
+					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
+					Dir:  rt.Worktree,
+					Env:  rt.Env,
+				})
+				return err
+			},
+		},
+	}
+}
+
+func TestWatchOutputSuppressorFiltersOutputFilesAndDirs(t *testing.T) {
+	g, err := graph.New((&watchGeneratedOutputProject{}).Tasks(), []project.Target{{Name: "dev", RootTasks: []string{"svc"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	suppressor := watchOutputSuppressor{
+		files: map[string]time.Time{},
+		dirs:  map[string]time.Time{},
+	}
+	suppressor.Record(g, []string{"bundle"}, time.Minute)
+
+	filtered := suppressor.Filter([]string{"generated/out.txt", "generated", "src.txt"})
+	if got := strings.Join(filtered, ","); got != "src.txt" {
+		t.Fatalf("unexpected filtered files %q", got)
 	}
 }
 

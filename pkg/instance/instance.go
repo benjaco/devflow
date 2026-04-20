@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -187,6 +189,9 @@ func ConsumeInteractionAnswer(worktree, instanceID, promptID string) (string, bo
 }
 
 func CacheRoot(worktree string) string {
+	if root, err := repoSharedRoot(worktree); err == nil {
+		return filepath.Join(root, "cache")
+	}
 	return filepath.Join(worktree, ".devflow", "cache")
 }
 
@@ -202,8 +207,55 @@ func GlobalStateRoot() (string, error) {
 	return path, nil
 }
 
+func RepoSharedStateRoot(worktree string) (string, error) {
+	if root, err := repoSharedRoot(worktree); err == nil {
+		path := filepath.Join(root, "state")
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return "", err
+		}
+		return path, nil
+	}
+	return GlobalStateRoot()
+}
+
 func instancePath(worktree, instanceID string) string {
 	return filepath.Join(worktree, ".devflow", "state", "instances", instanceID)
+}
+
+func GitCommonDir(worktree string) (string, error) {
+	root, err := filepath.Abs(worktree)
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command("git", "rev-parse", "--git-common-dir")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	common := strings.TrimSpace(string(out))
+	if common == "" {
+		return "", fmt.Errorf("git common dir output was empty")
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(root, common)
+	}
+	if real, err := fsutil.Realpath(common); err == nil {
+		return real, nil
+	}
+	return filepath.Abs(common)
+}
+
+func repoSharedRoot(worktree string) (string, error) {
+	common, err := GitCommonDir(worktree)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(common, "devflow")
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func StopProcesses(inst *api.Instance, task string) ([]string, error) {

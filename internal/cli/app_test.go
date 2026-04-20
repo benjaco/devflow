@@ -325,6 +325,83 @@ func TestBootstrapRebuildsWhenLocalProjectChanges(t *testing.T) {
 	}
 }
 
+func TestBootstrapDoesNotRebuildOnTimestampOnlyChange(t *testing.T) {
+	worktree := t.TempDir()
+	projectPath := filepath.Join(worktree, localProjectFile)
+	writeLocalProjectFile(t, worktree, localProjectSource("local-stable-project", "up"))
+
+	if _, err := runBootstrapCommand(t, worktree, "graph", "list", "--json"); err != nil {
+		t.Fatalf("initial bootstrap command failed: %v", err)
+	}
+	binaryPath := filepath.Join(worktree, ".devflow", "bin", "devflow-local")
+	before, err := os.Stat(binaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := localBuildKeyPath(binaryPath)
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("expected build key file to exist: %v", err)
+	}
+
+	future := before.ModTime().Add(3 * time.Second)
+	if err := os.Chtimes(projectPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runBootstrapCommand(t, worktree, "graph", "list", "--json"); err != nil {
+		t.Fatalf("timestamp-only bootstrap command failed: %v", err)
+	}
+	after, err := os.Stat(binaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("expected binary modtime to stay unchanged on timestamp-only touch: before=%s after=%s", before.ModTime(), after.ModTime())
+	}
+}
+
+func TestBootstrapFailedRebuildKeepsPreviousBinary(t *testing.T) {
+	worktree := t.TempDir()
+	projectPath := filepath.Join(worktree, localProjectFile)
+	projectName := "local-atomic-project"
+	writeLocalProjectFile(t, worktree, localProjectSource(projectName, "up"))
+
+	if _, err := runBootstrapCommand(t, worktree, "graph", "list", "--json"); err != nil {
+		t.Fatalf("initial bootstrap command failed: %v", err)
+	}
+	binaryPath := filepath.Join(worktree, ".devflow", "bin", "devflow-local")
+	before, err := os.Stat(binaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(projectPath, []byte("package main\n\nfunc broken(\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output, err := runBootstrapCommand(t, worktree, "graph", "list", "--json")
+	if err == nil {
+		t.Fatalf("expected rebuild to fail for invalid local project, got output %q", output)
+	}
+
+	after, err := os.Stat(binaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("expected existing binary to stay in place after failed rebuild: before=%s after=%s", before.ModTime(), after.ModTime())
+	}
+
+	cmd := exec.Command(binaryPath, "graph", "list", "--json", "--project", projectName)
+	cmd.Dir = worktree
+	cmd.Env = withEnv(os.Environ(), envLocalExec, "1")
+	directOut, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected previous local binary to remain runnable: %v\n%s", err, string(directOut))
+	}
+	if !strings.Contains(string(directOut), "\"up\"") {
+		t.Fatalf("expected previous binary output to include old target, got %q", string(directOut))
+	}
+}
+
 func buildBootstrapBinary(t *testing.T) string {
 	t.Helper()
 	bootstrapBuildOnce.Do(func() {

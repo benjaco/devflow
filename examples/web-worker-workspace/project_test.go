@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -168,6 +171,11 @@ func TestWorkspaceWatchSelectiveReruns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	events := eng.SubscribeEvents()
+	var (
+		eventMu     sync.Mutex
+		watchStarts []string
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -180,24 +188,43 @@ func TestWorkspaceWatchSelectiveReruns(t *testing.T) {
 			MaxParallel: 4,
 		})
 	}()
+	go func() {
+		for evt := range events {
+			if evt.Type != api.EventWatchCycleStart {
+				continue
+			}
+			eventMu.Lock()
+			watchStarts = append(watchStarts, "files="+strings.Join(evt.Files, ",")+" affected="+strings.Join(evt.AffectedTasks, ","))
+			if len(watchStarts) > 12 {
+				watchStarts = append([]string(nil), watchStarts[len(watchStarts)-12:]...)
+			}
+			eventMu.Unlock()
+		}
+	}()
 
-	waitFor(t, 5*time.Second, func() bool {
-		return traceCount(worktree, "db_migrate") == 1 &&
-			traceCount(worktree, "postgres") == 1 &&
-			traceCount(worktree, "contract_codegen") == 1 &&
-			traceCount(worktree, "backend_codegen") == 1 &&
-			traceCount(worktree, "frontend_codegen") == 1 &&
-			traceCount(worktree, "worker_bundle") == 1 &&
-			traceCount(worktree, "backend_dev") == 1 &&
-			traceCount(worktree, "worker_dev") == 1 &&
-			traceCount(worktree, "frontend_dev") == 1
-	})
-	time.Sleep(500 * time.Millisecond)
+	if !waitForStableTraceCounts(8*time.Second, 500*time.Millisecond, worktree, map[string]int{
+		"db_migrate":       1,
+		"postgres":         1,
+		"contract_codegen": 1,
+		"backend_codegen":  1,
+		"frontend_codegen": 1,
+		"worker_bundle":    1,
+		"backend_dev":      1,
+		"worker_dev":       1,
+		"frontend_dev":     1,
+	}) {
+		t.Fatalf("initial watch run did not settle: %s", traceSnapshot(worktree, "db_migrate", "postgres", "contract_codegen", "backend_codegen", "frontend_codegen", "worker_bundle", "backend_dev", "worker_dev", "frontend_dev"))
+	}
 
 	rewriteFile(t, filepath.Join(worktree, "worker/src/worker.go"), "package worker\nvar Queue = \"priority\"\n")
-	waitFor(t, 5*time.Second, func() bool {
-		return traceCount(worktree, "worker_bundle") == 2 && traceCount(worktree, "worker_dev") == 2
-	})
+	if !waitForStableTraceCounts(8*time.Second, 500*time.Millisecond, worktree, map[string]int{
+		"worker_bundle": 2,
+		"worker_dev":    2,
+		"backend_dev":   1,
+		"frontend_dev":  1,
+	}) {
+		t.Fatalf("worker change did not settle on expected slice: %s", traceSnapshot(worktree, "worker_bundle", "worker_dev", "backend_dev", "frontend_dev"))
+	}
 	if got := traceCount(worktree, "backend_dev"); got != 1 {
 		t.Fatalf("unexpected backend restart after worker change: %d", got)
 	}
@@ -206,26 +233,27 @@ func TestWorkspaceWatchSelectiveReruns(t *testing.T) {
 	}
 
 	rewriteFile(t, filepath.Join(worktree, "contracts/openapi.json"), "{ \"openapi\": \"3.0.0\", \"info\": { \"title\": \"workspace-api\", \"version\": \"2.0.0\" } }\n")
-	if !waitForBool(5*time.Second, func() bool {
-		return traceCount(worktree, "contract_codegen") == 2 &&
-			traceCount(worktree, "backend_codegen") == 2 &&
-			traceCount(worktree, "frontend_codegen") == 2 &&
-			traceCount(worktree, "worker_bundle") == 3 &&
-			traceCount(worktree, "backend_dev") == 2 &&
-			traceCount(worktree, "worker_dev") == 3 &&
-			traceCount(worktree, "frontend_dev") == 2
+	if !waitForStableTraceCounts(8*time.Second, 500*time.Millisecond, worktree, map[string]int{
+		"contract_codegen": 2,
+		"backend_codegen":  2,
+		"frontend_codegen": 2,
+		"worker_bundle":    3,
+		"backend_dev":      2,
+		"worker_dev":       3,
+		"frontend_dev":     2,
 	}) {
-		t.Fatalf("contract change did not rerun expected slice: contract=%d backend_codegen=%d frontend_codegen=%d worker_bundle=%d backend_dev=%d worker_dev=%d frontend_dev=%d", traceCount(worktree, "contract_codegen"), traceCount(worktree, "backend_codegen"), traceCount(worktree, "frontend_codegen"), traceCount(worktree, "worker_bundle"), traceCount(worktree, "backend_dev"), traceCount(worktree, "worker_dev"), traceCount(worktree, "frontend_dev"))
+		t.Fatalf("contract change did not rerun expected slice: %s watch=%s", traceSnapshot(worktree, "contract_codegen", "backend_codegen", "frontend_codegen", "worker_bundle", "backend_dev", "worker_dev", "frontend_dev"), recentWatchStarts(&eventMu, watchStarts))
 	}
 
 	rewriteFile(t, filepath.Join(worktree, "db/migrations/001_init.sql"), "create table jobs(id integer primary key, payload text not null, status text not null);\n")
-	if !waitForBool(5*time.Second, func() bool {
-		return traceCount(worktree, "db_migrate") == 2 &&
-			traceCount(worktree, "postgres") == 2 &&
-			traceCount(worktree, "backend_dev") == 3 &&
-			traceCount(worktree, "worker_dev") == 4
+	if !waitForStableTraceCounts(8*time.Second, 500*time.Millisecond, worktree, map[string]int{
+		"db_migrate":   2,
+		"postgres":     2,
+		"backend_dev":  3,
+		"worker_dev":   4,
+		"frontend_dev": 2,
 	}) {
-		t.Fatalf("db change did not rerun expected slice: db_migrate=%d postgres=%d backend_dev=%d worker_dev=%d frontend_dev=%d", traceCount(worktree, "db_migrate"), traceCount(worktree, "postgres"), traceCount(worktree, "backend_dev"), traceCount(worktree, "worker_dev"), traceCount(worktree, "frontend_dev"))
+		t.Fatalf("db change did not rerun expected slice: %s watch=%s", traceSnapshot(worktree, "db_migrate", "postgres", "backend_dev", "worker_dev", "frontend_dev"), recentWatchStarts(&eventMu, watchStarts))
 	}
 	if got := traceCount(worktree, "frontend_dev"); got != 2 {
 		t.Fatalf("unexpected frontend restart after DB change: %d", got)
@@ -269,6 +297,51 @@ func waitForBool(timeout time.Duration, fn func() bool) bool {
 	return false
 }
 
+func waitForStableTraceCounts(timeout, stableFor time.Duration, worktree string, expected map[string]int) bool {
+	deadline := time.Now().Add(timeout)
+	var stableSince time.Time
+	for time.Now().Before(deadline) {
+		if traceCountsMatch(worktree, expected) {
+			if stableSince.IsZero() {
+				stableSince = time.Now()
+			}
+			if time.Since(stableSince) >= stableFor {
+				return true
+			}
+		} else {
+			stableSince = time.Time{}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return false
+}
+
+func traceCountsMatch(worktree string, expected map[string]int) bool {
+	for task, want := range expected {
+		if traceCount(worktree, task) != want {
+			return false
+		}
+	}
+	return true
+}
+
+func traceSnapshot(worktree string, tasks ...string) string {
+	parts := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		parts = append(parts, task+"="+strconv.Itoa(traceCount(worktree, task)))
+	}
+	return strings.Join(parts, " ")
+}
+
+func recentWatchStarts(mu *sync.Mutex, values []string) string {
+	mu.Lock()
+	defer mu.Unlock()
+	if len(values) == 0 {
+		return "<none>"
+	}
+	return strings.Join(append([]string(nil), values...), " | ")
+}
+
 func assertFileExists(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); err != nil {
@@ -279,10 +352,6 @@ func assertFileExists(t *testing.T, path string) {
 func rewriteFile(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().Add(2 * time.Second)
-	if err := os.Chtimes(path, now, now); err != nil {
 		t.Fatal(err)
 	}
 }
