@@ -47,6 +47,10 @@ Implemented `run` flags include:
 
 `watch` runs an initial watch-mode cycle, then keeps polling for changes and reruns only the affected downstream slice. In JSON mode it emits the typed event stream line-by-line.
 
+Watch file matching is driven by adapter task inputs. Changed files directly affect tasks whose `Inputs.Files` or `Inputs.Dirs` match the changed paths, then the engine cascades through downstream tasks that are eligible to rerun in watch mode.
+
+Watch cascades respect dependency barriers. If an intermediate task in the affected slice is not allowed to run in watch mode, downstream tasks past that intermediate are not run in that cycle.
+
 For watch-cycle events:
 - `files` is the raw changed file list from the watcher batch
 - `affectedTasks` is the directly affected task list derived from those file changes

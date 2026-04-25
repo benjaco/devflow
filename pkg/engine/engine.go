@@ -1154,11 +1154,21 @@ func (e *Engine) affectedWatchOrder(target string, files []string) ([]string, []
 		return nil, nil
 	}
 	downstream := e.watchDownstream(filteredDirect)
-	filtered := make([]string, 0, len(downstream))
+	candidates := make(map[string]bool, len(downstream))
 	for _, name := range downstream {
 		if !inClosure[name] {
 			continue
 		}
+		candidates[name] = true
+	}
+	candidateOrder := sortedBoolKeys(candidates)
+	candidateOrder, err = e.graph.TopoSort(candidateOrder)
+	if err != nil {
+		return nil, filteredDirect
+	}
+	included := make(map[string]bool, len(candidateOrder))
+	filtered := make([]string, 0, len(candidateOrder))
+	for _, name := range candidateOrder {
 		task := e.graph.Tasks[name]
 		if task.Kind == project.KindWarmup && !task.AllowInWatch {
 			continue
@@ -1166,13 +1176,20 @@ func (e *Engine) affectedWatchOrder(target string, files []string) ([]string, []
 		if task.Kind == project.KindService && task.Restart == project.RestartNever {
 			continue
 		}
+		blockedByDep := false
+		for _, dep := range task.Deps {
+			if candidates[dep] && !included[dep] {
+				blockedByDep = true
+				break
+			}
+		}
+		if blockedByDep {
+			continue
+		}
+		included[name] = true
 		filtered = append(filtered, name)
 	}
-	order, err := e.graph.TopoSort(filtered)
-	if err != nil {
-		return nil, filteredDirect
-	}
-	return order, filteredDirect
+	return filtered, filteredDirect
 }
 
 func (e *Engine) watchDownstream(names []string) []string {

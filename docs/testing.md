@@ -28,6 +28,7 @@ Devflow uses three testing layers:
 - sequential engine execution with cache hits
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work
 - polling watch batching and selective watch reruns
+- watch cascade pruning so downstream tasks do not run past warmups or services that are blocked from watch execution, including full watch execution and mixed blocked/allowed branch coverage
 - opt-in real Docker-backed database runtime snapshot/restore coverage in `pkg/database`
 - opt-in real Docker-backed Prisma snapshot metadata + restore coverage in `pkg/database`
 

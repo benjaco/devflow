@@ -75,6 +75,23 @@ The important rule is precedence:
 
 That allows projects to keep normal local app settings in `.env` while still ensuring the launched frontend/backend processes point at the correct per-instance Postgres runtime and leased ports.
 
+## Watch Cascades
+
+Watch mode uses task inputs as the file-change interface:
+- `Inputs.Files` matches exact relative files
+- `Inputs.Dirs` matches relative directories and descendants
+- `Inputs.Ignore` can suppress matching paths
+
+When a file batch arrives, the engine:
+- finds directly affected tasks in the selected target closure
+- expands through the downstream task graph using watch restart policy rules
+- prunes tasks that cannot run in watch mode, such as warmups without `AllowInWatch` and services with `RestartNever`
+- preserves dependency barriers while pruning
+
+The dependency-barrier rule is important: if an intermediate candidate is blocked from the watch cycle, its downstream candidates are blocked too. Downstream tasks must not run in advance against stale intermediate outputs just because they are also reachable from the changed task.
+
+Normal ready-queue scheduling still applies to the final rerun set, so included downstream tasks become runnable only after included upstream dependencies finish or restore from cache.
+
 ## Interactive Commands
 
 Devflow should treat subprocess interactivity as an exception, not the default execution model.

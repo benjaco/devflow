@@ -277,6 +277,14 @@ Last updated: 2026-04-25
 - Added `docs/agent-memory.md` as shared long-term AI project memory and linked it from `AGENTS.md`, `README.md`, and `docs/agent-integration.md`
 - Refreshed stale roadmap and overview wording so agent memory docs match the current implementation state
 - Documented in `AGENTS.md` and `docs/agent-memory.md` that agent memory must stay integrated with subsystem docs instead of replacing them
+- Fixed watch cascade selection so downstream tasks do not run past intermediate tasks that are blocked from watch execution
+- Added watch regression coverage for cascades blocked by warmups without `AllowInWatch` and services with `RestartNever`
+- Added full watch execution coverage proving a service beyond a blocked warmup does not restart after an upstream file change
+- Added mixed-branch watch coverage proving an allowed sibling branch still cascades when another branch is blocked
+- Verified the watch cascade change with:
+  - `go test ./pkg/engine -run 'TestWatch.*Cascade|TestWatchRunDoesNotRestartServicePastWarmupBlockedInWatch' -count=1`
+  - `go test ./pkg/engine`
+  - `go test ./...`
 
 ## In Progress
 

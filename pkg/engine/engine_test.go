@@ -823,6 +823,298 @@ func TestWatchDoesNotPropagateAcrossServiceDependencies(t *testing.T) {
 	}
 }
 
+type watchBlockedWarmupProject struct{}
+
+func (watchBlockedWarmupProject) Name() string { return "watch-blocked-warmup-project" }
+
+func (watchBlockedWarmupProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "watch-blocked-warmup"}, nil
+}
+
+func (watchBlockedWarmupProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"serve"}}}
+}
+
+func (watchBlockedWarmupProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:   "schema",
+			Kind:   project.KindOnce,
+			Inputs: project.Inputs{Files: []string{"schema.txt"}},
+		},
+		{
+			Name:         "prepare",
+			Kind:         project.KindWarmup,
+			Deps:         []string{"schema"},
+			AllowInWatch: false,
+		},
+		{
+			Name:    "serve",
+			Kind:    project.KindService,
+			Deps:    []string{"prepare"},
+			Restart: project.RestartOnInputChange,
+		},
+	}
+}
+
+func TestWatchCascadeDoesNotRunPastWarmupBlockedInWatch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	eng, err := New(watchBlockedWarmupProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	order, changed := eng.affectedWatchOrder("dev", []string{"schema.txt"})
+	if got, want := strings.Join(changed, ","), "schema"; got != want {
+		t.Fatalf("changed=%s want=%s", got, want)
+	}
+	if got, want := strings.Join(order, ","), "schema"; got != want {
+		t.Fatalf("order=%s want=%s", got, want)
+	}
+}
+
+type watchBlockedWarmupRuntimeProject struct {
+	sourceRuns  atomic.Int32
+	prepareRuns atomic.Int32
+	serveRuns   atomic.Int32
+}
+
+func (p *watchBlockedWarmupRuntimeProject) Name() string {
+	return "watch-blocked-warmup-runtime-project"
+}
+
+func (p *watchBlockedWarmupRuntimeProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "watch-blocked-warmup-runtime"}, nil
+}
+
+func (p *watchBlockedWarmupRuntimeProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"serve"}}}
+}
+
+func (p *watchBlockedWarmupRuntimeProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:    "source",
+			Kind:    project.KindOnce,
+			Inputs:  project.Inputs{Files: []string{"source.txt"}},
+			Outputs: project.Outputs{Files: []string{"source.out"}},
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				p.sourceRuns.Add(1)
+				data, err := os.ReadFile(filepath.Join(rt.Worktree, "source.txt"))
+				if err != nil {
+					return err
+				}
+				return os.WriteFile(filepath.Join(rt.Worktree, "source.out"), data, 0o644)
+			},
+		},
+		{
+			Name:         "prepare",
+			Kind:         project.KindWarmup,
+			Deps:         []string{"source"},
+			AllowInWatch: false,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				_ = rt
+				p.prepareRuns.Add(1)
+				return nil
+			},
+		},
+		{
+			Name:    "serve",
+			Kind:    project.KindService,
+			Deps:    []string{"prepare"},
+			Restart: project.RestartOnInputChange,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				p.serveRuns.Add(1)
+				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
+					Name: "sh",
+					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
+					Dir:  rt.Worktree,
+					Env:  rt.Env,
+				})
+				return err
+			},
+		},
+	}
+}
+
+func TestWatchRunDoesNotRestartServicePastWarmupBlockedInWatch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "source.txt"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &watchBlockedWarmupRuntimeProject{}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Watch(ctx, Request{Target: "dev", Worktree: worktree, Mode: api.ModeWatch, MaxParallel: 2})
+	}()
+
+	waitFor(t, 3*time.Second, func() bool {
+		return p.sourceRuns.Load() == 1 && p.prepareRuns.Load() == 1 && p.serveRuns.Load() == 1
+	})
+	time.Sleep(500 * time.Millisecond)
+
+	if err := os.WriteFile(filepath.Join(worktree, "source.txt"), []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 4*time.Second, func() bool {
+		return p.sourceRuns.Load() == 2
+	})
+	if got := p.prepareRuns.Load(); got != 1 {
+		t.Fatalf("unexpected blocked warmup rerun: %d", got)
+	}
+	if got := p.serveRuns.Load(); got != 1 {
+		t.Fatalf("unexpected service restart past blocked warmup: %d", got)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("watch returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for watch shutdown")
+	}
+}
+
+type watchRestartNeverCascadeProject struct{}
+
+func (watchRestartNeverCascadeProject) Name() string { return "watch-restart-never-cascade-project" }
+
+func (watchRestartNeverCascadeProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "watch-restart-never"}, nil
+}
+
+func (watchRestartNeverCascadeProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"ui"}}}
+}
+
+func (watchRestartNeverCascadeProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:   "source",
+			Kind:   project.KindOnce,
+			Inputs: project.Inputs{Files: []string{"source.txt"}},
+		},
+		{
+			Name:    "api",
+			Kind:    project.KindService,
+			Deps:    []string{"source"},
+			Restart: project.RestartNever,
+		},
+		{
+			Name:                      "ui",
+			Kind:                      project.KindService,
+			Deps:                      []string{"api"},
+			Restart:                   project.RestartOnInputChange,
+			WatchRestartOnServiceDeps: true,
+		},
+	}
+}
+
+func TestWatchCascadeDoesNotRunPastRestartNeverService(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	eng, err := New(watchRestartNeverCascadeProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	order, changed := eng.affectedWatchOrder("dev", []string{"source.txt"})
+	if got, want := strings.Join(changed, ","), "source"; got != want {
+		t.Fatalf("changed=%s want=%s", got, want)
+	}
+	if got, want := strings.Join(order, ","), "source"; got != want {
+		t.Fatalf("order=%s want=%s", got, want)
+	}
+}
+
+type watchMixedCascadeProject struct{}
+
+func (watchMixedCascadeProject) Name() string { return "watch-mixed-cascade-project" }
+
+func (watchMixedCascadeProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "watch-mixed-cascade"}, nil
+}
+
+func (watchMixedCascadeProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"blocked_service", "allowed_service"}}}
+}
+
+func (watchMixedCascadeProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:   "source",
+			Kind:   project.KindOnce,
+			Inputs: project.Inputs{Files: []string{"source.txt"}},
+		},
+		{
+			Name:         "blocked_prepare",
+			Kind:         project.KindWarmup,
+			Deps:         []string{"source"},
+			AllowInWatch: false,
+		},
+		{
+			Name:    "blocked_service",
+			Kind:    project.KindService,
+			Deps:    []string{"blocked_prepare"},
+			Restart: project.RestartOnInputChange,
+		},
+		{
+			Name: "allowed_build",
+			Kind: project.KindOnce,
+			Deps: []string{"source"},
+		},
+		{
+			Name:    "allowed_service",
+			Kind:    project.KindService,
+			Deps:    []string{"allowed_build"},
+			Restart: project.RestartOnInputChange,
+		},
+	}
+}
+
+func TestWatchCascadeKeepsAllowedSiblingBranchWhenAnotherBranchBlocked(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	eng, err := New(watchMixedCascadeProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	order, changed := eng.affectedWatchOrder("dev", []string{"source.txt"})
+	if got, want := strings.Join(changed, ","), "source"; got != want {
+		t.Fatalf("changed=%s want=%s", got, want)
+	}
+	if got, want := strings.Join(order, ","), "source,allowed_build,allowed_service"; got != want {
+		t.Fatalf("order=%s want=%s", got, want)
+	}
+}
+
 func (p *watchGeneratedOutputProject) Name() string { return "watch-generated-output-project" }
 
 func (p *watchGeneratedOutputProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {

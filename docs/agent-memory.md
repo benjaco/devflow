@@ -43,6 +43,7 @@ Use this memory together with the subsystem docs. When a change affects one of t
 - Cacheable tasks must declare outputs.
 - Prefer narrow, semantic fingerprints over hashing the whole repo.
 - Optimize cache storage only after correctness and contract coverage exist.
+- Watch reruns must preserve graph dependency barriers. If an intermediate task is blocked from running in watch mode, downstream tasks in that cascade must not run against stale intermediate outputs.
 
 ## Current Shape
 
