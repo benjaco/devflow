@@ -1,12 +1,12 @@
 # Progress
 
-Last updated: 2026-04-20
+Last updated: 2026-04-25
 
 ## Current Status
 
 - Phase: post-bootstrap core implementation
-- State: graph/cache/process/instance/ports/engine/CLI foundation implemented and tested, with bounded parallel scheduling, a typed event stream, polling watch mode, basic operator commands, detached supervisor control, service readiness gates, and a realistic example adapter
-- Confidence: core parallel/watch/operator/readiness paths are working; the example adapter is now a meaningful validation target; TUI and finer-grained detached service control are still pending
+- State: graph/cache/process/instance/ports/engine/CLI foundation implemented and tested, with bounded parallel scheduling, a typed event stream, polling watch mode, basic operator commands, detached supervisor control, service readiness gates, project-local adapter bootstrap, dependency checks, prompt handling, a usable TUI, and realistic example adapters
+- Confidence: core parallel/watch/operator/readiness/bootstrap paths are working; the example adapters are meaningful validation targets; richer TUI actions, stronger JSON contract coverage, and finer-grained detached service control are still pending
 
 ## Completed
 
@@ -274,6 +274,9 @@ Last updated: 2026-04-20
   - `go test ./pkg/process -run 'TestRunCapturesStdoutAndStderr|TestRunTruncatesLogPerAttempt|TestStartWaitIsCleanAfterIntentionalStop' -count=100`
   - `go test ./pkg/project -run TestBinaryToolBuildRunAndStart -count=100`
   - `go test ./...`
+- Added `docs/agent-memory.md` as shared long-term AI project memory and linked it from `AGENTS.md`, `README.md`, and `docs/agent-integration.md`
+- Refreshed stale roadmap and overview wording so agent memory docs match the current implementation state
+- Documented in `AGENTS.md` and `docs/agent-memory.md` that agent memory must stay integrated with subsystem docs instead of replacing them
 
 ## In Progress
 

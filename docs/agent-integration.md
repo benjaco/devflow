@@ -14,3 +14,5 @@ The intended sequencing is:
 5. MCP wrapper
 
 `AGENTS.md` documents repository rules for coding agents. Future milestones can add project skills under `agents/skills/`.
+
+For agents contributing to this repository, `docs/agent-memory.md` is shared long-term project memory. Read it before substantial work and update it when durable project context, mental models, or recurring constraints change.

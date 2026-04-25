@@ -55,6 +55,11 @@ The local flow is:
 - clone the repo
 - run `go build ./cmd/devflow` or just use the repo-local `devflow` launcher script
 
+For contributor and coding-agent orientation, start with:
+- `AGENTS.md`
+- `PROGRESS.md`
+- `docs/agent-memory.md`
+
 Bare `devflow` is now a two-stage local launcher:
 - it rebuilds the bootstrap `devflow` binary into the repo's `.devflow/bin/devflow` when core sources change
 - when run inside a project worktree, it requires `./devflow.project.go`

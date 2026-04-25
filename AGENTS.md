@@ -17,6 +17,25 @@ Devflow is a local-first DAG runner for development workflows. Keep the core gen
 - `go run ./cmd/devflow run <target> --json --project <name>`
 - `go run ./cmd/devflow status --json`
 
+## Context Bootstrap
+
+- Start with `docs/agent-memory.md` and `PROGRESS.md` before substantial work.
+- Use `docs/architecture.md`, `docs/cli.md`, and `docs/testing.md` for package boundaries, command contracts, and validation expectations.
+- Treat `docs/agent-memory.md` as shared long-term project memory for AI agents; keep durable project context there instead of only in chat.
+
+## Subsystem Documentation
+
+- Use `docs/agent-memory.md` as the entry point for durable AI context, but do not let it become detached from the actual software design.
+- When work changes a subsystem's behavior, contracts, boundaries, risks, or operator model, update the relevant subsystem documentation in the same change:
+  - architecture/package boundaries in `docs/architecture.md`
+  - CLI behavior and JSON surfaces in `docs/cli.md`
+  - adapter expectations in `docs/adapter-guide.md`
+  - agent-facing execution surfaces in `docs/agent-integration.md`
+  - verification expectations in `docs/testing.md`
+  - roadmap priorities in `docs/roadmap.md`
+- Update `docs/agent-memory.md` when the change creates durable context that future agents should carry across subsystems, such as a design invariant, repeated failure mode, long-term deferral, or project-specific mental model.
+- Prefer documenting subsystem facts in their subsystem docs and linking or summarizing the cross-cutting lesson in `docs/agent-memory.md`.
+
 ## Engineering Rules
 
 - Every user-facing command must support stable JSON output.
@@ -30,6 +49,7 @@ Devflow is a local-first DAG runner for development workflows. Keep the core gen
 
 - Maintain the file [PROGRESS.md](/Users/benjaminschultzlarsen/Desktop/devflow/PROGRESS.md) as the canonical implementation ledger.
 - Update `PROGRESS.md` at the start and end of substantial work so repo state is recoverable without chat history.
+- Update `docs/agent-memory.md` when durable project context, mental models, or recurring constraints change.
 - Record:
   - current milestone/status
   - completed work

@@ -11,9 +11,9 @@ The current implementation provides the generic engine layers first:
 - a dedicated Postgres runtime module for per-worktree container isolation
 - JSON CLI contracts
 
-Future milestones add a richer TUI and continue expanding the example adapter and operator surface.
+Current milestones focus on making the existing TUI, detached supervisor controls, watch restart policies, JSON contracts, and project-local adapter loading more complete.
 
-Current bundled adapters cover two distinct validation shapes:
+Current bundled adapters cover three distinct validation shapes:
 - `go-next-monorepo`: deterministic in-repo example for repeatable tests
 - `web-worker-workspace`: deterministic multi-service API + worker + frontend example
 - `embedded-web-app`: real Go server with embedded Vite frontends plus dedicated per-worktree Postgres
