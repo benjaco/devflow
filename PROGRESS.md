@@ -259,6 +259,21 @@ Last updated: 2026-04-20
   - `go test ./examples/web-worker-workspace -run TestWorkspaceWatchSelectiveReruns -count=10`
   - `go test ./examples/go-next-monorepo ./examples/web-worker-workspace ./examples/embedded-web-app -count=3`
   - `go test ./...`
+- Reproduced the GitHub Actions Linux failures locally with focused repetition:
+  - `go test ./pkg/process -run 'TestRunCapturesStdoutAndStderr|TestRunTruncatesLogPerAttempt' -count=100`
+  - `go test ./pkg/project -run TestBinaryToolBuildRunAndStart -count=100`
+- Diagnosed the CI failure sources:
+  - `pkg/process` can lose short-lived stdout/stderr output because `cmd.Wait()` runs before the pipe readers have fully drained
+  - `pkg/project` inherits Linux process-stop semantics where `Wait()` can return `signal: terminated` after an intentional `Stop()`
+- Fixed the Linux CI failures in `pkg/process`:
+  - non-interactive and interactive command execution now drains stdout/stderr readers before final `Wait()`
+  - log writers are now serialized so concurrent stdout/stderr writes do not interleave unsafely
+  - intentional `Handle.Stop()` calls now normalize subsequent `Wait()` signal exits into clean shutdowns
+- Added direct regression coverage for intentional stop semantics in `pkg/process`
+- Verified the CI fix with:
+  - `go test ./pkg/process -run 'TestRunCapturesStdoutAndStderr|TestRunTruncatesLogPerAttempt|TestStartWaitIsCleanAfterIntentionalStop' -count=100`
+  - `go test ./pkg/project -run TestBinaryToolBuildRunAndStart -count=100`
+  - `go test ./...`
 
 ## In Progress
 

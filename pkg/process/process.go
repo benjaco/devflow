@@ -62,6 +62,8 @@ type Handle struct {
 	grace time.Duration
 	mu    sync.Mutex
 	err   error
+
+	stopRequested bool
 }
 
 func NowRFC3339Nano() string {
@@ -99,8 +101,8 @@ func Run(ctx context.Context, spec CommandSpec) (Result, error) {
 	go scanStream(&wg, stdout, "stdout", writer, spec.OnLine)
 	go scanStream(&wg, stderr, "stderr", writer, spec.OnLine)
 
-	err = cmd.Wait()
 	wg.Wait()
+	err = cmd.Wait()
 	if err != nil {
 		if ctx.Err() != nil {
 			return Result{ExitCode: -1}, ctx.Err()
@@ -144,25 +146,22 @@ func Start(ctx context.Context, spec CommandSpec) (*Handle, error) {
 	go scanStream(&wg, stdout, "stdout", writer, spec.OnLine)
 	go scanStream(&wg, stderr, "stderr", writer, spec.OnLine)
 
-	go func() {
-		err := cmd.Wait()
-		wg.Wait()
-		_ = closeWriter()
-		waitCh <- err
-		close(waitCh)
-	}()
-
 	handle := &Handle{
 		cmd:   cmd,
 		done:  make(chan struct{}),
 		grace: defaultGrace(spec.Grace),
 	}
 	go func() {
+		wg.Wait()
+		err := cmd.Wait()
+		_ = closeWriter()
+		waitCh <- normalizeStopError(handle.stopRequestedValue(), err)
+		close(waitCh)
+	}()
+
+	go func() {
 		err := <-waitCh
-		handle.mu.Lock()
-		handle.err = err
-		handle.mu.Unlock()
-		close(handle.done)
+		handle.setWaitError(err)
 	}()
 	go func() {
 		<-ctx.Done()
@@ -193,6 +192,13 @@ func (h *Handle) Stop() error {
 	if h == nil || h.cmd == nil {
 		return nil
 	}
+	h.mu.Lock()
+	if h.stopRequested {
+		h.mu.Unlock()
+		return nil
+	}
+	h.stopRequested = true
+	h.mu.Unlock()
 	if err := terminateCmd(h.cmd); err != nil {
 		_ = killCmd(h.cmd)
 		return nil
@@ -297,15 +303,6 @@ func startInteractive(ctx context.Context, spec CommandSpec) (*Handle, error) {
 		reader.read(stderr, "stderr")
 	}()
 
-	go func() {
-		err := cmd.Wait()
-		readWG.Wait()
-		_ = stdin.Close()
-		_ = closeWriter()
-		waitCh <- combineInteractiveErrors(err, reader.err())
-		close(waitCh)
-	}()
-
 	handle := &Handle{
 		cmd:   cmd,
 		stdin: stdin,
@@ -313,11 +310,17 @@ func startInteractive(ctx context.Context, spec CommandSpec) (*Handle, error) {
 		grace: defaultGrace(spec.Grace),
 	}
 	go func() {
+		readWG.Wait()
+		err := cmd.Wait()
+		_ = stdin.Close()
+		_ = closeWriter()
+		waitCh <- combineInteractiveErrors(normalizeStopError(handle.stopRequestedValue(), err), reader.err())
+		close(waitCh)
+	}()
+
+	go func() {
 		err := <-waitCh
-		handle.mu.Lock()
-		handle.err = err
-		handle.mu.Unlock()
-		close(handle.done)
+		handle.setWaitError(err)
 	}()
 	go func() {
 		<-ctx.Done()
@@ -494,7 +497,7 @@ func logWriter(path string) (io.Writer, func() error, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return file, file.Close, nil
+	return &lockedWriter{w: file}, file.Close, nil
 }
 
 func defaultGrace(d time.Duration) time.Duration {
@@ -502,4 +505,44 @@ func defaultGrace(d time.Duration) time.Duration {
 		return 5 * time.Second
 	}
 	return d
+}
+
+func (h *Handle) setWaitError(err error) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.err = err
+	h.mu.Unlock()
+	close(h.done)
+}
+
+func (h *Handle) stopRequestedValue() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.stopRequested
+}
+
+func normalizeStopError(stopRequested bool, err error) error {
+	if !stopRequested || err == nil {
+		return err
+	}
+	if _, ok := err.(*exec.ExitError); ok {
+		return nil
+	}
+	return err
+}
+
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.w.Write(p)
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestRunCapturesStdoutAndStderr(t *testing.T) {
@@ -114,6 +115,26 @@ func TestRunTruncatesLogPerAttempt(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(data)); got != "stdout: second" {
 		t.Fatalf("expected truncated current-run log, got %q", got)
+	}
+}
+
+func TestStartWaitIsCleanAfterIntentionalStop(t *testing.T) {
+	root := t.TempDir()
+	logPath := filepath.Join(root, "service.log")
+	handle, err := Start(context.Background(), CommandSpec{
+		Name:    "sh",
+		Args:    []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
+		LogPath: logPath,
+		Grace:   time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Wait(); err != nil {
+		t.Fatalf("expected intentional stop to wait cleanly, got %v", err)
 	}
 }
 
