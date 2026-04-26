@@ -17,6 +17,8 @@ Implemented commands:
 - `devflow doctor`
 - `devflow deps`
 - `devflow tui`
+- `devflow version`
+- `devflow upgrade`
 - `devflow graph list`
 - `devflow graph show <target>`
 - `devflow graph affected --files ...`
@@ -24,10 +26,10 @@ Implemented commands:
 All implemented commands support `--json`.
 
 Running bare `devflow` now acts as the default operator entry path:
-- it uses the repo-local launcher script
-- rebuilds the bootstrap binary when the core `devflow` source tree is newer than the repo-local `.devflow/bin/devflow`
+- it can be the installed Go binary or the repo-local launcher script
+- the repo-local launcher rebuilds the bootstrap binary when the core `devflow` source tree is newer than the repo-local `.devflow/bin/devflow`
 - requires `./devflow.project.go` in the selected worktree
-- compiles a worktree-local binary into `<worktree>/.devflow/bin/devflow-local` when the project file or core sources are newer
+- compiles a worktree-local binary into `<worktree>/.devflow/bin/devflow-local` when the project file or Devflow version/source inputs are newer
 - `exec`s into that worktree-local binary for all normal commands
 - chooses the project's preferred default target (`up`, `fullstack`, or the adapter-defined default)
 - if no detached supervisor is live for the current worktree, starts that target detached
@@ -88,6 +90,26 @@ Supervisor behavior:
 
 `flush --json` returns `FlushResult` with the request ID, instance ID, worktree, project, target, mode, whether a supervisor was started, sync/health success, node states, service health, and structured issues. The command exits non-zero when `success=false`, including timeout and health-check failures.
 
+`version` prints the installed Devflow version. `version --json` returns:
+
+```json
+{
+  "version": "v0.1.0",
+  "modulePath": "github.com/benjaco/devflow",
+  "goVersion": "go1.23.0",
+  "vcsRevision": "...",
+  "vcsTime": "..."
+}
+```
+
+`upgrade` updates the installed command by running:
+
+```bash
+go install github.com/benjaco/devflow/cmd/devflow@latest
+```
+
+`upgrade --version v0.1.2` installs that specific tag. `upgrade --json` returns the command, package, version target, success flag, duration, and any error/output. It exits non-zero when the underlying `go install` fails.
+
 `restart` supports rerunning non-service task slices from the CLI. For service tasks, if the instance was started with a detached run, `restart` stops the detached supervisor and relaunches the last detached target.
 
 `stop` terminates persisted service PIDs for a selected task or, when used with `--all`, terminates the detached supervisor for the instance and updates persisted node state to `stopped`.
@@ -130,4 +152,4 @@ Implemented `tui` flags include:
 - `--worktree`
 - `--instance`
 
-`cache status` lists cache entries, `cache invalidate` removes entries globally or per task, and `cache gc` keeps only the newest N entries per task.
+`cache status` lists entries for the selected project cache namespace, `cache invalidate` removes entries for that namespace globally or per task, and `cache gc` keeps only the newest N entries per task in that namespace. Task cache storage is physically global under the OS user cache directory, but entries are grouped by project namespace.

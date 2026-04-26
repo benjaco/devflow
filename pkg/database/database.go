@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"devflow/internal/jsonutil"
-	"devflow/pkg/api"
+	"github.com/benjaco/devflow/internal/jsonutil"
+	"github.com/benjaco/devflow/pkg/api"
 )
 
 const (

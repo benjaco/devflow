@@ -11,33 +11,41 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/benjaco/devflow/internal/version"
 )
 
 const (
-	envBootstrapEntry = "DEVFLOW_BOOTSTRAP_ENTRY"
-	envBootstrapRoot  = "DEVFLOW_BOOTSTRAP_ROOT"
-	envLocalExec      = "DEVFLOW_LOCAL_EXEC"
-	localProjectFile  = "devflow.project.go"
+	envBootstrapEntry         = "DEVFLOW_BOOTSTRAP_ENTRY"
+	envBootstrapRoot          = "DEVFLOW_BOOTSTRAP_ROOT"
+	envBootstrapModuleVersion = "DEVFLOW_BOOTSTRAP_MODULE_VERSION"
+	envLocalExec              = "DEVFLOW_LOCAL_EXEC"
+	localProjectFile          = "devflow.project.go"
 )
 
 func shouldExecLocalProject(args []string) bool {
-	if os.Getenv(envBootstrapEntry) != "1" {
-		return false
-	}
 	if os.Getenv(envLocalExec) == "1" {
 		return false
 	}
 	if len(args) > 0 && strings.HasPrefix(args[0], "__internal_") {
 		return false
 	}
-	return true
+	if isProjectlessCommand(args) {
+		return false
+	}
+	if os.Getenv(envBootstrapEntry) == "1" {
+		return true
+	}
+	worktree, err := worktreeFromArgs(args)
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(worktree, localProjectFile))
+	return err == nil && !info.IsDir()
 }
 
 func (a *App) execLocalProject(args []string) error {
-	bootstrapRoot, err := bootstrapRoot()
-	if err != nil {
-		return err
-	}
+	bootstrapRoot := bootstrapRoot()
 	worktree, err := worktreeFromArgs(args)
 	if err != nil {
 		return err
@@ -51,12 +59,16 @@ func (a *App) execLocalProject(args []string) error {
 	return syscall.Exec(localBinary, append([]string{localBinary}, args...), env)
 }
 
-func bootstrapRoot() (string, error) {
+func bootstrapRoot() string {
 	root := strings.TrimSpace(os.Getenv(envBootstrapRoot))
 	if root == "" {
-		return "", fmt.Errorf("%s is not set; launch devflow through the repo launcher", envBootstrapRoot)
+		return ""
 	}
-	return filepath.Abs(root)
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return root
+	}
+	return abs
 }
 
 func worktreeFromArgs(args []string) (string, error) {
@@ -134,9 +146,14 @@ func localBinaryNeedsBuild(target, buildKey string) (bool, error) {
 func localBuildSources(bootstrapRoot, projectPath string) ([]string, error) {
 	sources := []string{
 		projectPath,
+	}
+	if bootstrapRoot == "" {
+		return sources, nil
+	}
+	sources = append(sources,
 		filepath.Join(bootstrapRoot, "go.mod"),
 		filepath.Join(bootstrapRoot, "go.sum"),
-	}
+	)
 	for _, dir := range []string{"cmd", "internal", "pkg"} {
 		root := filepath.Join(bootstrapRoot, dir)
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -164,10 +181,26 @@ func localBuildKey(bootstrapRoot, projectPath string) (string, error) {
 		return "", err
 	}
 	hash := sha256.New()
+	if _, err := hash.Write([]byte(version.Current().Version)); err != nil {
+		return "", err
+	}
+	if _, err := hash.Write([]byte{0}); err != nil {
+		return "", err
+	}
+	if _, err := hash.Write([]byte(bootstrapRoot)); err != nil {
+		return "", err
+	}
+	if _, err := hash.Write([]byte{0}); err != nil {
+		return "", err
+	}
 	for _, path := range sources {
-		rel, err := filepath.Rel(bootstrapRoot, path)
-		if err != nil {
-			return "", err
+		rel := path
+		if bootstrapRoot != "" {
+			var err error
+			rel, err = filepath.Rel(bootstrapRoot, path)
+			if err != nil {
+				return "", err
+			}
 		}
 		if _, err := hash.Write([]byte(filepath.ToSlash(rel))); err != nil {
 			return "", err
@@ -190,7 +223,7 @@ func localBuildKey(bootstrapRoot, projectPath string) (string, error) {
 }
 
 func buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target, buildKey string) error {
-	buildDir := localBuildDir(bootstrapRoot, worktree)
+	buildDir := localBuildDir(worktree)
 	if err := os.RemoveAll(buildDir); err != nil {
 		return err
 	}
@@ -205,6 +238,22 @@ func buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target, build
 	if err := os.WriteFile(filepath.Join(buildDir, "main.go"), []byte(localBuildMainSource()), 0o644); err != nil {
 		return err
 	}
+	moduleSource, err := localBuildModuleSource(buildDir, bootstrapRoot)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(buildDir, "go.mod"), []byte(moduleSource), 0o644); err != nil {
+		return err
+	}
+	if bootstrapRoot != "" {
+		if data, err := os.ReadFile(filepath.Join(bootstrapRoot, "go.sum")); err == nil {
+			if err := os.WriteFile(filepath.Join(buildDir, "go.sum"), data, 0o644); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
 	data, err := os.ReadFile(projectPath)
 	if err != nil {
 		return err
@@ -212,12 +261,8 @@ func buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target, build
 	if err := os.WriteFile(filepath.Join(buildDir, localProjectFile), data, 0o644); err != nil {
 		return err
 	}
-	rel, err := filepath.Rel(bootstrapRoot, buildDir)
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command("go", "build", "-o", tmpTarget, "./"+filepath.ToSlash(rel))
-	cmd.Dir = bootstrapRoot
+	cmd := exec.Command("go", "build", "-mod=mod", "-o", tmpTarget, ".")
+	cmd.Dir = buildDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		_ = os.Remove(tmpTarget)
@@ -234,9 +279,9 @@ func buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target, build
 	return writeBuildKey(target, buildKey)
 }
 
-func localBuildDir(bootstrapRoot, worktree string) string {
+func localBuildDir(worktree string) string {
 	sum := sha1.Sum([]byte(worktree))
-	return filepath.Join(bootstrapRoot, ".devflow", "localbuild", fmt.Sprintf("%x", sum[:6]))
+	return filepath.Join(worktree, ".devflow", "localbuild", fmt.Sprintf("%x", sum[:6]))
 }
 
 func localBuildMainSource() string {
@@ -246,7 +291,7 @@ import (
 	"fmt"
 	"os"
 
-	"devflow/internal/cli"
+	"github.com/benjaco/devflow/internal/cli"
 )
 
 func main() {
@@ -257,6 +302,32 @@ func main() {
 	}
 }
 `
+}
+
+func localBuildModuleSource(buildDir, bootstrapRoot string) (string, error) {
+	modulePath := version.ModulePath + "/localbuild/" + filepath.Base(buildDir)
+	requireVersion := localBuildRequireVersion(bootstrapRoot)
+	if requireVersion == "" || requireVersion == "devel" {
+		return "", fmt.Errorf("cannot build local devflow project from a development binary without %s; use the repo launcher or install with go install %s@latest", envBootstrapRoot, version.CommandPackage)
+	}
+	var b strings.Builder
+	_, _ = fmt.Fprintf(&b, "module %s\n\n", modulePath)
+	_, _ = fmt.Fprintln(&b, "go 1.23")
+	_, _ = fmt.Fprintf(&b, "\nrequire %s %s\n", version.ModulePath, requireVersion)
+	if bootstrapRoot != "" {
+		_, _ = fmt.Fprintf(&b, "\nreplace %s => %s\n", version.ModulePath, filepath.ToSlash(bootstrapRoot))
+	}
+	return b.String(), nil
+}
+
+func localBuildRequireVersion(bootstrapRoot string) string {
+	if bootstrapRoot != "" {
+		return "v0.0.0"
+	}
+	if override := strings.TrimSpace(os.Getenv(envBootstrapModuleVersion)); override != "" {
+		return override
+	}
+	return version.Current().Version
 }
 
 func withEnv(env []string, key, value string) []string {
@@ -288,4 +359,16 @@ func writeBuildKey(target, buildKey string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func isProjectlessCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "version", "upgrade", "instances":
+		return true
+	default:
+		return false
+	}
 }

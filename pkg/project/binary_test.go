@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"devflow/pkg/api"
-	"devflow/pkg/process"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/process"
 )
 
 func TestBinaryToolBuildRunAndStart(t *testing.T) {

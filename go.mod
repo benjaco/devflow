@@ -1,4 +1,4 @@
-module devflow
+module github.com/benjaco/devflow
 
 go 1.23
 

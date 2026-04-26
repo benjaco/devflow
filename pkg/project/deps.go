@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"sort"
 
-	"devflow/pkg/process"
+	"github.com/benjaco/devflow/pkg/process"
 )
 
 type DependencyProvider interface {

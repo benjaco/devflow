@@ -22,8 +22,7 @@
 Runtime project configuration is now project-local.
 
 Flow:
-- the repo-level `devflow` launcher builds the bootstrap CLI in the `devflow` repo
-- when invoked in a project worktree, the bootstrap CLI looks for `./devflow.project.go`
+- the installed `devflow` binary, or the repo-level `devflow` launcher during source development, looks for `./devflow.project.go` in the selected project worktree
 - if the file is missing, the command fails
 - if the file exists, the bootstrap CLI compiles a worktree-local full CLI binary
 - execution is then transferred into that compiled local binary for all normal commands
@@ -32,7 +31,15 @@ Current local binary location:
 - `<worktree>/.devflow/bin/devflow-local`
 
 Current generated build location:
-- `<devflow-repo>/.devflow/localbuild/<worktree-hash>/`
+- `<worktree>/.devflow/localbuild/<worktree-hash>/`
+
+The generated build is a small Go module whose path is under `github.com/benjaco/devflow/localbuild/...`, which allows it to import Devflow's `internal/cli` package. Installed binaries require the released Devflow module version. Source-local development uses:
+
+```go
+replace github.com/benjaco/devflow => <devflow-source-root>
+```
+
+in that generated module, preserving fast local iteration without requiring a released tag for every source change.
 
 Current first-version constraint:
 - `devflow.project.go` is compiled as a self-contained `package main` file
@@ -51,17 +58,24 @@ Per-worktree state lives under `.devflow/`:
 - `.devflow/state/instances/<instance-id>/`
 - `.devflow/state/instances/<instance-id>/flush/`
 
-Repo-shared state for sibling git worktrees now lives under the Git common dir from:
+Task cache storage is global for the user:
+- `<os.UserCacheDir()>/devflow/cache`
+
+Entries are namespaced inside that physical cache root:
+- `entries/<project-cache-namespace>/<task>/<fingerprint-key>/`
+
+Projects can implement `CacheNamespace() string`; otherwise the project name is used. This keeps one cache folder on the system while avoiding accidental collisions between project adapters.
+
+Repo-shared coordination state for sibling git worktrees still lives under the Git common dir from:
 - `git rev-parse --git-common-dir`
 
 Current shared paths:
-- `<git-common-dir>/devflow/cache`
 - `<git-common-dir>/devflow/state/ports.json`
 
 Global coordination state that is not repo-specific still lives under the user cache directory:
 - `devflow/state/instance-index.json`
 
-This split keeps runtime logs and instance state local to the worktree while letting sibling worktrees in the same repo share cache entries and port allocations.
+This split keeps runtime logs and instance state local to the worktree, keeps task cache globally reusable, and keeps port allocation coordinated for sibling git worktrees.
 
 Flush coordination is per instance:
 - `flush/requests/<request-id>.json` records the requested sync point

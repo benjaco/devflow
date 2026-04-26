@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/api"
 )
 
 func TestDockerRuntimeSnapshotRestoreE2E(t *testing.T) {

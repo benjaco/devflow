@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	"devflow/pkg/process"
+	"github.com/benjaco/devflow/pkg/process"
 )
 
 type BinaryTool struct {

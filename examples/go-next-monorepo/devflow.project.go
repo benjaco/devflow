@@ -13,12 +13,12 @@ import (
 	"strings"
 	"time"
 
-	"devflow/internal/fsutil"
-	"devflow/pkg/api"
-	"devflow/pkg/database"
-	"devflow/pkg/instance"
-	"devflow/pkg/process"
-	"devflow/pkg/project"
+	"github.com/benjaco/devflow/internal/fsutil"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/database"
+	"github.com/benjaco/devflow/pkg/instance"
+	"github.com/benjaco/devflow/pkg/process"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 type exampleProject struct{}

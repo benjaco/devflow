@@ -178,3 +178,22 @@ type DoctorResult struct {
 	Checks       []string `json:"checks"`
 	Warnings     []string `json:"warnings,omitempty"`
 }
+
+type VersionResult struct {
+	Version     string `json:"version"`
+	ModulePath  string `json:"modulePath"`
+	GoVersion   string `json:"goVersion"`
+	VCSRevision string `json:"vcsRevision,omitempty"`
+	VCSTime     string `json:"vcsTime,omitempty"`
+	Modified    bool   `json:"modified,omitempty"`
+}
+
+type UpgradeResult struct {
+	Command       []string `json:"command"`
+	Package       string   `json:"package"`
+	VersionTarget string   `json:"versionTarget"`
+	Success       bool     `json:"success"`
+	DurationMs    int64    `json:"durationMs"`
+	Error         string   `json:"error,omitempty"`
+	Output        string   `json:"output,omitempty"`
+}

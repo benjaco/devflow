@@ -3,9 +3,10 @@ package cache
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
-	"devflow/pkg/project"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 func TestSnapshotRestoreReplacesDeclaredOutputsOnly(t *testing.T) {
@@ -119,5 +120,80 @@ func TestListInvalidateAndGC(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected empty cache after invalidate, got %d", len(entries))
+	}
+}
+
+func TestNamespacedStoreKeepsEntriesUnderNamespace(t *testing.T) {
+	worktree := t.TempDir()
+	store := NewNamespaced(filepath.Join(worktree, "cache"), "project/a")
+	task := project.Task{
+		Name:    "gen",
+		Kind:    project.KindOnce,
+		Outputs: project.Outputs{Files: []string{"out.txt"}},
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "out.txt"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Snapshot(worktree, task, "key1"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := store.EntryDir("gen", "key1"), filepath.Join(worktree, "cache", "entries", "project_a", "gen", "key1"); got != want {
+		t.Fatalf("unexpected namespaced entry dir: got %q want %q", got, want)
+	}
+	plain := New(filepath.Join(worktree, "cache"))
+	entries, err := plain.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected plain store not to list namespaced entries, got %d", len(entries))
+	}
+	namespacedEntries, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(namespacedEntries) != 1 || namespacedEntries[0].Namespace != "project_a" {
+		t.Fatalf("unexpected namespaced entries: %+v", namespacedEntries)
+	}
+}
+
+func TestConcurrentSnapshotSameKeyPublishesOneEntry(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "cache")
+	store := NewNamespaced(root, "project")
+	task := project.Task{
+		Name:    "gen",
+		Kind:    project.KindOnce,
+		Outputs: project.Outputs{Files: []string{"out.txt"}},
+	}
+	worktrees := []string{t.TempDir(), t.TempDir()}
+	for _, worktree := range worktrees {
+		if err := os.WriteFile(filepath.Join(worktree, "out.txt"), []byte("same"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(worktrees))
+	for _, worktree := range worktrees {
+		wg.Add(1)
+		go func(worktree string) {
+			defer wg.Done()
+			_, err := store.Snapshot(worktree, task, "key1")
+			errs <- err
+		}(worktree)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one published entry, got %+v", entries)
 	}
 }

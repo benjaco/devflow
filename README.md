@@ -39,29 +39,38 @@ The TUI is still minimal, but the bundled example adapters still act as real smo
 ## Quick Start
 
 ```bash
-go build ./cmd/devflow
-go test ./...
-devflow
+go install github.com/benjaco/devflow/cmd/devflow@latest
+devflow version
 ```
 
+Make sure `$(go env GOPATH)/bin` is on your `PATH`; that is where `go install` places the `devflow` executable by default.
+
+Update an installed copy with:
+
+```bash
+devflow upgrade
+```
+
+`devflow upgrade` is intentionally simple in round 1: it runs `go install github.com/benjaco/devflow/cmd/devflow@latest`. There are no release binaries, npm package, Homebrew tap, or installer scripts yet because Go is required for project-local graph definitions anyway.
+
 For real use, the target project repo should contain its own `devflow.project.go`.
-The `devflow` launcher then compiles a worktree-local CLI and transfers execution into it.
+The installed `devflow` command then compiles a worktree-local CLI and transfers execution into it.
 
 If you want to use `devflow` locally, you still need Go installed on your machine.
 GitHub Actions only verifies that the repo builds in CI; it does not remove the need for a local Go toolchain when you want to build or run the tool yourself.
 
-The local flow is:
+The source-development flow is:
 - install Go
 - clone the repo
-- run `go build ./cmd/devflow` or just use the repo-local `devflow` launcher script
+- run `go build -o .devflow/bin/devflow ./cmd/devflow` or just use the repo-local `devflow` launcher script
 
 For contributor and coding-agent orientation, start with:
 - `AGENTS.md`
 - `PROGRESS.md`
 - `docs/agent-memory.md`
 
-Bare `devflow` is now a two-stage local launcher:
-- it rebuilds the bootstrap `devflow` binary into the repo's `.devflow/bin/devflow` when core sources change
+Bare `devflow` uses a two-stage project bootstrap:
+- the repo-local launcher rebuilds the bootstrap `devflow` binary into the repo's `.devflow/bin/devflow` when core sources change
 - when run inside a project worktree, it requires `./devflow.project.go`
 - it compiles a worktree-local CLI into `<worktree>/.devflow/bin/devflow-local` when the project file or core sources are newer
 - it `exec`s into that worktree-local CLI for all normal commands

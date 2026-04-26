@@ -5,7 +5,7 @@ Last updated: 2026-04-26
 ## Current Status
 
 - Phase: post-bootstrap core implementation
-- State: graph/cache/process/instance/ports/engine/CLI foundation implemented and tested, with bounded parallel scheduling, a typed event stream, polling watch mode, basic operator commands, detached supervisor control, service readiness gates, project-local adapter bootstrap, dependency checks, prompt handling, a usable TUI, and realistic example adapters
+- State: Go-first release/install flow, installed project bootstrap, `version`/`upgrade`, and a single global task cache are implemented; per-worktree runtime state remains isolated
 - Confidence: core parallel/watch/operator/readiness/bootstrap paths are working; the example adapters are meaningful validation targets; richer TUI actions, stronger JSON contract coverage, and finer-grained detached service control are still pending
 
 ## Completed
@@ -233,16 +233,14 @@ Last updated: 2026-04-26
   - repeated bootstrap/local-project CLI runs
   - repeated TUI package tests
   - repeated watch/example workflow tests across the deterministic adapters
-- Cache and port allocation roots now use the Git common dir for sibling worktree sharing:
-  - task cache is now rooted at `<git-common-dir>/devflow/cache`
+- Cache and port allocation roots were hardened for sibling worktree sharing:
+  - task cache originally used `<git-common-dir>/devflow/cache`; this has since been superseded by the global OS user cache root
   - port allocation registry is now rooted at `<git-common-dir>/devflow/state/ports.json`
-  - non-git temp-dir/test flows still fall back safely to the previous local/global roots
+  - non-git temp-dir/test flows still fall back safely for shared coordination state
 - Added real `git worktree` regression coverage proving sibling worktrees share:
   - cache root resolution
   - port registry path resolution
-- Added fallback regression coverage so non-git worktrees still use:
-  - local `.devflow/cache`
-  - global shared `ports.json` state
+- Added fallback regression coverage so non-git worktrees still use global shared `ports.json` state
 - Added bootstrap regression coverage proving:
   - timestamp-only local-project touches do not rebuild
   - failed local-project rebuilds keep the previous local binary intact
@@ -307,6 +305,36 @@ Last updated: 2026-04-26
   - `go test ./examples/go-next-monorepo`
   - `go test ./pkg/instance ./pkg/watch ./pkg/engine ./internal/cli ./examples/go-next-monorepo`
   - `go test ./...`
+- Implemented the Go-first release/update flow:
+  - changed the module path to `github.com/benjaco/devflow`
+  - updated all Go imports and adapter docs to the public module path
+  - added `devflow version` and `devflow upgrade`, with JSON output
+  - added a tag-only release workflow that verifies tests and build without publishing binaries
+- Updated project-local bootstrap for installed binaries:
+  - generated build modules now live under `<worktree>/.devflow/localbuild/<hash>`
+  - source-local launcher builds add a `replace github.com/benjaco/devflow => <source-root>`
+  - installed-mode generated modules require the released Devflow version
+  - generated build modules use `-mod=mod` so temporary module metadata can be maintained under `.devflow`
+- Moved task cache storage to one OS user cache folder:
+  - task cache root is now `<os.UserCacheDir()>/devflow/cache`
+  - cache entries are namespaced by project via `project.CacheNamespace`
+  - per-worktree logs/state remain under the worktree `.devflow/`
+  - cache snapshot writes now publish through temporary entry dirs to avoid concurrent shared-cache races
+- Added release/cache/bootstrap coverage for:
+  - `version` JSON
+  - `upgrade` default/version/failure JSON using a fake `go`
+  - source generated module `replace` behavior
+  - installed-mode generated module source without source `replace`
+  - global cache root behavior
+  - namespaced cache paths
+  - concurrent same-key shared-cache snapshots
+- Verified the Go-first release/cache work with:
+  - `go test ./pkg/cache ./pkg/instance`
+  - `go test ./internal/cli`
+  - `go test ./pkg/engine ./pkg/tui`
+  - `go test ./pkg/cache ./examples/go-next-monorepo`
+  - `go test ./...`
+  - `go build -o "$(mktemp -d)/devflow" ./cmd/devflow`
 
 ## In Progress
 
@@ -318,9 +346,11 @@ Last updated: 2026-04-26
 - Extend project-local adapter loading beyond a single self-contained `devflow.project.go` file when the first version needs companion adapter files
 - Expand TUI operator actions with confirmations and rerun/stop/restart controls
 - Add stronger JSON contract tests for status/instances/events/flush
+- Add binary artifacts, npm/Homebrew/Scoop installers, or richer update channels later only if Go install stops being enough
 
 ## Deferred / Known Gaps
 
+- Round-1 release flow deliberately has no binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable
 - Fine-grained detached per-service restart is not fully implemented yet
 - The example adapter still uses a deterministic fake-DB path in normal tests; real Docker-backed coverage now exists as an opt-in module-level e2e layer rather than being part of default `go test ./...`
 - The `embedded-web-app` adapter is now manually validated against a local repo for build, DB prep, detached runtime, health, and shutdown flows; remaining gaps are automated Docker-backed coverage and richer control UX

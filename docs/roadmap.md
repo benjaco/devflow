@@ -18,6 +18,8 @@
 - Docker-backed Postgres runtime helpers and snapshot planning
 - project-local `devflow.project.go` bootstrap flow
 - `devflow flush [target]` readiness gate for detached watch workflows
+- Go-first install/update flow with `go install` and `devflow upgrade`
+- global OS user task cache with project namespaces
 - deterministic example adapters plus a real embedded-web-app adapter
 - GitHub Actions build/test workflow
 

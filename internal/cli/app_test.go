@@ -14,13 +14,13 @@ import (
 	"testing"
 	"time"
 
-	embeddedwebapp "devflow/examples/embedded-web-app"
-	gonextmonorepo "devflow/examples/go-next-monorepo"
-	"devflow/pkg/api"
-	"devflow/pkg/cache"
-	"devflow/pkg/instance"
-	"devflow/pkg/process"
-	"devflow/pkg/project"
+	embeddedwebapp "github.com/benjaco/devflow/examples/embedded-web-app"
+	gonextmonorepo "github.com/benjaco/devflow/examples/go-next-monorepo"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/cache"
+	"github.com/benjaco/devflow/pkg/instance"
+	"github.com/benjaco/devflow/pkg/process"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 type failCLIProject struct{}
@@ -135,6 +135,82 @@ func TestGraphListJSON(t *testing.T) {
 	}
 }
 
+func TestVersionJSON(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"version", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var result api.VersionResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ModulePath != "github.com/benjaco/devflow" {
+		t.Fatalf("unexpected module path %q", result.ModulePath)
+	}
+	if result.Version == "" || result.GoVersion == "" {
+		t.Fatalf("expected version and go version, got %+v", result)
+	}
+}
+
+func TestUpgradeJSONRunsGoInstallLatest(t *testing.T) {
+	argsPath := installFakeGo(t, 0)
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"upgrade", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantArgs := "install github.com/benjaco/devflow/cmd/devflow@latest\n"
+	if string(args) != wantArgs {
+		t.Fatalf("unexpected go args: got %q want %q", string(args), wantArgs)
+	}
+	var result api.UpgradeResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success || result.VersionTarget != "latest" {
+		t.Fatalf("unexpected upgrade result: %+v", result)
+	}
+}
+
+func TestUpgradeVersionJSON(t *testing.T) {
+	argsPath := installFakeGo(t, 0)
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"upgrade", "--json", "--version", "v0.1.2"}); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantArgs := "install github.com/benjaco/devflow/cmd/devflow@v0.1.2\n"
+	if string(args) != wantArgs {
+		t.Fatalf("unexpected go args: got %q want %q", string(args), wantArgs)
+	}
+}
+
+func TestUpgradeJSONReportsFailure(t *testing.T) {
+	installFakeGo(t, 7)
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	err := app.Run([]string{"upgrade", "--json"})
+	if err == nil {
+		t.Fatal("expected upgrade failure")
+	}
+	var result api.UpgradeResult
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if result.Success || result.Error == "" {
+		t.Fatalf("expected structured failure, got %+v", result)
+	}
+}
+
 func TestRunJSONStillReturnsExecutionError(t *testing.T) {
 	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
 	err := app.Run([]string{"run", "build", "--json", "--ci", "--project", "cli-fail-project", "--worktree", t.TempDir()})
@@ -144,6 +220,9 @@ func TestRunJSONStillReturnsExecutionError(t *testing.T) {
 }
 
 func TestRunAcceptsTaskNameAsSyntheticTarget(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	worktree := t.TempDir()
 	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
 	if err := app.Run([]string{"run", "gen", "--json", "--ci", "--project", "cli-task-target-project", "--worktree", worktree}); err != nil {
@@ -410,6 +489,54 @@ func TestBootstrapExecsLocalProjectBinary(t *testing.T) {
 	}
 }
 
+func TestBootstrapWritesWorktreeLocalBuildModuleWithSourceReplace(t *testing.T) {
+	worktree := t.TempDir()
+	writeLocalProjectFile(t, worktree, localProjectSource("local-build-module-project", "up"))
+
+	output, err := runBootstrapCommand(t, worktree, "graph", "list", "--json")
+	if err != nil {
+		t.Fatalf("bootstrap command failed: %v\n%s", err, output)
+	}
+	buildRoot := filepath.Join(worktree, ".devflow", "localbuild")
+	entries, err := os.ReadDir(buildRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one local build dir, got %d", len(entries))
+	}
+	data, err := os.ReadFile(filepath.Join(buildRoot, entries[0].Name(), "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "module github.com/benjaco/devflow/localbuild/") {
+		t.Fatalf("expected generated module path, got:\n%s", text)
+	}
+	repoRoot, err := repoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "replace github.com/benjaco/devflow => "+filepath.ToSlash(repoRoot)) {
+		t.Fatalf("expected source replace in generated go.mod, got:\n%s", text)
+	}
+}
+
+func TestLocalBuildModuleSourceInstalledModeUsesVersionWithoutReplace(t *testing.T) {
+	t.Setenv(envBootstrapModuleVersion, "v1.2.3")
+	buildDir := filepath.Join(t.TempDir(), ".devflow", "localbuild", "abc123")
+	data, err := localBuildModuleSource(buildDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(data, "require github.com/benjaco/devflow v1.2.3") {
+		t.Fatalf("expected requested module version, got:\n%s", data)
+	}
+	if strings.Contains(data, "replace github.com/benjaco/devflow") {
+		t.Fatalf("installed-mode module should not include source replace, got:\n%s", data)
+	}
+}
+
 func TestBootstrapFailsWithoutLocalProjectFile(t *testing.T) {
 	worktree := t.TempDir()
 	output, err := runBootstrapCommand(t, worktree, "graph", "list", "--json")
@@ -595,13 +722,31 @@ func writeLocalProjectFile(t *testing.T, worktree, content string) {
 	}
 }
 
+func installFakeGo(t *testing.T, exitCode int) string {
+	t.Helper()
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args.txt")
+	fakeGo := filepath.Join(dir, "go")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" > "$DEVFLOW_FAKE_GO_ARGS"
+echo fake go output
+exit %d
+`, exitCode)
+	if err := os.WriteFile(fakeGo, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DEVFLOW_FAKE_GO_ARGS", argsPath)
+	return argsPath
+}
+
 func localProjectSource(name, target string) string {
 	return fmt.Sprintf(`package main
 
 import (
 	"context"
 
-	"devflow/pkg/project"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 type localProject struct{}
@@ -676,8 +821,11 @@ func TestStartEventCapturePersistsJSONLines(t *testing.T) {
 }
 
 func TestCacheStatusJSON(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	worktree := t.TempDir()
-	store := cache.New(filepath.Join(worktree, ".devflow", "cache"))
+	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(taskTargetCLIProject{}))
 	if err := os.WriteFile(filepath.Join(worktree, "out.txt"), []byte("v1"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -690,7 +838,7 @@ func TestCacheStatusJSON(t *testing.T) {
 	}
 	stdout := &bytes.Buffer{}
 	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
-	if err := app.Run([]string{"cache", "status", "--json", "--worktree", worktree}); err != nil {
+	if err := app.Run([]string{"cache", "status", "--json", "--project", "cli-task-target-project", "--worktree", worktree}); err != nil {
 		t.Fatal(err)
 	}
 	var payload map[string]any
@@ -699,6 +847,9 @@ func TestCacheStatusJSON(t *testing.T) {
 	}
 	if got := int(payload["count"].(float64)); got != 1 {
 		t.Fatalf("unexpected cache count: %d", got)
+	}
+	if got := payload["namespace"]; got != "cli-task-target-project" {
+		t.Fatalf("unexpected cache namespace: %v", got)
 	}
 }
 

@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"time"
 
-	"devflow/pkg/api"
-	"devflow/pkg/process"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/process"
 )
 
 type PrepareOptions struct {

@@ -15,14 +15,15 @@ import (
 	"syscall"
 	"time"
 
-	"devflow/internal/fsutil"
-	"devflow/pkg/api"
-	"devflow/pkg/cache"
-	"devflow/pkg/engine"
-	"devflow/pkg/graph"
-	"devflow/pkg/instance"
-	"devflow/pkg/project"
-	"devflow/pkg/tui"
+	"github.com/benjaco/devflow/internal/fsutil"
+	"github.com/benjaco/devflow/internal/version"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/cache"
+	"github.com/benjaco/devflow/pkg/engine"
+	"github.com/benjaco/devflow/pkg/graph"
+	"github.com/benjaco/devflow/pkg/instance"
+	"github.com/benjaco/devflow/pkg/project"
+	"github.com/benjaco/devflow/pkg/tui"
 )
 
 type App struct {
@@ -72,6 +73,10 @@ func (a *App) Run(args []string) error {
 		return a.flushCmd(args[1:])
 	case "tui":
 		return a.tuiCmd(args[1:])
+	case "version":
+		return a.versionCmd(args[1:])
+	case "upgrade":
+		return a.upgradeCmd(args[1:])
 	default:
 		return a.usage()
 	}
@@ -135,7 +140,7 @@ func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
 }
 
 func (a *App) usage() error {
-	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|cache|status|logs|instances|doctor|deps|graph|tui>")
+	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|cache|status|logs|instances|doctor|deps|graph|tui|version|upgrade>")
 	return flag.ErrHelp
 }
 
@@ -846,6 +851,7 @@ func (a *App) cacheStatusCmd(args []string) error {
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
 	worktree := fs.String("worktree", "", "")
+	projectName := fs.String("project", "", "")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -853,14 +859,21 @@ func (a *App) cacheStatusCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	store := cache.New(instance.CacheRoot(root))
+	p, err := resolvedProject(*projectName, root)
+	if err != nil {
+		return err
+	}
+	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p))
 	entries, err := store.List()
 	if err != nil {
 		return err
 	}
 	payload := map[string]any{
-		"entries": entries,
-		"count":   len(entries),
+		"cacheRoot": instance.CacheRoot(),
+		"namespace": store.Namespace,
+		"project":   p.Name(),
+		"entries":   entries,
+		"count":     len(entries),
 	}
 	if *jsonOut {
 		return writeJSON(a.Stdout, payload)
@@ -877,6 +890,7 @@ func (a *App) cacheInvalidateCmd(args []string) error {
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
 	worktree := fs.String("worktree", "", "")
+	projectName := fs.String("project", "", "")
 	task := fs.String("task", "", "")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -885,11 +899,15 @@ func (a *App) cacheInvalidateCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	store := cache.New(instance.CacheRoot(root))
+	p, err := resolvedProject(*projectName, root)
+	if err != nil {
+		return err
+	}
+	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p))
 	if err := store.Invalidate(*task); err != nil {
 		return err
 	}
-	payload := map[string]any{"task": *task, "invalidated": true}
+	payload := map[string]any{"cacheRoot": instance.CacheRoot(), "namespace": store.Namespace, "project": p.Name(), "task": *task, "invalidated": true}
 	if *jsonOut {
 		return writeJSON(a.Stdout, payload)
 	}
@@ -906,6 +924,7 @@ func (a *App) cacheGCCmd(args []string) error {
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
 	worktree := fs.String("worktree", "", "")
+	projectName := fs.String("project", "", "")
 	keepPerTask := fs.Int("keep-per-task", 1, "")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -914,12 +933,16 @@ func (a *App) cacheGCCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	store := cache.New(instance.CacheRoot(root))
+	p, err := resolvedProject(*projectName, root)
+	if err != nil {
+		return err
+	}
+	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p))
 	removed, err := store.GC(*keepPerTask)
 	if err != nil {
 		return err
 	}
-	payload := map[string]any{"removed": removed, "keepPerTask": *keepPerTask}
+	payload := map[string]any{"cacheRoot": instance.CacheRoot(), "namespace": store.Namespace, "project": p.Name(), "removed": removed, "keepPerTask": *keepPerTask}
 	if *jsonOut {
 		return writeJSON(a.Stdout, payload)
 	}
@@ -1122,7 +1145,8 @@ func (a *App) doctorCmd(args []string) error {
 		ChecksPassed: true,
 		Checks: []string{
 			"graph: ok",
-			"cache_root: " + instance.CacheRoot(root),
+			"cache_root: " + instance.CacheRoot(),
+			"cache_namespace: " + project.CacheNamespace(p),
 			"project: " + p.Name(),
 			"tasks: " + fmt.Sprintf("%d", len(eng.Graph().Tasks)),
 		},
@@ -1287,6 +1311,82 @@ func (a *App) tuiCmd(args []string) error {
 		Worktree:   *worktree,
 		InstanceID: *instanceID,
 	})
+}
+
+func (a *App) versionCmd(args []string) error {
+	fs := flag.NewFlagSet("version", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	jsonOut := fs.Bool("json", false, "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: devflow version")
+	}
+	info := version.Current()
+	result := api.VersionResult{
+		Version:     info.Version,
+		ModulePath:  info.ModulePath,
+		GoVersion:   info.GoVersion,
+		VCSRevision: info.VCSRevision,
+		VCSTime:     info.VCSTime,
+		Modified:    info.Modified,
+	}
+	if *jsonOut {
+		return writeJSON(a.Stdout, result)
+	}
+	_, _ = fmt.Fprintf(a.Stdout, "devflow %s\n", result.Version)
+	return nil
+}
+
+func (a *App) upgradeCmd(args []string) error {
+	fs := flag.NewFlagSet("upgrade", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	jsonOut := fs.Bool("json", false, "")
+	versionTarget := fs.String("version", "latest", "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: devflow upgrade")
+	}
+	target := strings.TrimSpace(*versionTarget)
+	if target == "" {
+		target = "latest"
+	}
+	pkg := version.CommandPackage + "@" + target
+	command := []string{"go", "install", pkg}
+	started := time.Now()
+	cmd := exec.Command(command[0], command[1:]...)
+	output, err := cmd.CombinedOutput()
+	result := api.UpgradeResult{
+		Command:       command,
+		Package:       version.CommandPackage,
+		VersionTarget: target,
+		Success:       err == nil,
+		DurationMs:    time.Since(started).Milliseconds(),
+		Output:        strings.TrimSpace(string(output)),
+	}
+	if err != nil {
+		result.Error = err.Error()
+	}
+	if *jsonOut {
+		if writeErr := writeJSON(a.Stdout, result); writeErr != nil {
+			return writeErr
+		}
+		if err != nil {
+			return fmt.Errorf("upgrade failed")
+		}
+		return nil
+	}
+	if err != nil {
+		if result.Output != "" {
+			_, _ = fmt.Fprintln(a.Stdout, result.Output)
+		}
+		return fmt.Errorf("upgrade failed: %w", err)
+	}
+	_, _ = fmt.Fprintf(a.Stdout, "upgraded devflow using %s\n", strings.Join(command, " "))
+	return nil
 }
 
 func (a *App) graphListCmd(args []string) error {

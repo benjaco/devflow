@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"devflow/pkg/api"
-	"devflow/pkg/graph"
-	"devflow/pkg/instance"
-	"devflow/pkg/project"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/graph"
+	"github.com/benjaco/devflow/pkg/instance"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 func TestReadLastLines(t *testing.T) {

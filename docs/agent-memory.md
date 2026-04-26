@@ -38,9 +38,12 @@ Use this memory together with the subsystem docs. When a change affects one of t
 - Keep the core generic. Project-specific behavior belongs in adapters, examples, or project-local `devflow.project.go` files.
 - Preserve stable JSON output for every user-facing command.
 - Treat worktrees as the isolation boundary.
+- Devflow itself does not need to be developed through git worktrees; worktree support is for target projects.
+- Go is required on machines that run Devflow because project graph definitions are Go code. Round-1 install/update is `go install github.com/benjaco/devflow/cmd/devflow@latest` and `devflow upgrade`; binary releases are deliberately deferred.
 - Keep instance env explicit, layered, and persisted.
 - Services are supervised, not cached.
 - Cacheable tasks must declare outputs.
+- Keep task cache storage in one OS user cache folder (`<os.UserCacheDir()>/devflow/cache`) and namespace entries by project. Per-worktree logs/state stay in the worktree `.devflow/`.
 - Prefer narrow, semantic fingerprints over hashing the whole repo.
 - Optimize cache storage only after correctness and contract coverage exist.
 - Watch reruns must preserve graph dependency barriers. If an intermediate task is blocked from running in watch mode, downstream tasks in that cascade must not run against stale intermediate outputs.
@@ -52,7 +55,7 @@ Use this memory together with the subsystem docs. When a change affects one of t
 Devflow is now beyond the initial bootstrap. The core includes graph validation, fingerprinting, snapshot caching, process supervision, instance and port state, bounded parallel engine scheduling, typed events, polling watch mode, flush readiness coordination, dependency checks/installers, interactive prompt plumbing, a TUI, and Docker-backed Postgres runtime helpers.
 
 Runtime adapters are project-local:
-- the repo-level `devflow` launcher builds the bootstrap binary
+- installed `devflow` or the repo-level source launcher builds/uses the bootstrap binary
 - a selected worktree must contain `devflow.project.go`
 - the bootstrap CLI compiles `<worktree>/.devflow/bin/devflow-local`
 - normal commands exec into that worktree-local binary
@@ -60,7 +63,8 @@ Runtime adapters are project-local:
 
 State is split deliberately:
 - per-worktree logs and instance snapshots live under the worktree `.devflow/`
-- sibling git worktrees share cache and port allocation through the Git common dir
+- all projects share one physical task cache under the OS user cache dir, with entries namespaced by project
+- sibling git worktrees share port allocation through the Git common dir
 - non-git temp/test flows fall back to local/global safe defaults
 
 ## Before Editing

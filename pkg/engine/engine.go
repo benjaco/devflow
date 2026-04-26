@@ -14,16 +14,16 @@ import (
 	"syscall"
 	"time"
 
-	"devflow/pkg/api"
-	"devflow/pkg/cache"
-	"devflow/pkg/event"
-	"devflow/pkg/fingerprint"
-	"devflow/pkg/graph"
-	"devflow/pkg/instance"
-	"devflow/pkg/ports"
-	"devflow/pkg/process"
-	"devflow/pkg/project"
-	"devflow/pkg/watch"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/cache"
+	"github.com/benjaco/devflow/pkg/event"
+	"github.com/benjaco/devflow/pkg/fingerprint"
+	"github.com/benjaco/devflow/pkg/graph"
+	"github.com/benjaco/devflow/pkg/instance"
+	"github.com/benjaco/devflow/pkg/ports"
+	"github.com/benjaco/devflow/pkg/process"
+	"github.com/benjaco/devflow/pkg/project"
+	"github.com/benjaco/devflow/pkg/watch"
 )
 
 type Request struct {
@@ -83,7 +83,7 @@ func New(p project.Project, worktree string) (*Engine, error) {
 	return &Engine{
 		project: p,
 		graph:   g,
-		cache:   cache.New(instance.CacheRoot(worktree)),
+		cache:   cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p)),
 		ports:   pm,
 	}, nil
 }

@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strings"
 
-	"devflow/pkg/project"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 const EngineKeyVersion = "devflow-v1"

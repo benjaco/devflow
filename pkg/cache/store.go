@@ -6,11 +6,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
-	"devflow/internal/fsutil"
-	"devflow/internal/jsonutil"
-	"devflow/pkg/project"
+	"github.com/benjaco/devflow/internal/fsutil"
+	"github.com/benjaco/devflow/internal/jsonutil"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 type Manifest struct {
@@ -34,10 +35,12 @@ type Summary struct {
 }
 
 type Store struct {
-	Root string
+	Root      string
+	Namespace string
 }
 
 type EntrySummary struct {
+	Namespace string `json:"namespace,omitempty"`
 	Task      string `json:"task"`
 	Key       string `json:"key"`
 	CreatedAt string `json:"createdAt"`
@@ -47,8 +50,20 @@ func New(root string) *Store {
 	return &Store{Root: root}
 }
 
+func NewNamespaced(root, namespace string) *Store {
+	return &Store{Root: root, Namespace: sanitizeNamespace(namespace)}
+}
+
+func (s *Store) entriesRoot() string {
+	root := filepath.Join(s.Root, "entries")
+	if s.Namespace != "" {
+		root = filepath.Join(root, s.Namespace)
+	}
+	return root
+}
+
 func (s *Store) EntryDir(task, key string) string {
-	return filepath.Join(s.Root, "entries", task, key)
+	return filepath.Join(s.entriesRoot(), task, key)
 }
 
 func (s *Store) manifestPath(task, key string) string {
@@ -70,13 +85,23 @@ func (s *Store) Load(task, key string) (*Manifest, bool, error) {
 
 func (s *Store) Snapshot(worktree string, task project.Task, key string) (*Manifest, error) {
 	entryDir := s.EntryDir(task.Name, key)
-	if err := os.RemoveAll(entryDir); err != nil {
+	if manifest, ok, err := s.Load(task.Name, key); err != nil {
+		return nil, err
+	} else if ok {
+		return manifest, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(entryDir), 0o755); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Join(entryDir, "files"), 0o755); err != nil {
+	tmpEntryDir, err := os.MkdirTemp(filepath.Dir(entryDir), filepath.Base(entryDir)+".tmp-")
+	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Join(entryDir, "dirs"), 0o755); err != nil {
+	defer func() { _ = os.RemoveAll(tmpEntryDir) }()
+	if err := os.MkdirAll(filepath.Join(tmpEntryDir, "files"), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Join(tmpEntryDir, "dirs"), 0o755); err != nil {
 		return nil, err
 	}
 
@@ -90,7 +115,7 @@ func (s *Store) Snapshot(worktree string, task project.Task, key string) (*Manif
 		if _, err := os.Stat(src); err != nil {
 			return nil, fmt.Errorf("declared output file %q missing: %w", rel, err)
 		}
-		if err := fsutil.CopyFile(src, filepath.Join(entryDir, "files", strconv.Itoa(i))); err != nil {
+		if err := fsutil.CopyFile(src, filepath.Join(tmpEntryDir, "files", strconv.Itoa(i))); err != nil {
 			return nil, err
 		}
 	}
@@ -99,7 +124,7 @@ func (s *Store) Snapshot(worktree string, task project.Task, key string) (*Manif
 		if _, err := os.Stat(src); err != nil {
 			return nil, fmt.Errorf("declared output dir %q missing: %w", rel, err)
 		}
-		if err := fsutil.CopyDir(src, filepath.Join(entryDir, "dirs", strconv.Itoa(i))); err != nil {
+		if err := fsutil.CopyDir(src, filepath.Join(tmpEntryDir, "dirs", strconv.Itoa(i))); err != nil {
 			return nil, err
 		}
 	}
@@ -119,8 +144,17 @@ func (s *Store) Snapshot(worktree string, task project.Task, key string) (*Manif
 			Env:       append([]string(nil), task.Inputs.Env...),
 		},
 	}
-	if err := jsonutil.WriteFileAtomic(s.manifestPath(task.Name, key), manifest); err != nil {
+	if err := jsonutil.WriteFileAtomic(filepath.Join(tmpEntryDir, "manifest.json"), manifest); err != nil {
 		return nil, err
+	}
+	if err := os.Rename(tmpEntryDir, entryDir); err != nil {
+		if existing, ok, loadErr := s.Load(task.Name, key); loadErr == nil && ok {
+			return existing, nil
+		}
+		_ = os.RemoveAll(entryDir)
+		if retryErr := os.Rename(tmpEntryDir, entryDir); retryErr != nil {
+			return nil, err
+		}
 	}
 	return manifest, nil
 }
@@ -161,7 +195,7 @@ func (s *Store) Restore(worktree string, taskName, key string) (bool, error) {
 }
 
 func (s *Store) List() ([]EntrySummary, error) {
-	root := filepath.Join(s.Root, "entries")
+	root := s.entriesRoot()
 	if _, err := os.Stat(root); os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -187,6 +221,7 @@ func (s *Store) List() ([]EntrySummary, error) {
 				continue
 			}
 			entries = append(entries, EntrySummary{
+				Namespace: s.Namespace,
 				Task:      manifest.Task,
 				Key:       manifest.Key,
 				CreatedAt: manifest.CreatedAt,
@@ -203,7 +238,7 @@ func (s *Store) List() ([]EntrySummary, error) {
 }
 
 func (s *Store) Invalidate(task string) error {
-	path := filepath.Join(s.Root, "entries")
+	path := s.entriesRoot()
 	if task != "" {
 		path = filepath.Join(path, task)
 	}
@@ -217,7 +252,7 @@ func (s *Store) GC(keepPerTask int) (int, error) {
 	if keepPerTask <= 0 {
 		keepPerTask = 1
 	}
-	root := filepath.Join(s.Root, "entries")
+	root := s.entriesRoot()
 	taskDirs, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -252,4 +287,31 @@ func (s *Store) GC(keepPerTask int) (int, error) {
 		}
 	}
 	return removed, nil
+}
+
+func sanitizeNamespace(namespace string) string {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return "default"
+	}
+	var b strings.Builder
+	for _, r := range namespace {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "._-")
+	if out == "" {
+		return "default"
+	}
+	return out
 }

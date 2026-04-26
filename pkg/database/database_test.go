@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/api"
 )
 
 func TestDesiredBuildsDedicatedInstanceIdentity(t *testing.T) {

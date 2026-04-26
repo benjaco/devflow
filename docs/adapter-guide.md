@@ -12,7 +12,7 @@ Current first-version constraint:
 - `devflow.project.go` must be self-contained
 - use `package main`
 - register the project in `init()`
-- importing `devflow/pkg/...` and standard library packages is supported
+- importing `github.com/benjaco/devflow/pkg/...` and standard library packages is supported
 - arbitrary companion Go files from the project repo are not loaded yet
 
 An adapter defines:
@@ -30,7 +30,7 @@ package main
 import (
     "context"
 
-    "devflow/pkg/project"
+    "github.com/benjaco/devflow/pkg/project"
 )
 
 type myProject struct{}

@@ -3,7 +3,7 @@ package graph
 import (
 	"testing"
 
-	"devflow/pkg/project"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 func TestValidateDuplicateTaskFails(t *testing.T) {

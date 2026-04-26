@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"devflow/internal/cli"
+	"github.com/benjaco/devflow/internal/cli"
 )
 
 func main() {
