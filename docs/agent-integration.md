@@ -6,6 +6,20 @@ Devflow is designed so humans and agents use the same execution surface:
 - logs are addressable by instance and task
 - the engine publishes a typed event stream for live consumers
 
+Agents should use the normal installed command:
+
+```bash
+go install github.com/benjaco/devflow/cmd/devflow@latest
+```
+
+Updates are intentionally Go-first:
+
+```bash
+devflow upgrade
+```
+
+Because project graph definitions are Go code, Go is expected to be available on machines where agents use Devflow.
+
 The intended sequencing is:
 1. CLI
 2. stable JSON contracts

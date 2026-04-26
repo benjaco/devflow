@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"devflow/pkg/project"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 type Graph struct {

@@ -16,14 +16,14 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	"devflow/internal/fsutil"
-	"devflow/pkg/api"
-	"devflow/pkg/cache"
-	"devflow/pkg/graph"
-	"devflow/pkg/instance"
-	"devflow/pkg/process"
-	"devflow/pkg/project"
-	"devflow/pkg/watch"
+	"github.com/benjaco/devflow/internal/fsutil"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/cache"
+	"github.com/benjaco/devflow/pkg/graph"
+	"github.com/benjaco/devflow/pkg/instance"
+	"github.com/benjaco/devflow/pkg/process"
+	"github.com/benjaco/devflow/pkg/project"
+	"github.com/benjaco/devflow/pkg/watch"
 )
 
 type Options struct {
@@ -837,7 +837,7 @@ func invalidateAndRerunDownstream(root, instanceID, task string, onTransition fu
 	if onTransition != nil {
 		onTransition()
 	}
-	store := cache.New(instance.CacheRoot(root))
+	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p))
 	for _, name := range toInvalidate {
 		if err := store.Invalidate(name); err != nil {
 			return err

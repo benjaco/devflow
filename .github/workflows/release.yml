@@ -1,13 +1,12 @@
-name: build
+name: release
 
 on:
   push:
-    branches:
-      - main
-  pull_request:
+    tags:
+      - "v*"
 
 jobs:
-  test-and-build:
+  verify-tag:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository

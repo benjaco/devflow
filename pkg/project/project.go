@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"devflow/pkg/api"
-	"devflow/pkg/process"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/process"
 )
 
 type Kind string
@@ -85,6 +85,25 @@ type Project interface {
 	Tasks() []Task
 	Targets() []Target
 	ConfigureInstance(ctx context.Context, worktree string) (InstanceConfig, error)
+}
+
+type CacheNamespacer interface {
+	CacheNamespace() string
+}
+
+func CacheNamespace(p Project) string {
+	if p == nil {
+		return "default"
+	}
+	if namespacer, ok := p.(CacheNamespacer); ok {
+		if namespace := namespacer.CacheNamespace(); namespace != "" {
+			return namespace
+		}
+	}
+	if name := p.Name(); name != "" {
+		return name
+	}
+	return "default"
 }
 
 type Runtime struct {

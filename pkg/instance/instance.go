@@ -13,10 +13,10 @@ import (
 	"syscall"
 	"time"
 
-	"devflow/internal/fsutil"
-	"devflow/internal/jsonutil"
-	"devflow/internal/lock"
-	"devflow/pkg/api"
+	"github.com/benjaco/devflow/internal/fsutil"
+	"github.com/benjaco/devflow/internal/jsonutil"
+	"github.com/benjaco/devflow/internal/lock"
+	"github.com/benjaco/devflow/pkg/api"
 )
 
 type State struct {
@@ -251,11 +251,12 @@ func ConsumeInteractionAnswer(worktree, instanceID, promptID string) (string, bo
 	return payload["value"], true, nil
 }
 
-func CacheRoot(worktree string) string {
-	if root, err := repoSharedRoot(worktree); err == nil {
-		return filepath.Join(root, "cache")
+func CacheRoot() string {
+	base, err := os.UserCacheDir()
+	if err != nil || base == "" {
+		base = os.TempDir()
 	}
-	return filepath.Join(worktree, ".devflow", "cache")
+	return filepath.Join(base, "devflow", "cache")
 }
 
 func GlobalStateRoot() (string, error) {

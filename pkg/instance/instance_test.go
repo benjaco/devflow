@@ -4,10 +4,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	"devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/api"
 )
 
 func TestResolveSameWorktreeSameInstance(t *testing.T) {
@@ -159,28 +160,33 @@ func TestFlushRequestAndAckRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCacheRootUsesGitCommonDirAcrossWorktrees(t *testing.T) {
+func TestCacheRootUsesSingleUserCacheAcrossWorktrees(t *testing.T) {
 	mainRepo, sibling := setupGitWorktrees(t)
-	first := CacheRoot(mainRepo)
-	second := CacheRoot(sibling)
+	first := CacheRoot()
+	second := CacheRoot()
 	if first != second {
-		t.Fatalf("expected shared cache root, got %q and %q", first, second)
+		t.Fatalf("expected single cache root, got %q and %q", first, second)
 	}
-	commonDir, err := GitCommonDir(mainRepo)
+	base, err := os.UserCacheDir()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(commonDir, "devflow", "cache")
+	want := filepath.Join(base, "devflow", "cache")
 	if first != want {
 		t.Fatalf("unexpected cache root: got %q want %q", first, want)
 	}
+	for _, worktree := range []string{mainRepo, sibling} {
+		if strings.Contains(first, worktree) {
+			t.Fatalf("cache root %q should not live under worktree %q", first, worktree)
+		}
+	}
 }
 
-func TestCacheRootFallsBackOutsideGitRepo(t *testing.T) {
+func TestCacheRootDoesNotUseLocalDevflowCacheOutsideGitRepo(t *testing.T) {
 	worktree := t.TempDir()
-	want := filepath.Join(worktree, ".devflow", "cache")
-	if got := CacheRoot(worktree); got != want {
-		t.Fatalf("unexpected cache root fallback: got %q want %q", got, want)
+	got := CacheRoot()
+	if got == filepath.Join(worktree, ".devflow", "cache") {
+		t.Fatalf("cache root should be global, got local worktree cache %q", got)
 	}
 }
 

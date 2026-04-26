@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"devflow/pkg/api"
-	"devflow/pkg/engine"
-	"devflow/pkg/graph"
-	"devflow/pkg/project"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/engine"
+	"github.com/benjaco/devflow/pkg/graph"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 func TestWorkspaceProjectRegistered(t *testing.T) {

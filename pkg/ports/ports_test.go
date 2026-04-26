@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"devflow/pkg/instance"
+	"github.com/benjaco/devflow/pkg/instance"
 )
 
 func TestAllocateUniquePorts(t *testing.T) {

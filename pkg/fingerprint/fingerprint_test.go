@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"devflow/pkg/project"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 func TestHashDirDeterministic(t *testing.T) {

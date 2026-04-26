@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"devflow/pkg/api"
-	"devflow/pkg/process"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/process"
 )
 
 func TestCommandSourcePolicyMergesAdapterAndDatabaseEnv(t *testing.T) {

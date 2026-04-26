@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/api"
 )
 
 func TestInspectPrismaStateAndPlanRestore(t *testing.T) {

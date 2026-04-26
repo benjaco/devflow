@@ -6,9 +6,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"devflow/internal/jsonutil"
-	"devflow/internal/lock"
-	"devflow/pkg/instance"
+	"github.com/benjaco/devflow/internal/jsonutil"
+	"github.com/benjaco/devflow/internal/lock"
+	"github.com/benjaco/devflow/pkg/instance"
 )
 
 type Registry struct {

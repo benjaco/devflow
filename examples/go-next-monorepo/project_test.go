@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"devflow/internal/cli"
-	"devflow/pkg/api"
-	"devflow/pkg/engine"
-	"devflow/pkg/instance"
-	"devflow/pkg/project"
+	"github.com/benjaco/devflow/internal/cli"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/engine"
+	"github.com/benjaco/devflow/pkg/instance"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 func TestExampleProjectCachesOnSecondRun(t *testing.T) {

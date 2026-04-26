@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"devflow/pkg/api"
-	"devflow/pkg/graph"
-	"devflow/pkg/project"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/graph"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 func TestEmbeddedWebAppProjectRegistered(t *testing.T) {

@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"devflow/pkg/api"
-	"devflow/pkg/graph"
-	"devflow/pkg/instance"
-	"devflow/pkg/process"
-	"devflow/pkg/project"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/graph"
+	"github.com/benjaco/devflow/pkg/instance"
+	"github.com/benjaco/devflow/pkg/process"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 type testProject struct{}
