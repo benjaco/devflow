@@ -1,5 +1,9 @@
 # Adapter Guide
 
+This is the adapter API guide for project owners who already understand the adoption flow.
+
+If you are adding Devflow to a project for the first time, start with `docs_users/README.md`. If you are changing Devflow itself, use `docs_contributors/README.md`.
+
 Projects integrate with Devflow by implementing `pkg/project.Project` in a project-local `devflow.project.go`.
 
 Current runtime model:

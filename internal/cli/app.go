@@ -77,6 +77,8 @@ func (a *App) Run(args []string) error {
 		return a.versionCmd(args[1:])
 	case "upgrade":
 		return a.upgradeCmd(args[1:])
+	case "docs":
+		return a.docsCmd(args[1:])
 	default:
 		return a.usage()
 	}
@@ -140,7 +142,7 @@ func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
 }
 
 func (a *App) usage() error {
-	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|cache|status|logs|instances|doctor|deps|graph|tui|version|upgrade>")
+	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|cache|status|logs|instances|doctor|deps|graph|tui|version|upgrade|docs>")
 	return flag.ErrHelp
 }
 
@@ -1387,6 +1389,13 @@ func (a *App) upgradeCmd(args []string) error {
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "upgraded devflow using %s\n", strings.Join(command, " "))
 	return nil
+}
+
+func (a *App) docsCmd(args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("usage: devflow docs")
+	}
+	return writeUserDocs(a.Stdout)
 }
 
 func (a *App) graphListCmd(args []string) error {

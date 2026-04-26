@@ -14,13 +14,13 @@ Last updated: 2026-04-26
 - Root docs created:
   - `README.md`
   - `AGENTS.md`
-  - `docs/overview.md`
-  - `docs/architecture.md`
-  - `docs/testing.md`
-  - `docs/cli.md`
-  - `docs/adapter-guide.md`
-  - `docs/agent-integration.md`
-  - `docs/roadmap.md`
+  - `docs_contributors/overview.md`
+  - `docs_contributors/architecture.md`
+  - `docs_contributors/testing.md`
+  - `docs_contributors/cli.md`
+  - `docs_users/adapter-guide.md`
+  - `docs_users/agent-integration.md`
+  - `docs_contributors/roadmap.md`
 - Core generic packages implemented:
   - `pkg/api`
   - `pkg/project`
@@ -272,9 +272,9 @@ Last updated: 2026-04-26
   - `go test ./pkg/process -run 'TestRunCapturesStdoutAndStderr|TestRunTruncatesLogPerAttempt|TestStartWaitIsCleanAfterIntentionalStop' -count=100`
   - `go test ./pkg/project -run TestBinaryToolBuildRunAndStart -count=100`
   - `go test ./...`
-- Added `docs/agent-memory.md` as shared long-term AI project memory and linked it from `AGENTS.md`, `README.md`, and `docs/agent-integration.md`
+- Added `docs_contributors/agent-memory.md` as shared long-term AI project memory and linked it from `AGENTS.md`, `README.md`, and `docs_users/agent-integration.md`
 - Refreshed stale roadmap and overview wording so agent memory docs match the current implementation state
-- Documented in `AGENTS.md` and `docs/agent-memory.md` that agent memory must stay integrated with subsystem docs instead of replacing them
+- Documented in `AGENTS.md` and `docs_contributors/agent-memory.md` that agent memory must stay integrated with subsystem docs instead of replacing them
 - Fixed watch cascade selection so downstream tasks do not run past intermediate tasks that are blocked from watch execution
 - Added watch regression coverage for cascades blocked by warmups without `AllowInWatch` and services with `RestartNever`
 - Added full watch execution coverage proving a service beyond a blocked warmup does not restart after an upstream file change
@@ -335,6 +335,12 @@ Last updated: 2026-04-26
   - `go test ./pkg/cache ./examples/go-next-monorepo`
   - `go test ./...`
   - `go build -o "$(mktemp -d)/devflow" ./cmd/devflow`
+- Split documentation into explicit root-level user/adopter and Devflow contributor lanes:
+  - added `docs_users/README.md` for adding Devflow to another project
+  - added `docs_contributors/README.md` for changing Devflow itself
+  - updated README to route readers into the right lane
+  - updated overview, adapter guide, roadmap, and agent memory with the documentation split
+- Added `devflow docs` as a projectless command that prints the bundled `docs_users` Markdown files only, with no JSON mode
 
 ## In Progress
 

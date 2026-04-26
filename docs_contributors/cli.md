@@ -19,11 +19,12 @@ Implemented commands:
 - `devflow tui`
 - `devflow version`
 - `devflow upgrade`
+- `devflow docs`
 - `devflow graph list`
 - `devflow graph show <target>`
 - `devflow graph affected --files ...`
 
-All implemented commands support `--json`.
+All implemented commands support `--json` except `devflow docs`, which intentionally prints plain bundled user Markdown only.
 
 Running bare `devflow` now acts as the default operator entry path:
 - it can be the installed Go binary or the repo-local launcher script
@@ -109,6 +110,10 @@ go install github.com/benjaco/devflow/cmd/devflow@latest
 ```
 
 `upgrade --version v0.1.2` installs that specific tag. `upgrade --json` returns the command, package, version target, success flag, duration, and any error/output. It exits non-zero when the underlying `go install` fails.
+
+`docs` prints all bundled user-facing Markdown files from `docs_users/` in sorted order.
+
+It is projectless, has no flags, has no JSON mode, and does not print contributor docs.
 
 `restart` supports rerunning non-service task slices from the CLI. For service tasks, if the instance was started with a detached run, `restart` stops the detached supervisor and relaunches the last detached target.
 

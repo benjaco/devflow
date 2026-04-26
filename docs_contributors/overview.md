@@ -2,6 +2,10 @@
 
 Devflow is a local-first runner for development DAGs. It executes cacheable one-shot tasks, supervises long-running services, isolates concurrent worktrees, and exposes stable JSON output so the same surface can serve humans, CI, and later agent wrappers.
 
+Documentation is split into two explicit lanes:
+- `docs_users/README.md` and `docs_users/adapter-guide.md` are for users adding Devflow to another project.
+- `docs_contributors/README.md`, `docs_contributors/architecture.md`, and `docs_contributors/testing.md` are for contributors changing Devflow itself.
+
 The current implementation provides the generic engine layers first:
 - graph validation and traversal
 - task fingerprinting

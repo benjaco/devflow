@@ -1,7 +1,7 @@
 # Agent Integration
 
 Devflow is designed so humans and agents use the same execution surface:
-- CLI commands have stable JSON output
+- operational CLI commands have stable JSON output
 - instance and task state are persisted
 - logs are addressable by instance and task
 - the engine publishes a typed event stream for live consumers
@@ -10,6 +10,7 @@ Agents should use the normal installed command:
 
 ```bash
 go install github.com/benjaco/devflow/cmd/devflow@latest
+devflow docs
 ```
 
 Updates are intentionally Go-first:
@@ -19,6 +20,8 @@ devflow upgrade
 ```
 
 Because project graph definitions are Go code, Go is expected to be available on machines where agents use Devflow.
+
+`devflow docs` prints the bundled user-facing Markdown docs for the installed version. It has no JSON mode. Use it when integrating Devflow into another project instead of fetching contributor docs or browsing the repository.
 
 The intended sequencing is:
 1. CLI
@@ -41,4 +44,4 @@ Do not run downstream tests before a successful flush when relying on detached w
 
 `AGENTS.md` documents repository rules for coding agents. Future milestones can add project skills under `agents/skills/`.
 
-For agents contributing to this repository, `docs/agent-memory.md` is shared long-term project memory. Read it before substantial work and update it when durable project context, mental models, or recurring constraints change.
+For agents contributing to this repository, `docs_contributors/agent-memory.md` is shared long-term project memory. Read it before substantial work and update it when durable project context, mental models, or recurring constraints change.

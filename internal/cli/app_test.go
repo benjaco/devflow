@@ -153,6 +153,37 @@ func TestVersionJSON(t *testing.T) {
 	}
 }
 
+func TestDocsPrintsUserMarkdownOnly(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	output := stdout.String()
+	want := []string{
+		"<!-- docs_users/README.md -->",
+		"# Adopting Devflow In A Project",
+		"<!-- docs_users/adapter-guide.md -->",
+		"# Adapter Guide",
+		"<!-- docs_users/agent-integration.md -->",
+		"# Agent Integration",
+	}
+	last := -1
+	for _, marker := range want {
+		idx := strings.Index(output, marker)
+		if idx < 0 {
+			t.Fatalf("missing docs marker %q in output", marker)
+		}
+		if idx <= last {
+			t.Fatalf("marker %q appeared out of order", marker)
+		}
+		last = idx
+	}
+	if strings.Contains(output, "# Developing Devflow") {
+		t.Fatalf("docs command should not include contributor docs")
+	}
+}
+
 func TestUpgradeJSONRunsGoInstallLatest(t *testing.T) {
 	argsPath := installFakeGo(t, 0)
 	stdout := &bytes.Buffer{}
