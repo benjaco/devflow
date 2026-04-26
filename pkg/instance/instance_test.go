@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"devflow/pkg/api"
 )
@@ -100,6 +101,61 @@ func TestStopSupervisorIgnoresMissingProcess(t *testing.T) {
 	}
 	if loaded.Supervisor.PID != 0 {
 		t.Fatalf("expected supervisor to be cleared, got %+v", loaded.Supervisor)
+	}
+}
+
+func TestFlushRequestAndAckRoundTrip(t *testing.T) {
+	worktree := t.TempDir()
+	instanceID := "abc123"
+	requestID := "flush-1"
+	syncPath := FlushSyncPath(worktree, instanceID, requestID)
+	req := api.FlushRequest{
+		ID:        requestID,
+		CreatedAt: time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC),
+		SyncPath:  syncPath,
+	}
+	if err := WriteFlushRequest(worktree, instanceID, req); err != nil {
+		t.Fatal(err)
+	}
+	loadedReq, err := LoadFlushRequest(worktree, instanceID, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedReq.ID != req.ID || loadedReq.SyncPath != req.SyncPath || !loadedReq.CreatedAt.Equal(req.CreatedAt) {
+		t.Fatalf("unexpected loaded request: %+v", loadedReq)
+	}
+
+	result := api.FlushResult{
+		RequestID:  requestID,
+		InstanceID: instanceID,
+		Worktree:   worktree,
+		Target:     "dev",
+		Mode:       api.ModeWatch,
+		Synced:     true,
+		Success:    true,
+		UpdatedAt:  req.CreatedAt,
+	}
+	if err := WriteFlushAck(worktree, instanceID, result); err != nil {
+		t.Fatal(err)
+	}
+	loadedAck, err := LoadFlushAck(worktree, instanceID, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedAck.RequestID != result.RequestID || !loadedAck.Success || !loadedAck.Synced {
+		t.Fatalf("unexpected loaded ack: %+v", loadedAck)
+	}
+	if got, want := FlushRequestPath(worktree, instanceID, requestID), filepath.Join(worktree, ".devflow", "state", "instances", instanceID, "flush", "requests", requestID+".json"); got != want {
+		t.Fatalf("unexpected request path: got %q want %q", got, want)
+	}
+	if got, want := FlushAckPath(worktree, instanceID, requestID), filepath.Join(worktree, ".devflow", "state", "instances", instanceID, "flush", "acks", requestID+".json"); got != want {
+		t.Fatalf("unexpected ack path: got %q want %q", got, want)
+	}
+	if got, want := FlushSyncPath(worktree, instanceID, requestID), filepath.Join(worktree, ".devflow", "state", "instances", instanceID, "flush", "sync", requestID+".sync"); got != want {
+		t.Fatalf("unexpected sync path: got %q want %q", got, want)
+	}
+	if got, want := FlushWatchReadyPath(worktree, instanceID), filepath.Join(worktree, ".devflow", "state", "instances", instanceID, "flush", "watch.ready"); got != want {
+		t.Fatalf("unexpected watch ready path: got %q want %q", got, want)
 	}
 }
 

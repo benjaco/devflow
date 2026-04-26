@@ -29,6 +29,8 @@ Devflow uses three testing layers:
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work
 - polling watch batching and selective watch reruns
 - watch cascade pruning so downstream tasks do not run past warmups or services that are blocked from watch execution, including full watch execution and mixed blocked/allowed branch coverage
+- watch service restart policies, including `RestartAlways` selection and full watch execution behavior
+- flush coordination coverage for request/ack path generation, watcher inclusion of the flush sync directory under `.devflow`, engine ack timing after reruns and sync-only batches, failed-task ack issues, service readiness health issues, and CLI supervisor/timeout behavior
 - opt-in real Docker-backed database runtime snapshot/restore coverage in `pkg/database`
 - opt-in real Docker-backed Prisma snapshot metadata + restore coverage in `pkg/database`
 
@@ -38,6 +40,7 @@ The bundled example adapters are now deterministic smoke targets. Current smoke 
 - repeated runs with cache hits
 - watch-mode selective reruns
 - watch-mode file pickup verification that starts watch mode, edits a real file, and asserts the watch cycle event plus the affected rerun
+- flush readiness verification that starts watch mode on the `go-next-monorepo` example, edits a real file, runs `flush --json`, and asserts success only arrives after the affected service reruns
 - service readiness via ready-file probes on the example backend/frontend services
 - DB snapshot reuse and dedicated postgres port isolation in the fake-DB example path
 - multi-worktree DB and port isolation

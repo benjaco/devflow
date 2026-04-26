@@ -131,6 +131,19 @@ Recommended precedence:
 
 Use dotenv values for normal app configuration, but keep leased ports, instance IDs, and per-instance DB URLs under devflow control.
 
+## Watch Restart Policies
+
+Watch mode maps changed files to task inputs and then cascades through the selected target's task graph.
+
+For service tasks, choose the narrowest restart policy that matches the service behavior:
+- `project.RestartNever`: do not restart the service from watch file changes
+- `project.RestartOnInputChange`: restart only when the service is in the affected downstream slice
+- `project.RestartAlways`: restart on every watch cycle that has at least one directly affected task in the selected target
+
+Dependency barriers still apply. If a changed upstream path reaches a task that is blocked from watch execution, downstream tasks past that blocked task do not run against stale outputs.
+
+Use `WatchRestartOnServiceDeps` only when a service-to-service dependency should propagate restarts, such as a runtime service depending on a database service. Service-to-service restart propagation is off by default.
+
 ## DB Source Policies
 
 When a DB snapshot miss happens, the adapter should rebuild from a configured base source instead of implying a reset command.

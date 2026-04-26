@@ -13,6 +13,18 @@ The intended sequencing is:
 4. TUI
 5. MCP wrapper
 
+## Readiness Workflow
+
+For AI coding agents, `devflow flush --json` is the readiness gate when a detached watch supervisor is available or desired.
+
+Recommended loop:
+1. Edit files.
+2. Run `devflow flush [target] --json`.
+3. If `success=true`, run focused tests or other validation commands.
+4. If `success=false`, inspect `issues`, `nodes`, `services`, and referenced logs before editing again.
+
+Do not run downstream tests before a successful flush when relying on detached watch/dev mode. The flush sync sentinel proves the watcher has observed the post-edit boundary and has settled the selected target closure.
+
 `AGENTS.md` documents repository rules for coding agents. Future milestones can add project skills under `agents/skills/`.
 
 For agents contributing to this repository, `docs/agent-memory.md` is shared long-term project memory. Read it before substantial work and update it when durable project context, mental models, or recurring constraints change.

@@ -161,6 +161,69 @@ func EventsPath(worktree, instanceID string) string {
 	return filepath.Join(instancePath(worktree, instanceID), "events.jsonl")
 }
 
+func FlushRoot(worktree, instanceID string) string {
+	return filepath.Join(instancePath(worktree, instanceID), "flush")
+}
+
+func FlushRequestPath(worktree, instanceID, requestID string) string {
+	return filepath.Join(FlushRoot(worktree, instanceID), "requests", requestID+".json")
+}
+
+func FlushAckPath(worktree, instanceID, requestID string) string {
+	return filepath.Join(FlushRoot(worktree, instanceID), "acks", requestID+".json")
+}
+
+func FlushSyncDir(worktree, instanceID string) string {
+	return filepath.Join(FlushRoot(worktree, instanceID), "sync")
+}
+
+func FlushSyncPath(worktree, instanceID, requestID string) string {
+	return filepath.Join(FlushSyncDir(worktree, instanceID), requestID+".sync")
+}
+
+func FlushWatchReadyPath(worktree, instanceID string) string {
+	return filepath.Join(FlushRoot(worktree, instanceID), "watch.ready")
+}
+
+func WriteFlushRequest(worktree, instanceID string, req api.FlushRequest) error {
+	path := FlushRequestPath(worktree, instanceID, req.ID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return jsonutil.WriteFileAtomic(path, req)
+}
+
+func LoadFlushRequest(worktree, instanceID, requestID string) (api.FlushRequest, error) {
+	var req api.FlushRequest
+	if err := jsonutil.ReadFile(FlushRequestPath(worktree, instanceID, requestID), &req); err != nil {
+		return api.FlushRequest{}, err
+	}
+	return req, nil
+}
+
+func WriteFlushAck(worktree, instanceID string, result api.FlushResult) error {
+	path := FlushAckPath(worktree, instanceID, result.RequestID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return jsonutil.WriteFileAtomic(path, result)
+}
+
+func LoadFlushAck(worktree, instanceID, requestID string) (api.FlushResult, error) {
+	var result api.FlushResult
+	if err := jsonutil.ReadFile(FlushAckPath(worktree, instanceID, requestID), &result); err != nil {
+		return api.FlushResult{}, err
+	}
+	return result, nil
+}
+
+func RemoveFlushRequest(worktree, instanceID, requestID string) error {
+	if err := os.Remove(FlushRequestPath(worktree, instanceID, requestID)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func InteractionAnswerPath(worktree, instanceID, promptID string) string {
 	return filepath.Join(instancePath(worktree, instanceID), "interactions", promptID+".json")
 }

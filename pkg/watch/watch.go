@@ -21,6 +21,7 @@ type Options struct {
 	Debounce     time.Duration
 	PollInterval time.Duration
 	IgnorePaths  []string
+	IncludePaths []string
 }
 
 type Batch struct {
@@ -34,6 +35,7 @@ type Runner struct {
 	debounce     time.Duration
 	pollInterval time.Duration
 	ignorePaths  []string
+	includePaths []string
 }
 
 func New(opts Options) (*Runner, error) {
@@ -50,11 +52,13 @@ func New(opts Options) (*Runner, error) {
 		pollInterval = DefaultPollInterval
 	}
 	ignorePaths := append([]string{".devflow", ".git"}, opts.IgnorePaths...)
+	includePaths := normalizeIncludePaths(root, opts.IncludePaths)
 	return &Runner{
 		root:         root,
 		debounce:     debounce,
 		pollInterval: pollInterval,
 		ignorePaths:  ignorePaths,
+		includePaths: includePaths,
 	}, nil
 }
 
@@ -70,6 +74,9 @@ func (r *Runner) Start(ctx context.Context) (<-chan Batch, <-chan error, error) 
 		if rel == "." {
 			return nil
 		}
+		if pathIncluded(rel, r.includePaths) {
+			return nil
+		}
 		for _, ignore := range r.ignorePaths {
 			ignore = filepath.ToSlash(ignore)
 			if rel == ignore || strings.HasPrefix(rel, ignore+"/") {
@@ -80,6 +87,15 @@ func (r *Runner) Start(ctx context.Context) (<-chan Batch, <-chan error, error) 
 	})
 	if err := w.AddRecursive(r.root); err != nil {
 		return nil, nil, err
+	}
+	for _, include := range r.includePaths {
+		full := filepath.Join(r.root, filepath.FromSlash(include))
+		if err := os.MkdirAll(full, 0o755); err != nil {
+			return nil, nil, err
+		}
+		if err := w.AddRecursive(full); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	batches := make(chan Batch, 16)
@@ -177,4 +193,42 @@ func (r *Runner) Start(ctx context.Context) (<-chan Batch, <-chan error, error) 
 	}()
 
 	return batches, errs, nil
+}
+
+func normalizeIncludePaths(root string, paths []string) []string {
+	out := make([]string, 0, len(paths))
+	seen := map[string]bool{}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if filepath.IsAbs(path) {
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				continue
+			}
+			path = rel
+		}
+		path = filepath.ToSlash(filepath.Clean(path))
+		if path == "." || path == "" || strings.HasPrefix(path, "../") || path == ".." {
+			continue
+		}
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func pathIncluded(rel string, includes []string) bool {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	for _, include := range includes {
+		if rel == include || strings.HasPrefix(rel, include+"/") {
+			return true
+		}
+	}
+	return false
 }

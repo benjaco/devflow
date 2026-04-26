@@ -44,10 +44,12 @@ Use this memory together with the subsystem docs. When a change affects one of t
 - Prefer narrow, semantic fingerprints over hashing the whole repo.
 - Optimize cache storage only after correctness and contract coverage exist.
 - Watch reruns must preserve graph dependency barriers. If an intermediate task is blocked from running in watch mode, downstream tasks in that cascade must not run against stale intermediate outputs.
+- Watch service restart policies should stay explicit: default to affected-slice restarts, use `RestartNever` to block watch restarts, and reserve `RestartAlways` for services that must bounce on every target-affecting watch cycle.
+- Treat `devflow flush --json` as the AI readiness gate for detached watch/dev workflows: edit files, flush the selected target closure, then run tests only when flush reports success.
 
 ## Current Shape
 
-Devflow is now beyond the initial bootstrap. The core includes graph validation, fingerprinting, snapshot caching, process supervision, instance and port state, bounded parallel engine scheduling, typed events, polling watch mode, dependency checks/installers, interactive prompt plumbing, a TUI, and Docker-backed Postgres runtime helpers.
+Devflow is now beyond the initial bootstrap. The core includes graph validation, fingerprinting, snapshot caching, process supervision, instance and port state, bounded parallel engine scheduling, typed events, polling watch mode, flush readiness coordination, dependency checks/installers, interactive prompt plumbing, a TUI, and Docker-backed Postgres runtime helpers.
 
 Runtime adapters are project-local:
 - the repo-level `devflow` launcher builds the bootstrap binary
@@ -95,7 +97,7 @@ DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run Docker -v
 
 The latest concrete next steps are maintained in `PROGRESS.md`. As of this memory update, likely next work includes:
 
-- richer watch restart policies
+- broader use of `flush` in agent-facing workflows and future wrappers
 - fine-grained detached service restart/control beyond whole-target relaunch
 - project-local adapter loading beyond a single self-contained `devflow.project.go`
 - broader TUI operator actions with confirmations and rerun/stop/restart controls

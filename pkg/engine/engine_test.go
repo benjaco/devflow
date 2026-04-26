@@ -701,6 +701,251 @@ func TestWatchCycleEventsReportChangedFilesAndAffectedTasks(t *testing.T) {
 	}
 }
 
+type flushWatchProject struct {
+	runs      atomic.Int32
+	failOnBad bool
+}
+
+func (p *flushWatchProject) Name() string { return "flush-watch-project" }
+
+func (p *flushWatchProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "flush-watch"}, nil
+}
+
+func (p *flushWatchProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"gen"}}}
+}
+
+func (p *flushWatchProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:    "gen",
+			Kind:    project.KindOnce,
+			Inputs:  project.Inputs{Files: []string{"input.txt"}},
+			Outputs: project.Outputs{Files: []string{"out.txt"}},
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				p.runs.Add(1)
+				data, err := os.ReadFile(filepath.Join(rt.Worktree, "input.txt"))
+				if err != nil {
+					return err
+				}
+				if p.failOnBad && strings.TrimSpace(string(data)) == "bad" {
+					return fmt.Errorf("bad input")
+				}
+				return os.WriteFile(filepath.Join(rt.Worktree, "out.txt"), data, 0o644)
+			},
+		},
+	}
+}
+
+func TestWatchFlushAckAfterFileChangeRerun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &flushWatchProject{}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Watch(ctx, Request{Target: "dev", Worktree: worktree, Mode: api.ModeWatch})
+	}()
+	instanceID := waitForEngineWatchReady(t, worktree)
+
+	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	requestID := writeEngineFlushRequest(t, worktree, instanceID)
+	result := waitForEngineFlushAck(t, worktree, instanceID, requestID)
+	if !result.Success || !result.Synced {
+		t.Fatalf("expected successful synced flush, got %+v", result)
+	}
+	if got := p.runs.Load(); got != 2 {
+		t.Fatalf("expected rerun before ack, got %d runs", got)
+	}
+	if data, err := os.ReadFile(filepath.Join(worktree, "out.txt")); err != nil || string(data) != "v2" {
+		t.Fatalf("expected rerun output v2, got %q err=%v", string(data), err)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("watch returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for watch shutdown")
+	}
+}
+
+func TestWatchFlushAckWithNoUserChanges(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &flushWatchProject{}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Watch(ctx, Request{Target: "dev", Worktree: worktree, Mode: api.ModeWatch})
+	}()
+	instanceID := waitForEngineWatchReady(t, worktree)
+
+	requestID := writeEngineFlushRequest(t, worktree, instanceID)
+	result := waitForEngineFlushAck(t, worktree, instanceID, requestID)
+	if !result.Success || !result.Synced {
+		t.Fatalf("expected successful sync-only flush, got %+v", result)
+	}
+	if got := p.runs.Load(); got != 1 {
+		t.Fatalf("expected no rerun for sync-only flush, got %d runs", got)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("watch returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for watch shutdown")
+	}
+}
+
+func TestWatchFlushAckReportsTaskFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("good"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &flushWatchProject{failOnBad: true}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Watch(ctx, Request{Target: "dev", Worktree: worktree, Mode: api.ModeWatch})
+	}()
+	instanceID := waitForEngineWatchReady(t, worktree)
+
+	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("bad"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	requestID := writeEngineFlushRequest(t, worktree, instanceID)
+	result := waitForEngineFlushAck(t, worktree, instanceID, requestID)
+	if result.Success {
+		t.Fatalf("expected failed flush, got %+v", result)
+	}
+	if len(result.Issues) != 1 || result.Issues[0].Task != "gen" || result.Issues[0].Kind != "task_failed" {
+		t.Fatalf("unexpected issues: %+v", result.Issues)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("watch returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for watch shutdown")
+	}
+}
+
+type flushUnreadyServiceProject struct{}
+
+func (flushUnreadyServiceProject) Name() string { return "flush-unready-service-project" }
+
+func (flushUnreadyServiceProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "flush-unready-service"}, nil
+}
+
+func (flushUnreadyServiceProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"svc"}}}
+}
+
+func (flushUnreadyServiceProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:         "svc",
+			Kind:         project.KindService,
+			ReadyTimeout: 100 * time.Millisecond,
+			Ready: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				_ = rt
+				return fmt.Errorf("not ready")
+			},
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
+					Name: "sh",
+					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
+					Dir:  rt.Worktree,
+				})
+				return err
+			},
+		},
+	}
+}
+
+func TestWatchFlushAckReportsServiceReadinessFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	eng, err := New(flushUnreadyServiceProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Watch(ctx, Request{Target: "dev", Worktree: worktree, Mode: api.ModeWatch})
+	}()
+	instanceID := waitForEngineWatchReady(t, worktree)
+
+	requestID := writeEngineFlushRequest(t, worktree, instanceID)
+	result := waitForEngineFlushAck(t, worktree, instanceID, requestID)
+	if result.Success {
+		t.Fatalf("expected failed flush, got %+v", result)
+	}
+	if len(result.Services) != 1 || result.Services[0].Task != "svc" || result.Services[0].Ready {
+		t.Fatalf("unexpected services: %+v", result.Services)
+	}
+	if len(result.Issues) != 1 || result.Issues[0].Task != "svc" || result.Issues[0].Kind != "service_unhealthy" {
+		t.Fatalf("unexpected issues: %+v", result.Issues)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("watch returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for watch shutdown")
+	}
+}
+
 type watchServiceChainProject struct {
 	buildRuns atomic.Int32
 	apiRuns   atomic.Int32
@@ -1115,6 +1360,116 @@ func TestWatchCascadeKeepsAllowedSiblingBranchWhenAnotherBranchBlocked(t *testin
 	}
 }
 
+type watchRestartAlwaysProject struct {
+	changedRuns atomic.Int32
+	alwaysRuns  atomic.Int32
+}
+
+func (p *watchRestartAlwaysProject) Name() string { return "watch-restart-always-project" }
+
+func (p *watchRestartAlwaysProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "watch-restart-always"}, nil
+}
+
+func (p *watchRestartAlwaysProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"changed", "always"}}}
+}
+
+func (p *watchRestartAlwaysProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:   "changed",
+			Kind:   project.KindOnce,
+			Inputs: project.Inputs{Files: []string{"changed.txt"}},
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				_ = rt
+				p.changedRuns.Add(1)
+				return nil
+			},
+		},
+		{
+			Name:    "always",
+			Kind:    project.KindService,
+			Restart: project.RestartAlways,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				p.alwaysRuns.Add(1)
+				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
+					Name: "sh",
+					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
+					Dir:  rt.Worktree,
+					Env:  rt.Env,
+				})
+				return err
+			},
+		},
+	}
+}
+
+func TestWatchCascadeIncludesRestartAlwaysServiceOnAnyTargetChange(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	eng, err := New(&watchRestartAlwaysProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	order, changed := eng.affectedWatchOrder("dev", []string{"changed.txt"})
+	if got, want := strings.Join(changed, ","), "changed"; got != want {
+		t.Fatalf("changed=%s want=%s", got, want)
+	}
+	if got, want := strings.Join(order, ","), "always,changed"; got != want {
+		t.Fatalf("order=%s want=%s", got, want)
+	}
+}
+
+func TestWatchRunRestartsRestartAlwaysServiceOnAnyTargetChange(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "changed.txt"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &watchRestartAlwaysProject{}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Watch(ctx, Request{Target: "dev", Worktree: worktree, Mode: api.ModeWatch, MaxParallel: 2})
+	}()
+
+	waitFor(t, 3*time.Second, func() bool {
+		return p.changedRuns.Load() == 1 && p.alwaysRuns.Load() == 1
+	})
+	time.Sleep(500 * time.Millisecond)
+
+	if err := os.WriteFile(filepath.Join(worktree, "changed.txt"), []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 4*time.Second, func() bool {
+		return p.changedRuns.Load() == 2 && p.alwaysRuns.Load() == 2
+	})
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("watch returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for watch shutdown")
+	}
+}
+
 func (p *watchGeneratedOutputProject) Name() string { return "watch-generated-output-project" }
 
 func (p *watchGeneratedOutputProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
@@ -1510,6 +1865,53 @@ func waitForBool(timeout time.Duration, fn func() bool) bool {
 		time.Sleep(25 * time.Millisecond)
 	}
 	return false
+}
+
+func waitForEngineWatchReady(t *testing.T, worktree string) string {
+	t.Helper()
+	instanceID, realWorktree, err := instance.IDForWorktree(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 4*time.Second, func() bool {
+		_, err := os.Stat(instance.FlushWatchReadyPath(realWorktree, instanceID))
+		return err == nil
+	})
+	return instanceID
+}
+
+func writeEngineFlushRequest(t *testing.T, worktree, instanceID string) string {
+	t.Helper()
+	requestID := fmt.Sprintf("test-flush-%d", time.Now().UnixNano())
+	req := api.FlushRequest{
+		ID:        requestID,
+		CreatedAt: time.Now().UTC(),
+		SyncPath:  instance.FlushSyncPath(worktree, instanceID, requestID),
+	}
+	if err := instance.WriteFlushRequest(worktree, instanceID, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(req.SyncPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(req.SyncPath, []byte(requestID+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return requestID
+}
+
+func waitForEngineFlushAck(t *testing.T, worktree, instanceID, requestID string) api.FlushResult {
+	t.Helper()
+	var result api.FlushResult
+	waitFor(t, 4*time.Second, func() bool {
+		ack, err := instance.LoadFlushAck(worktree, instanceID, requestID)
+		if err != nil {
+			return false
+		}
+		result = ack
+		return true
+	})
+	return result
 }
 
 func stringSliceHas(items []string, want string) bool {

@@ -68,6 +68,8 @@ func (a *App) Run(args []string) error {
 		return a.graphCmd(args[1:])
 	case "watch":
 		return a.watchCmd(args[1:])
+	case "flush":
+		return a.flushCmd(args[1:])
 	case "tui":
 		return a.tuiCmd(args[1:])
 	default:
@@ -133,7 +135,7 @@ func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
 }
 
 func (a *App) usage() error {
-	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|restart|stop|cache|status|logs|instances|doctor|deps|graph|tui>")
+	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|cache|status|logs|instances|doctor|deps|graph|tui>")
 	return flag.ErrHelp
 }
 
@@ -279,6 +281,154 @@ func (a *App) executeWatch(target string, jsonOut bool, worktreeFlag, projectNam
 		Mode:        api.ModeWatch,
 		MaxParallel: maxParallel,
 	})
+}
+
+func (a *App) flushCmd(args []string) error {
+	target := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		target = args[0]
+		args = args[1:]
+	}
+	fs := flag.NewFlagSet("flush", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	jsonOut := fs.Bool("json", false, "")
+	worktree := fs.String("worktree", "", "")
+	instanceID := fs.String("instance", "", "")
+	projectName := fs.String("project", "", "")
+	timeout := fs.Duration("timeout", 60*time.Second, "")
+	maxParallel := fs.Int("max-parallel", 0, "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		if target != "" || fs.NArg() != 1 {
+			return fmt.Errorf("usage: devflow flush [target]")
+		}
+		target = fs.Arg(0)
+	}
+	if *timeout <= 0 {
+		return fmt.Errorf("--timeout must be positive")
+	}
+
+	startedAt := time.Now().UTC()
+	requestID := newFlushRequestID()
+	root, id, err := resolveInstance(*worktree, *instanceID)
+	if err != nil {
+		return err
+	}
+	inst, instErr := instance.Load(root, id)
+	if instErr != nil && !os.IsNotExist(instErr) {
+		return instErr
+	}
+	resolvedProjectName := *projectName
+	if strings.TrimSpace(resolvedProjectName) == "" && instErr == nil && inst.LastRun.Project != "" {
+		resolvedProjectName = inst.LastRun.Project
+	}
+	p, err := resolvedProject(resolvedProjectName, root)
+	if err != nil {
+		return err
+	}
+
+	supervisorLive := instErr == nil && instance.ProcessAlive(inst.Supervisor.PID)
+	if target == "" {
+		if supervisorLive {
+			target = inst.LastRun.Target
+		} else if instErr == nil && inst.LastRun.Target != "" {
+			target = inst.LastRun.Target
+		} else {
+			target = project.PreferredTarget(p)
+		}
+	}
+	if target == "" {
+		result := newFlushResult(requestID, root, id, p.Name(), "", startedAt)
+		result.Issues = append(result.Issues, api.FlushIssue{
+			Kind:    "target_required",
+			Message: "no target was provided and the project does not define a preferred target",
+		})
+		return a.finishFlush(result, *jsonOut)
+	}
+	_, resolvedTarget, err := project.ResolveExecutionProject(p, target)
+	if err != nil {
+		result := newFlushResult(requestID, root, id, p.Name(), target, startedAt)
+		result.Issues = append(result.Issues, api.FlushIssue{
+			Kind:    "target_error",
+			Message: err.Error(),
+		})
+		return a.finishFlush(result, *jsonOut)
+	}
+
+	startedSupervisor := false
+	if supervisorLive {
+		if !inst.LastRun.Detached || inst.LastRun.Mode != api.ModeWatch {
+			result := newFlushResult(requestID, root, id, p.Name(), resolvedTarget, startedAt)
+			result.Issues = append(result.Issues, api.FlushIssue{
+				Kind:    "non_watch_supervisor",
+				Message: fmt.Sprintf("live detached supervisor is running mode %q, want %q", inst.LastRun.Mode, api.ModeWatch),
+				LogPath: inst.Supervisor.LogPath,
+			})
+			return a.finishFlush(result, *jsonOut)
+		}
+		if inst.LastRun.Target != resolvedTarget {
+			result := newFlushResult(requestID, root, id, p.Name(), resolvedTarget, startedAt)
+			result.Issues = append(result.Issues, api.FlushIssue{
+				Kind:    "target_mismatch",
+				Message: fmt.Sprintf("live watch supervisor target is %q, requested %q", inst.LastRun.Target, resolvedTarget),
+				LogPath: inst.Supervisor.LogPath,
+			})
+			return a.finishFlush(result, *jsonOut)
+		}
+	} else {
+		supervisorStartedAt := time.Now().UTC()
+		if _, _, _, err := a.startDetached(resolvedTarget, p.Name(), root, api.ModeWatch, *maxParallel); err != nil {
+			return err
+		}
+		startedSupervisor = true
+		if !waitForWatchReady(root, id, supervisorStartedAt, time.Until(startedAt.Add(*timeout))) {
+			result := newFlushResult(requestID, root, id, p.Name(), resolvedTarget, startedAt)
+			result.Started = true
+			result.TimedOut = true
+			result.Issues = append(result.Issues, api.FlushIssue{
+				Kind:    "timeout",
+				Message: "timed out waiting for detached watch supervisor to become ready",
+			})
+			return a.finishFlush(result, *jsonOut)
+		}
+	}
+
+	req := api.FlushRequest{
+		ID:        requestID,
+		CreatedAt: startedAt,
+		SyncPath:  instance.FlushSyncPath(root, id, requestID),
+	}
+	if err := instance.WriteFlushRequest(root, id, req); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(req.SyncPath), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(req.SyncPath, []byte(requestID+"\n"), 0o644); err != nil {
+		return err
+	}
+
+	result, ok, err := waitForFlushAck(root, id, requestID, time.Until(startedAt.Add(*timeout)))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		result = newFlushResult(requestID, root, id, p.Name(), resolvedTarget, startedAt)
+		result.Started = startedSupervisor
+		result.TimedOut = true
+		result.Issues = append(result.Issues, api.FlushIssue{
+			Kind:    "timeout",
+			Message: "timed out waiting for flush acknowledgement",
+		})
+		return a.finishFlush(result, *jsonOut)
+	}
+	result.Started = startedSupervisor
+	if result.Project == "" {
+		result.Project = p.Name()
+	}
+	return a.finishFlush(result, *jsonOut)
 }
 
 func (a *App) internalExecCmd(args []string) error {
@@ -462,25 +612,45 @@ func parseInternalExecArgs(args []string, stderr io.Writer) (internalExecRequest
 }
 
 func (a *App) executeDetached(target, projectName, worktreeFlag string, mode api.RunMode, maxParallel int, jsonOut bool) error {
-	root, err := resolveWorktree(worktreeFlag)
+	inst, logPath, pid, err := a.startDetached(target, projectName, worktreeFlag, mode, maxParallel)
 	if err != nil {
 		return err
+	}
+	payload := map[string]any{
+		"instanceId": inst.ID,
+		"target":     target,
+		"mode":       mode,
+		"detached":   true,
+		"pid":        pid,
+		"logPath":    logPath,
+	}
+	if jsonOut {
+		return writeJSON(a.Stdout, payload)
+	}
+	_, _ = fmt.Fprintf(a.Stdout, "detached instance=%s pid=%d target=%s\n", inst.ID, pid, target)
+	return nil
+}
+
+func (a *App) startDetached(target, projectName, worktreeFlag string, mode api.RunMode, maxParallel int) (*api.Instance, string, int, error) {
+	root, err := resolveWorktree(worktreeFlag)
+	if err != nil {
+		return nil, "", 0, err
 	}
 	inst, err := instance.Resolve(root, filepath.Base(root))
 	if err != nil {
-		return err
+		return nil, "", 0, err
 	}
 	executable, err := detachedExecutable(root)
 	if err != nil {
-		return err
+		return nil, "", 0, err
 	}
 	logPath := filepath.Join(root, ".devflow", "logs", inst.ID, "supervisor.log")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		return err
+		return nil, "", 0, err
 	}
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		return err
+		return nil, "", 0, err
 	}
 	defer logFile.Close()
 
@@ -500,7 +670,7 @@ func (a *App) executeDetached(target, projectName, worktreeFlag string, mode api
 	cmd.Dir = root
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
-		return err
+		return nil, "", 0, err
 	}
 	if err := instance.RecordDetachedRun(inst, api.RunConfig{
 		Project:     projectName,
@@ -509,21 +679,9 @@ func (a *App) executeDetached(target, projectName, worktreeFlag string, mode api
 		MaxParallel: maxParallel,
 		Detached:    true,
 	}, cmd.Process.Pid, logPath); err != nil {
-		return err
+		return nil, "", 0, err
 	}
-	payload := map[string]any{
-		"instanceId": inst.ID,
-		"target":     target,
-		"mode":       mode,
-		"detached":   true,
-		"pid":        cmd.Process.Pid,
-		"logPath":    logPath,
-	}
-	if jsonOut {
-		return writeJSON(a.Stdout, payload)
-	}
-	_, _ = fmt.Fprintf(a.Stdout, "detached instance=%s pid=%d target=%s\n", inst.ID, cmd.Process.Pid, target)
-	return nil
+	return inst, logPath, cmd.Process.Pid, nil
 }
 
 func (a *App) restartCmd(args []string) error {
@@ -1436,6 +1594,99 @@ func waitForInitialStatus(worktree, instanceID string, timeout time.Duration) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func newFlushRequestID() string {
+	return fmt.Sprintf("flush-%d-%d", time.Now().UTC().UnixNano(), os.Getpid())
+}
+
+func newFlushResult(requestID, worktree, instanceID, projectName, target string, startedAt time.Time) api.FlushResult {
+	now := time.Now().UTC()
+	return api.FlushResult{
+		RequestID:  requestID,
+		InstanceID: instanceID,
+		Worktree:   worktree,
+		Project:    projectName,
+		Target:     target,
+		Mode:       api.ModeWatch,
+		Success:    false,
+		DurationMs: now.Sub(startedAt).Milliseconds(),
+		UpdatedAt:  now,
+	}
+}
+
+func (a *App) finishFlush(result api.FlushResult, jsonOut bool) error {
+	if err := a.writeFlushResult(result, jsonOut); err != nil {
+		return err
+	}
+	if !result.Success {
+		return fmt.Errorf("flush failed")
+	}
+	return nil
+}
+
+func (a *App) writeFlushResult(result api.FlushResult, jsonOut bool) error {
+	if jsonOut {
+		return writeJSON(a.Stdout, result)
+	}
+	if result.Success {
+		_, _ = fmt.Fprintf(a.Stdout, "flush ok target=%s instance=%s synced=%v duration_ms=%d\n", result.Target, result.InstanceID, result.Synced, result.DurationMs)
+		return nil
+	}
+	status := "failed"
+	if result.TimedOut {
+		status = "timed out"
+	}
+	_, _ = fmt.Fprintf(a.Stdout, "flush %s target=%s instance=%s synced=%v\n", status, result.Target, result.InstanceID, result.Synced)
+	for _, issue := range result.Issues {
+		task := ""
+		if issue.Task != "" {
+			task = " task=" + issue.Task
+		}
+		logPath := ""
+		if issue.LogPath != "" {
+			logPath = " log=" + issue.LogPath
+		}
+		_, _ = fmt.Fprintf(a.Stdout, "%s%s: %s%s\n", issue.Kind, task, issue.Message, logPath)
+	}
+	return nil
+}
+
+func waitForFlushAck(worktree, instanceID, requestID string, timeout time.Duration) (api.FlushResult, bool, error) {
+	if timeout <= 0 {
+		return api.FlushResult{}, false, nil
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		result, err := instance.LoadFlushAck(worktree, instanceID, requestID)
+		if err == nil {
+			return result, true, nil
+		}
+		if !os.IsNotExist(err) {
+			return api.FlushResult{}, false, err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return api.FlushResult{}, false, nil
+}
+
+func waitForWatchReady(worktree, instanceID string, after time.Time, timeout time.Duration) bool {
+	if timeout <= 0 {
+		return false
+	}
+	deadline := time.Now().Add(timeout)
+	path := instance.FlushWatchReadyPath(worktree, instanceID)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			readyAt, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+			if parseErr == nil && !readyAt.Before(after) {
+				return true
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
 }
 
 func supervisorStatus(inst *api.Instance) *api.SupervisorStatus {

@@ -158,6 +158,141 @@ func TestRunAcceptsTaskNameAsSyntheticTarget(t *testing.T) {
 	}
 }
 
+func TestFlushAutoStartsDetachedWatchJSON(t *testing.T) {
+	worktree := t.TempDir()
+	writeLocalProjectFile(t, worktree, localProjectSource("local-flush-project", "up"))
+	t.Cleanup(func() {
+		_, _ = runBootstrapCommand(t, worktree, "stop", "--all", "--json", "--worktree", worktree)
+	})
+
+	output, err := runBootstrapCommand(t, worktree, "flush", "up", "--json", "--timeout", "10s", "--worktree", worktree)
+	if err != nil {
+		t.Fatalf("flush failed: %v\n%s", err, output)
+	}
+	var result api.FlushResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode flush result %q: %v", output, err)
+	}
+	if !result.Success || !result.Synced || !result.Started {
+		t.Fatalf("expected successful auto-started flush, got %+v", result)
+	}
+	if result.Target != "up" {
+		t.Fatalf("unexpected target %q", result.Target)
+	}
+}
+
+func TestFlushNoTargetUsesPreferredTarget(t *testing.T) {
+	worktree := t.TempDir()
+	writeLocalProjectFile(t, worktree, localProjectSource("local-flush-default-project", "up"))
+	t.Cleanup(func() {
+		_, _ = runBootstrapCommand(t, worktree, "stop", "--all", "--json", "--worktree", worktree)
+	})
+
+	output, err := runBootstrapCommand(t, worktree, "flush", "--json", "--timeout", "10s", "--worktree", worktree)
+	if err != nil {
+		t.Fatalf("flush failed: %v\n%s", err, output)
+	}
+	result := decodeCLIFlushResult(t, []byte(output))
+	if !result.Success || result.Target != "up" || !result.Started {
+		t.Fatalf("expected preferred target auto-start flush, got %+v", result)
+	}
+}
+
+func TestFlushNoTargetUsesLastRunTarget(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	recordCLITestSupervisor(t, worktree, api.RunConfig{
+		Project:  "cli-task-target-project",
+		Target:   "build",
+		Mode:     api.ModeWatch,
+		Detached: true,
+	})
+
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	err := app.Run([]string{"flush", "--json", "--worktree", worktree, "--timeout", "10ms"})
+	if err == nil {
+		t.Fatal("expected flush to time out without a real watcher")
+	}
+	var result api.FlushResult
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+		t.Fatalf("decode flush result: %v\n%s", decodeErr, stdout.String())
+	}
+	if result.Target != "build" || !result.TimedOut {
+		t.Fatalf("expected last-run target timeout, got %+v", result)
+	}
+}
+
+func TestFlushLiveWatchTargetMismatchFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	recordCLITestSupervisor(t, worktree, api.RunConfig{
+		Project:  "cli-task-target-project",
+		Target:   "gen",
+		Mode:     api.ModeWatch,
+		Detached: true,
+	})
+
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	err := app.Run([]string{"flush", "build", "--json", "--project", "cli-task-target-project", "--worktree", worktree})
+	if err == nil {
+		t.Fatal("expected target mismatch error")
+	}
+	result := decodeCLIFlushResult(t, stdout.Bytes())
+	if len(result.Issues) != 1 || result.Issues[0].Kind != "target_mismatch" {
+		t.Fatalf("unexpected mismatch result: %+v", result)
+	}
+}
+
+func TestFlushLiveNonWatchSupervisorFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	recordCLITestSupervisor(t, worktree, api.RunConfig{
+		Project:  "cli-task-target-project",
+		Target:   "build",
+		Mode:     api.ModeDev,
+		Detached: true,
+	})
+
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	err := app.Run([]string{"flush", "build", "--json", "--project", "cli-task-target-project", "--worktree", worktree})
+	if err == nil {
+		t.Fatal("expected non-watch supervisor error")
+	}
+	result := decodeCLIFlushResult(t, stdout.Bytes())
+	if len(result.Issues) != 1 || result.Issues[0].Kind != "non_watch_supervisor" {
+		t.Fatalf("unexpected non-watch result: %+v", result)
+	}
+}
+
+func TestFlushTimeoutReturnsStructuredFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	recordCLITestSupervisor(t, worktree, api.RunConfig{
+		Project:  "cli-task-target-project",
+		Target:   "build",
+		Mode:     api.ModeWatch,
+		Detached: true,
+	})
+
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	err := app.Run([]string{"flush", "build", "--json", "--project", "cli-task-target-project", "--worktree", worktree, "--timeout", "10ms"})
+	if err == nil {
+		t.Fatal("expected flush timeout")
+	}
+	result := decodeCLIFlushResult(t, stdout.Bytes())
+	if !result.TimedOut || result.Success || len(result.Issues) != 1 || result.Issues[0].Kind != "timeout" {
+		t.Fatalf("unexpected timeout result: %+v", result)
+	}
+}
+
 func TestDepsStatusAndInstallJSON(t *testing.T) {
 	marker := filepath.Join(os.TempDir(), "devflow-cli-deps-installed.txt")
 	_ = os.Remove(marker)
@@ -902,6 +1037,31 @@ func containsInstance(items []api.InstanceSummary, id string) bool {
 		}
 	}
 	return false
+}
+
+func recordCLITestSupervisor(t *testing.T, worktree string, run api.RunConfig) string {
+	t.Helper()
+	inst, err := instance.Resolve(worktree, filepath.Base(worktree))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(worktree, ".devflow", "logs", inst.ID, "supervisor.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.RecordDetachedRun(inst, run, os.Getpid(), logPath); err != nil {
+		t.Fatal(err)
+	}
+	return inst.ID
+}
+
+func decodeCLIFlushResult(t *testing.T, data []byte) api.FlushResult {
+	t.Helper()
+	var result api.FlushResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("decode flush result: %v\n%s", err, string(data))
+	}
+	return result
 }
 
 func decodeJSONLines(t *testing.T, data []byte) []map[string]string {

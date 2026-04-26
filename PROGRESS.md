@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-04-25
+Last updated: 2026-04-26
 
 ## Current Status
 
@@ -281,22 +281,43 @@ Last updated: 2026-04-25
 - Added watch regression coverage for cascades blocked by warmups without `AllowInWatch` and services with `RestartNever`
 - Added full watch execution coverage proving a service beyond a blocked warmup does not restart after an upstream file change
 - Added mixed-branch watch coverage proving an allowed sibling branch still cascades when another branch is blocked
+- Implemented `RestartAlways` watch semantics so opted-in services restart on any watch cycle that affects the selected target
+- Added selection and full watch execution coverage for `RestartAlways`
+- Hardened the `go-next-monorepo` watch smoke test by waiting for stable trace counts before the next file edit
 - Verified the watch cascade change with:
-  - `go test ./pkg/engine -run 'TestWatch.*Cascade|TestWatchRunDoesNotRestartServicePastWarmupBlockedInWatch' -count=1`
+  - `go test ./pkg/engine -run 'TestWatch.*RestartAlways|TestWatch.*Cascade|TestWatchRunDoesNotRestartServicePastWarmupBlockedInWatch' -count=1`
   - `go test ./pkg/engine`
+  - `go test ./examples/go-next-monorepo -run TestExampleProjectWatchSelectiveReruns -count=10`
+  - `go test ./...`
+- Implemented `devflow flush [target]` as the AI readiness gate for detached watch workflows:
+  - added public `FlushResult`, `FlushService`, `FlushIssue`, and request/ack persistence types
+  - added per-instance flush request, sync, ack, and watch-ready paths
+  - taught watch mode to include the flush sync directory under `.devflow` while keeping normal `.devflow` paths ignored
+  - added engine flush acks after file-change reruns and sync-only batches
+  - added target-closure health checks for done/cached tasks and running/ready services
+  - added CLI target resolution, detached watch auto-start, mismatch/non-watch supervisor errors, timeout handling, and JSON output
+- Added flush coverage in `pkg/instance`, `pkg/watch`, `pkg/engine`, and `internal/cli`
+- Added example-project flush coverage in `examples/go-next-monorepo` proving `flush --json` on the real adapter waits for a changed file to rerun before reporting success
+- Updated subsystem docs for flush CLI behavior, architecture protocol, agent workflow, testing expectations, roadmap status, and shared agent memory
+- Verified the flush implementation with:
+  - `go test ./pkg/instance ./pkg/watch ./pkg/engine ./internal/cli`
+  - `go test ./...`
+- Re-verified after adding example flush coverage with:
+  - `go test ./examples/go-next-monorepo -run TestExampleProjectFlushSettlesWatchChange -count=1`
+  - `go test ./examples/go-next-monorepo`
+  - `go test ./pkg/instance ./pkg/watch ./pkg/engine ./internal/cli ./examples/go-next-monorepo`
   - `go test ./...`
 
 ## In Progress
 
-- No active implementation work recorded
+- None
 
 ## Next Steps
 
-- Add richer watch restart policies now that service readiness exists
 - Improve fine-grained detached service restart/control semantics beyond whole-target relaunch
 - Extend project-local adapter loading beyond a single self-contained `devflow.project.go` file when the first version needs companion adapter files
 - Expand TUI operator actions with confirmations and rerun/stop/restart controls
-- Add stronger JSON contract tests for status/instances/events
+- Add stronger JSON contract tests for status/instances/events/flush
 
 ## Deferred / Known Gaps
 

@@ -49,6 +49,7 @@ This model intentionally avoids:
 Per-worktree state lives under `.devflow/`:
 - `.devflow/logs/<instance-id>/`
 - `.devflow/state/instances/<instance-id>/`
+- `.devflow/state/instances/<instance-id>/flush/`
 
 Repo-shared state for sibling git worktrees now lives under the Git common dir from:
 - `git rev-parse --git-common-dir`
@@ -61,6 +62,12 @@ Global coordination state that is not repo-specific still lives under the user c
 - `devflow/state/instance-index.json`
 
 This split keeps runtime logs and instance state local to the worktree while letting sibling worktrees in the same repo share cache entries and port allocations.
+
+Flush coordination is per instance:
+- `flush/requests/<request-id>.json` records the requested sync point
+- `flush/sync/<request-id>.sync` is the file-watcher sentinel
+- `flush/acks/<request-id>.json` stores the final `FlushResult`
+- `flush/watch.ready` is an internal readiness marker written after detached watch startup has reached the file-watching phase
 
 ## Runtime Env
 
@@ -86,11 +93,38 @@ When a file batch arrives, the engine:
 - finds directly affected tasks in the selected target closure
 - expands through the downstream task graph using watch restart policy rules
 - prunes tasks that cannot run in watch mode, such as warmups without `AllowInWatch` and services with `RestartNever`
+- adds services marked `RestartAlways` so they restart on any watch cycle that affects the selected target
 - preserves dependency barriers while pruning
 
 The dependency-barrier rule is important: if an intermediate candidate is blocked from the watch cycle, its downstream candidates are blocked too. Downstream tasks must not run in advance against stale intermediate outputs just because they are also reachable from the changed task.
 
 Normal ready-queue scheduling still applies to the final rerun set, so included downstream tasks become runnable only after included upstream dependencies finish or restore from cache.
+
+Current service restart policy meanings in watch mode:
+- `RestartNever`: never restart from file-change cascades
+- `RestartOnInputChange`: restart only when the service is in the affected downstream slice
+- `RestartAlways`: restart on every watch cycle that has at least one directly affected task in the selected target
+
+## Flush Readiness Gate
+
+`devflow flush [target]` coordinates with detached watch mode through the per-instance flush files. The command writes a request file and then writes the sync sentinel under `.devflow/state/instances/<instance-id>/flush/sync/`.
+
+The watch runner normally ignores `.devflow`, but the engine explicitly includes the flush sync directory in its watcher inputs. When a batch arrives, the engine splits flush sync files out of normal changed files:
+- normal user file changes run through the existing watch cascade logic first
+- sync files are not treated as task inputs
+- after the cycle completes, the engine loads each matching request and writes an ack
+- sync-only batches still produce an ack after health evaluation
+
+This proves that edits completed before the `flush` command wrote the sentinel have crossed the watcher's file-change boundary before the command returns success.
+
+Flush health is scoped to the selected target closure:
+- once, group, and warmup tasks must be `done` or `cached`
+- service tasks must be `running`
+- service PIDs must still be alive
+- service readiness hooks must pass when defined
+- services outside the selected target closure are not part of flush success
+
+Version 1 reports unhealthy in-chain services as `service_unhealthy` issues. It does not auto-restart unhealthy services during `flush`.
 
 ## Interactive Commands
 

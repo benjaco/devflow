@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -130,12 +131,28 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 		Success:    boolPtr(initialSuccess),
 	})
 
-	runner, err := watch.New(watch.Options{Root: req.Worktree})
+	flushSyncDir := instance.FlushSyncDir(req.Worktree, inst.ID)
+	if err := os.MkdirAll(flushSyncDir, 0o755); err != nil {
+		return err
+	}
+	runner, err := watch.New(watch.Options{
+		Root:         req.Worktree,
+		IncludePaths: []string{flushSyncDir},
+	})
 	if err != nil {
 		return err
 	}
 	batches, errs, err := runner.Start(ctx)
 	if err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		e.stopAllServices(req, inst, state)
+		return nil
+	case <-time.After(watch.DefaultPollInterval):
+	}
+	if err := os.WriteFile(instance.FlushWatchReadyPath(req.Worktree, inst.ID), []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o644); err != nil {
 		return err
 	}
 	suppressor := watchOutputSuppressor{
@@ -167,41 +184,42 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 				e.stopAllServices(req, inst, state)
 				return nil
 			}
-			files := suppressor.Filter(batch.Files)
-			if len(files) == 0 {
+			userFiles, flushRequestIDs := splitFlushSyncFiles(req.Worktree, inst.ID, batch.Files)
+			files := suppressor.Filter(userFiles)
+			if len(files) == 0 && len(flushRequestIDs) == 0 {
 				continue
 			}
-			affectedOrder, changedTasks := e.affectedWatchOrder(req.Target, files)
-			if len(affectedOrder) == 0 {
-				continue
-			}
-			e.publish(api.Event{
-				TS:            process.NowRFC3339Nano(),
-				Type:          api.EventWatchCycleStart,
-				InstanceID:    inst.ID,
-				Worktree:      req.Worktree,
-				Target:        req.Target,
-				Mode:          req.Mode,
-				Files:         append([]string(nil), files...),
-				AffectedTasks: changedTasks,
-			})
-			state.stopServices(req, affectedOrder)
 			success := true
-			if err := e.runReadyQueue(ctx, func() {}, baseRT, state, affectedOrder); err != nil {
-				success = false
+			affectedOrder, changedTasks := e.affectedWatchOrder(req.Target, files)
+			if len(affectedOrder) > 0 {
+				e.publish(api.Event{
+					TS:            process.NowRFC3339Nano(),
+					Type:          api.EventWatchCycleStart,
+					InstanceID:    inst.ID,
+					Worktree:      req.Worktree,
+					Target:        req.Target,
+					Mode:          req.Mode,
+					Files:         append([]string(nil), files...),
+					AffectedTasks: changedTasks,
+				})
+				state.stopServices(req, affectedOrder)
+				if err := e.runReadyQueue(ctx, func() {}, baseRT, state, affectedOrder); err != nil {
+					success = false
+				}
+				suppressor.Record(e.graph, affectedOrder, watchOutputSuppressTTL)
+				e.publish(api.Event{
+					TS:            process.NowRFC3339Nano(),
+					Type:          api.EventWatchCycleDone,
+					InstanceID:    inst.ID,
+					Worktree:      req.Worktree,
+					Target:        req.Target,
+					Mode:          req.Mode,
+					Files:         append([]string(nil), files...),
+					AffectedTasks: changedTasks,
+					Success:       boolPtr(success),
+				})
 			}
-			suppressor.Record(e.graph, affectedOrder, watchOutputSuppressTTL)
-			e.publish(api.Event{
-				TS:            process.NowRFC3339Nano(),
-				Type:          api.EventWatchCycleDone,
-				InstanceID:    inst.ID,
-				Worktree:      req.Worktree,
-				Target:        req.Target,
-				Mode:          req.Mode,
-				Files:         append([]string(nil), files...),
-				AffectedTasks: changedTasks,
-				Success:       boolPtr(success),
-			})
+			e.ackFlushRequests(ctx, req, baseRT, state, flushRequestIDs)
 		}
 	}
 }
@@ -1116,6 +1134,31 @@ func watchPathHasPrefix(path, prefix string) bool {
 	return len(path) > len(prefix) && path[:len(prefix)] == prefix && path[len(prefix)] == '/'
 }
 
+func splitFlushSyncFiles(worktree, instanceID string, files []string) ([]string, []string) {
+	syncDir, err := filepath.Rel(worktree, instance.FlushSyncDir(worktree, instanceID))
+	if err != nil {
+		return append([]string(nil), files...), nil
+	}
+	syncDir = normalizeWatchPath(syncDir)
+	ids := map[string]bool{}
+	userFiles := make([]string, 0, len(files))
+	for _, file := range files {
+		normalized := normalizeWatchPath(file)
+		if !watchPathHasPrefix(normalized, syncDir) {
+			userFiles = append(userFiles, file)
+			continue
+		}
+		if filepath.Ext(normalized) != ".sync" {
+			continue
+		}
+		id := strings.TrimSuffix(filepath.Base(normalized), ".sync")
+		if id != "" {
+			ids[id] = true
+		}
+	}
+	return userFiles, sortedBoolKeys(ids)
+}
+
 func sortedNodeNames(m map[string]api.NodeStatus) []string {
 	names := make([]string, 0, len(m))
 	for name := range m {
@@ -1160,6 +1203,12 @@ func (e *Engine) affectedWatchOrder(target string, files []string) ([]string, []
 			continue
 		}
 		candidates[name] = true
+	}
+	for _, name := range closure {
+		task := e.graph.Tasks[name]
+		if task.Kind == project.KindService && task.Restart == project.RestartAlways {
+			candidates[name] = true
+		}
 	}
 	candidateOrder := sortedBoolKeys(candidates)
 	candidateOrder, err = e.graph.TopoSort(candidateOrder)
@@ -1217,6 +1266,137 @@ func (e *Engine) watchDownstream(names []string) []string {
 		}
 	}
 	return sortedBoolKeys(seen)
+}
+
+func (e *Engine) ackFlushRequests(ctx context.Context, req Request, baseRT *project.Runtime, state *runState, requestIDs []string) {
+	for _, requestID := range requestIDs {
+		flushReq, err := instance.LoadFlushRequest(req.Worktree, state.inst.ID, requestID)
+		if err != nil {
+			continue
+		}
+		result := e.evaluateFlush(ctx, req, baseRT, state, flushReq)
+		_ = instance.WriteFlushAck(req.Worktree, state.inst.ID, result)
+		_ = instance.RemoveFlushRequest(req.Worktree, state.inst.ID, requestID)
+	}
+}
+
+func (e *Engine) evaluateFlush(ctx context.Context, req Request, baseRT *project.Runtime, state *runState, flushReq api.FlushRequest) api.FlushResult {
+	startedAt := flushReq.CreatedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now().UTC()
+	}
+	status := state.statusSnapshot()
+	closure, err := e.graph.TargetClosure(req.Target)
+	now := time.Now().UTC()
+	result := api.FlushResult{
+		RequestID:  flushReq.ID,
+		InstanceID: state.inst.ID,
+		Worktree:   req.Worktree,
+		Project:    e.project.Name(),
+		Target:     req.Target,
+		Mode:       req.Mode,
+		Synced:     true,
+		Success:    true,
+		DurationMs: now.Sub(startedAt).Milliseconds(),
+		UpdatedAt:  now,
+	}
+	if err != nil {
+		result.Success = false
+		result.Issues = append(result.Issues, api.FlushIssue{
+			Kind:    "target_error",
+			Message: err.Error(),
+		})
+		return result
+	}
+	for _, name := range closure {
+		task := e.graph.Tasks[name]
+		node := status[name]
+		result.Nodes = append(result.Nodes, node)
+		if task.Kind == project.KindService {
+			service := e.evaluateFlushService(ctx, req, baseRT, state, task, node)
+			result.Services = append(result.Services, service)
+			if !service.Ready {
+				result.Success = false
+				message := service.Error
+				if message == "" {
+					message = "service is not healthy"
+				}
+				result.Issues = append(result.Issues, api.FlushIssue{
+					Task:    task.Name,
+					Kind:    "service_unhealthy",
+					Message: message,
+					LogPath: service.LogPath,
+				})
+			}
+			continue
+		}
+		if node.State == api.StateDone || node.State == api.StateCached {
+			continue
+		}
+		result.Success = false
+		result.Issues = append(result.Issues, api.FlushIssue{
+			Task:    name,
+			Kind:    flushTaskIssueKind(node.State),
+			Message: flushTaskIssueMessage(node),
+			LogPath: node.LogPath,
+		})
+	}
+	sort.Slice(result.Nodes, func(i, j int) bool { return result.Nodes[i].Name < result.Nodes[j].Name })
+	sort.Slice(result.Services, func(i, j int) bool { return result.Services[i].Task < result.Services[j].Task })
+	return result
+}
+
+func (e *Engine) evaluateFlushService(ctx context.Context, req Request, baseRT *project.Runtime, state *runState, task project.Task, node api.NodeStatus) api.FlushService {
+	service := api.FlushService{
+		Task:    task.Name,
+		State:   node.State,
+		PID:     node.PID,
+		LogPath: node.LogPath,
+	}
+	if node.State != api.StateRunning {
+		service.Error = fmt.Sprintf("service state is %q, want %q", node.State, api.StateRunning)
+		return service
+	}
+	if node.PID <= 0 || !instance.ProcessAlive(node.PID) {
+		service.Error = "service process is not alive"
+		return service
+	}
+	service.Alive = true
+	if task.Ready == nil {
+		service.Ready = true
+		return service
+	}
+	timeout := task.ReadyTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	readyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	rt := baseRT.WithTask(task.Name, instance.LogPath(req.Worktree, state.inst.ID, task.Name))
+	if err := task.Ready(readyCtx, rt); err != nil {
+		service.Error = err.Error()
+		return service
+	}
+	service.Ready = true
+	return service
+}
+
+func flushTaskIssueKind(state api.NodeState) string {
+	switch state {
+	case api.StateFailed:
+		return "task_failed"
+	case api.StateCanceled:
+		return "task_canceled"
+	default:
+		return "task_not_settled"
+	}
+}
+
+func flushTaskIssueMessage(node api.NodeStatus) string {
+	if node.LastError != "" {
+		return node.LastError
+	}
+	return fmt.Sprintf("task state is %q", node.State)
 }
 
 func (e *Engine) stopAllServices(req Request, inst *api.Instance, state *runState) {

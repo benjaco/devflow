@@ -99,6 +99,47 @@ type RunResult struct {
 	FinishedAt string   `json:"finishedAt"`
 }
 
+type FlushRequest struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"createdAt"`
+	SyncPath  string    `json:"syncPath"`
+}
+
+type FlushResult struct {
+	RequestID  string         `json:"requestId"`
+	InstanceID string         `json:"instanceId"`
+	Worktree   string         `json:"worktree"`
+	Project    string         `json:"project,omitempty"`
+	Target     string         `json:"target"`
+	Mode       RunMode        `json:"mode"`
+	Started    bool           `json:"started"`
+	Synced     bool           `json:"synced"`
+	Success    bool           `json:"success"`
+	TimedOut   bool           `json:"timedOut,omitempty"`
+	DurationMs int64          `json:"durationMs"`
+	UpdatedAt  time.Time      `json:"updatedAt,omitempty"`
+	Nodes      []NodeStatus   `json:"nodes,omitempty"`
+	Services   []FlushService `json:"services,omitempty"`
+	Issues     []FlushIssue   `json:"issues,omitempty"`
+}
+
+type FlushService struct {
+	Task    string    `json:"task"`
+	State   NodeState `json:"state"`
+	PID     int       `json:"pid,omitempty"`
+	Alive   bool      `json:"alive"`
+	Ready   bool      `json:"ready"`
+	Error   string    `json:"error,omitempty"`
+	LogPath string    `json:"logPath,omitempty"`
+}
+
+type FlushIssue struct {
+	Task    string `json:"task,omitempty"`
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
+	LogPath string `json:"logPath,omitempty"`
+}
+
 type StatusResult struct {
 	InstanceID string            `json:"instanceId"`
 	Worktree   string            `json:"worktree,omitempty"`

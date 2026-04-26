@@ -5,6 +5,7 @@ Implemented commands:
 - `devflow` (default launcher behavior)
 - `devflow run <target>`
 - `devflow watch <target>`
+- `devflow flush [target]`
 - `devflow restart <task>`
 - `devflow stop`
 - `devflow cache status`
@@ -51,11 +52,41 @@ Watch file matching is driven by adapter task inputs. Changed files directly aff
 
 Watch cascades respect dependency barriers. If an intermediate task in the affected slice is not allowed to run in watch mode, downstream tasks past that intermediate are not run in that cycle.
 
+For service restart policies, `RestartNever` blocks watch restarts, `RestartOnInputChange` follows the affected downstream slice, and `RestartAlways` restarts the service on any watch cycle that affects the selected target.
+
 For watch-cycle events:
 - `files` is the raw changed file list from the watcher batch
 - `affectedTasks` is the directly affected task list derived from those file changes
 
 `watch` also supports `--detach`.
+
+`flush` is the AI readiness gate for detached watch workflows. It makes sure a detached `watch` supervisor is running for the selected target, writes a flush request plus a sync sentinel, waits until the watcher acknowledges that sentinel after the current watch batch settles, and then returns the target-closure health result.
+
+Usage:
+
+```bash
+devflow flush [target]
+devflow flush [target] --json
+devflow flush [target] --worktree <path>
+devflow flush [target] --instance <id>
+devflow flush [target] --project <name>
+devflow flush [target] --timeout 60s
+devflow flush [target] --max-parallel <n>
+```
+
+Target resolution:
+- a positional `target` wins
+- without a positional target, a live detached watch supervisor reuses `inst.LastRun.Target`
+- without a live supervisor, `inst.LastRun.Target` is reused when present
+- otherwise the project preferred target is used
+
+Supervisor behavior:
+- no detached supervisor: starts `devflow watch <target> --detach`
+- live detached watch supervisor for the same target: reused
+- live detached watch supervisor for a different target: fails with `target_mismatch`
+- live detached non-watch supervisor: fails with `non_watch_supervisor`
+
+`flush --json` returns `FlushResult` with the request ID, instance ID, worktree, project, target, mode, whether a supervisor was started, sync/health success, node states, service health, and structured issues. The command exits non-zero when `success=false`, including timeout and health-check failures.
 
 `restart` supports rerunning non-service task slices from the CLI. For service tasks, if the instance was started with a detached run, `restart` stops the detached supervisor and relaunches the last detached target.
 
