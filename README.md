@@ -2,100 +2,218 @@
 
 Devflow is a local-first DAG runner for development workflows.
 
-It is designed for:
+It gives a project a small Go-defined task graph with:
 - cached one-shot tasks
 - supervised long-running services
-- adapter-defined service readiness checks
-- detached background supervision for service-bearing runs
-- a terminal UI for inspecting a live instance
-- worktree-scoped instance isolation
-- per-instance ports and runtime env
-- watch-mode partial reruns and selective service restarts
-- stable JSON output for humans, CI, and future agents
+- service readiness checks
+- detached watch/dev supervisors
+- file-change cascades through the task graph
+- `devflow flush --json` as an AI readiness gate
+- stable JSON output for humans, CI, and coding agents
 
-## Status
+Devflow stays generic. Project-specific behavior belongs in the project-owned `devflow.project.go` file or in example adapters, not in the core packages.
 
-Early development. The current implementation focuses on the generic core:
-- task graph validation and traversal
-- content-based fingerprints
-- local snapshot cache
-- subprocess execution and service supervision
-- service readiness gating before a service is considered running
-- built-in binary-tool helpers for cacheable helper-binary builds and later execution
-- Docker-backed database runtime helpers for dedicated per-instance Postgres containers and snapshots
-- dotenv loading so adapter instances can start from `.env` and then apply devflow-owned overrides
-- project-scoped dependency checks and platform-specific dependency installers
-- detached `run/watch --detach` background supervisor launching
-- `tui` for task selection and live log inspection
-- worktree instances and shared port leasing
-- polling-based watch mode using `github.com/radovskyb/watcher`
-- JSON-capable CLI commands
+## Documentation
 
-The TUI is still minimal, but the bundled example adapters still act as real smoke targets for the core test suite:
-- `go-next-monorepo` for the deterministic in-repo example workflow
-- `web-worker-workspace` for a deterministic API + worker + frontend multi-service workflow
-- `embedded-web-app` for a real embedded-frontend + Go server + dedicated Postgres workflow
+There are two documentation lanes:
 
-## Quick Start
+- **Use Devflow in your project**: start with this README, then read `docs_users/README.md` and `docs_users/adapter-guide.md`.
+- **Develop Devflow itself**: start with `docs_contributors/README.md`, then read `AGENTS.md`, `docs_contributors/agent-memory.md`, and `PROGRESS.md`.
+
+Keep these separate when adding docs. Project adopters should not need contributor internals before they can define a useful `devflow.project.go`.
+
+## Install
+
+Devflow requires Go because project graph definitions are Go code.
 
 ```bash
 go install github.com/benjaco/devflow/cmd/devflow@latest
 devflow version
+devflow docs
 ```
 
 Make sure `$(go env GOPATH)/bin` is on your `PATH`; that is where `go install` places the `devflow` executable by default.
 
-Update an installed copy with:
+Update later with:
 
 ```bash
 devflow upgrade
 ```
 
-`devflow upgrade` is intentionally simple in round 1: it runs `go install github.com/benjaco/devflow/cmd/devflow@latest`. There are no release binaries, npm package, Homebrew tap, or installer scripts yet because Go is required for project-local graph definitions anyway.
+`devflow upgrade` is intentionally simple in round 1. It runs:
 
-For real use, the target project repo should contain its own `devflow.project.go`.
-The installed `devflow` command then compiles a worktree-local CLI and transfers execution into it.
+```bash
+go install github.com/benjaco/devflow/cmd/devflow@latest
+```
 
-If you want to use `devflow` locally, you still need Go installed on your machine.
-GitHub Actions only verifies that the repo builds in CI; it does not remove the need for a local Go toolchain when you want to build or run the tool yourself.
+There are no release binaries, npm package, Homebrew tap, or installer scripts yet.
 
-The source-development flow is:
-- install Go
-- clone the repo
-- run `go build -o .devflow/bin/devflow ./cmd/devflow` or just use the repo-local `devflow` launcher script
+## Getting Started
 
-For contributor and coding-agent orientation, start with:
+This is the short path for adding Devflow to another project. The longer guide is `docs_users/README.md`.
+
+In the project you want Devflow to run, add a self-contained `devflow.project.go` file:
+
+```go
+package main
+
+import (
+	"context"
+
+	"github.com/benjaco/devflow/pkg/project"
+)
+
+type localProject struct{}
+
+func init() {
+	project.Register(localProject{})
+}
+
+func (localProject) Name() string { return "my-project" }
+
+func (localProject) DefaultTarget() string { return "up" }
+
+func (localProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "my-project"}, nil
+}
+
+func (localProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name: "check",
+			Kind: project.KindOnce,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				return rt.RunCmd(ctx, "go", "version")
+			},
+		},
+	}
+}
+
+func (localProject) Targets() []project.Target {
+	return []project.Target{
+		{Name: "up", RootTasks: []string{"check"}},
+	}
+}
+```
+
+Replace the `check` task command with the project command you actually want, such as `go test ./...`, `npm test`, or a service start command.
+
+Then run:
+
+```bash
+devflow graph list --json
+devflow run up --json
+```
+
+For a detached watch workflow:
+
+```bash
+devflow watch up --detach --json
+devflow flush up --json
+```
+
+`flush` writes a sync sentinel, waits for the watcher to process file changes before that sentinel, waits for the selected target closure to settle, and reports structured success or issues. Coding agents should edit files, run `devflow flush --json`, and only run tests after `success=true`.
+
+Bare `devflow` inside a project worktree starts the default target detached when needed and opens the TUI.
+
+## Project Model
+
+Current project-local constraints:
+- the project repo owns `./devflow.project.go`
+- the file must use `package main`
+- the file must register a project in `init()`
+- the file must be self-contained; arbitrary companion Go files are not loaded yet
+- importing `github.com/benjaco/devflow/pkg/...` and standard library packages is supported
+
+When Devflow sees `devflow.project.go`, it compiles a worktree-local CLI into:
+
+```text
+<worktree>/.devflow/bin/devflow-local
+```
+
+Generated build modules live under:
+
+```text
+<worktree>/.devflow/localbuild/<hash>/
+```
+
+Commit `devflow.project.go`. Do not commit `.devflow/`.
+
+## Common Commands
+
+```bash
+devflow docs
+devflow version --json
+devflow doctor --json
+devflow graph list --json
+devflow graph show up --json
+devflow run up --json
+devflow watch up --detach --json
+devflow flush up --json
+devflow status --json
+devflow logs <task>
+devflow stop --all --json
+devflow cache status --json
+```
+
+All user-facing commands are expected to keep stable JSON output except `devflow docs`, which intentionally prints plain user Markdown.
+
+## State And Cache
+
+Per-worktree runtime state lives under the project worktree:
+
+```text
+<worktree>/.devflow/state/
+<worktree>/.devflow/logs/
+```
+
+Task cache storage is shared system-wide under the OS user cache directory:
+
+```text
+<os.UserCacheDir()>/devflow/cache/
+```
+
+Cache entries are namespaced by project, so sibling worktrees and unrelated project worktrees can share one physical cache folder without sharing instance state.
+
+## Examples
+
+The repo includes example adapters that double as smoke coverage:
+- `examples/go-next-monorepo`
+- `examples/web-worker-workspace`
+- `examples/embedded-web-app`
+
+They show larger graphs with services, generated artifacts, watch reruns, dependency checks, and database helpers.
+
+## Developing Devflow
+
+This section is only for contributors changing this repository. For full contributor guidance, read `docs_contributors/README.md`.
+
+For work on Devflow itself:
+
+```bash
+go test ./...
+go build -o .devflow/bin/devflow ./cmd/devflow
+```
+
+You can also use the repo-local launcher:
+
+```bash
+./devflow version
+```
+
+Start substantial agent or contributor work by reading:
 - `AGENTS.md`
+- `docs_contributors/agent-memory.md`
 - `PROGRESS.md`
-- `docs/agent-memory.md`
 
-Bare `devflow` uses a two-stage project bootstrap:
-- the repo-local launcher rebuilds the bootstrap `devflow` binary into the repo's `.devflow/bin/devflow` when core sources change
-- when run inside a project worktree, it requires `./devflow.project.go`
-- it compiles a worktree-local CLI into `<worktree>/.devflow/bin/devflow-local` when the project file or core sources are newer
-- it `exec`s into that worktree-local CLI for all normal commands
-- bare `devflow` in the project worktree then starts the project's default target detached if nothing is already running and opens the TUI
-
-There is currently no built-in adapter fallback. If `devflow.project.go` is missing in the worktree, `devflow` fails.
-
-Dependency management is also built in:
-- `devflow deps status --project <name>` checks the adapter's required tool commands
-- `devflow deps install --project <name>` runs platform-specific install scripts for missing tools
-- `devflow doctor --project <name>` now reports missing adapter dependencies
-
-## Design Goals
-
-- generic standalone core
-- adapter-defined project behavior
-- human-first, agent-ready interfaces
-- cache correctness before optimization
-- service supervision separate from one-shot caching
-
-## Roadmap
-
-1. graph + cache
-2. process + instance manager
-3. watch mode
-4. TUI
-5. richer example adapter
-6. MCP wrapper
+More docs:
+- `docs_users/README.md`
+- `docs_contributors/README.md`
+- `docs_contributors/architecture.md`
+- `docs_contributors/cli.md`
+- `docs_users/adapter-guide.md`
+- `docs_users/agent-integration.md`
+- `docs_contributors/testing.md`
+- `docs_contributors/roadmap.md`

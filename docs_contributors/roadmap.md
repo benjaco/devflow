@@ -20,6 +20,7 @@
 - `devflow flush [target]` readiness gate for detached watch workflows
 - Go-first install/update flow with `go install` and `devflow upgrade`
 - global OS user task cache with project namespaces
+- explicit documentation split between project adoption and Devflow contributor workflows
 - deterministic example adapters plus a real embedded-web-app adapter
 - GitHub Actions build/test workflow
 

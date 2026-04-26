@@ -7,11 +7,12 @@ Use it on every substantial agent session to preserve project health across mode
 ## Read Order
 
 1. `AGENTS.md` for project rules and non-goals.
-2. `docs/agent-memory.md` for shared project memory and long-term AI operating context.
+2. `docs_contributors/agent-memory.md` for shared project memory and long-term AI operating context.
 3. `PROGRESS.md` for the current implementation ledger, active milestone, next steps, and known gaps.
-4. `docs/architecture.md` for package boundaries and runtime state layout.
-5. `docs/cli.md` for user-facing command behavior and JSON surfaces.
-6. `docs/testing.md` before changing behavior with broad blast radius.
+4. `docs_contributors/architecture.md` for package boundaries and runtime state layout.
+5. `docs_contributors/cli.md` for user-facing command behavior and JSON surfaces.
+6. `docs_contributors/testing.md` before changing behavior with broad blast radius.
+7. `docs_contributors/README.md` for contributor workflow and `docs_users/README.md` for user/adopter workflow.
 
 ## Memory Policy
 
@@ -26,17 +27,20 @@ Use it on every substantial agent session to preserve project health across mode
 
 Use this memory together with the subsystem docs. When a change affects one of these areas, update the corresponding doc rather than only editing this file.
 
-- `docs/architecture.md`: package boundaries, runtime state layout, bootstrap flow, cache/env/database design
-- `docs/cli.md`: command behavior, JSON output contracts, TUI/operator semantics
-- `docs/adapter-guide.md`: adapter authoring expectations and project-local behavior
-- `docs/agent-integration.md`: agent-facing execution surfaces and future wrapper direction
-- `docs/testing.md`: default and opt-in verification expectations
-- `docs/roadmap.md`: active priorities and deferred work
+- `docs_contributors/architecture.md`: package boundaries, runtime state layout, bootstrap flow, cache/env/database design
+- `docs_contributors/cli.md`: command behavior, JSON output contracts, TUI/operator semantics
+- `docs_users/README.md`: user-facing workflow for adding Devflow to another project
+- `docs_contributors/README.md`: contributor workflow for changing Devflow itself
+- `docs_users/adapter-guide.md`: adapter authoring expectations and project-local behavior
+- `docs_users/agent-integration.md`: agent-facing execution surfaces and future wrapper direction
+- `docs_contributors/testing.md`: default and opt-in verification expectations
+- `docs_contributors/roadmap.md`: active priorities and deferred work
 
 ## Working Mindset
 
 - Keep the core generic. Project-specific behavior belongs in adapters, examples, or project-local `devflow.project.go` files.
-- Preserve stable JSON output for every user-facing command.
+- Keep documentation split into two lanes: user/adopter docs for applying Devflow in another project, and contributor docs for changing Devflow itself.
+- Preserve stable JSON output for every user-facing command except `devflow docs`, which intentionally prints plain bundled user Markdown only.
 - Treat worktrees as the isolation boundary.
 - Devflow itself does not need to be developed through git worktrees; worktree support is for target projects.
 - Go is required on machines that run Devflow because project graph definitions are Go code. Round-1 install/update is `go install github.com/benjaco/devflow/cmd/devflow@latest` and `devflow upgrade`; binary releases are deliberately deferred.
