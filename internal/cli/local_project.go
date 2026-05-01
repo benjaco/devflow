@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/benjaco/devflow/internal/lock"
 	"github.com/benjaco/devflow/internal/version"
 )
 
@@ -106,6 +107,22 @@ func ensureLocalProjectBinary(bootstrapRoot, worktree string) (string, error) {
 		return "", err
 	}
 	needsBuild, err := localBinaryNeedsBuild(target, buildKey)
+	if err != nil {
+		return "", err
+	}
+	if !needsBuild {
+		return target, nil
+	}
+	lockFile, err := lock.Acquire(localBuildLockPath(worktree))
+	if err != nil {
+		return "", err
+	}
+	defer lockFile.Release()
+	buildKey, err = localBuildKey(bootstrapRoot, projectPath)
+	if err != nil {
+		return "", err
+	}
+	needsBuild, err = localBinaryNeedsBuild(target, buildKey)
 	if err != nil {
 		return "", err
 	}
@@ -282,6 +299,10 @@ func buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target, build
 func localBuildDir(worktree string) string {
 	sum := sha1.Sum([]byte(worktree))
 	return filepath.Join(worktree, ".devflow", "localbuild", fmt.Sprintf("%x", sum[:6]))
+}
+
+func localBuildLockPath(worktree string) string {
+	return filepath.Join(worktree, ".devflow", "localbuild.lock")
 }
 
 func localBuildMainSource() string {

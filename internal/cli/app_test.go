@@ -695,6 +695,56 @@ func TestBootstrapFailedRebuildKeepsPreviousBinary(t *testing.T) {
 	}
 }
 
+func TestEnsureLocalProjectBinarySerializesConcurrentBuilds(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake go helper uses a POSIX shell script")
+	}
+	worktree := t.TempDir()
+	writeLocalProjectFile(t, worktree, localProjectSource("local-concurrent-project", "up"))
+	repoRoot, err := repoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := installFakeBuildGo(t)
+
+	const workers = 8
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			path, err := ensureLocalProjectBinary(repoRoot, worktree)
+			if err != nil {
+				errs <- err
+				return
+			}
+			want := filepath.Join(worktree, ".devflow", "bin", "devflow-local")
+			if path != want {
+				errs <- fmt.Errorf("unexpected local binary path %q, want %q", path, want)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(data), "start\n"); got != 1 {
+		t.Fatalf("expected one local build under concurrent callers, got %d\nlog:\n%s", got, string(data))
+	}
+}
+
 func buildBootstrapBinary(t *testing.T) string {
 	t.Helper()
 	bootstrapBuildOnce.Do(func() {
@@ -769,6 +819,41 @@ exit %d
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("DEVFLOW_FAKE_GO_ARGS", argsPath)
 	return argsPath
+}
+
+func installFakeBuildGo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "build.log")
+	fakeGo := filepath.Join(dir, "go")
+	script := `#!/bin/sh
+set -eu
+printf 'start\n' >> "$DEVFLOW_FAKE_GO_BUILD_LOG"
+sleep 0.2
+out=""
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		-o)
+			shift
+			out="$1"
+			;;
+	esac
+	shift
+done
+if [ -z "$out" ]; then
+	echo "missing -o output" >&2
+	exit 2
+fi
+mkdir -p "$(dirname "$out")"
+printf 'fake local binary\n' > "$out"
+printf 'done\n' >> "$DEVFLOW_FAKE_GO_BUILD_LOG"
+`
+	if err := os.WriteFile(fakeGo, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DEVFLOW_FAKE_GO_BUILD_LOG", logPath)
+	return logPath
 }
 
 func localProjectSource(name, target string) string {

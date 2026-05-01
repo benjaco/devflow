@@ -24,7 +24,7 @@ Devflow uses three testing layers:
 - dotenv parsing and merged runtime-env coverage with devflow-managed DB overrides
 - CLI JSON output shape, including command-level lifecycle coverage for `run`, `status`, `logs`, `instances`, `doctor`, and `stop`
 - Go-first release command coverage for `version` and `upgrade`, with `upgrade` tested through a fake `go` executable on `PATH`
-- installed/source bootstrap coverage for generated local modules, source `replace` directives, project-file rebuilds, and stable binary reuse
+- installed/source bootstrap coverage for generated local modules, source `replace` directives, project-file rebuilds, stable binary reuse, and concurrent localbuild serialization
 - global cache coverage for the single OS user cache root and project cache namespaces
 - dependency detection and platform-script install coverage in `pkg/project` and `internal/cli`
 - engine-level interactive prompt event plus answer-file integration coverage

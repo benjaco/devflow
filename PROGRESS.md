@@ -1,12 +1,12 @@
 # Progress
 
-Last updated: 2026-04-26
+Last updated: 2026-05-02
 
 ## Current Status
 
 - Phase: post-bootstrap core implementation
-- State: Go-first release/install flow, installed project bootstrap, `version`/`upgrade`, and a single global task cache are implemented; per-worktree runtime state remains isolated
-- Confidence: core parallel/watch/operator/readiness/bootstrap paths are working; the example adapters are meaningful validation targets; richer TUI actions, stronger JSON contract coverage, and finer-grained detached service control are still pending
+- State: Go-first release/install flow, installed project bootstrap, `version`/`upgrade`, a single global task cache, split docs, `devflow docs`, and per-worktree localbuild locking are implemented; BikeCoach real-project integration feedback is integrated into the roadmap
+- Confidence: core parallel/watch/operator/readiness/bootstrap paths are working; the BikeCoach integration exposed remaining adoption-hardening gaps around detached cleanup, lifecycle docs, dependency scoping, watch explainability, and database/fixed-port guidance
 
 ## Completed
 
@@ -341,6 +341,13 @@ Last updated: 2026-04-26
   - updated README to route readers into the right lane
   - updated overview, adapter guide, roadmap, and agent memory with the documentation split
 - Added `devflow docs` as a projectless command that prints the bundled `docs_users` Markdown files only, with no JSON mode
+- Folded BikeCoach real-project integration feedback into the contributor roadmap and shared agent memory:
+  - reprioritized next work around localbuild concurrency, reliable detached cleanup, service lifecycle contracts, watch/debug ergonomics, target-scoped dependencies, and adoption docs/examples
+  - recorded which feedback is accepted, reframed, or deferred
+- Implemented per-worktree localbuild locking:
+  - stale checks that require rebuilding now acquire `<worktree>/.devflow/localbuild.lock`
+  - callers that wait for another builder re-check the build key and reuse the completed local binary when possible
+  - added concurrency coverage proving multiple simultaneous callers trigger only one local build
 
 ## In Progress
 
@@ -348,10 +355,11 @@ Last updated: 2026-04-26
 
 ## Next Steps
 
-- Improve fine-grained detached service restart/control semantics beyond whole-target relaunch
-- Extend project-local adapter loading beyond a single self-contained `devflow.project.go` file when the first version needs companion adapter files
-- Expand TUI operator actions with confirmations and rerun/stop/restart controls
-- Add stronger JSON contract tests for status/instances/events/flush
+- Make `stop --all` reliably reconcile and terminate detached supervisors, internal exec children, and service process groups for the selected worktree
+- Clarify and harden service lifecycle contracts for `run`, `run/watch --detach`, `flush`, `status`, and `stop`
+- Improve watch/input/output debugging ergonomics, including consistent ignore semantics and an explanation path for why a file affects a task
+- Add target-scoped dependency declarations and `doctor --target <target> --json`
+- Expand user docs/examples for script-to-Devflow convergence, managed local Postgres, fixed ports, and secret/redaction expectations
 - Add binary artifacts, npm/Homebrew/Scoop installers, or richer update channels later only if Go install stops being enough
 
 ## Deferred / Known Gaps

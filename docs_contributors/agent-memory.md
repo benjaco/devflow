@@ -62,8 +62,11 @@ Runtime adapters are project-local:
 - installed `devflow` or the repo-level source launcher builds/uses the bootstrap binary
 - a selected worktree must contain `devflow.project.go`
 - the bootstrap CLI compiles `<worktree>/.devflow/bin/devflow-local`
+- project-local binary stale checks and rebuilds are serialized by `<worktree>/.devflow/localbuild.lock`
 - normal commands exec into that worktree-local binary
 - there is no built-in adapter fallback when `devflow.project.go` is missing
+
+The first real BikeCoach integration showed that adoption hardening is now more important than expanding operator features in the abstract. After localbuild locking, the highest-value issues are reliable detached cleanup, clear service lifecycle contracts, watch/input/output explainability, target-scoped dependency checks, and complete user examples for script convergence, fixed ports, managed Postgres, and secret handling.
 
 State is split deliberately:
 - per-worktree logs and instance snapshots live under the worktree `.devflow/`
@@ -105,11 +108,11 @@ DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run Docker -v
 
 The latest concrete next steps are maintained in `PROGRESS.md`. As of this memory update, likely next work includes:
 
-- broader use of `flush` in agent-facing workflows and future wrappers
-- fine-grained detached service restart/control beyond whole-target relaunch
-- project-local adapter loading beyond a single self-contained `devflow.project.go`
-- broader TUI operator actions with confirmations and rerun/stop/restart controls
-- stronger JSON contract tests for status, instances, and events
+- reliable `stop --all` reconciliation for detached supervisors, internal exec children, service processes, and stale process groups
+- clearer service lifecycle contracts for attached service `run`, detached `run/watch`, `flush`, `status`, and `stop`
+- watch/debug ergonomics for generated outputs, ignore matching, and explaining why files affect tasks
+- target-scoped dependencies plus `doctor --target <target> --json`
+- user docs/examples for script-to-Devflow convergence, managed local Postgres, fixed ports, and secret/redaction expectations
 
 ## Deliberate Deferrals
 

@@ -25,6 +25,7 @@ Flow:
 - the installed `devflow` binary, or the repo-level `devflow` launcher during source development, looks for `./devflow.project.go` in the selected project worktree
 - if the file is missing, the command fails
 - if the file exists, the bootstrap CLI compiles a worktree-local full CLI binary
+- stale checks and rebuilds are guarded by a per-worktree lock at `<worktree>/.devflow/localbuild.lock`; commands that waited for another builder re-check the build key before compiling
 - execution is then transferred into that compiled local binary for all normal commands
 
 Current local binary location:
@@ -32,6 +33,9 @@ Current local binary location:
 
 Current generated build location:
 - `<worktree>/.devflow/localbuild/<worktree-hash>/`
+
+Current localbuild lock location:
+- `<worktree>/.devflow/localbuild.lock`
 
 The generated build is a small Go module whose path is under `github.com/benjaco/devflow/localbuild/...`, which allows it to import Devflow's `internal/cli` package. Installed binaries require the released Devflow module version. Source-local development uses:
 
