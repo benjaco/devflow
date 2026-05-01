@@ -5,8 +5,8 @@ Last updated: 2026-05-02
 ## Current Status
 
 - Phase: post-bootstrap core implementation
-- State: Go-first release/install flow, installed project bootstrap, `version`/`upgrade`, a single global task cache, split docs, `devflow docs`, and per-worktree localbuild locking are implemented; BikeCoach real-project integration feedback is integrated into the roadmap
-- Confidence: core parallel/watch/operator/readiness/bootstrap paths are working; the BikeCoach integration exposed remaining adoption-hardening gaps around detached cleanup, lifecycle docs, dependency scoping, watch explainability, and database/fixed-port guidance
+- State: Go-first release/install flow, installed project bootstrap, `version`/`upgrade`, a single global task cache, split docs, `devflow docs`, per-worktree localbuild locking, and reliable detached cleanup are implemented; BikeCoach real-project integration feedback is integrated into the roadmap
+- Confidence: core parallel/watch/operator/readiness/bootstrap paths are working; the BikeCoach integration exposed remaining adoption-hardening gaps around lifecycle docs, dependency scoping, watch explainability, and database/fixed-port guidance
 
 ## Completed
 
@@ -348,6 +348,12 @@ Last updated: 2026-05-02
   - stale checks that require rebuilding now acquire `<worktree>/.devflow/localbuild.lock`
   - callers that wait for another builder re-check the build key and reuse the completed local binary when possible
   - added concurrency coverage proving multiple simultaneous callers trigger only one local build
+- Hardened detached cleanup for `stop --all`:
+  - supervisor state now records the child `__internal_exec` PID
+  - `stop --all` terminates supervisor, executor, tracked service, and PID-bearing status-node process groups
+  - supervisor logs provide a `child pid=<pid>` fallback for older state without a recorded executor PID
+  - persisted supervisor/process refs are cleared and nonterminal status nodes are marked `stopped`
+  - added regression coverage for executor cleanup, stale status PIDs, and legacy supervisor-log fallback
 
 ## In Progress
 
@@ -355,7 +361,6 @@ Last updated: 2026-05-02
 
 ## Next Steps
 
-- Make `stop --all` reliably reconcile and terminate detached supervisors, internal exec children, and service process groups for the selected worktree
 - Clarify and harden service lifecycle contracts for `run`, `run/watch --detach`, `flush`, `status`, and `stop`
 - Improve watch/input/output debugging ergonomics, including consistent ignore semantics and an explanation path for why a file affects a task
 - Add target-scoped dependency declarations and `doctor --target <target> --json`

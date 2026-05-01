@@ -579,6 +579,7 @@ func (a *App) internalSuperviseCmd(args []string) error {
 	done := make(chan struct{}, 2)
 	go copySupervisorStream(logFile, "stdout", stdout, done)
 	go copySupervisorStream(logFile, "stderr", stderr, done)
+	recordSupervisorExecPID(root, cmd.Process.Pid, logFile)
 	<-done
 	<-done
 	err = cmd.Wait()
@@ -795,31 +796,23 @@ func (a *App) stopCmd(args []string) error {
 	if !*all {
 		taskName = *task
 	}
-	if *all && inst.Supervisor.PID > 0 {
-		supervisorPID := inst.Supervisor.PID
-		if err := instance.StopSupervisor(inst); err != nil {
-			return err
-		}
-		waitForPIDExit(supervisorPID, 5*time.Second)
-		if err := markAllStoppedNodes(root, id); err != nil {
-			return err
-		}
-		payload := map[string]any{
-			"instanceId": id,
-			"stopped":    []string{"supervisor"},
-		}
-		if *jsonOut {
-			return writeJSON(a.Stdout, payload)
-		}
-		_, _ = fmt.Fprintln(a.Stdout, "stopped detached supervisor")
-		return nil
+	var stopped []string
+	if *all {
+		stopped, err = instance.StopAll(inst, stopAllExtraProcessRefs(root, id, inst))
+	} else {
+		stopped, err = instance.StopProcesses(inst, taskName)
 	}
-	stopped, err := instance.StopProcesses(inst, taskName)
 	if err != nil {
 		return err
 	}
-	if err := markStoppedNodes(root, id, stopped); err != nil {
-		return err
+	if *all {
+		if err := markAllStoppedNodes(root, id); err != nil {
+			return err
+		}
+	} else {
+		if err := markStoppedNodes(root, id, stopped); err != nil {
+			return err
+		}
 	}
 	payload := map[string]any{
 		"instanceId": id,
@@ -830,6 +823,22 @@ func (a *App) stopCmd(args []string) error {
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "stopped: %s\n", strings.Join(stopped, ", "))
 	return nil
+}
+
+func recordSupervisorExecPID(worktree string, pid int, logFile *os.File) {
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		err := instance.RecordSupervisorExec(worktree, pid)
+		if err == nil {
+			return
+		}
+		lastErr = err
+		time.Sleep(50 * time.Millisecond)
+	}
+	if lastErr != nil {
+		writeSupervisorLine(logFile, "failed to record child pid=%d: %v", pid, lastErr)
+	}
 }
 
 func (a *App) cacheCmd(args []string) error {
@@ -1798,12 +1807,56 @@ func waitForWatchReady(worktree, instanceID string, after time.Time, timeout tim
 	return false
 }
 
+func stopAllExtraProcessRefs(worktree, instanceID string, inst *api.Instance) map[string]int {
+	refs := map[string]int{}
+	if inst != nil && inst.Supervisor.ExecPID <= 0 {
+		logPath := inst.Supervisor.LogPath
+		if logPath == "" {
+			logPath = filepath.Join(worktree, ".devflow", "logs", instanceID, "supervisor.log")
+		}
+		if pid := supervisorChildPIDFromLog(logPath); pid > 0 {
+			refs["executor"] = pid
+		}
+	}
+	if state, err := instance.LoadStatus(worktree, instanceID); err == nil {
+		for name, node := range state.Nodes {
+			if node.PID > 0 {
+				refs[name] = node.PID
+			}
+		}
+	}
+	return refs
+}
+
+func supervisorChildPIDFromLog(path string) int {
+	if path == "" {
+		return 0
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	pid := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		idx := strings.LastIndex(line, "child pid=")
+		if idx < 0 {
+			continue
+		}
+		var candidate int
+		if _, err := fmt.Sscanf(line[idx:], "child pid=%d", &candidate); err == nil && candidate > 0 {
+			pid = candidate
+		}
+	}
+	return pid
+}
+
 func supervisorStatus(inst *api.Instance) *api.SupervisorStatus {
 	if inst == nil || inst.Supervisor.PID <= 0 {
 		return nil
 	}
 	return &api.SupervisorStatus{
 		PID:       inst.Supervisor.PID,
+		ExecPID:   inst.Supervisor.ExecPID,
 		Alive:     instance.ProcessAlive(inst.Supervisor.PID),
 		StartedAt: inst.Supervisor.StartedAt,
 		LogPath:   inst.Supervisor.LogPath,

@@ -45,12 +45,14 @@ type ProcessRef struct {
 
 type SupervisorRef struct {
 	PID       int       `json:"pid"`
+	ExecPID   int       `json:"execPid,omitempty"`
 	StartedAt time.Time `json:"startedAt"`
 	LogPath   string    `json:"logPath,omitempty"`
 }
 
 type SupervisorStatus struct {
 	PID       int       `json:"pid,omitempty"`
+	ExecPID   int       `json:"execPid,omitempty"`
 	Alive     bool      `json:"alive"`
 	StartedAt time.Time `json:"startedAt,omitempty"`
 	LogPath   string    `json:"logPath,omitempty"`

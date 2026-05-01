@@ -62,6 +62,12 @@ Per-worktree state lives under `.devflow/`:
 - `.devflow/state/instances/<instance-id>/`
 - `.devflow/state/instances/<instance-id>/flush/`
 
+Detached supervisor state is also per worktree. The instance snapshot records:
+- the supervisor PID
+- the child `__internal_exec` PID when the supervisor has started it
+- service task PIDs
+- the supervisor log path, which also contains a `child pid=<pid>` line as a fallback for older state
+
 Task cache storage is global for the user:
 - `<os.UserCacheDir()>/devflow/cache`
 
@@ -445,13 +451,14 @@ The current operator surface now includes:
 
 Detached ownership is currently implemented by spawning a background `devflow` supervisor process and persisting:
 - supervisor PID
+- child `__internal_exec` PID
 - supervisor log path
 - last detached run config
 
 This is enough for:
 - `run --detach`
 - `watch --detach`
-- `stop --all` against detached runs
+- `stop --all` against detached runs; it terminates the supervisor process group, child executor process group, tracked service process groups, and PID-bearing status nodes before clearing persisted process state
 - service `restart` by stopping the detached supervisor and relaunching the last detached target
 
 The operator surface now also reconciles detached state when queried:

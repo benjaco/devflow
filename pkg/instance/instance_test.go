@@ -1,6 +1,7 @@
 package instance
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,6 +79,37 @@ func TestRecordDetachedRunPersistsSupervisorAndLastRun(t *testing.T) {
 	}
 	if loaded.LastRun.Target != "fullstack" || !loaded.LastRun.Detached {
 		t.Fatalf("unexpected last run: %+v", loaded.LastRun)
+	}
+}
+
+func TestRecordSupervisorExecPersistsChildPID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	inst, err := Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordSupervisorExec(worktree, 5678); !errors.Is(err, ErrSupervisorNotRecorded) {
+		t.Fatalf("expected supervisor-not-recorded error, got %v", err)
+	}
+	if err := RecordDetachedRun(inst, api.RunConfig{
+		Project:  "go-next-monorepo",
+		Target:   "fullstack",
+		Mode:     api.ModeWatch,
+		Detached: true,
+	}, 4321, filepath.Join(worktree, "supervisor.log")); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordSupervisorExec(worktree, 5678); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(worktree, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Supervisor.ExecPID != 5678 {
+		t.Fatalf("unexpected executor pid: %d", loaded.Supervisor.ExecPID)
 	}
 }
 

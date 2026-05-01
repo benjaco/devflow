@@ -17,6 +17,7 @@ Devflow uses three testing layers:
 - per-task log truncation so logs reflect the current run attempt
 - interactive prompt detection and answer forwarding with a real prompt CLI fixture
 - service lifecycle management
+- detached stop cleanup for supervisor, child executor, tracked service, and stale status process groups
 - service readiness success and timeout behavior
 - built-binary helper build/run/start coverage and cache-restore coverage
 - database runtime command planning and snapshot-manifest coverage

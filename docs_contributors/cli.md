@@ -117,7 +117,7 @@ It is projectless, has no flags, has no JSON mode, and does not print contributo
 
 `restart` supports rerunning non-service task slices from the CLI. For service tasks, if the instance was started with a detached run, `restart` stops the detached supervisor and relaunches the last detached target.
 
-`stop` terminates persisted service PIDs for a selected task or, when used with `--all`, terminates the detached supervisor for the instance and updates persisted node state to `stopped`.
+`stop` terminates persisted service PIDs for a selected task. With `--all`, it reconciles all known detached runtime process groups for the instance: supervisor, child `__internal_exec`, tracked service tasks, and PID-bearing status nodes. It then clears persisted supervisor/process refs and updates nonterminal node state to `stopped`.
 
 `deps status` reports adapter-defined command dependencies, whether they are already installed, and whether a platform install script is available.
 
@@ -129,7 +129,7 @@ It is projectless, has no flags, has no JSON mode, and does not print contributo
 - assigned ports
 - sanitized DB details
 - derived local URLs such as `backend`
-- detached supervisor PID/liveness/log path when present
+- detached supervisor PID, child executor PID, liveness, and log path when present
 
 Task states now distinguish:
 - `failed`: the task itself failed

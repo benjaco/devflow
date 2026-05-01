@@ -1010,6 +1010,130 @@ func TestStopCommandStopsTrackedProcess(t *testing.T) {
 	}
 }
 
+func TestStopAllStopsDetachedSupervisorExecutorAndStaleStatusProcesses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell process-group test is Unix-only")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	supervisorHandle := startCLILoopProcess(t, worktree)
+	executorHandle := startCLILoopProcess(t, worktree)
+	serviceHandle := startCLILoopProcess(t, worktree)
+	staleHandle := startCLILoopProcess(t, worktree)
+	logPath := filepath.Join(worktree, ".devflow", "logs", inst.ID, "supervisor.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte(fmt.Sprintf("old child pid=1\nnew child pid=%d\n", executorHandle.PID())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	inst.Supervisor = api.SupervisorRef{
+		PID:       supervisorHandle.PID(),
+		ExecPID:   executorHandle.PID(),
+		StartedAt: time.Now().UTC(),
+		LogPath:   logPath,
+	}
+	inst.Processes["svc"] = api.ProcessRef{PID: serviceHandle.PID(), StartedAt: time.Now().UTC()}
+	if err := instance.Save(inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.SaveStatus(worktree, inst.ID, "dev", api.ModeWatch, map[string]api.NodeStatus{
+		"svc":   {Name: "svc", Kind: "service", State: api.StateRunning, PID: serviceHandle.PID()},
+		"stale": {Name: "stale", Kind: "service", State: api.StateRunning, PID: staleHandle.PID()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"stop", "--worktree", worktree, "--all", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	stopped := stringSetFromJSONList(t, payload["stopped"])
+	for _, name := range []string{"supervisor", "executor", "svc", "stale"} {
+		if !stopped[name] {
+			t.Fatalf("expected %q in stopped payload: %v", name, payload["stopped"])
+		}
+	}
+
+	waitForProcessExit(t, supervisorHandle)
+	waitForProcessExit(t, executorHandle)
+	waitForProcessExit(t, serviceHandle)
+	waitForProcessExit(t, staleHandle)
+
+	loaded, err := instance.Load(worktree, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Supervisor.PID != 0 || loaded.Supervisor.ExecPID != 0 {
+		t.Fatalf("expected supervisor refs to be cleared, got %+v", loaded.Supervisor)
+	}
+	if len(loaded.Processes) != 0 {
+		t.Fatalf("expected process refs to be cleared, got %+v", loaded.Processes)
+	}
+	state, err := instance.LoadStatus(worktree, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"svc", "stale"} {
+		node := state.Nodes[name]
+		if node.State != api.StateStopped || node.PID != 0 {
+			t.Fatalf("expected %s stopped with no pid, got %+v", name, node)
+		}
+	}
+}
+
+func TestStopAllUsesSupervisorLogChildPIDFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell process-group test is Unix-only")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisorHandle := startCLILoopProcess(t, worktree)
+	executorHandle := startCLILoopProcess(t, worktree)
+	logPath := filepath.Join(worktree, ".devflow", "logs", inst.ID, "supervisor.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte(fmt.Sprintf("child pid=%d\n", executorHandle.PID())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inst.Supervisor = api.SupervisorRef{
+		PID:       supervisorHandle.PID(),
+		StartedAt: time.Now().UTC(),
+		LogPath:   logPath,
+	}
+	if err := instance.Save(inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.SaveStatus(worktree, inst.ID, "dev", api.ModeWatch, map[string]api.NodeStatus{}); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"stop", "--worktree", worktree, "--all"}); err != nil {
+		t.Fatal(err)
+	}
+	waitForProcessExit(t, supervisorHandle)
+	waitForProcessExit(t, executorHandle)
+}
+
 func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1242,8 +1366,19 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopped, ok := stopPayload["stopped"].([]any)
-	if !ok || len(stopped) != 1 || stopped[0] != "supervisor" {
+	if !ok {
 		t.Fatalf("expected stopped service list in stop payload: %v", stopPayload)
+	}
+	stoppedSet := map[string]bool{}
+	for _, item := range stopped {
+		if name, ok := item.(string); ok {
+			stoppedSet[name] = true
+		}
+	}
+	for _, name := range []string{"supervisor", "backend_dev", "frontend_dev"} {
+		if !stoppedSet[name] {
+			t.Fatalf("expected %q in stop payload: %v", name, stopPayload)
+		}
 	}
 
 	finalStatusStdout := &bytes.Buffer{}
@@ -1274,6 +1409,40 @@ func waitForProcessExit(t *testing.T, handle *process.Handle) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for process exit")
 	}
+}
+
+func startCLILoopProcess(t *testing.T, worktree string) *process.Handle {
+	t.Helper()
+	handle, err := process.Start(context.Background(), process.CommandSpec{
+		Name: "sh",
+		Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
+		Dir:  worktree,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = handle.Stop()
+		_ = handle.Wait()
+	})
+	return handle
+}
+
+func stringSetFromJSONList(t *testing.T, value any) map[string]bool {
+	t.Helper()
+	items, ok := value.([]any)
+	if !ok {
+		t.Fatalf("expected JSON list, got %T: %v", value, value)
+	}
+	out := map[string]bool{}
+	for _, item := range items {
+		name, ok := item.(string)
+		if !ok {
+			t.Fatalf("expected string list item, got %T: %v", item, item)
+		}
+		out[name] = true
+	}
+	return out
 }
 
 func waitForCondition(t *testing.T, timeout time.Duration, fn func() bool) {

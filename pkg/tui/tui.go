@@ -766,6 +766,7 @@ func supervisorStatus(inst *api.Instance) *api.SupervisorStatus {
 	}
 	return &api.SupervisorStatus{
 		PID:       inst.Supervisor.PID,
+		ExecPID:   inst.Supervisor.ExecPID,
 		Alive:     instance.ProcessAlive(inst.Supervisor.PID),
 		StartedAt: inst.Supervisor.StartedAt,
 		LogPath:   inst.Supervisor.LogPath,

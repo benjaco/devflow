@@ -19,6 +19,8 @@ import (
 	"github.com/benjaco/devflow/pkg/api"
 )
 
+var ErrSupervisorNotRecorded = errors.New("detached supervisor is not recorded yet")
+
 type State struct {
 	Target    string                    `json:"target"`
 	Mode      api.RunMode               `json:"mode"`
@@ -323,7 +325,7 @@ func repoSharedRoot(worktree string) (string, error) {
 }
 
 func StopProcesses(inst *api.Instance, task string) ([]string, error) {
-	stopped := make([]string, 0)
+	refs := map[string]int{}
 	for name, ref := range inst.Processes {
 		if task != "" && name != task {
 			continue
@@ -331,25 +333,68 @@ func StopProcesses(inst *api.Instance, task string) ([]string, error) {
 		if ref.PID <= 0 {
 			continue
 		}
-		if err := syscall.Kill(-ref.PID, syscall.SIGTERM); err != nil {
-			if err := syscall.Kill(ref.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-				return stopped, err
-			}
-		}
-		stopped = append(stopped, name)
+		refs[name] = ref.PID
+	}
+	stopped, err := stopNamedProcessGroups(refs, 3*time.Second)
+	if err != nil {
+		return stopped, err
+	}
+	for name := range refs {
 		delete(inst.Processes, name)
 	}
-	sort.Strings(stopped)
+	return stopped, Save(inst)
+}
+
+func StopAll(inst *api.Instance, extra map[string]int) ([]string, error) {
+	refs := map[string]int{}
+	addStopRef(refs, "supervisor", inst.Supervisor.PID)
+	addStopRef(refs, "executor", inst.Supervisor.ExecPID)
+	for name, ref := range inst.Processes {
+		addStopRef(refs, name, ref.PID)
+	}
+	for name, pid := range extra {
+		addStopRef(refs, name, pid)
+	}
+	stopped, err := stopNamedProcessGroups(refs, 3*time.Second)
+	if err != nil {
+		return stopped, err
+	}
+	inst.Supervisor = api.SupervisorRef{}
+	inst.Processes = map[string]api.ProcessRef{}
 	return stopped, Save(inst)
 }
 
 func RecordDetachedRun(inst *api.Instance, cfg api.RunConfig, supervisorPID int, logPath string) error {
+	execPID := inst.Supervisor.ExecPID
+	if loaded, err := Load(inst.Worktree, inst.ID); err == nil && loaded.Supervisor.ExecPID > 0 {
+		execPID = loaded.Supervisor.ExecPID
+	}
 	inst.LastRun = cfg
 	inst.Supervisor = api.SupervisorRef{
 		PID:       supervisorPID,
+		ExecPID:   execPID,
 		StartedAt: time.Now().UTC(),
 		LogPath:   logPath,
 	}
+	return Save(inst)
+}
+
+func RecordSupervisorExec(worktree string, pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	id, real, err := IDForWorktree(worktree)
+	if err != nil {
+		return err
+	}
+	inst, err := Load(real, id)
+	if err != nil {
+		return err
+	}
+	if inst.Supervisor.PID <= 0 {
+		return ErrSupervisorNotRecorded
+	}
+	inst.Supervisor.ExecPID = pid
 	return Save(inst)
 }
 
@@ -362,17 +407,8 @@ func ClearSupervisor(inst *api.Instance) error {
 }
 
 func StopSupervisor(inst *api.Instance) error {
-	if inst.Supervisor.PID <= 0 {
-		return nil
-	}
-	if err := syscall.Kill(-inst.Supervisor.PID, syscall.SIGTERM); err != nil {
-		if err := syscall.Kill(inst.Supervisor.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return err
-		}
-	}
-	inst.Supervisor = api.SupervisorRef{}
-	inst.Processes = map[string]api.ProcessRef{}
-	return Save(inst)
+	_, err := StopAll(inst, nil)
+	return err
 }
 
 func ProcessAlive(pid int) bool {
@@ -380,6 +416,72 @@ func ProcessAlive(pid int) bool {
 		return false
 	}
 	return syscall.Kill(pid, 0) == nil
+}
+
+func addStopRef(refs map[string]int, name string, pid int) {
+	if name == "" || pid <= 0 {
+		return
+	}
+	if existing, ok := refs[name]; ok && existing > 0 {
+		return
+	}
+	refs[name] = pid
+}
+
+func stopNamedProcessGroups(refs map[string]int, grace time.Duration) ([]string, error) {
+	names := make([]string, 0, len(refs))
+	unique := map[int]bool{}
+	for name, pid := range refs {
+		if pid <= 0 {
+			continue
+		}
+		names = append(names, name)
+		if !unique[pid] {
+			if err := signalProcessGroup(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+				return names, err
+			}
+			unique[pid] = true
+		}
+	}
+	sort.Strings(names)
+	if len(unique) == 0 {
+		return names, nil
+	}
+	waitForProcessExit(unique, grace)
+	for pid := range unique {
+		if ProcessAlive(pid) {
+			_ = signalProcessGroup(pid, syscall.SIGKILL)
+		}
+	}
+	waitForProcessExit(unique, 500*time.Millisecond)
+	return names, nil
+}
+
+func signalProcessGroup(pid int, signal syscall.Signal) error {
+	if err := syscall.Kill(-pid, signal); err != nil {
+		return syscall.Kill(pid, signal)
+	}
+	return nil
+}
+
+func waitForProcessExit(pids map[int]bool, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		alive := false
+		for pid := range pids {
+			if ProcessAlive(pid) {
+				alive = true
+				break
+			}
+		}
+		if !alive {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func instanceID(realpath string) string {
