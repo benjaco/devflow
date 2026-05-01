@@ -66,7 +66,9 @@ Runtime adapters are project-local:
 - normal commands exec into that worktree-local binary
 - there is no built-in adapter fallback when `devflow.project.go` is missing
 
-The first real BikeCoach integration showed that adoption hardening is now more important than expanding operator features in the abstract. After localbuild locking and reliable detached cleanup, the highest-value issues are clear service lifecycle contracts, watch/input/output explainability, target-scoped dependency checks, and complete user examples for script convergence, fixed ports, managed Postgres, and secret handling.
+The first real BikeCoach integration showed that adoption hardening is now more important than expanding operator features in the abstract. After localbuild locking, reliable detached cleanup, and explicit service lifecycle contracts, the highest-value issues are watch/input/output explainability, target-scoped dependency checks, and complete user examples for script convergence, fixed ports, managed Postgres, and secret handling.
+
+Service lifecycle contract: attached `run` is foreground and blocks while services live; `run --ci` may start services as readiness probes but stops them before returning; `run --detach` only proves supervisor launch; `watch --detach` plus `flush` is the readiness-gated background workflow for humans and agents.
 
 State is split deliberately:
 - per-worktree logs and instance snapshots live under the worktree `.devflow/`
@@ -108,7 +110,6 @@ DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run Docker -v
 
 The latest concrete next steps are maintained in `PROGRESS.md`. As of this memory update, likely next work includes:
 
-- clearer service lifecycle contracts for attached service `run`, detached `run/watch`, `flush`, `status`, and `stop`
 - watch/debug ergonomics for generated outputs, ignore matching, and explaining why files affect tasks
 - target-scoped dependencies plus `doctor --target <target> --json`
 - user docs/examples for script-to-Devflow convergence, managed local Postgres, fixed ports, and secret/redaction expectations

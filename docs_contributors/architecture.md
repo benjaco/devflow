@@ -422,6 +422,18 @@ Default behavior:
 
 This keeps the core generic while letting adapters define the right readiness signal for each service.
 
+## Service Lifecycle Contract
+
+Service tasks have different command semantics depending on the run mode:
+- attached `run` is a foreground operator command. It starts services, waits for readiness, and then blocks while those services run. A service exit ends the attached run; an external stop may surface as a service-exited error.
+- `run --ci` is finite. Services are allowed as readiness probes: Devflow starts them, waits for readiness, stops them, clears persisted service PIDs, and records the service nodes as `stopped` before returning success.
+- `run --detach` starts the detached supervisor and returns after launch. It records the supervisor but does not prove the target closure is healthy.
+- `watch --detach` starts the detached development loop. It is the expected long-running mode for humans and agents that want automatic reruns after file edits.
+- `flush` is the detached watch readiness gate. It proves the watcher observed the post-edit sync sentinel, waits for the selected target closure to settle, and checks service health.
+- `stop --all` is the cleanup surface for detached runs. It reconciles supervisor, child executor, tracked service, and stale status PIDs before clearing persisted runtime process state.
+
+The current automation recommendation is intentionally explicit: use detached watch plus `flush` for "background environment is ready" workflows. Do not reinterpret attached `run` as a start-and-return command without adding a separate CLI contract.
+
 ## Watch Mode
 
 Watch mode now uses a polling watcher with debounced batches. On each batch:

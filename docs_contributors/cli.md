@@ -38,7 +38,14 @@ Running bare `devflow` now acts as the default operator entry path:
 
 There is currently no built-in adapter fallback. Missing `devflow.project.go` is a hard error.
 
-`run` provisions an instance, executes the target closure, restores cacheable one-shot tasks when possible, and keeps supervised services alive until interrupted.
+`run` provisions an instance, executes the target closure, and restores cacheable one-shot tasks when possible.
+
+Service lifecycle contract:
+- attached `devflow run <target>` waits for service readiness and then keeps supervised services alive until interrupted or until a service exits
+- if a service exits during attached `run`, the command returns a service-exited error
+- `devflow run <target> --ci --json` is finite; service tasks are started, readiness is checked, services are stopped, and status records those services as `stopped`
+- `devflow run <target> --detach --json` returns after launching the detached supervisor; it is not a health/readiness gate
+- use `devflow watch <target> --detach --json` plus `devflow flush <target> --json` when automation needs a detached environment that is proven settled and healthy
 
 Implemented `run` flags include:
 - `--json`

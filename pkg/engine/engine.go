@@ -267,14 +267,18 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 	result.CacheHits = state.snapshotCacheHits()
 
 	services := state.snapshotServices()
-	if len(services) > 0 && req.Mode != api.ModeCI {
-		waitErr := e.waitForServices(ctx, req, inst, state.statusSnapshot(), services)
-		if waitErr != nil && !errors.Is(waitErr, context.Canceled) {
-			result.Success = false
-			result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
-			result.DurationMs = time.Since(started).Milliseconds()
-			e.publishRunFinished(result, req.Worktree, waitErr.Error())
-			return nil, waitErr
+	if len(services) > 0 {
+		if req.Mode == api.ModeCI {
+			state.stopServices(req, sortedHandles(services))
+		} else {
+			waitErr := e.waitForServices(ctx, req, inst, state.statusSnapshot(), services)
+			if waitErr != nil && !errors.Is(waitErr, context.Canceled) {
+				result.Success = false
+				result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+				result.DurationMs = time.Since(started).Milliseconds()
+				e.publishRunFinished(result, req.Worktree, waitErr.Error())
+				return nil, waitErr
+			}
 		}
 	}
 
@@ -954,17 +958,21 @@ func (s *runState) stopServices(req Request, tasks []string) {
 		s.mu.Lock()
 		handle, ok := s.services[task]
 		node := s.status[task]
+		prev := node.State
+		pid := node.PID
 		if ok {
 			delete(s.services, task)
 			delete(s.inst.Processes, task)
 		}
+		node.PID = 0
+		s.status[task] = node
+		s.saveLocked()
 		s.mu.Unlock()
 		if !ok {
 			continue
 		}
 		_ = handle.Stop()
-		prev := node.State
-		s.setNodeState(task, api.StateStopped, node.LastRunKey, "", node.PID)
+		s.setNodeState(task, api.StateStopped, node.LastRunKey, "", 0)
 		s.publishEvent(api.Event{
 			TS:            process.NowRFC3339Nano(),
 			Type:          api.EventProcessExited,
@@ -973,7 +981,7 @@ func (s *runState) stopServices(req Request, tasks []string) {
 			Target:        req.Target,
 			Task:          task,
 			Mode:          req.Mode,
-			PID:           node.PID,
+			PID:           pid,
 			State:         api.StateStopped,
 			PreviousState: prev,
 		})

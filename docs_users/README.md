@@ -190,6 +190,19 @@ Service tasks start long-running processes:
 Use readiness hooks for services that need a health check before downstream work or `flush` can report success.
 For named-port readiness, include that port name in `InstanceConfig.PortNames` and pass the assigned port to the service through env or args.
 
+## Service Lifecycle
+
+Use the lifecycle command that matches the job:
+
+- `devflow run up` is foreground/attached. It starts the target closure, waits for service readiness, then keeps the terminal attached while services run. Interrupt it from that terminal when you are done.
+- `devflow run up --ci --json` is a readiness probe for CI-style validation. If the target contains services, Devflow starts them, waits for readiness, stops them, and returns a finite result. It is not a background dev environment.
+- `devflow run up --detach --json` starts a detached supervisor and returns after launch. It does not prove the whole target is healthy; use `status`, `logs`, or a watch `flush` workflow when readiness matters.
+- `devflow watch up --detach --json` starts the recommended detached dev loop for humans and agents.
+- `devflow flush up --json` is the readiness gate for detached watch mode. It waits for file-change work to settle and checks in-chain services.
+- `devflow stop --all --json` cleans up the detached supervisor, child executor, tracked services, and stale process records for the worktree.
+
+For AI-assisted development, prefer `watch --detach` plus `flush` over an attached service `run`. Attached runs are useful for a human terminal, but they are not a clean "start and return when ready" automation interface.
+
 ## Watch Mode
 
 Watch mode maps changed files to task inputs, then reruns the affected downstream slice.

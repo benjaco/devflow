@@ -1615,7 +1615,7 @@ func (readinessTimeoutProject) Tasks() []project.Task {
 	}
 }
 
-func TestServiceReadinessMustPassBeforeSuccess(t *testing.T) {
+func TestCIModeServiceReadinessPassesThenStopsService(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	worktree := t.TempDir()
@@ -1630,11 +1630,6 @@ func TestServiceReadinessMustPassBeforeSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		if _, stopErr := instance.StopProcesses(out.Instance, ""); stopErr != nil {
-			t.Fatalf("stop processes: %v", stopErr)
-		}
-	}()
 
 	if elapsed := time.Since(started); elapsed < 175*time.Millisecond {
 		t.Fatalf("service run completed before readiness delay elapsed: %s", elapsed)
@@ -1645,11 +1640,18 @@ func TestServiceReadinessMustPassBeforeSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := status.Nodes["svc"]
-	if node.State != api.StateRunning {
-		t.Fatalf("expected running state after readiness, got %q", node.State)
+	if node.State != api.StateStopped {
+		t.Fatalf("expected stopped state after CI readiness probe, got %q", node.State)
 	}
-	if node.PID <= 0 {
-		t.Fatalf("expected tracked PID after readiness, got %d", node.PID)
+	if node.PID != 0 {
+		t.Fatalf("expected cleared PID after CI readiness probe, got %d", node.PID)
+	}
+	loaded, err := instance.Load(worktree, out.Result.InstanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Processes) != 0 {
+		t.Fatalf("expected no tracked services after CI readiness probe, got %+v", loaded.Processes)
 	}
 }
 

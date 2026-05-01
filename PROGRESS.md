@@ -5,8 +5,8 @@ Last updated: 2026-05-02
 ## Current Status
 
 - Phase: post-bootstrap core implementation
-- State: Go-first release/install flow, installed project bootstrap, `version`/`upgrade`, a single global task cache, split docs, `devflow docs`, per-worktree localbuild locking, and reliable detached cleanup are implemented; BikeCoach real-project integration feedback is integrated into the roadmap
-- Confidence: core parallel/watch/operator/readiness/bootstrap paths are working; the BikeCoach integration exposed remaining adoption-hardening gaps around lifecycle docs, dependency scoping, watch explainability, and database/fixed-port guidance
+- State: Go-first release/install flow, installed project bootstrap, `version`/`upgrade`, a single global task cache, split docs, `devflow docs`, per-worktree localbuild locking, reliable detached cleanup, and explicit service lifecycle contracts are implemented; BikeCoach real-project integration feedback is integrated into the roadmap
+- Confidence: core parallel/watch/operator/readiness/bootstrap paths are working; the BikeCoach integration exposed remaining adoption-hardening gaps around watch explainability, dependency scoping, and database/fixed-port guidance
 
 ## Completed
 
@@ -354,6 +354,10 @@ Last updated: 2026-05-02
   - supervisor logs provide a `child pid=<pid>` fallback for older state without a recorded executor PID
   - persisted supervisor/process refs are cleared and nonterminal status nodes are marked `stopped`
   - added regression coverage for executor cleanup, stale status PIDs, and legacy supervisor-log fallback
+- Clarified and hardened service lifecycle contracts:
+  - documented attached `run`, `run --ci`, detached `run/watch`, `flush`, `status`, and `stop` semantics in user and contributor docs
+  - `run --ci` service targets now act as finite readiness probes: services start, pass readiness, stop, clear persisted PIDs, and persist `stopped`
+  - documented `watch --detach` plus `flush` as the recommended readiness-gated background workflow for automation
 
 ## In Progress
 
@@ -361,7 +365,6 @@ Last updated: 2026-05-02
 
 ## Next Steps
 
-- Clarify and harden service lifecycle contracts for `run`, `run/watch --detach`, `flush`, `status`, and `stop`
 - Improve watch/input/output debugging ergonomics, including consistent ignore semantics and an explanation path for why a file affects a task
 - Add target-scoped dependency declarations and `doctor --target <target> --json`
 - Expand user docs/examples for script-to-Devflow convergence, managed local Postgres, fixed ports, and secret/redaction expectations

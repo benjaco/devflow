@@ -1217,11 +1217,11 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 	if len(status.Nodes) == 0 {
 		t.Fatal("expected status nodes")
 	}
-	if !hasNodeState(status.Nodes, "backend_dev", api.StateRunning) {
-		t.Fatalf("expected backend_dev running in status: %+v", status.Nodes)
+	if !hasNodeState(status.Nodes, "backend_dev", api.StateStopped) {
+		t.Fatalf("expected backend_dev stopped after CI run readiness probe: %+v", status.Nodes)
 	}
-	if !hasNodeState(status.Nodes, "frontend_dev", api.StateRunning) {
-		t.Fatalf("expected frontend_dev running in status: %+v", status.Nodes)
+	if !hasNodeState(status.Nodes, "frontend_dev", api.StateStopped) {
+		t.Fatalf("expected frontend_dev stopped after CI run readiness probe: %+v", status.Nodes)
 	}
 
 	waitForCondition(t, 3*time.Second, func() bool {
@@ -1375,7 +1375,7 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 			stoppedSet[name] = true
 		}
 	}
-	for _, name := range []string{"supervisor", "backend_dev", "frontend_dev"} {
+	for _, name := range []string{"supervisor"} {
 		if !stoppedSet[name] {
 			t.Fatalf("expected %q in stop payload: %v", name, stopPayload)
 		}
