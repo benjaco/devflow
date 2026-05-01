@@ -124,6 +124,15 @@ The dependency-barrier rule is important: if an intermediate candidate is blocke
 
 Normal ready-queue scheduling still applies to the final rerun set, so included downstream tasks become runnable only after included upstream dependencies finish or restore from cache.
 
+Ignore semantics are shared by watch matching and fingerprinting:
+- paths are slash-normalized before matching
+- glob-style matches use exact path matching
+- a non-glob directory pattern also suppresses descendants by path prefix
+- for directory inputs, ignore patterns are checked both root-relative and relative to the input directory
+- for explicit file inputs, root-relative ignore patterns can suppress that file from both watch matching and fingerprinting
+
+This lets adapters use either `internal/storage/sqlc` or `sqlc` to ignore generated files under `Inputs.Dirs: []string{"internal/storage"}`. `devflow graph affected --files <path> --explain --json` exposes which input matched or which ignore pattern suppressed a file.
+
 Current service restart policy meanings in watch mode:
 - `RestartNever`: never restart from file-change cascades
 - `RestartOnInputChange`: restart only when the service is in the affected downstream slice

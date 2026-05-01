@@ -1477,6 +1477,7 @@ func (a *App) graphAffectedCmd(args []string) error {
 	jsonOut := fs.Bool("json", false, "")
 	projectName := fs.String("project", defaultProject(), "")
 	files := fs.String("files", "", "")
+	explain := fs.Bool("explain", false, "")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1489,16 +1490,75 @@ func (a *App) graphAffectedCmd(args []string) error {
 	}
 	changed := splitCSV(*files)
 	direct := g.AffectedByFiles(changed)
-	payload := map[string]any{
-		"files":            changed,
-		"directlyAffected": direct,
-		"downstream":       g.Downstream(direct),
+	payload := api.GraphAffectedResult{
+		Files:            changed,
+		DirectlyAffected: direct,
+		Downstream:       g.Downstream(direct),
+	}
+	if *explain {
+		impacts := g.ExplainAffectedByFiles(changed)
+		payload.Explanations = toAPIGraphImpacts(impacts)
+		payload.UnmatchedFiles = graphUnmatchedFiles(changed, impacts)
 	}
 	if *jsonOut {
 		return writeJSON(a.Stdout, payload)
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "affected: %s\n", strings.Join(direct, ", "))
+	if *explain {
+		for _, impact := range payload.Explanations {
+			state := "affected"
+			if !impact.Affected {
+				state = "ignored"
+			}
+			detail := impact.Input
+			if impact.Relative != "" {
+				detail += " relative=" + impact.Relative
+			}
+			if impact.Ignore != "" {
+				detail += " ignore=" + impact.Ignore
+			}
+			_, _ = fmt.Fprintf(a.Stdout, "%s: %s -> %s (%s %s)\n", state, impact.File, impact.Task, impact.Reason, detail)
+		}
+		if len(payload.UnmatchedFiles) > 0 {
+			_, _ = fmt.Fprintf(a.Stdout, "unmatched: %s\n", strings.Join(payload.UnmatchedFiles, ", "))
+		}
+	}
 	return nil
+}
+
+func toAPIGraphImpacts(impacts []graph.FileImpact) []api.GraphFileImpact {
+	out := make([]api.GraphFileImpact, 0, len(impacts))
+	for _, impact := range impacts {
+		out = append(out, api.GraphFileImpact{
+			File:     impact.File,
+			Task:     impact.Task,
+			Affected: impact.Affected,
+			Reason:   impact.Reason,
+			Input:    impact.Input,
+			Relative: impact.Relative,
+			Ignore:   impact.Ignore,
+		})
+	}
+	return out
+}
+
+func graphUnmatchedFiles(files []string, impacts []graph.FileImpact) []string {
+	matched := map[string]bool{}
+	for _, impact := range impacts {
+		matched[impact.File] = true
+	}
+	unmatched := make([]string, 0)
+	for _, file := range files {
+		cleaned := filepath.ToSlash(filepath.Clean(file))
+		if cleaned == "." {
+			cleaned = ""
+		}
+		if !matched[cleaned] {
+			unmatched = append(unmatched, cleaned)
+		}
+	}
+	sort.Strings(unmatched)
+	return unmatched
 }
 
 func defaultProject() string {

@@ -232,3 +232,69 @@ func TestCollectTaskInputsHashChangesWhenFileChanges(t *testing.T) {
 		t.Fatalf("expected collected input hash to change after file edit: %v vs %v", first, second)
 	}
 }
+
+func TestCollectTaskInputsIgnoresRootAndDirRelativePatterns(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFingerprintTestFile(t, filepath.Join(root, "internal", "storage", "repo.go"), "repo")
+	mustWriteFingerprintTestFile(t, filepath.Join(root, "internal", "storage", "sqlc", "users.sql.go"), "generated")
+	rt := &project.Runtime{Worktree: root, Env: map[string]string{}}
+	rootRelativeTask := project.Task{
+		Name:   "root-ignore",
+		Kind:   project.KindOnce,
+		Inputs: project.Inputs{Dirs: []string{"internal/storage"}, Ignore: []string{"internal/storage/sqlc"}},
+	}
+	dirRelativeTask := project.Task{
+		Name:   "dir-ignore",
+		Kind:   project.KindOnce,
+		Inputs: project.Inputs{Dirs: []string{"internal/storage"}, Ignore: []string{"sqlc"}},
+	}
+	first, _, _, err := CollectTaskInputs(context.Background(), root, rootRelativeTask, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, _, err := CollectTaskInputs(context.Background(), root, dirRelativeTask, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || len(second) != 1 || first[0] != second[0] {
+		t.Fatalf("expected root and dir relative ignores to hash the same inputs: %v vs %v", first, second)
+	}
+	if err := os.WriteFile(filepath.Join(root, "internal", "storage", "sqlc", "users.sql.go"), []byte("changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after, _, _, err := CollectTaskInputs(context.Background(), root, rootRelativeTask, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first[0] != after[0] {
+		t.Fatalf("ignored generated file changed hash: %v vs %v", first, after)
+	}
+}
+
+func TestCollectTaskInputsIgnoreCanSuppressExplicitFile(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFingerprintTestFile(t, filepath.Join(root, "schema.json"), "schema")
+	rt := &project.Runtime{Worktree: root, Env: map[string]string{}}
+	task := project.Task{
+		Name:   "explicit",
+		Kind:   project.KindOnce,
+		Inputs: project.Inputs{Files: []string{"schema.json"}, Ignore: []string{"schema.json"}},
+	}
+	hashes, _, _, err := CollectTaskInputs(context.Background(), root, task, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hashes) != 0 {
+		t.Fatalf("expected ignored explicit file to be skipped, got %v", hashes)
+	}
+}
+
+func mustWriteFingerprintTestFile(t *testing.T, path, data string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}

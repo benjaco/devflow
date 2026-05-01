@@ -26,6 +26,7 @@ import (
 type failCLIProject struct{}
 type taskTargetCLIProject struct{}
 type depsCLIProject struct{}
+type graphExplainCLIProject struct{}
 
 func (failCLIProject) Name() string { return "cli-fail-project" }
 
@@ -115,10 +116,42 @@ func (depsCLIProject) Dependencies() []project.Dependency {
 	}
 }
 
+func (graphExplainCLIProject) Name() string { return "cli-graph-explain-project" }
+
+func (graphExplainCLIProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "cli-graph-explain"}, nil
+}
+
+func (graphExplainCLIProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:   "codegen",
+			Kind:   project.KindOnce,
+			Inputs: project.Inputs{Files: []string{"schema.json"}},
+		},
+		{
+			Name: "build",
+			Kind: project.KindOnce,
+			Deps: []string{"codegen"},
+			Inputs: project.Inputs{
+				Dirs:   []string{"internal/storage"},
+				Ignore: []string{"sqlc"},
+			},
+		},
+	}
+}
+
+func (graphExplainCLIProject) Targets() []project.Target {
+	return []project.Target{{Name: "up", RootTasks: []string{"build"}}}
+}
+
 func init() {
 	project.Register(failCLIProject{})
 	project.Register(taskTargetCLIProject{})
 	project.Register(depsCLIProject{})
+	project.Register(graphExplainCLIProject{})
 }
 
 func TestGraphListJSON(t *testing.T) {
@@ -132,6 +165,42 @@ func TestGraphListJSON(t *testing.T) {
 	}
 	if _, ok := payload["tasks"]; !ok {
 		t.Fatalf("missing tasks: %v", payload)
+	}
+}
+
+func TestGraphAffectedExplainJSON(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{
+		"graph", "affected",
+		"--json",
+		"--explain",
+		"--project", "cli-graph-explain-project",
+		"--files", "schema.json,internal/storage/sqlc/users.sql.go,unmatched.txt",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var result api.GraphAffectedResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(result.DirectlyAffected, ",") != "codegen" {
+		t.Fatalf("unexpected directly affected tasks: %+v", result)
+	}
+	if strings.Join(result.Downstream, ",") != "build,codegen" {
+		t.Fatalf("unexpected downstream tasks: %+v", result)
+	}
+	if len(result.Explanations) != 2 {
+		t.Fatalf("unexpected explanations: %+v", result.Explanations)
+	}
+	if result.Explanations[0].File != "internal/storage/sqlc/users.sql.go" || result.Explanations[0].Task != "build" || result.Explanations[0].Affected || result.Explanations[0].Reason != "ignored" || result.Explanations[0].Ignore != "sqlc" {
+		t.Fatalf("unexpected ignored explanation: %+v", result.Explanations[0])
+	}
+	if result.Explanations[1].File != "schema.json" || result.Explanations[1].Task != "codegen" || !result.Explanations[1].Affected || result.Explanations[1].Reason != "file" {
+		t.Fatalf("unexpected file explanation: %+v", result.Explanations[1])
+	}
+	if strings.Join(result.UnmatchedFiles, ",") != "unmatched.txt" {
+		t.Fatalf("unexpected unmatched files: %+v", result.UnmatchedFiles)
 	}
 }
 

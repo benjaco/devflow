@@ -62,6 +62,14 @@ Watch file matching is driven by adapter task inputs. Changed files directly aff
 
 Watch cascades respect dependency barriers. If an intermediate task in the affected slice is not allowed to run in watch mode, downstream tasks past that intermediate are not run in that cycle.
 
+`graph affected --files a,b --explain --json` reports why changed files do or do not affect tasks. Explanations include direct file matches, directory matches, ignored paths, and unmatched files. This is the primary debugging tool for generated-output watch loops.
+
+`Inputs.Ignore` uses the same path-matching model for fingerprinting and watch matching:
+- exact or glob matches use slash-normalized paths
+- a pattern also suppresses descendants when the changed path has that pattern as a path prefix
+- for directory inputs, ignore patterns are checked both root-relative and relative to the input directory
+- for explicit file inputs, root-relative ignore patterns can suppress that file
+
 For service restart policies, `RestartNever` blocks watch restarts, `RestartOnInputChange` follows the affected downstream slice, and `RestartAlways` restarts the service on any watch cycle that affects the selected target.
 
 For watch-cycle events:

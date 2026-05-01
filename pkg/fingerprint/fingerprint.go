@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -41,7 +42,16 @@ func HashFile(path string) (string, error) {
 }
 
 func HashDir(root string, ignore []string) (string, error) {
+	return hashDir(root, "", ignore)
+}
+
+func HashInputDir(root, inputDir string, ignore []string) (string, error) {
+	return hashDir(root, inputDir, ignore)
+}
+
+func hashDir(root, inputDir string, ignore []string) (string, error) {
 	entries := make([]string, 0)
+	inputDir = cleanInputPath(inputDir)
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -54,7 +64,7 @@ func HashDir(root string, ignore []string) (string, error) {
 		if rel == "." {
 			rel = ""
 		}
-		if ignored(rel, ignore) {
+		if ignored(rel, inputDir, ignore) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -95,6 +105,9 @@ func HashEnv(env map[string]string, keys []string) []string {
 func CollectTaskInputs(ctx context.Context, worktree string, task project.Task, rt *project.Runtime) (hashes []string, envValues []string, custom []string, err error) {
 	fileSet := map[string]bool{}
 	for _, file := range task.Inputs.Files {
+		if ignored(cleanInputPath(file), "", task.Inputs.Ignore) {
+			continue
+		}
 		path := filepath.Join(worktree, file)
 		sum, hashErr := HashFile(path)
 		if hashErr != nil {
@@ -109,7 +122,7 @@ func CollectTaskInputs(ctx context.Context, worktree string, task project.Task, 
 	}
 	for _, dir := range task.Inputs.Dirs {
 		path := filepath.Join(worktree, dir)
-		sum, hashErr := HashDir(path, task.Inputs.Ignore)
+		sum, hashErr := HashInputDir(path, dir, task.Inputs.Ignore)
 		if hashErr != nil {
 			if os.IsNotExist(hashErr) {
 				sum = "missing"
@@ -208,16 +221,41 @@ func OverrideTaskKey(taskName, override string) string {
 	return hashStrings([]string{EngineKeyVersion, taskName, override})
 }
 
-func ignored(path string, ignore []string) bool {
+func ignored(pathValue, inputDir string, ignore []string) bool {
 	for _, pattern := range ignore {
-		if ok, _ := filepath.Match(pattern, path); ok {
+		if matchInputIgnore(pattern, pathValue) {
 			return true
 		}
-		if strings.HasPrefix(path, pattern+"/") {
-			return true
+		if inputDir != "" {
+			rootRelative := pathValue
+			if rootRelative == "" {
+				rootRelative = inputDir
+			} else {
+				rootRelative = inputDir + "/" + rootRelative
+			}
+			if matchInputIgnore(pattern, rootRelative) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+func matchInputIgnore(pattern, candidate string) bool {
+	pattern = cleanInputPath(pattern)
+	candidate = cleanInputPath(candidate)
+	if ok, _ := path.Match(pattern, candidate); ok {
+		return true
+	}
+	return candidate == pattern || strings.HasPrefix(candidate, pattern+"/")
+}
+
+func cleanInputPath(value string) string {
+	value = filepath.ToSlash(filepath.Clean(value))
+	if value == "." {
+		return ""
+	}
+	return value
 }
 
 func hashStrings(items []string) string {

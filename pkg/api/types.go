@@ -155,6 +155,24 @@ type StatusResult struct {
 	Nodes      []NodeStatus      `json:"nodes"`
 }
 
+type GraphAffectedResult struct {
+	Files            []string          `json:"files"`
+	DirectlyAffected []string          `json:"directlyAffected"`
+	Downstream       []string          `json:"downstream"`
+	Explanations     []GraphFileImpact `json:"explanations,omitempty"`
+	UnmatchedFiles   []string          `json:"unmatchedFiles,omitempty"`
+}
+
+type GraphFileImpact struct {
+	File     string `json:"file"`
+	Task     string `json:"task"`
+	Affected bool   `json:"affected"`
+	Reason   string `json:"reason"`
+	Input    string `json:"input,omitempty"`
+	Relative string `json:"relative,omitempty"`
+	Ignore   string `json:"ignore,omitempty"`
+}
+
 type LogEvent struct {
 	TS         string `json:"ts"`
 	InstanceID string `json:"instanceId"`

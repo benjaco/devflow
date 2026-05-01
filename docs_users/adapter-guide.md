@@ -270,6 +270,14 @@ Rules:
 - use the task `Inputs` to describe what should invalidate the build
 - use `Signature` if the build command itself needs a stable explicit version marker
 
+For generated files, prefer an explicit ignore pattern on the task that owns the source directory. Ignore patterns are slash-normalized and are checked both root-relative and, for directory inputs, relative to that input directory. For example, if a task has `Inputs.Dirs: []string{"internal/storage"}`, both `internal/storage/sqlc` and `sqlc` suppress generated files below `internal/storage/sqlc`.
+
+Use this command when tuning watch inputs:
+
+```bash
+devflow graph affected --files internal/storage/sqlc/users.sql.go --explain --json
+```
+
 This gives you a standard way to compile helper binaries once, cache them by input hash, and run the restored artifact later from downstream tasks.
 
 ## Service Readiness

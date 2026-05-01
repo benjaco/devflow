@@ -227,6 +227,14 @@ Important watch rules:
 - `RestartNever` prevents watch restarts
 - `RestartAlways` restarts a service on any watch cycle that affects the target
 
+Use `graph affected --explain` when a file change restarts too much or too little:
+
+```bash
+devflow graph affected --files internal/storage/sqlc/users.sql.go --explain --json
+```
+
+The explanation shows which task input matched the file, which ignore pattern suppressed it, and which files did not match any task. Ignore patterns are slash-normalized and work both root-relative and, for directory inputs, relative to that input directory.
+
 ## Runtime State
 
 Per-worktree state stays under the project worktree:

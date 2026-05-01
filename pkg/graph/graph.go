@@ -5,9 +5,20 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/benjaco/devflow/pkg/project"
 )
+
+type FileImpact struct {
+	File     string
+	Task     string
+	Affected bool
+	Reason   string
+	Input    string
+	Relative string
+	Ignore   string
+}
 
 type Graph struct {
 	Tasks   map[string]project.Task
@@ -185,40 +196,101 @@ func (g *Graph) Upstream(names []string) []string {
 
 func (g *Graph) AffectedByFiles(files []string) []string {
 	affected := map[string]bool{}
-	for _, task := range g.Tasks {
-		for _, changed := range files {
-			if matchesTaskInput(task, filepath.Clean(changed)) {
-				affected[task.Name] = true
-				break
-			}
+	for _, impact := range g.ExplainAffectedByFiles(files) {
+		if impact.Affected {
+			affected[impact.Task] = true
 		}
 	}
 	return sortedKeys(affected)
 }
 
-func matchesTaskInput(task project.Task, changed string) bool {
-	for _, ignore := range task.Inputs.Ignore {
-		if ok, _ := filepath.Match(ignore, changed); ok {
-			return false
+func (g *Graph) ExplainAffectedByFiles(files []string) []FileImpact {
+	tasks := make([]string, 0, len(g.Tasks))
+	for name := range g.Tasks {
+		tasks = append(tasks, name)
+	}
+	sort.Strings(tasks)
+	impacts := make([]FileImpact, 0)
+	for _, changed := range files {
+		cleaned := cleanInputPath(changed)
+		for _, name := range tasks {
+			if impact, ok := explainTaskInput(g.Tasks[name], cleaned); ok {
+				impacts = append(impacts, impact)
+			}
 		}
 	}
-	for _, file := range task.Inputs.Files {
-		if filepath.Clean(file) == changed {
-			return true
+	sort.Slice(impacts, func(i, j int) bool {
+		if impacts[i].File != impacts[j].File {
+			return impacts[i].File < impacts[j].File
 		}
+		if impacts[i].Task != impacts[j].Task {
+			return impacts[i].Task < impacts[j].Task
+		}
+		return impacts[i].Reason < impacts[j].Reason
+	})
+	return impacts
+}
+
+func explainTaskInput(task project.Task, changed string) (FileImpact, bool) {
+	for _, file := range task.Inputs.Files {
+		file = cleanInputPath(file)
+		if file != changed {
+			continue
+		}
+		if pattern, ignored := ignoredByInput(task.Inputs.Ignore, changed, ""); ignored {
+			return FileImpact{File: changed, Task: task.Name, Affected: false, Reason: "ignored", Input: file, Ignore: pattern}, true
+		}
+		return FileImpact{File: changed, Task: task.Name, Affected: true, Reason: "file", Input: file}, true
 	}
 	for _, dir := range task.Inputs.Dirs {
-		dir = filepath.Clean(dir)
-		if changed == dir || stringsHasPathPrefix(changed, dir) {
-			return true
+		dir = cleanInputPath(dir)
+		if changed != dir && !stringsHasPathPrefix(changed, dir) {
+			continue
+		}
+		rel := ""
+		if changed != dir {
+			rel = strings.TrimPrefix(changed, dir+"/")
+		}
+		if pattern, ignored := ignoredByInput(task.Inputs.Ignore, changed, rel); ignored {
+			return FileImpact{File: changed, Task: task.Name, Affected: false, Reason: "ignored", Input: dir, Relative: rel, Ignore: pattern}, true
+		}
+		return FileImpact{File: changed, Task: task.Name, Affected: true, Reason: "dir", Input: dir, Relative: rel}, true
+	}
+	return FileImpact{}, false
+}
+
+func ignoredByInput(ignore []string, rootRelative, dirRelative string) (string, bool) {
+	for _, pattern := range ignore {
+		if matchInputIgnore(pattern, rootRelative) {
+			return pattern, true
+		}
+		if dirRelative != "" && matchInputIgnore(pattern, dirRelative) {
+			return pattern, true
 		}
 	}
-	return false
+	return "", false
+}
+
+func matchInputIgnore(pattern, candidate string) bool {
+	pattern = cleanInputPath(pattern)
+	candidate = cleanInputPath(candidate)
+	if ok, _ := path.Match(pattern, candidate); ok {
+		return true
+	}
+	return candidate == pattern || strings.HasPrefix(candidate, pattern+"/")
+}
+
+func cleanInputPath(value string) string {
+	value = filepath.ToSlash(filepath.Clean(value))
+	if value == "." {
+		return ""
+	}
+	return value
 }
 
 func stringsHasPathPrefix(changed, dir string) bool {
-	changed = filepath.ToSlash(changed)
-	dir = filepath.ToSlash(dir)
+	changed = cleanInputPath(changed)
+	dir = cleanInputPath(dir)
 	if dir == "." || dir == "" {
 		return true
 	}

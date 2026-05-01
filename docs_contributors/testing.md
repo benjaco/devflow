@@ -33,6 +33,7 @@ Devflow uses three testing layers:
 - sequential engine execution with cache hits
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work
 - polling watch batching and selective watch reruns
+- graph affected explanations for file, directory, ignored, and unmatched paths
 - watch cascade pruning so downstream tasks do not run past warmups or services that are blocked from watch execution, including full watch execution and mixed blocked/allowed branch coverage
 - watch service restart policies, including `RestartAlways` selection and full watch execution behavior
 - flush coordination coverage for request/ack path generation, watcher inclusion of the flush sync directory under `.devflow`, engine ack timing after reruns and sync-only batches, failed-task ack issues, service readiness health issues, and CLI supervisor/timeout behavior
