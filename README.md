@@ -184,7 +184,7 @@ The repo includes example adapters that double as smoke coverage:
 - `examples/web-worker-workspace`
 - `examples/embedded-web-app`
 
-They show larger graphs with services, generated artifacts, watch reruns, dependency checks, and database helpers.
+They show larger graphs with services, generated artifacts, watch reruns, required CLI checks, and database helpers.
 
 ## Developing Devflow
 

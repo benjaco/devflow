@@ -155,6 +155,7 @@ func TaskSignature(task project.Task) (string, error) {
 		Name                      string                `json:"name"`
 		Kind                      project.Kind          `json:"kind"`
 		Deps                      []string              `json:"deps"`
+		RequiredCLIs              []string              `json:"requiredCLIs"`
 		Inputs                    project.Inputs        `json:"inputs"`
 		Outputs                   project.Outputs       `json:"outputs"`
 		Cache                     bool                  `json:"cache"`
@@ -168,6 +169,7 @@ func TaskSignature(task project.Task) (string, error) {
 		Name:                      task.Name,
 		Kind:                      task.Kind,
 		Deps:                      append([]string(nil), task.Deps...),
+		RequiredCLIs:              append([]string(nil), task.RequiredCLIs...),
 		Inputs:                    task.Inputs,
 		Outputs:                   task.Outputs,
 		Cache:                     task.Cache,
@@ -179,6 +181,7 @@ func TaskSignature(task project.Task) (string, error) {
 		Signature:                 task.Signature,
 	}
 	sort.Strings(payload.Deps)
+	sort.Strings(payload.RequiredCLIs)
 	sort.Strings(payload.Tags)
 	sort.Strings(payload.Inputs.Files)
 	sort.Strings(payload.Inputs.Dirs)

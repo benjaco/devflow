@@ -32,8 +32,8 @@ func (embeddedWebAppProject) DefaultTarget() string {
 	return "up"
 }
 
-func (embeddedWebAppProject) Dependencies() []project.Dependency {
-	return []project.Dependency{
+func (embeddedWebAppProject) RequiredCLIs() []project.RequiredCLI {
+	return []project.RequiredCLI{
 		{
 			Name:        "go",
 			Command:     "go",
@@ -168,9 +168,14 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 			Kind:        project.KindOnce,
 			Description: "Verify the build toolchain required for the embedded web app example",
 			Signature:   "embedded-web-app-check-build-tools-v1",
+			RequiredCLIs: []string{
+				"go",
+				"npm",
+				"sqlc",
+			},
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				_ = ctx
-				return project.EnsureDependencies(embeddedWebAppProject{}.Dependencies(), "go", "npm", "sqlc")
+				return project.EnsureRequiredCLIs(embeddedWebAppProject{}.RequiredCLIs(), "go", "npm", "sqlc")
 			},
 		},
 		{
@@ -178,9 +183,12 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 			Kind:        project.KindOnce,
 			Description: "Verify the database runtime tooling required for the embedded web app example",
 			Signature:   "embedded-web-app-check-db-tools-v1",
+			RequiredCLIs: []string{
+				"docker",
+			},
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				_ = ctx
-				if err := project.EnsureDependencies(embeddedWebAppProject{}.Dependencies(), "docker"); err != nil {
+				if err := project.EnsureRequiredCLIs(embeddedWebAppProject{}.RequiredCLIs(), "docker"); err != nil {
 					return err
 				}
 				cmd := exec.Command("docker", "info")

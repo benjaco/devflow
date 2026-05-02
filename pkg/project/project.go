@@ -48,9 +48,13 @@ type Outputs struct {
 }
 
 type Task struct {
-	Name                      string
-	Kind                      Kind
-	Deps                      []string
+	Name string
+	Kind Kind
+	// Deps are task graph dependencies that must run before this task.
+	Deps []string
+	// RequiredCLIs names entries from the project RequiredCLIs catalog.
+	// They are external command prerequisites, not task graph edges.
+	RequiredCLIs              []string
 	Inputs                    Inputs
 	Outputs                   Outputs
 	Run                       RunFunc
@@ -67,9 +71,11 @@ type Task struct {
 }
 
 type Target struct {
-	Name        string
-	RootTasks   []string
-	Description string
+	Name      string
+	RootTasks []string
+	// RequiredCLIs names external command prerequisites for this target.
+	RequiredCLIs []string
+	Description  string
 }
 
 type InstanceConfig struct {

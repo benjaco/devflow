@@ -72,15 +72,17 @@ func (myProject) Targets() []project.Target {
 }
 ```
 
-## Dependency Installation
+## Required CLI Installation
 
-Adapters can expose required tool commands through `DependencyProvider`.
+Adapters can expose required command-line tools through `RequiredCLIProvider`.
+
+`RequiredCLIs()` is the project catalog. Attach catalog entries to tasks or targets with `RequiredCLIs` when different targets need different tools.
 
 Example:
 
 ```go
-func (myProject) Dependencies() []project.Dependency {
-    return []project.Dependency{
+func (myProject) RequiredCLIs() []project.RequiredCLI {
+    return []project.RequiredCLI{
         {
             Name:    "sqlc",
             Command: "sqlc",
@@ -91,15 +93,47 @@ func (myProject) Dependencies() []project.Dependency {
         },
     }
 }
+
+func (myProject) Tasks() []project.Task {
+    return []project.Task{
+        {
+            Name:         "codegen",
+            Kind:         project.KindOnce,
+            RequiredCLIs: []string{"sqlc"},
+            Run:          runCodegen,
+        },
+        {
+            Name:         "app",
+            Kind:         project.KindService,
+            Deps:         []string{"codegen"},
+            RequiredCLIs: []string{"go"},
+            Run:          runApp,
+        },
+    }
+}
+
+func (myProject) Targets() []project.Target {
+    return []project.Target{
+        {
+            Name:         "up",
+            RootTasks:    []string{"app"},
+            RequiredCLIs: []string{"docker"},
+        },
+    }
+}
 ```
 
 That enables:
-- `devflow deps status --project my-project`
-- `devflow deps install --project my-project`
-- richer `doctor` output for missing prerequisites
+- `devflow clis status --project my-project`
+- `devflow clis status --target up --project my-project`
+- `devflow clis install --project my-project`
+- `devflow clis install --target up --project my-project`
+- `devflow doctor --target up --json`
 
 Rules:
 - `Command` should be the binary name Devflow can verify on `PATH`
+- `RequiredCLIs` entries can use either required CLI `Name` or `Command`
+- `doctor --target <target>` and `clis ... --target <target>` only check required CLIs attached to the selected target and its task closure
 - install scripts should be platform-specific and idempotent when practical
 - installers should leave the command actually available on `PATH`, because Devflow re-checks the command after install
 

@@ -216,28 +216,44 @@ Current limitation:
 - this is prompt-pattern and stdin based, not full TTY emulation
 - commands that require a true terminal rather than prompt/answer stdin handling still need a future PTY-specific path
 
-## Dependency Installation
+## Required CLI Installation
 
-Adapters can now define project-scoped command dependencies together with platform-specific install scripts.
+Adapters define required command-line tools together with platform-specific install scripts.
+
+`RequiredCLIs()` is the project-level catalog. Tasks and targets select from that catalog with `RequiredCLIs`, allowing target-scoped commands to avoid over-reporting tools that belong only to unrelated flows. The older `Dependencies()` provider remains as a compatibility shim for early adapters.
 
 Current shape:
 
 ```go
-type Dependency struct {
+type RequiredCLI struct {
     Name        string
     Command     string
     Description string
     Install     map[string]InstallScript
 }
+
+type Task struct {
+    Deps         []string
+    RequiredCLIs []string
+}
+
+type Target struct {
+    RootTasks    []string
+    RequiredCLIs []string
+}
 ```
 
 Semantics:
-- dependency status is determined by checking whether the command is available on `PATH`
-- `deps install` only runs installers for commands that are currently missing
+- required CLI status is determined by checking whether the command is available on `PATH`
+- `devflow doctor` checks the full project required CLI catalog for backward compatibility
+- `devflow doctor --target <target>` checks only CLIs required by the target and its task closure
+- `devflow clis status/install --target <target>` use the same scoped selection
+- `RequiredCLIs` entries may reference either required CLI `Name` or `Command`
+- `clis install` only runs installers for commands that are currently missing
 - after an installer runs, Devflow re-checks that the command now resolves
 - install scripts are selected by platform (`darwin`, `linux`, `windows`, or `unix`)
 
-This keeps dependency policy adapter-defined while giving the core CLI a stable install surface for humans, CI, and future agents.
+This keeps required CLI policy adapter-defined while giving the core CLI a stable install surface for humans, CI, and agents.
 
 ## Database Isolation
 

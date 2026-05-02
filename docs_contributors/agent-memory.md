@@ -56,7 +56,7 @@ Use this memory together with the subsystem docs. When a change affects one of t
 
 ## Current Shape
 
-Devflow is now beyond the initial bootstrap. The core includes graph validation, fingerprinting, snapshot caching, process supervision, instance and port state, bounded parallel engine scheduling, typed events, polling watch mode, flush readiness coordination, dependency checks/installers, interactive prompt plumbing, a TUI, and Docker-backed Postgres runtime helpers.
+Devflow is now beyond the initial bootstrap. The core includes graph validation, fingerprinting, snapshot caching, process supervision, instance and port state, bounded parallel engine scheduling, typed events, polling watch mode, flush readiness coordination, required CLI checks/installers, interactive prompt plumbing, a TUI, and Docker-backed Postgres runtime helpers.
 
 Runtime adapters are project-local:
 - installed `devflow` or the repo-level source launcher builds/uses the bootstrap binary
@@ -66,11 +66,13 @@ Runtime adapters are project-local:
 - normal commands exec into that worktree-local binary
 - there is no built-in adapter fallback when `devflow.project.go` is missing
 
-The first real BikeCoach integration showed that adoption hardening is now more important than expanding operator features in the abstract. After localbuild locking, reliable detached cleanup, explicit service lifecycle contracts, and graph affected explanations, the highest-value issues are target-scoped dependency checks and complete user examples for script convergence, fixed ports, managed Postgres, and secret handling.
+The first real BikeCoach integration showed that adoption hardening is now more important than expanding operator features in the abstract. After localbuild locking, reliable detached cleanup, explicit service lifecycle contracts, graph affected explanations, and target-scoped required CLI checks, the highest-value issues are complete user examples for script convergence, fixed ports, managed Postgres, and secret handling.
 
 Service lifecycle contract: attached `run` is foreground and blocks while services live; `run --ci` may start services as readiness probes but stops them before returning; `run --detach` only proves supervisor launch; `watch --detach` plus `flush` is the readiness-gated background workflow for humans and agents.
 
 Watch/input debugging contract: `Inputs.Ignore` is shared by fingerprinting and watch matching. Patterns are slash-normalized, checked root-relative, and for directory inputs also checked relative to the input dir. `devflow graph affected --files <path> --explain --json` is the first tool to use when generated files cause surprising watch cascades.
+
+Required CLI contract: `RequiredCLIs()` is the project catalog. `RequiredCLIs` on tasks and targets selects the subset needed for a target closure. `devflow doctor --target <target> --json` and `devflow clis status/install --target <target>` must not report unrelated catalog entries. The older `Dependencies()` provider remains only as a compatibility path.
 
 State is split deliberately:
 - per-worktree logs and instance snapshots live under the worktree `.devflow/`
@@ -112,7 +114,6 @@ DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run Docker -v
 
 The latest concrete next steps are maintained in `PROGRESS.md`. As of this memory update, likely next work includes:
 
-- target-scoped dependencies plus `doctor --target <target> --json`
 - user docs/examples for script-to-Devflow convergence, managed local Postgres, fixed ports, and secret/redaction expectations
 
 ## Deliberate Deferrals

@@ -194,6 +194,9 @@ type InstanceSummary struct {
 type DoctorResult struct {
 	Worktree     string   `json:"worktree"`
 	InstanceID   string   `json:"instanceId,omitempty"`
+	Project      string   `json:"project,omitempty"`
+	Target       string   `json:"target,omitempty"`
+	CLIScope     string   `json:"cliScope,omitempty"`
 	ChecksPassed bool     `json:"checksPassed"`
 	Checks       []string `json:"checks"`
 	Warnings     []string `json:"warnings,omitempty"`

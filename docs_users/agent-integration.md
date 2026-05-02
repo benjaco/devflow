@@ -42,6 +42,15 @@ Recommended loop:
 
 Do not run downstream tests before a successful flush when relying on detached watch/dev mode. The flush sync sentinel proves the watcher has observed the post-edit boundary and has settled the selected target closure.
 
+For prerequisite checks, prefer the same target scope the agent will use for execution:
+
+```bash
+devflow doctor --target up --json
+devflow clis status --target up --json
+```
+
+Target-scoped required CLI checks only include `RequiredCLIs` attached to the selected target and its task closure, so agents are not blocked by tools needed only for unrelated targets.
+
 Avoid using attached `devflow run <service-target>` as an agent readiness gate. Attached service runs keep the terminal occupied until interrupted or until a service exits. For background development, use `devflow watch <target> --detach --json` and then `devflow flush <target> --json`. `devflow run <target> --ci --json` is finite; service tasks are started through readiness and then stopped before the command returns.
 
 `AGENTS.md` documents repository rules for coding agents. Future milestones can add project skills under `agents/skills/`.

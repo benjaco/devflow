@@ -26,6 +26,7 @@ import (
 type failCLIProject struct{}
 type taskTargetCLIProject struct{}
 type depsCLIProject struct{}
+type targetDepsCLIProject struct{}
 type graphExplainCLIProject struct{}
 
 func (failCLIProject) Name() string { return "cli-fail-project" }
@@ -89,13 +90,21 @@ func (depsCLIProject) ConfigureInstance(ctx context.Context, worktree string) (p
 	return project.InstanceConfig{Label: "cli-deps"}, nil
 }
 
-func (depsCLIProject) Tasks() []project.Task { return nil }
-
-func (depsCLIProject) Targets() []project.Target {
-	return []project.Target{{Name: "noop", RootTasks: nil}}
+func (depsCLIProject) Tasks() []project.Task {
+	return []project.Task{
+		{Name: "shell_task", Kind: project.KindOnce, RequiredCLIs: []string{"shell"}},
+		{Name: "installable_task", Kind: project.KindOnce, RequiredCLIs: []string{"missing-tool"}},
+	}
 }
 
-func (depsCLIProject) Dependencies() []project.Dependency {
+func (depsCLIProject) Targets() []project.Target {
+	return []project.Target{
+		{Name: "noop", RootTasks: []string{"shell_task"}},
+		{Name: "installable", RootTasks: []string{"installable_task"}},
+	}
+}
+
+func (depsCLIProject) RequiredCLIs() []project.RequiredCLI {
 	marker := filepath.Join(os.TempDir(), "devflow-cli-deps-installed.txt")
 	bin := filepath.Join(os.TempDir(), "devflow-cli-missing-tool")
 	installer := strings.Join([]string{
@@ -106,13 +115,43 @@ func (depsCLIProject) Dependencies() []project.Dependency {
 		"EOF",
 		"chmod +x " + shellQuote(bin),
 	}, "\n")
-	return []project.Dependency{
+	return []project.RequiredCLI{
 		{Name: "shell", Command: "sh"},
 		{
 			Name:    "missing-tool",
 			Command: "devflow-cli-missing-tool",
 			Install: map[string]project.InstallScript{runtime.GOOS: {Script: installer}},
 		},
+	}
+}
+
+func (targetDepsCLIProject) Name() string { return "cli-target-deps-project" }
+
+func (targetDepsCLIProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "cli-target-deps"}, nil
+}
+
+func (targetDepsCLIProject) Tasks() []project.Task {
+	return []project.Task{
+		{Name: "serve", Kind: project.KindOnce, RequiredCLIs: []string{"shell"}},
+		{Name: "deploy", Kind: project.KindOnce, RequiredCLIs: []string{"deploy-tool"}},
+	}
+}
+
+func (targetDepsCLIProject) Targets() []project.Target {
+	return []project.Target{
+		{Name: "up", RootTasks: []string{"serve"}},
+		{Name: "deploy", RootTasks: []string{"deploy"}, RequiredCLIs: []string{"cloud"}},
+	}
+}
+
+func (targetDepsCLIProject) RequiredCLIs() []project.RequiredCLI {
+	return []project.RequiredCLI{
+		{Name: "cloud", Command: "devflow-cli-definitely-missing-cloud-tool"},
+		{Name: "deploy-tool", Command: "devflow-cli-definitely-missing-deploy-tool"},
+		{Name: "shell", Command: "sh"},
 	}
 }
 
@@ -151,6 +190,7 @@ func init() {
 	project.Register(failCLIProject{})
 	project.Register(taskTargetCLIProject{})
 	project.Register(depsCLIProject{})
+	project.Register(targetDepsCLIProject{})
 	project.Register(graphExplainCLIProject{})
 }
 
@@ -488,9 +528,9 @@ func TestDepsStatusAndInstallJSON(t *testing.T) {
 	if err := json.Unmarshal(statusOut.Bytes(), &statusPayload); err != nil {
 		t.Fatal(err)
 	}
-	deps, ok := statusPayload["dependencies"].([]any)
-	if !ok || len(deps) != 2 {
-		t.Fatalf("unexpected deps payload: %+v", statusPayload)
+	requiredCLIs, ok := statusPayload["requiredCLIs"].([]any)
+	if !ok || len(requiredCLIs) != 2 {
+		t.Fatalf("unexpected required CLIs payload: %+v", statusPayload)
 	}
 
 	installOut := &bytes.Buffer{}
@@ -500,6 +540,96 @@ func TestDepsStatusAndInstallJSON(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("expected install marker to be written: %v", err)
+	}
+}
+
+func TestDepsInstallTargetInstallsOnlyMissingRequiredCLIs(t *testing.T) {
+	marker := filepath.Join(os.TempDir(), "devflow-cli-deps-installed.txt")
+	_ = os.Remove(marker)
+	bin := filepath.Join(os.TempDir(), "devflow-cli-missing-tool")
+	_ = os.Remove(bin)
+	t.Setenv("PATH", os.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	installOut := &bytes.Buffer{}
+	app := &App{Stdout: installOut, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"clis", "install", "--json", "--project", "cli-deps-project", "--target", "installable", "--worktree", t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Target    string   `json:"target"`
+		CLIScope  string   `json:"cliScope"`
+		Installed []string `json:"installed"`
+	}
+	if err := json.Unmarshal(installOut.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Target != "installable" || payload.CLIScope != "target" {
+		t.Fatalf("unexpected install scope payload: %+v", payload)
+	}
+	if len(payload.Installed) != 1 || payload.Installed[0] != "missing-tool" {
+		t.Fatalf("unexpected installed required CLIs: %+v", payload.Installed)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected install marker to be written: %v", err)
+	}
+}
+
+func TestDoctorTargetScopesDependencyChecks(t *testing.T) {
+	worktree := t.TempDir()
+
+	upOut := &bytes.Buffer{}
+	app := &App{Stdout: upOut, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"doctor", "--json", "--project", "cli-target-deps-project", "--target", "up", "--worktree", worktree}); err != nil {
+		t.Fatal(err)
+	}
+	var up api.DoctorResult
+	if err := json.Unmarshal(upOut.Bytes(), &up); err != nil {
+		t.Fatal(err)
+	}
+	if !up.ChecksPassed || up.Target != "up" || up.CLIScope != "target" {
+		t.Fatalf("unexpected up doctor result: %+v", up)
+	}
+	if strings.Contains(strings.Join(up.Warnings, ","), "deploy-tool") || strings.Contains(strings.Join(up.Warnings, ","), "cloud") {
+		t.Fatalf("target-scoped doctor reported unrelated dependencies: %+v", up.Warnings)
+	}
+
+	deployOut := &bytes.Buffer{}
+	app = &App{Stdout: deployOut, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"doctor", "--json", "--project", "cli-target-deps-project", "--target", "deploy", "--worktree", worktree}); err != nil {
+		t.Fatal(err)
+	}
+	var deploy api.DoctorResult
+	if err := json.Unmarshal(deployOut.Bytes(), &deploy); err != nil {
+		t.Fatal(err)
+	}
+	if deploy.ChecksPassed {
+		t.Fatalf("expected deploy doctor to fail: %+v", deploy)
+	}
+	warnings := strings.Join(deploy.Warnings, "\n")
+	if !strings.Contains(warnings, "cloud") || !strings.Contains(warnings, "deploy-tool") || strings.Contains(warnings, "shell") {
+		t.Fatalf("unexpected deploy warnings: %+v", deploy.Warnings)
+	}
+}
+
+func TestDepsStatusTargetScopesDependencyList(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"clis", "status", "--json", "--project", "cli-target-deps-project", "--target", "up", "--worktree", t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Target       string                      `json:"target"`
+		CLIScope     string                      `json:"cliScope"`
+		RequiredCLIs []project.RequiredCLIStatus `json:"requiredCLIs"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Target != "up" || payload.CLIScope != "target" {
+		t.Fatalf("unexpected target scope payload: %+v", payload)
+	}
+	if len(payload.RequiredCLIs) != 1 || payload.RequiredCLIs[0].Name != "shell" {
+		t.Fatalf("unexpected target required CLI list: %+v", payload.RequiredCLIs)
 	}
 }
 

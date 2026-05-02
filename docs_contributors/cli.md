@@ -15,7 +15,8 @@ Implemented commands:
 - `devflow logs <task>`
 - `devflow instances`
 - `devflow doctor`
-- `devflow deps`
+- `devflow clis`
+- `devflow deps` (compatibility alias for `devflow clis`)
 - `devflow tui`
 - `devflow version`
 - `devflow upgrade`
@@ -134,9 +135,11 @@ It is projectless, has no flags, has no JSON mode, and does not print contributo
 
 `stop` terminates persisted service PIDs for a selected task. With `--all`, it reconciles all known detached runtime process groups for the instance: supervisor, child `__internal_exec`, tracked service tasks, and PID-bearing status nodes. It then clears persisted supervisor/process refs and updates nonterminal node state to `stopped`.
 
-`deps status` reports adapter-defined command dependencies, whether they are already installed, and whether a platform install script is available.
+`doctor` supports `--target <target>`. Without a target it checks the full adapter required CLI catalog. With a target it resolves the target or task name and checks only required CLIs attached through `RequiredCLIs` to that target and its task closure. JSON includes `project`, `target`, and `cliScope`.
 
-`deps install` runs adapter-defined install scripts only for missing dependencies and then re-checks that each installed command is now available on `PATH`.
+`clis status` reports adapter-defined required CLIs, whether they are already installed, and whether a platform install script is available. `clis status --target <target>` uses the same CLI scope as target-scoped doctor. JSON includes `requiredCLIs`; the older `dependencies` field is still emitted for compatibility.
+
+`clis install` runs adapter-defined install scripts only for missing required CLIs and then re-checks that each installed command is now available on `PATH`. `clis install --target <target>` installs only CLIs needed for that target closure. `deps status/install` remains available as a compatibility alias.
 
 `status` now reports instance metadata in both text and JSON forms, including:
 - worktree

@@ -28,7 +28,7 @@ Devflow uses three testing layers:
 - Go-first release command coverage for `version` and `upgrade`, with `upgrade` tested through a fake `go` executable on `PATH`
 - installed/source bootstrap coverage for generated local modules, source `replace` directives, project-file rebuilds, stable binary reuse, and concurrent localbuild serialization
 - global cache coverage for the single OS user cache root and project cache namespaces
-- dependency detection and platform-script install coverage in `pkg/project` and `internal/cli`
+- required CLI detection, target-scoped required CLI selection, and platform-script install coverage in `pkg/project` and `internal/cli`
 - engine-level interactive prompt event plus answer-file integration coverage
 - sequential engine execution with cache hits
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work

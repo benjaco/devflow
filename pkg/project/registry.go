@@ -144,6 +144,17 @@ func (p syntheticTargetProject) Tasks() []Task { return p.base.Tasks() }
 func (p syntheticTargetProject) ConfigureInstance(ctx context.Context, worktree string) (InstanceConfig, error) {
 	return p.base.ConfigureInstance(ctx, worktree)
 }
+func (p syntheticTargetProject) RequiredCLIs() []RequiredCLI {
+	provider, ok := p.base.(RequiredCLIProvider)
+	if ok {
+		return provider.RequiredCLIs()
+	}
+	legacy, ok := p.base.(DependencyProvider)
+	if !ok {
+		return nil
+	}
+	return legacy.Dependencies()
+}
 func (p syntheticTargetProject) Targets() []Target {
 	targets := append([]Target(nil), p.base.Targets()...)
 	targets = append(targets, p.target)

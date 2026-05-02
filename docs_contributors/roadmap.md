@@ -13,7 +13,7 @@
 - polling watch mode with selective reruns
 - detached supervisor flow
 - first usable TUI with task/log panes and selected-task actions
-- project-scoped dependency checks and installers
+- project-scoped required CLI checks and installers
 - interactive prompt plumbing for prompt-driven subprocesses
 - Docker-backed Postgres runtime helpers and snapshot planning
 - project-local `devflow.project.go` bootstrap flow
@@ -25,6 +25,7 @@
 - reliable `stop --all` cleanup for detached supervisors, child executors, service process groups, and stale status PIDs
 - explicit service lifecycle contract for attached run, CI readiness probes, detached run/watch, flush, status, and stop
 - graph affected explanations plus aligned ignore semantics for watch matching and fingerprinting
+- target-scoped required CLI declarations plus `doctor --target <target> --json`
 - deterministic example adapters plus a real embedded-web-app adapter
 - GitHub Actions build/test workflow
 
@@ -32,17 +33,13 @@
 
 The BikeCoach real-project integration moved the next focus from generic operator expansion to adoption hardening. The next work should make the installed CLI safe and understandable in a real repository where humans and agents call commands quickly, stale detached state can exist, and the current workflow may still be script-based.
 
-1. Target-scoped dependencies and doctor
-   - Allow dependency declarations to attach to tasks or targets, not only the whole project.
-   - Add `doctor --target <target> --json` so developers and agents see only dependency problems relevant to the selected target closure.
-
-2. User adoption docs and examples
+1. User adoption docs and examples
    - Add a full "converge from scripts to Devflow" user guide based on the BikeCoach integration pattern.
    - Add a complete managed local Postgres example that starts a container, waits for readiness, creates/prepares the database, runs migrations, preserves or snapshots state, and stops cleanly.
    - Add a fixed-port service example for apps that need stable callback URLs such as OAuth redirects.
    - Document secret handling: what may be persisted under `.devflow/state`, what may appear in logs/status, and how adapters should avoid or redact sensitive values.
 
-3. Broader operator surface
+2. Broader operator surface
    - Add fine-grained detached service restart/control beyond whole-target relaunch once process cleanup and lifecycle contracts are solid.
    - Expand TUI operator actions with confirmations and rerun/stop/restart controls after the CLI behavior is stable.
    - Add stronger JSON contract tests for status, instances, events, and flush.
@@ -54,7 +51,8 @@ The BikeCoach real-project integration moved the next focus from generic operato
 - Completed from BikeCoach feedback: reliable `stop --all` cleanup for detached supervisors, child executors, tracked services, and stale status process groups.
 - Completed from BikeCoach feedback: service lifecycle contract documentation plus CI-mode service readiness probes that stop services before returning.
 - Completed from BikeCoach feedback: watch/debug ergonomics via `graph affected --explain` and aligned root-relative/directory-relative ignore matching between watch and fingerprinting.
-- Accepted as immediate roadmap input: target-scoped dependencies, managed Postgres docs/examples, fixed-port examples, and secret-handling guidance.
+- Completed from BikeCoach feedback: target-scoped required CLI declarations plus `doctor --target <target> --json`.
+- Accepted as immediate roadmap input: managed Postgres docs/examples, fixed-port examples, and secret-handling guidance.
 - Reframed: "service target `run` returns after readiness" should not silently change attached `run` semantics. The current automation path is `watch --detach` plus `flush`; CI mode can probe readiness but stops services before returning.
 - Reframed: a fixed-port HTTP readiness helper should probably be part of broader env-aware readiness patterns rather than a BikeCoach-specific helper.
 - Deferred behind reliability work: fine-grained service restart/control, TUI restart/stop actions, MCP wrapper, and richer installer channels.

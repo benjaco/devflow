@@ -63,7 +63,7 @@ func (a *App) Run(args []string) error {
 		return a.instancesCmd(args[1:])
 	case "doctor":
 		return a.doctorCmd(args[1:])
-	case "deps":
+	case "deps", "clis", "required-clis":
 		return a.depsCmd(args[1:])
 	case "graph":
 		return a.graphCmd(args[1:])
@@ -1131,6 +1131,7 @@ func (a *App) doctorCmd(args []string) error {
 	jsonOut := fs.Bool("json", false, "")
 	worktree := fs.String("worktree", "", "")
 	projectName := fs.String("project", defaultProject(), "")
+	target := fs.String("target", "", "")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1146,13 +1147,27 @@ func (a *App) doctorCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	eng, err := engine.New(p, root)
+	cliScope := "project"
+	resolvedTarget := ""
+	requiredCLIs := project.RequiredCLIsFor(p)
+	executionProject := p
+	if strings.TrimSpace(*target) != "" {
+		cliScope = "target"
+		executionProject, resolvedTarget, requiredCLIs, err = requiredCLIsForTargetScope(p, *target)
+		if err != nil {
+			return err
+		}
+	}
+	eng, err := engine.New(executionProject, root)
 	if err != nil {
 		return err
 	}
 	result := api.DoctorResult{
 		Worktree:     root,
 		InstanceID:   id,
+		Project:      p.Name(),
+		Target:       resolvedTarget,
+		CLIScope:     cliScope,
 		ChecksPassed: true,
 		Checks: []string{
 			"graph: ok",
@@ -1162,9 +1177,11 @@ func (a *App) doctorCmd(args []string) error {
 			"tasks: " + fmt.Sprintf("%d", len(eng.Graph().Tasks)),
 		},
 	}
-	deps := project.DependenciesFor(p)
-	if len(deps) > 0 {
-		statuses := project.CheckDependencies(deps)
+	if resolvedTarget != "" {
+		result.Checks = append(result.Checks, "target: "+resolvedTarget)
+	}
+	if len(requiredCLIs) > 0 {
+		statuses := project.CheckRequiredCLIs(requiredCLIs)
 		missing := make([]string, 0)
 		for _, status := range statuses {
 			if status.Installed {
@@ -1178,10 +1195,12 @@ func (a *App) doctorCmd(args []string) error {
 			}
 		}
 		if len(missing) == 0 {
-			result.Checks = append(result.Checks, fmt.Sprintf("dependencies: ok (%d)", len(statuses)))
+			result.Checks = append(result.Checks, fmt.Sprintf("required_clis: ok (%d)", len(statuses)))
 		} else {
-			result.Warnings = append(result.Warnings, "missing dependencies: "+strings.Join(missing, ", "))
+			result.Warnings = append(result.Warnings, "missing required CLIs: "+strings.Join(missing, ", "))
 		}
+	} else if cliScope == "target" {
+		result.Checks = append(result.Checks, "required_clis: ok (0)")
 	}
 	if *jsonOut {
 		return writeJSON(a.Stdout, result)
@@ -1189,12 +1208,15 @@ func (a *App) doctorCmd(args []string) error {
 	for _, check := range result.Checks {
 		_, _ = fmt.Fprintln(a.Stdout, check)
 	}
+	for _, warning := range result.Warnings {
+		_, _ = fmt.Fprintln(a.Stdout, "warning: "+warning)
+	}
 	return nil
 }
 
 func (a *App) depsCmd(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: devflow deps <status|install>")
+		return fmt.Errorf("usage: devflow clis <status|install>")
 	}
 	switch args[0] {
 	case "status":
@@ -1202,16 +1224,17 @@ func (a *App) depsCmd(args []string) error {
 	case "install":
 		return a.depsInstallCmd(args[1:])
 	default:
-		return fmt.Errorf("usage: devflow deps <status|install>")
+		return fmt.Errorf("usage: devflow clis <status|install>")
 	}
 }
 
 func (a *App) depsStatusCmd(args []string) error {
-	fs := flag.NewFlagSet("deps status", flag.ContinueOnError)
+	fs := flag.NewFlagSet("clis status", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
 	projectName := fs.String("project", defaultProject(), "")
 	worktree := fs.String("worktree", "", "")
+	target := fs.String("target", "", "")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1223,11 +1246,22 @@ func (a *App) depsStatusCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	statuses := project.CheckDependencies(project.DependenciesFor(p))
+	resolvedTarget, requiredCLIs, err := requiredCLIsForOptionalTargetScope(p, *target)
+	if err != nil {
+		return err
+	}
+	statuses := project.CheckRequiredCLIs(requiredCLIs)
 	payload := map[string]any{
 		"worktree":     root,
 		"project":      p.Name(),
 		"dependencies": statuses,
+		"requiredCLIs": statuses,
+	}
+	if resolvedTarget != "" {
+		payload["target"] = resolvedTarget
+		payload["cliScope"] = "target"
+	} else {
+		payload["cliScope"] = "project"
 	}
 	if *jsonOut {
 		return writeJSON(a.Stdout, payload)
@@ -1247,11 +1281,12 @@ func (a *App) depsStatusCmd(args []string) error {
 }
 
 func (a *App) depsInstallCmd(args []string) error {
-	fs := flag.NewFlagSet("deps install", flag.ContinueOnError)
+	fs := flag.NewFlagSet("clis install", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
 	projectName := fs.String("project", defaultProject(), "")
 	worktree := fs.String("worktree", "", "")
+	target := fs.String("target", "", "")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1263,7 +1298,11 @@ func (a *App) depsInstallCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	result, installErr := project.InstallMissingDependencies(context.Background(), root, project.DependenciesFor(p), func(stream, line string) {
+	resolvedTarget, requiredCLIs, err := requiredCLIsForOptionalTargetScope(p, *target)
+	if err != nil {
+		return err
+	}
+	result, installErr := project.InstallMissingRequiredCLIs(context.Background(), root, requiredCLIs, func(stream, line string) {
 		if *jsonOut {
 			return
 		}
@@ -1275,6 +1314,11 @@ func (a *App) depsInstallCmd(args []string) error {
 		"installed":      result.Installed,
 		"alreadyPresent": result.AlreadyPresent,
 		"missingInstall": result.MissingInstall,
+		"cliScope":       "project",
+	}
+	if resolvedTarget != "" {
+		payload["target"] = resolvedTarget
+		payload["cliScope"] = "target"
 	}
 	if *jsonOut {
 		if err := writeJSON(a.Stdout, payload); err != nil {
@@ -1292,6 +1336,27 @@ func (a *App) depsInstallCmd(args []string) error {
 		_, _ = fmt.Fprintf(a.Stdout, "missing install scripts: %s\n", strings.Join(result.MissingInstall, ", "))
 	}
 	return installErr
+}
+
+func requiredCLIsForOptionalTargetScope(p project.Project, target string) (string, []project.RequiredCLI, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", project.RequiredCLIsFor(p), nil
+	}
+	_, resolvedTarget, requiredCLIs, err := requiredCLIsForTargetScope(p, target)
+	return resolvedTarget, requiredCLIs, err
+}
+
+func requiredCLIsForTargetScope(p project.Project, target string) (project.Project, string, []project.RequiredCLI, error) {
+	executionProject, resolvedTarget, err := project.ResolveExecutionProject(p, strings.TrimSpace(target))
+	if err != nil {
+		return nil, "", nil, err
+	}
+	requiredCLIs, err := project.RequiredCLIsForTarget(executionProject, resolvedTarget)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return executionProject, resolvedTarget, requiredCLIs, nil
 }
 
 func (a *App) graphCmd(args []string) error {

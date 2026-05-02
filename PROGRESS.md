@@ -5,8 +5,8 @@ Last updated: 2026-05-02
 ## Current Status
 
 - Phase: post-bootstrap core implementation
-- State: Go-first release/install flow, installed project bootstrap, `version`/`upgrade`, a single global task cache, split docs, `devflow docs`, per-worktree localbuild locking, reliable detached cleanup, explicit service lifecycle contracts, and graph affected explanations are implemented; BikeCoach real-project integration feedback is integrated into the roadmap
-- Confidence: core parallel/watch/operator/readiness/bootstrap paths are working; the BikeCoach integration exposed remaining adoption-hardening gaps around dependency scoping, database/fixed-port guidance, and broader user adoption examples
+- State: Go-first release/install flow, installed project bootstrap, `version`/`upgrade`, a single global task cache, split docs, `devflow docs`, per-worktree localbuild locking, reliable detached cleanup, explicit service lifecycle contracts, graph affected explanations, and target-scoped required CLI checks are implemented; BikeCoach real-project integration feedback is integrated into the roadmap
+- Confidence: core parallel/watch/operator/readiness/bootstrap paths are working; the BikeCoach integration exposed remaining adoption-hardening gaps around database/fixed-port guidance and broader user adoption examples
 
 ## Completed
 
@@ -162,21 +162,21 @@ Last updated: 2026-05-02
 - Added a real prompt CLI fixture at `internal/testutil/promptcli` plus test coverage for:
   - process-level prompt detection and answer forwarding
   - engine-level prompt events and instance answer-file integration
-- Project-scoped dependency installation implemented:
-  - adapters can define command dependencies plus platform-specific install scripts
-  - `devflow deps status` reports installed vs missing vs installable dependencies
-  - `devflow deps install` installs only missing commands and re-checks that they are now on `PATH`
-  - `doctor` now reports missing adapter dependencies
-- The embedded-web-app adapter now declares real dependency requirements for:
+- Project-scoped required CLI installation implemented:
+  - adapters can define required CLI commands plus platform-specific install scripts
+  - `devflow clis status` reports installed vs missing vs installable CLIs
+  - `devflow clis install` installs only missing commands and re-checks that they are now on `PATH`
+  - `doctor` now reports missing adapter required CLIs
+- The embedded-web-app adapter now declares real required CLI requirements for:
   - `go`
   - `npm`
   - `sqlc`
   - `docker`
-- Added dependency coverage for:
+- Added required CLI coverage for:
   - installed vs missing detection
   - platform-script installation of a fake command
   - install verification failure when the command is still missing
-  - CLI `deps status/install` JSON behavior
+  - CLI `clis status/install` JSON behavior plus `deps` compatibility behavior
 - Added a DB source-policy abstraction in `pkg/database`:
   - snapshot misses now recreate from a configured base source instead of implying a reset action
   - `PreparePrismaBase` now handles restore-or-recreate orchestration
@@ -342,7 +342,7 @@ Last updated: 2026-05-02
   - updated overview, adapter guide, roadmap, and agent memory with the documentation split
 - Added `devflow docs` as a projectless command that prints the bundled `docs_users` Markdown files only, with no JSON mode
 - Folded BikeCoach real-project integration feedback into the contributor roadmap and shared agent memory:
-  - reprioritized next work around localbuild concurrency, reliable detached cleanup, service lifecycle contracts, watch/debug ergonomics, target-scoped dependencies, and adoption docs/examples
+  - reprioritized next work around localbuild concurrency, reliable detached cleanup, service lifecycle contracts, watch/debug ergonomics, target-scoped required CLIs, and adoption docs/examples
   - recorded which feedback is accepted, reframed, or deferred
 - Implemented per-worktree localbuild locking:
   - stale checks that require rebuilding now acquire `<worktree>/.devflow/localbuild.lock`
@@ -363,6 +363,11 @@ Last updated: 2026-05-02
   - ignore patterns are slash-normalized, checked root-relative, and for directory inputs also checked relative to the input directory
   - added `devflow graph affected --files <paths> --explain --json` to report file, directory, ignored, and unmatched path explanations
   - documented the generated-output debugging workflow in user and contributor docs
+- Added target-scoped required CLI checks:
+  - tasks and targets can declare `RequiredCLIs` that select from the adapter's `RequiredCLIs()` catalog
+  - `devflow doctor --target <target> --json` checks only the selected target closure
+  - `devflow clis status/install --target <target>` use the same scoped selection
+  - target-scoped required CLI coverage was added in `pkg/project` and `internal/cli`
 
 ## In Progress
 
@@ -370,7 +375,6 @@ Last updated: 2026-05-02
 
 ## Next Steps
 
-- Add target-scoped dependency declarations and `doctor --target <target> --json`
 - Expand user docs/examples for script-to-Devflow convergence, managed local Postgres, fixed ports, and secret/redaction expectations
 - Add binary artifacts, npm/Homebrew/Scoop installers, or richer update channels later only if Go install stops being enough
 

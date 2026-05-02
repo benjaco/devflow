@@ -13,7 +13,7 @@ The project owns:
 - target names such as `up`, `test`, or `fullstack`
 - file inputs that trigger cache invalidation and watch reruns
 - service readiness checks
-- dependency requirements
+- required CLI/tool requirements
 - runtime env layering
 
 Devflow owns:
@@ -261,15 +261,35 @@ Recommended precedence:
 
 Use `project.LoadOptionalDotEnvInWorktree` and `project.MergeEnvMaps` for this instead of hand-rolling env parsing.
 
-## Dependencies
+## Required CLIs
 
-Expose required commands through `Dependencies()`:
+Expose required command-line tools through `RequiredCLIs()` and attach them to the tasks or targets that need them:
 
 ```go
-func (localProject) Dependencies() []project.Dependency {
-	return []project.Dependency{
+func (localProject) RequiredCLIs() []project.RequiredCLI {
+	return []project.RequiredCLI{
 		{Name: "go", Command: "go"},
-		{Name: "npm", Command: "npm"},
+		{
+			Name:    "npm",
+			Command: "npm",
+			Install: map[string]project.InstallScript{
+				"darwin": {Script: "brew install node"},
+				"linux":  {Script: "sudo apt-get update && sudo apt-get install -y nodejs npm"},
+			},
+		},
+	}
+}
+
+func (localProject) Tasks() []project.Task {
+	return []project.Task{
+		{Name: "frontend_build", Kind: project.KindOnce, RequiredCLIs: []string{"npm"}},
+		{Name: "server", Kind: project.KindService, RequiredCLIs: []string{"go"}},
+	}
+}
+
+func (localProject) Targets() []project.Target {
+	return []project.Target{
+		{Name: "up", RootTasks: []string{"server"}},
 	}
 }
 ```
@@ -277,11 +297,12 @@ func (localProject) Dependencies() []project.Dependency {
 Then users can run:
 
 ```bash
-devflow deps status --json
-devflow doctor --json
+devflow clis status --json
+devflow clis status --target up --json
+devflow doctor --target up --json
 ```
 
-Install scripts are supported for dependencies that can be installed safely and idempotently.
+`devflow clis install --target up` runs platform-specific install scripts only for missing required CLIs, then re-checks that each installed command is available on `PATH`.
 
 ## Daily Workflow
 
