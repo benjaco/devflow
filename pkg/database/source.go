@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -54,6 +55,36 @@ func (p CommandSourcePolicy) PrepareBase(ctx context.Context, db api.DBInstance,
 	spec.LogPath = opts.LogPath
 	spec.OnLine = opts.OnLine
 	spec.Env = mergeStringMaps(opts.Env, databaseEnv(db))
+	_, err := process.Run(ctx, spec)
+	return err
+}
+
+type PostgresDumpSourcePolicy struct {
+	PolicyName string
+	RemoteURL  string
+}
+
+func (p PostgresDumpSourcePolicy) Name() string {
+	if p.PolicyName != "" {
+		return p.PolicyName
+	}
+	return "postgres-dump"
+}
+
+func (p PostgresDumpSourcePolicy) PrepareBase(ctx context.Context, db api.DBInstance, opts PrepareOptions) error {
+	if p.RemoteURL == "" {
+		return fmt.Errorf("remote database URL is required")
+	}
+	spec := process.CommandSpec{
+		Name: "sh",
+		Args: []string{"-c", `pg_dump --no-owner --no-privileges "$DEVFLOW_REMOTE_DATABASE_URL" | psql "$DATABASE_URL"`},
+		Dir:  opts.Worktree,
+		Env: mergeStringMaps(opts.Env, mergeStringMaps(databaseEnv(db), map[string]string{
+			"DEVFLOW_REMOTE_DATABASE_URL": p.RemoteURL,
+		})),
+		LogPath: opts.LogPath,
+		OnLine:  opts.OnLine,
+	}
 	_, err := process.Run(ctx, spec)
 	return err
 }

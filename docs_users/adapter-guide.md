@@ -162,6 +162,31 @@ return project.InstanceConfig{
 }
 ```
 
+### Runtime Env, Tests, And Secrets
+
+`InstanceConfig.Env` becomes the runtime environment for tasks and is persisted under `.devflow/state`. That makes runtime recovery and detached supervision deterministic, but it also means adapters should treat this env as local state, not as a secret vault.
+
+Guidance:
+- keep `.devflow/` ignored by git
+- avoid placing long-lived production secrets in `InstanceConfig.Env`
+- prefer short-lived local credentials for managed local services
+- do not print full env maps in task logs
+- if a task runs unit tests, override runtime service variables that would change test behavior
+
+Example:
+
+```go
+return rt.RunCmdSpec(ctx, process.CommandSpec{
+    Name: "go",
+    Args: []string{"test", "./..."},
+    Env: project.MergeEnvMaps(rt.Env, map[string]string{
+        "PORT": "8080",
+    }),
+})
+```
+
+This is important when a service target leases a dynamic runtime `PORT`, but unit tests expect a fixed port or no app server port at all.
+
 Recommended precedence:
 - `.env`
 - adapter defaults
@@ -213,7 +238,114 @@ This is the right abstraction for:
 - clone-from-dev scripts today
 - local bootstrap/startup scripts later
 
+For Postgres databases that can be cloned through `pg_dump | psql`, use the built-in remote source policy:
+
+```go
+policy := database.PostgresDumpSourcePolicy{
+    PolicyName: "clone-dev",
+    RemoteURL:  os.Getenv("DEV_DATABASE_URL"),
+}
+```
+
 It is not a "reset DB" operator action. The goal is to reuse the best compatible local state or rebuild a new base automatically.
+
+## Managed Local Postgres Pattern
+
+For application targets, use host-visible readiness, not only in-container readiness. The app connects through the mapped host port, so a managed DB task should ensure the container, wait until Postgres is ready inside Docker and the host port accepts connections, then run migrations.
+
+Recommended shape:
+
+```go
+mgr := database.New()
+
+db := mgr.Desired(inst.ID, database.Config{
+    HostPort:     inst.Ports["postgres"],
+    Database:     "app_" + inst.ID,
+    User:         "devflow",
+    Password:     "devflow",
+    SnapshotRoot: filepath.Join(worktree, ".devflow", "db-snapshots"),
+})
+
+if err := mgr.EnsureRuntime(ctx, db); err != nil {
+    return err
+}
+if err := mgr.WaitReady(ctx, db, 30*time.Second); err != nil {
+    return err
+}
+```
+
+`EnsureRuntime` preserves the data volume, but recreates a stale container when its published host port does not match the current Devflow instance. Avoid unconditional container removal in normal startup paths; it can race Docker and should not be necessary for a preserved-volume workflow.
+
+For a Prisma project, the high-level path is:
+
+```go
+result, err := mgr.EnsurePrismaDevDatabase(ctx, database.PrismaDevDatabaseOptions{
+    Worktree:      worktree,
+    DB:            db,
+    SchemaPath:    "prisma/schema.prisma",
+    MigrationsDir: "prisma/migrations",
+    SourcePolicy:  policy,
+    Prepare: database.PrepareOptions{
+        Worktree: worktree,
+        Env:      env,
+    },
+})
+```
+
+This will:
+- inspect the Prisma schema and migration folder
+- restore the nearest compatible cached migration point
+- clone/rebuild a base database when no compatible snapshot exists
+- ensure the host-visible Postgres runtime is ready
+- run Prisma migrations through `npx prisma migrate deploy`
+- snapshot each migration prefix by default
+
+That prefix snapshotting matters during development. If you edit the latest migration, Devflow can restore the previous compatible prefix and apply only the changed tail instead of rebuilding from the remote/base source.
+
+Only override `Migrate` when you intentionally want an all-at-once custom Prisma command; that path snapshots the final state only. Use `MigrateEach` for custom per-prefix behavior.
+
+If `schema.prisma` changes but no new migration appears, `EnsurePrismaDevDatabase` returns an explicit error instead of pretending the database is current.
+
+For a plain SQL migration folder, use the generic migration workflow and an apply function:
+
+```go
+result, err := mgr.EnsureMigratedDatabase(ctx, database.ManagedMigrationOptions{
+    Worktree:      worktree,
+    DB:            db,
+    MigrationsDir: "db/migrations",
+    SourcePolicy:  policy,
+    ApplyEach:     database.PostgresMigrationFileApplier("migration.sql"),
+})
+```
+
+`ApplyEach` snapshots every migration prefix. If the latest migration changes, Devflow can restore the previous prefix snapshot and apply only the changed tail.
+
+When a Prisma schema has changed and a new migration must be authored explicitly, add a separate target/action that uses:
+
+```go
+err := database.GeneratePrismaMigration(ctx, database.PrismaMigrationGenerateOptions{
+    Worktree:   worktree,
+    SchemaPath: "prisma/schema.prisma",
+    Name:       "add-bike-ride-index",
+    CreateOnly: true,
+})
+```
+
+Keep migration generation as an explicit target/action, not part of normal `up` startup.
+
+Typical graph shape:
+- `postgres`: service task that calls `EnsureRuntime`, `WaitReady`, and supervises database lifetime/logs
+- `db_prepare`: finite task that restores/rebuilds the volume from snapshots or a base source
+- `db_migrate`: finite task that runs migrations against the host DSN after host readiness passes
+- `app`: service task depending on `db_migrate`
+
+When validating a finite target that has service dependencies, prefer:
+
+```bash
+devflow run test --ci --json
+```
+
+`run --ci` starts service dependencies as readiness probes and stops them before returning. Plain attached `run` keeps services alive and is better for interactive development.
 
 ## Interactive Task Policy
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,6 +121,19 @@ func (m *Manager) EnsureRuntime(ctx context.Context, db api.DBInstance) error {
 	if err != nil {
 		return err
 	}
+	if exists {
+		portOK, err := m.containerPublishesHostPort(ctx, db.ContainerName, db.Port)
+		if err != nil {
+			return err
+		}
+		if !portOK {
+			if _, err := m.runner.CombinedOutput(ctx, "docker", "rm", "-f", db.ContainerName); err != nil && !containerMissing(err) {
+				return err
+			}
+			running = false
+			exists = false
+		}
+	}
 	if running {
 		return nil
 	}
@@ -151,7 +165,7 @@ func (m *Manager) WaitReady(ctx context.Context, db api.DBInstance, timeout time
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		_, err := m.runner.CombinedOutput(ctx, "docker", "exec", db.ContainerName, "pg_isready", "-U", db.User, "-d", db.Name)
-		if err == nil {
+		if err == nil && (strings.TrimSpace(db.Host) == "" || hostPortReady(ctx, db.Host, db.Port, 200*time.Millisecond) == nil) {
 			return nil
 		}
 		select {
@@ -161,6 +175,24 @@ func (m *Manager) WaitReady(ctx context.Context, db api.DBInstance, timeout time
 		}
 	}
 	return fmt.Errorf("database %q did not become ready within %s", db.ContainerName, timeout)
+}
+
+func (m *Manager) WaitHostReady(ctx context.Context, db api.DBInstance, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := hostPortReady(ctx, db.Host, db.Port, 200*time.Millisecond); err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("database host port %s did not become ready within %s", net.JoinHostPort(dbHost(db), strconv.Itoa(db.Port)), timeout)
 }
 
 func (m *Manager) StopRuntime(ctx context.Context, db api.DBInstance) error {
@@ -326,6 +358,24 @@ func (m *Manager) inspectContainer(ctx context.Context, name string) (running bo
 	return strings.TrimSpace(string(out)) == "true", true, nil
 }
 
+func (m *Manager) containerPublishesHostPort(ctx context.Context, name string, hostPort int) (bool, error) {
+	format := fmt.Sprintf(`{{range (index .NetworkSettings.Ports "%d/tcp")}}{{.HostPort}}{{"\n"}}{{end}}`, DefaultContainerPort)
+	out, err := m.runner.CombinedOutput(ctx, "docker", "inspect", "-f", format, name)
+	if containerMissing(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	want := strconv.Itoa(hostPort)
+	for _, field := range strings.Fields(strings.TrimSpace(string(out))) {
+		if field == want {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m *Manager) ensureVolume(ctx context.Context, name string) error {
 	_, err := m.runner.CombinedOutput(ctx, "docker", "volume", "inspect", name)
 	if err == nil {
@@ -371,6 +421,28 @@ func commandErrContains(err error, fragment string) bool {
 		return strings.Contains(strings.ToLower(string(exitErr.Stderr)), fragment)
 	}
 	return strings.Contains(strings.ToLower(err.Error()), fragment)
+}
+
+func hostPortReady(ctx context.Context, host string, port int, timeout time.Duration) error {
+	if port == 0 {
+		return fmt.Errorf("host port is required")
+	}
+	if timeout <= 0 {
+		timeout = 200 * time.Millisecond
+	}
+	dialer := net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(dbHost(api.DBInstance{Host: host}), strconv.Itoa(port)))
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+func dbHost(db api.DBInstance) string {
+	if strings.TrimSpace(db.Host) != "" {
+		return db.Host
+	}
+	return "127.0.0.1"
 }
 
 type execRunner struct{}

@@ -142,7 +142,7 @@ func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
 }
 
 func (a *App) usage() error {
-	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|cache|status|logs|instances|doctor|deps|graph|tui|version|upgrade|docs>")
+	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|cache|status|logs|instances|doctor|clis|graph|tui|version|upgrade|docs>")
 	return flag.ErrHelp
 }
 
@@ -154,13 +154,13 @@ func (a *App) runCmd(args []string) error {
 	}
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
-	jsonOut := fs.Bool("json", false, "")
-	worktree := fs.String("worktree", "", "")
-	modeWatch := fs.Bool("watch", false, "")
-	ciMode := fs.Bool("ci", false, "")
-	detach := fs.Bool("detach", false, "")
-	maxParallel := fs.Int("max-parallel", 0, "")
-	projectName := fs.String("project", defaultProject(), "")
+	jsonOut := fs.Bool("json", false, "(--json) emit stable JSON output")
+	worktree := fs.String("worktree", "", "project worktree path; defaults to the current directory")
+	modeWatch := fs.Bool("watch", false, "(--watch) run in watch mode; for detached automation prefer devflow watch <target> --detach plus devflow flush")
+	ciMode := fs.Bool("ci", false, "(--ci) run as a finite CI/readiness probe; service tasks start, pass readiness, then stop before returning")
+	detach := fs.Bool("detach", false, "(--detach) launch a detached supervisor and return after it starts; this is not a readiness gate")
+	maxParallel := fs.Int("max-parallel", 0, "maximum parallel tasks; 0 uses the engine default")
+	projectName := fs.String("project", defaultProject(), "registered project adapter name")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

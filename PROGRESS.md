@@ -5,8 +5,8 @@ Last updated: 2026-05-02
 ## Current Status
 
 - Phase: post-bootstrap core implementation
-- State: Go-first release/install flow, installed project bootstrap, `version`/`upgrade`, a single global task cache, split docs, `devflow docs`, per-worktree localbuild locking, reliable detached cleanup, explicit service lifecycle contracts, graph affected explanations, and target-scoped required CLI checks are implemented; BikeCoach real-project integration feedback is integrated into the roadmap
-- Confidence: core parallel/watch/operator/readiness/bootstrap paths are working; the BikeCoach integration exposed remaining adoption-hardening gaps around database/fixed-port guidance and broader user adoption examples
+- State: Go-first release/install flow, installed project bootstrap, `version`/`upgrade`, a single global task cache, split docs, `devflow docs`, per-worktree localbuild locking, reliable detached cleanup, explicit service lifecycle contracts, graph affected explanations, target-scoped required CLI checks, managed Postgres host-port hardening, and higher-level managed database workflows are implemented; BikeCoach real-project integration feedback is integrated into the roadmap
+- Confidence: core parallel/watch/operator/readiness/bootstrap/database paths are working; the BikeCoach integration exposed remaining adoption-hardening gaps around full adoption examples and fixed-port guidance
 
 ## Completed
 
@@ -368,6 +368,25 @@ Last updated: 2026-05-02
   - `devflow doctor --target <target> --json` checks only the selected target closure
   - `devflow clis status/install --target <target>` use the same scoped selection
   - target-scoped required CLI coverage was added in `pkg/project` and `internal/cli`
+- Hardened managed Postgres runtime behavior from BikeCoach feedback:
+  - `EnsureRuntime` now recreates stale containers whose published host port does not match the current instance while preserving the volume
+  - `WaitReady` now includes host-port readiness when the DB instance has a host, and `WaitHostReady` is available as an explicit host-port helper
+  - `run --help` now describes `--ci`, `--detach`, `--watch`, and related flags
+  - user/contributor docs now cover finite service-dependent targets with `run --ci`, managed Postgres host readiness, runtime env persistence, test `PORT` overrides, and secret-handling expectations
+- Added higher-level managed database workflows:
+  - generic migration folder inspection, nearest-prefix restore planning, and migration snapshot metadata
+  - `EnsureMigratedDatabase` for restoring/rebuilding, applying migrations, and snapshotting the final state
+  - `ApplyEach` plus `PostgresMigrationFileApplier` for caching every migration prefix
+  - `PostgresDumpSourcePolicy` for cloning a remote development Postgres database into the local runtime
+  - `EnsurePrismaDevDatabase` for Prisma schema/migration folders using prefix-limited `prisma migrate deploy` runs
+  - Prisma schema-without-migration drift now returns an explicit migration-authoring error
+  - `GeneratePrismaMigration` for explicit Prisma migration authoring targets
+- Deepened managed database tests for common adapter cases:
+  - exact snapshots skip migration work and final resnapshotting
+  - changed latest generic/Prisma migrations restore the previous prefix and apply only the tail
+  - incompatible base fingerprints miss the old snapshot and rebuild from the source policy
+  - stopped containers with the expected host port are restarted instead of recreated
+  - Prisma migration generation runs the expected default command
 
 ## In Progress
 
@@ -375,7 +394,7 @@ Last updated: 2026-05-02
 
 ## Next Steps
 
-- Expand user docs/examples for script-to-Devflow convergence, managed local Postgres, fixed ports, and secret/redaction expectations
+- Expand user docs/examples for script-to-Devflow convergence, a complete managed database example, and fixed-port service guidance
 - Add binary artifacts, npm/Homebrew/Scoop installers, or richer update channels later only if Go install stops being enough
 
 ## Deferred / Known Gaps

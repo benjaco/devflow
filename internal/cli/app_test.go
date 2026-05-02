@@ -244,6 +244,21 @@ func TestGraphAffectedExplainJSON(t *testing.T) {
 	}
 }
 
+func TestRunHelpDescribesOperationalFlags(t *testing.T) {
+	stderr := &bytes.Buffer{}
+	app := &App{Stdout: &bytes.Buffer{}, Stderr: stderr}
+	err := app.Run([]string{"run", "--help"})
+	if err == nil {
+		t.Fatal("expected help error")
+	}
+	help := stderr.String()
+	for _, want := range []string{"--ci", "finite CI/readiness probe", "--detach", "not a readiness gate", "--watch"} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("help output missing %q:\n%s", want, help)
+		}
+	}
+}
+
 func TestVersionJSON(t *testing.T) {
 	stdout := &bytes.Buffer{}
 	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}

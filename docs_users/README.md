@@ -201,6 +201,8 @@ Use the lifecycle command that matches the job:
 - `devflow flush up --json` is the readiness gate for detached watch mode. It waits for file-change work to settle and checks in-chain services.
 - `devflow stop --all --json` cleans up the detached supervisor, child executor, tracked services, and stale process records for the worktree.
 
+For finite check/test targets that depend on services such as Postgres or a local app, generally use `devflow run <target> --ci --json` so Devflow starts the services as readiness probes and stops them before returning.
+
 For AI-assisted development, prefer `watch --detach` plus `flush` over an attached service `run`. Attached runs are useful for a human terminal, but they are not a clean "start and return when ready" automation interface.
 
 ## Watch Mode
@@ -260,6 +262,8 @@ Recommended precedence:
 3. Devflow-managed runtime values such as ports and DB URLs
 
 Use `project.LoadOptionalDotEnvInWorktree` and `project.MergeEnvMaps` for this instead of hand-rolling env parsing.
+
+Runtime env is persisted under `.devflow/state` for detached runs, status, and relaunches. Keep `.devflow/` ignored, avoid storing long-lived production secrets in runtime env, and override service-specific values such as `PORT` for test commands when needed.
 
 ## Required CLIs
 

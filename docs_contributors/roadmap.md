@@ -35,9 +35,8 @@ The BikeCoach real-project integration moved the next focus from generic operato
 
 1. User adoption docs and examples
    - Add a full "converge from scripts to Devflow" user guide based on the BikeCoach integration pattern.
-   - Add a complete managed local Postgres example that starts a container, waits for readiness, creates/prepares the database, runs migrations, preserves or snapshots state, and stops cleanly.
+   - Expand the managed database APIs into a complete example that starts a container, waits for host readiness, creates/prepares the database, runs migrations, preserves prefix snapshots, and stops cleanly.
    - Add a fixed-port service example for apps that need stable callback URLs such as OAuth redirects.
-   - Document secret handling: what may be persisted under `.devflow/state`, what may appear in logs/status, and how adapters should avoid or redact sensitive values.
 
 2. Broader operator surface
    - Add fine-grained detached service restart/control beyond whole-target relaunch once process cleanup and lifecycle contracts are solid.
@@ -52,7 +51,8 @@ The BikeCoach real-project integration moved the next focus from generic operato
 - Completed from BikeCoach feedback: service lifecycle contract documentation plus CI-mode service readiness probes that stop services before returning.
 - Completed from BikeCoach feedback: watch/debug ergonomics via `graph affected --explain` and aligned root-relative/directory-relative ignore matching between watch and fingerprinting.
 - Completed from BikeCoach feedback: target-scoped required CLI declarations plus `doctor --target <target> --json`.
-- Accepted as immediate roadmap input: managed Postgres docs/examples, fixed-port examples, and secret-handling guidance.
+- Completed from BikeCoach feedback: managed Postgres host-port readiness, stale published-port reconciliation, `run --help` flag descriptions, finite service-dependent target guidance, and secret/runtime-env documentation.
+- Accepted as immediate roadmap input: complete script-convergence docs, a full managed Postgres example, and fixed-port examples.
 - Reframed: "service target `run` returns after readiness" should not silently change attached `run` semantics. The current automation path is `watch --detach` plus `flush`; CI mode can probe readiness but stops services before returning.
 - Reframed: a fixed-port HTTP readiness helper should probably be part of broader env-aware readiness patterns rather than a BikeCoach-specific helper.
 - Deferred behind reliability work: fine-grained service restart/control, TUI restart/stop actions, MCP wrapper, and richer installer channels.

@@ -66,13 +66,19 @@ Runtime adapters are project-local:
 - normal commands exec into that worktree-local binary
 - there is no built-in adapter fallback when `devflow.project.go` is missing
 
-The first real BikeCoach integration showed that adoption hardening is now more important than expanding operator features in the abstract. After localbuild locking, reliable detached cleanup, explicit service lifecycle contracts, graph affected explanations, and target-scoped required CLI checks, the highest-value issues are complete user examples for script convergence, fixed ports, managed Postgres, and secret handling.
+The first real BikeCoach integration showed that adoption hardening is now more important than expanding operator features in the abstract. After localbuild locking, reliable detached cleanup, explicit service lifecycle contracts, graph affected explanations, target-scoped required CLI checks, and managed Postgres host-port hardening, the highest-value issues are complete user examples for script convergence, fixed ports, and managed Postgres.
 
 Service lifecycle contract: attached `run` is foreground and blocks while services live; `run --ci` may start services as readiness probes but stops them before returning; `run --detach` only proves supervisor launch; `watch --detach` plus `flush` is the readiness-gated background workflow for humans and agents.
 
 Watch/input debugging contract: `Inputs.Ignore` is shared by fingerprinting and watch matching. Patterns are slash-normalized, checked root-relative, and for directory inputs also checked relative to the input dir. `devflow graph affected --files <path> --explain --json` is the first tool to use when generated files cause surprising watch cascades.
 
 Required CLI contract: `RequiredCLIs()` is the project catalog. `RequiredCLIs` on tasks and targets selects the subset needed for a target closure. `devflow doctor --target <target> --json` and `devflow clis status/install --target <target>` must not report unrelated catalog entries. The older `Dependencies()` provider remains only as a compatibility path.
+
+Managed Postgres contract: app code connects through the host-mapped port, so database readiness must include host-port readiness, not only in-container `pg_isready`. `EnsureRuntime` should preserve volumes but recreate stale containers whose published port no longer matches the current instance. Migration snapshots must be prefix-safe: restore only exact/prefix-compatible snapshots, and use `ApplyEach` or the default Prisma workflow when a workflow needs cached intermediate migration points so editing the latest migration can restore the previous prefix.
+
+Prisma workflow contract: normal DB preparation applies migrations with `prisma migrate deploy` and snapshots prefixes; migration authoring is separate. If `schema.prisma` changes without a new migration, the default Prisma workflow should fail with an explicit "generate a migration" error instead of masking drift during `up`.
+
+Runtime env and secrets: instance env is persisted under `.devflow/state`. Adapters should avoid storing long-lived production secrets there, avoid logging whole env maps, and override runtime values such as `PORT` for unit-test tasks when those tests should not inherit service runtime ports.
 
 State is split deliberately:
 - per-worktree logs and instance snapshots live under the worktree `.devflow/`
@@ -114,7 +120,7 @@ DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run Docker -v
 
 The latest concrete next steps are maintained in `PROGRESS.md`. As of this memory update, likely next work includes:
 
-- user docs/examples for script-to-Devflow convergence, managed local Postgres, fixed ports, and secret/redaction expectations
+- user docs/examples for script-to-Devflow convergence, a complete managed local Postgres example, and fixed ports
 
 ## Deliberate Deferrals
 

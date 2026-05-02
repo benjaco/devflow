@@ -3,10 +3,12 @@ package database
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/benjaco/devflow/pkg/api"
 )
@@ -61,6 +63,126 @@ func TestEnsureRuntimeCreatesVolumeAndContainer(t *testing.T) {
 	}
 	if !runner.sawPrefix("docker run -d --name devflow-pg-abc") {
 		t.Fatal("expected docker run for container start")
+	}
+}
+
+func TestEnsureRuntimeReusesRunningContainerWithExpectedHostPort(t *testing.T) {
+	runner := &fakeRunner{
+		responses: map[string]response{
+			key("docker", "inspect", "-f", "{{.State.Running}}", "devflow-pg-abc"): {out: []byte("true\n")},
+			portInspectKey("devflow-pg-abc"):                                       {out: []byte("55432\n")},
+		},
+	}
+	mgr := NewWithRunner(runner)
+	db := api.DBInstance{
+		Name:          "app_wt_abc",
+		Port:          55432,
+		User:          "devflow",
+		Password:      "secret",
+		Image:         "postgres:16.3",
+		ContainerName: "devflow-pg-abc",
+		VolumeName:    "devflow-pgdata-abc",
+	}
+	if err := mgr.EnsureRuntime(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if runner.sawPrefix("docker run -d --name devflow-pg-abc") {
+		t.Fatal("expected existing container to be reused")
+	}
+}
+
+func TestEnsureRuntimeStartsStoppedContainerWithExpectedHostPort(t *testing.T) {
+	runner := &fakeRunner{
+		responses: map[string]response{
+			key("docker", "inspect", "-f", "{{.State.Running}}", "devflow-pg-abc"): {out: []byte("false\n")},
+			portInspectKey("devflow-pg-abc"):                                       {out: []byte("55432\n")},
+			key("docker", "volume", "inspect", "devflow-pgdata-abc"):               {},
+			key("docker", "start", "devflow-pg-abc"):                               {},
+		},
+	}
+	mgr := NewWithRunner(runner)
+	db := api.DBInstance{
+		Name:          "app_wt_abc",
+		Port:          55432,
+		User:          "devflow",
+		Password:      "secret",
+		Image:         "postgres:16.3",
+		ContainerName: "devflow-pg-abc",
+		VolumeName:    "devflow-pgdata-abc",
+	}
+	if err := mgr.EnsureRuntime(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.sawPrefix("docker start devflow-pg-abc") {
+		t.Fatal("expected stopped container to be started")
+	}
+	if runner.sawPrefix("docker run -d --name devflow-pg-abc") {
+		t.Fatal("did not expect replacement container when published port matches")
+	}
+}
+
+func TestEnsureRuntimeRecreatesContainerWithWrongHostPort(t *testing.T) {
+	runner := &fakeRunner{
+		responses: map[string]response{
+			key("docker", "inspect", "-f", "{{.State.Running}}", "devflow-pg-abc"): {out: []byte("true\n")},
+			portInspectKey("devflow-pg-abc"):                                       {out: []byte("55433\n")},
+			key("docker", "rm", "-f", "devflow-pg-abc"):                            {},
+			key("docker", "volume", "inspect", "devflow-pgdata-abc"):               {},
+			key("docker", "run", "-d", "--name", "devflow-pg-abc", "--label", "devflow.managed=true", "--label", "devflow.database=true", "-p", "55432:5432", "-e", "POSTGRES_USER=devflow", "-e", "POSTGRES_PASSWORD=secret", "-e", "POSTGRES_DB=app_wt_abc", "-v", "devflow-pgdata-abc:/var/lib/postgresql/data", "postgres:16.3"): {},
+		},
+	}
+	mgr := NewWithRunner(runner)
+	db := api.DBInstance{
+		Name:          "app_wt_abc",
+		Port:          55432,
+		User:          "devflow",
+		Password:      "secret",
+		Image:         "postgres:16.3",
+		ContainerName: "devflow-pg-abc",
+		VolumeName:    "devflow-pgdata-abc",
+	}
+	if err := mgr.EnsureRuntime(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.sawPrefix("docker rm -f devflow-pg-abc") {
+		t.Fatal("expected stale container to be removed")
+	}
+	if !runner.sawPrefix("docker run -d --name devflow-pg-abc") {
+		t.Fatal("expected replacement container to be started")
+	}
+}
+
+func TestWaitReadyAlsoWaitsForHostPortWhenHostSet(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	runner := &fakeRunner{
+		responses: map[string]response{
+			key("docker", "exec", "devflow-pg-abc", "pg_isready", "-U", "devflow", "-d", "app_wt_abc"): {},
+		},
+	}
+	mgr := NewWithRunner(runner)
+	db := api.DBInstance{
+		Name:          "app_wt_abc",
+		Host:          "127.0.0.1",
+		Port:          port,
+		User:          "devflow",
+		ContainerName: "devflow-pg-abc",
+	}
+	if err := mgr.WaitReady(context.Background(), db, time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWaitHostReadyReportsHostPortFailures(t *testing.T) {
+	mgr := NewWithRunner(&fakeRunner{})
+	db := api.DBInstance{Host: "127.0.0.1", Port: freeLocalPort(t)}
+	err := mgr.WaitHostReady(context.Background(), db, 10*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "database host port") {
+		t.Fatalf("expected host readiness failure, got %v", err)
 	}
 }
 
@@ -193,6 +315,20 @@ func (f *fakeRunner) sawPrefix(prefix string) bool {
 
 func key(name string, args ...string) string {
 	return strings.TrimSpace(name + " " + strings.Join(args, " "))
+}
+
+func portInspectKey(container string) string {
+	return key("docker", "inspect", "-f", `{{range (index .NetworkSettings.Ports "5432/tcp")}}{{.HostPort}}{{"\n"}}{{end}}`, container)
+}
+
+func freeLocalPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
 }
 
 func jsonWrite(path string, v any) error {

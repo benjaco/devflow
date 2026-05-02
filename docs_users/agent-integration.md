@@ -53,6 +53,8 @@ Target-scoped required CLI checks only include `RequiredCLIs` attached to the se
 
 Avoid using attached `devflow run <service-target>` as an agent readiness gate. Attached service runs keep the terminal occupied until interrupted or until a service exits. For background development, use `devflow watch <target> --detach --json` and then `devflow flush <target> --json`. `devflow run <target> --ci --json` is finite; service tasks are started through readiness and then stopped before the command returns.
 
+For finite test/check targets that depend on services, use `devflow run <target> --ci --json` rather than plain `run`. Plain attached `run` is for keeping services alive in an operator terminal.
+
 `AGENTS.md` documents repository rules for coding agents. Future milestones can add project skills under `agents/skills/`.
 
 For agents contributing to this repository, `docs_contributors/agent-memory.md` is shared long-term project memory. Read it before substantial work and update it when durable project context, mental models, or recurring constraints change.

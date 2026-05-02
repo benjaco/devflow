@@ -106,6 +106,8 @@ The important rule is precedence:
 
 That allows projects to keep normal local app settings in `.env` while still ensuring the launched frontend/backend processes point at the correct per-instance Postgres runtime and leased ports.
 
+Instance env is persisted under `.devflow/state` so detached supervisors, status, and relaunches can recover the same runtime configuration. Do not treat it as encrypted secret storage. Adapters should avoid storing long-lived production secrets there, avoid logging full env maps, and override runtime values such as `PORT` for unit-test tasks when those tests should not inherit the service runtime port.
+
 ## Watch Cascades
 
 Watch mode uses task inputs as the file-change interface:
@@ -264,8 +266,8 @@ The chosen direction is now full per-worktree separation for local databases:
 
 The new `pkg/database` package provides the runtime primitives for that model:
 - derive deterministic per-instance container and volume names
-- ensure the container is running
-- wait for readiness via `pg_isready`
+- ensure the container is running, recreating stale containers whose published host port no longer matches the selected instance
+- wait for readiness via `pg_isready` plus host-port readiness when the DB instance has a host
 - stop or destroy the runtime
 - snapshot and restore the Postgres data volume
 - inspect Prisma schema/migration state and choose the nearest cached migration-prefix snapshot
@@ -314,6 +316,28 @@ The bundled example adapter now exercises this shape structurally:
 - replay remaining migrations
 - snapshot the prepared state
 - start the final per-instance Postgres service for app runtime
+
+Higher-level workflow helpers now exist on top of those primitives:
+- `EnsureMigratedDatabase` for generic migration folders
+- `PostgresMigrationFileApplier` for applying one SQL file per migration and snapshotting every prefix
+- `EnsurePrismaDevDatabase` for Prisma schema + migration folders, applying pending migrations through prefix-limited `prisma migrate deploy` runs by default
+- `GeneratePrismaMigration` for explicit Prisma migration authoring
+- `PostgresDumpSourcePolicy` for cloning a remote development Postgres database into the local runtime
+
+The important cache invariant is prefix safety. A snapshot can only be reused when its migration list is a valid prefix of the current migration list and the base fingerprint still matches. `EnsureMigratedDatabase` with `ApplyEach` and the default `EnsurePrismaDevDatabase` path snapshot every prefix after applying it, so editing the latest migration can restore the previous prefix snapshot and apply only the changed tail.
+
+Prisma has one additional authoring guard: if `schema.prisma` changes but the migration list has not advanced beyond the restored prefix, the default workflow returns an error telling the adapter to generate a migration first. Migration generation must be modeled as an explicit target/action using `GeneratePrismaMigration`, not hidden inside normal `up`.
+
+Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`. `Migrate` is an all-at-once command and only snapshots the final state; `MigrateEach` preserves the per-prefix cache contract.
+
+Managed Postgres target pattern:
+- preserve the Docker volume unless an explicit restore/rebuild path owns the destruction
+- call `EnsureRuntime` before migration/app tasks
+- call `WaitReady` before connecting through the host DSN; it checks Docker readiness and the host-mapped port
+- run migrations against `db.URL`, not a container-local address
+- supervise the final DB container as a service and stop it through Devflow lifecycle commands
+
+Do not unconditionally remove the DB container in normal startup. Docker port mappings are immutable, so `EnsureRuntime` removes and recreates only stale containers with a wrong published port while preserving the volume.
 
 ## Cache Keys
 
@@ -458,6 +482,8 @@ Service tasks have different command semantics depending on the run mode:
 - `stop --all` is the cleanup surface for detached runs. It reconciles supervisor, child executor, tracked service, and stale status PIDs before clearing persisted runtime process state.
 
 The current automation recommendation is intentionally explicit: use detached watch plus `flush` for "background environment is ready" workflows. Do not reinterpret attached `run` as a start-and-return command without adding a separate CLI contract.
+
+Finite check/test targets with service dependencies should generally use `run --ci`, because plain attached `run` keeps service dependencies alive.
 
 ## Watch Mode
 

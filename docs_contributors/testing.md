@@ -22,9 +22,12 @@ Devflow uses three testing layers:
 - service readiness success and timeout behavior
 - built-binary helper build/run/start coverage and cache-restore coverage
 - database runtime command planning and snapshot-manifest coverage
+- database runtime host-port readiness and stale published-port reconciliation coverage
+- managed migration workflow coverage for exact snapshot reuse, nearest-prefix restore, incompatible base fingerprint misses, changed-latest tail replay, per-migration prefix snapshots, remote Postgres clone policy, Prisma prefix deploy snapshots, schema-without-migration errors, and Prisma generate helpers
 - Prisma schema/migration inspection and nearest-prefix snapshot planning coverage
 - dotenv parsing and merged runtime-env coverage with devflow-managed DB overrides
 - CLI JSON output shape, including command-level lifecycle coverage for `run`, `status`, `logs`, `instances`, `doctor`, and `stop`
+- CLI help coverage for important `run` flags such as `--ci`, `--detach`, and `--watch`
 - Go-first release command coverage for `version` and `upgrade`, with `upgrade` tested through a fake `go` executable on `PATH`
 - installed/source bootstrap coverage for generated local modules, source `replace` directives, project-file rebuilds, stable binary reuse, and concurrent localbuild serialization
 - global cache coverage for the single OS user cache root and project cache namespaces
