@@ -20,6 +20,7 @@ import (
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/cache"
 	"github.com/benjaco/devflow/pkg/database"
+	"github.com/benjaco/devflow/pkg/engine"
 	"github.com/benjaco/devflow/pkg/graph"
 	"github.com/benjaco/devflow/pkg/instance"
 	"github.com/benjaco/devflow/pkg/process"
@@ -61,14 +62,6 @@ type tuiPrismaConfig struct {
 	Available bool
 }
 
-type tuiDatabaseManager interface {
-	PreparePrismaMigrationAuthoringDatabase(context.Context, database.PrismaMigrationAuthoringOptions) (*database.PrismaMigrationAuthoringResult, error)
-}
-
-var newDatabaseManagerForTUI = func() tuiDatabaseManager {
-	return database.New()
-}
-
 type dashboard struct {
 	root              string
 	instanceID        string
@@ -95,6 +88,8 @@ const (
 	databasePanelTitle      = "database / prisma"
 	supervisorLogTitle      = "supervisor log"
 )
+
+var launchDetachedForTUI = launchDetached
 
 func Run(opts Options) error {
 	root, id, err := resolveInstance(opts.Worktree, opts.InstanceID)
@@ -1096,7 +1091,7 @@ func generatePrismaMigrationFromTUI(root, instanceID, name string, progressFns .
 	if name == "" {
 		return fmt.Errorf("migration name is required")
 	}
-	reportTUIProgress(progress, "loading Prisma migration configuration...")
+	reportTUIProgress(progress, "loading Prisma migration target...")
 	inst, err := instance.Load(root, instanceID)
 	if err != nil {
 		return err
@@ -1108,68 +1103,207 @@ func generatePrismaMigrationFromTUI(root, instanceID, name string, progressFns .
 	if !cfg.Available {
 		return fmt.Errorf("no Prisma schema detected or configured")
 	}
-	env := project.MergeEnvMaps(inst.Env, map[string]string{
-		"DEVFLOW_MIGRATION_NAME": name,
-	})
-	if env["DATABASE_URL"] == "" && inst.DB.URL != "" {
-		env["DATABASE_URL"] = inst.DB.URL
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	logPath := instance.LogPath(root, instanceID, "prisma_migration")
-	if err := preparePrismaMigrationAuthoringDatabaseForTUI(ctx, root, inst.DB, cfg, env, logPath, progress); err != nil {
+	if err := runPrismaMigrationTargetFromTUI(ctx, root, inst, name, progress); err != nil {
 		return err
 	}
-	reportTUIProgress(progress, "running Prisma migration generation for %q...", name)
-	return database.GeneratePrismaMigration(ctx, database.PrismaMigrationGenerateOptions{
-		Worktree:   root,
-		SchemaPath: cfg.SchemaPath,
-		Name:       name,
-		CreateOnly: cfg.CreateOnly,
-		Env:        env,
-		LogPath:    logPath,
-		Command:    cfg.Command,
-		OnLine: func(stream, line string) {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				return
-			}
-			reportTUIProgress(progress, "Prisma %s: %s", stream, compactTUIStatus(line, 120))
-		},
-	})
+	return nil
 }
 
-func preparePrismaMigrationAuthoringDatabaseForTUI(ctx context.Context, root string, db api.DBInstance, cfg tuiPrismaConfig, env map[string]string, logPath string, progress func(string)) error {
-	if db.ContainerName == "" && db.VolumeName == "" {
-		return nil
+func runPrismaMigrationTargetFromTUI(ctx context.Context, root string, inst *api.Instance, name string, progress func(string)) error {
+	projectName, p, err := resolveRelaunchProject(root, inst)
+	if err != nil {
+		return err
 	}
-	manager := newDatabaseManagerForTUI()
-	reportTUIProgress(progress, "reconciling Prisma migration database...")
-	result, err := manager.PreparePrismaMigrationAuthoringDatabase(ctx, database.PrismaMigrationAuthoringOptions{
-		Worktree:      root,
-		DB:            db,
-		SchemaPath:    cfg.SchemaPath,
-		MigrationsDir: cfg.MigrationsDir,
-		BasePaths:     cfg.BasePaths,
-		Prepare: database.PrepareOptions{
+	target, err := resolvePrismaMigrationTarget(p)
+	if err != nil {
+		return err
+	}
+	relaunchTarget := strings.TrimSpace(inst.LastRun.Target)
+	relaunchMode := inst.LastRun.Mode
+	relaunchMaxParallel := inst.LastRun.MaxParallel
+	shouldRelaunch := inst.LastRun.Detached && relaunchTarget != "" && relaunchTarget != target
+
+	if inst.Supervisor.PID > 0 {
+		reportTUIProgress(progress, "pausing detached target %q before migration...", relaunchTarget)
+		supervisorPID := inst.Supervisor.PID
+		if err := instance.StopSupervisor(inst); err != nil {
+			return fmt.Errorf("pause detached target: %w", err)
+		}
+		waitForPIDExit(supervisorPID, 5*time.Second)
+	}
+
+	reportTUIProgress(progress, "running project migration target %q...", target)
+	if err := runProjectTargetOnceWithEnv(ctx, root, inst.ID, p, target, map[string]string{
+		"DEVFLOW_MIGRATION_NAME": name,
+	}, progress); err != nil {
+		return err
+	}
+	if shouldRelaunch {
+		reportTUIProgress(progress, "relaunching detached target %q...", relaunchTarget)
+		latest, err := instance.Load(root, inst.ID)
+		if err != nil {
+			return err
+		}
+		if _, err := launchDetachedForTUI(root, latest, relaunchTarget, projectName, relaunchMode, relaunchMaxParallel); err != nil {
+			return fmt.Errorf("relaunch detached target: %w", err)
+		}
+		reportTUIProgress(progress, "detached target %q relaunched", relaunchTarget)
+	}
+	return nil
+}
+
+func resolvePrismaMigrationTarget(p project.Project) (string, error) {
+	for _, candidate := range []string{"new-migration", "migration_new", "prisma_new_migration"} {
+		if _, _, err := project.ResolveExecutionProject(p, candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	taskNames := map[string]bool{}
+	for _, task := range p.Tasks() {
+		if strings.HasSuffix(task.Name, "_new_migration") || task.Name == "prisma_new_migration" {
+			taskNames[task.Name] = true
+		}
+	}
+	targets := make([]string, 0, 1)
+	for _, target := range p.Targets() {
+		for _, root := range target.RootTasks {
+			if taskNames[root] {
+				targets = append(targets, target.Name)
+				break
+			}
+		}
+	}
+	sort.Strings(targets)
+	if len(targets) == 1 {
+		return targets[0], nil
+	}
+	if len(targets) > 1 {
+		return "", fmt.Errorf("multiple Prisma migration targets found: %s", strings.Join(targets, ", "))
+	}
+	tasks := make([]string, 0, len(taskNames))
+	for name := range taskNames {
+		tasks = append(tasks, name)
+	}
+	sort.Strings(tasks)
+	if len(tasks) == 1 {
+		return tasks[0], nil
+	}
+	return "", fmt.Errorf("no Prisma migration target found; add b.Target(\"new-migration\", prisma.NewMigration(b))")
+}
+
+func runProjectTargetOnceWithEnv(ctx context.Context, root, instanceID string, p project.Project, target string, env map[string]string, progress func(string)) error {
+	execProject, resolvedTarget, err := project.ResolveExecutionProject(p, target)
+	if err != nil {
+		return err
+	}
+	if err := withTemporaryInstanceEnv(root, instanceID, env, func() error {
+		eng, err := engine.New(execProject, root)
+		if err != nil {
+			return err
+		}
+		eventCtx, cancel := context.WithCancel(ctx)
+		events := eng.SubscribeEvents()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			reportEngineEventsForTUI(eventCtx, events, progress)
+		}()
+		outcome, runErr := eng.Run(ctx, engine.Request{
+			Target:   resolvedTarget,
 			Worktree: root,
-			Env:      env,
-			LogPath:  logPath,
-			OnLine: func(stream, line string) {
-				line = strings.TrimSpace(line)
-				if line == "" {
+			Mode:     api.ModeCI,
+		})
+		cancel()
+		<-done
+		if runErr != nil {
+			return runErr
+		}
+		if outcome == nil || !outcome.Result.Success {
+			return fmt.Errorf("migration target %q did not finish successfully", target)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func withTemporaryInstanceEnv(root, instanceID string, env map[string]string, fn func() error) error {
+	inst, err := instance.Load(root, instanceID)
+	if err != nil {
+		return err
+	}
+	previous := map[string]string{}
+	had := map[string]bool{}
+	if inst.Env == nil {
+		inst.Env = map[string]string{}
+	}
+	for key, value := range env {
+		previous[key], had[key] = inst.Env[key]
+		inst.Env[key] = value
+	}
+	if err := instance.Save(inst); err != nil {
+		return err
+	}
+	defer func() {
+		current, err := instance.Load(root, instanceID)
+		if err != nil {
+			return
+		}
+		if current.Env == nil {
+			current.Env = map[string]string{}
+		}
+		for key := range env {
+			if had[key] {
+				current.Env[key] = previous[key]
+			} else {
+				delete(current.Env, key)
+			}
+		}
+		_ = instance.Save(current)
+	}()
+	return fn()
+}
+
+func reportEngineEventsForTUI(ctx context.Context, events <-chan api.Event, progress func(string)) {
+	report := func(evt api.Event) {
+		switch evt.Type {
+		case api.EventRunStarted:
+			reportTUIProgress(progress, "migration run started: %s", evt.Target)
+		case api.EventTaskState:
+			if evt.Task != "" && evt.State != "" {
+				reportTUIProgress(progress, "%s: %s", evt.Task, evt.State)
+			}
+		case api.EventLogLine:
+			line := strings.TrimSpace(evt.Line)
+			if evt.Task != "" && line != "" {
+				reportTUIProgress(progress, "%s %s: %s", evt.Task, evt.Stream, compactTUIStatus(line, 120))
+			}
+		case api.EventRunFinished:
+			if evt.Success != nil && *evt.Success {
+				reportTUIProgress(progress, "migration run finished: %s", evt.Target)
+			} else if strings.TrimSpace(evt.Error) != "" {
+				reportTUIProgress(progress, "migration run failed: %s", compactTUIStatus(evt.Error, 120))
+			}
+		}
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			for {
+				select {
+				case evt := <-events:
+					report(evt)
+				default:
 					return
 				}
-				reportTUIProgress(progress, "Prisma database %s: %s", stream, compactTUIStatus(line, 120))
-			},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("prepare Prisma migration database: %w", err)
+			}
+		case evt := <-events:
+			report(evt)
+		}
 	}
-	summary := database.SummarizePrismaMigrationAuthoring(result)
-	reportTUIProgress(progress, "managed database is ready; restored=%v applied=%v prefix=%d", summary.Restored, summary.Applied, summary.PrefixLength)
-	return nil
 }
 
 func firstTUIProgress(progressFns []func(string)) func(string) {

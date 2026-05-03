@@ -421,13 +421,20 @@ Last updated: 2026-05-03
 
 ## Latest Work
 
+- Fixed the Prisma TUI migration action so it is no longer a detached side path:
+  - `m` now resolves the project migration target such as `new-migration`
+  - runs that target through the engine with `DEVFLOW_MIGRATION_NAME`
+  - streams task state and task log output into the footer
+  - relaunches the previously detached target after the migration target succeeds so the server restarts through the graph
+  - added TUI coverage for target-backed migration creation and detached target relaunch
+  - verified with `go test ./pkg/tui`, `go test ./pkg/database ./pkg/tui`, and `go test ./...`
 - Added focused regression coverage for the recent Prisma authoring/component/TUI edge cases:
   - first-migration authoring prep succeeds without tripping the normal no-migrations guard
   - source-policy authoring prep rebuilds the base and applies all migrations on snapshot miss
   - exact-snapshot authoring prep is a no-op beyond restore/readiness
   - `prisma_new_migration` fingerprints the configured clone/source env key
   - TUI migration generation reports progress in the footer
-- Aligned the TUI migration action with the component contract: it now reconciles the managed Prisma database through authoring prep before invoking Prisma migration generation.
+- Aligned the TUI migration action with the component contract and graph model.
 - Verified with `go test ./pkg/database ./pkg/tui` and `go test ./...`.
 - Folded the reworked Prisma/Postgres adoption feedback into the component API:
   - added `PreparePrismaMigrationAuthoringDatabase` and runtime summary helpers

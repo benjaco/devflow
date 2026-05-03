@@ -61,7 +61,7 @@ Useful TUI keys:
 - `i`: invalidate selected task and rerun downstream
 - `t`: retarget to the selected task
 
-The database/Prisma panel shows managed Postgres identity, cached migration-prefix snapshots, and schema/migration drift. Migration authoring is explicit; normal startup does not secretly generate migrations. When you create a migration from the TUI, Devflow first reconciles the managed database to the best compatible migration-prefix state, then runs the configured Prisma migration generator.
+The database/Prisma panel shows managed Postgres identity, cached migration-prefix snapshots, and schema/migration drift. Migration authoring is explicit; normal startup does not secretly generate migrations. When you create a migration from the TUI, Devflow runs the project migration target such as `new-migration` through the normal engine, streams task progress in the footer, and then relaunches the previously detached target so services come back through the graph.
 
 ## Watch Mode
 

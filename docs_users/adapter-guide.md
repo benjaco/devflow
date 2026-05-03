@@ -314,7 +314,7 @@ That prefix snapshotting matters during development. If you edit the latest migr
 
 `prisma.NewMigration(b)` uses the same prefix restore model before it invokes Prisma migration generation. It restores or rebuilds the managed database to the best compatible state, reapplies any missing or edited tail migrations, then runs `npx prisma migrate dev --name "$DEVFLOW_MIGRATION_NAME" --create-only`. This avoids Prisma seeing an old live database where an edited migration was already applied with different contents.
 
-When a detached run is active, `devflow tui` has a `d` database/Prisma panel that shows the managed Postgres identity, recent cached Prisma migration-prefix snapshots, and schema/migration drift. Pressing `m` is an explicit migration-authoring action; normal `up` startup should still avoid hidden migration generation. `F2` and `F4` are backup keys for terminals where letter shortcuts conflict.
+When a detached run is active, `devflow tui` has a `d` database/Prisma panel that shows the managed Postgres identity, recent cached Prisma migration-prefix snapshots, and schema/migration drift. Pressing `m` is an explicit migration-authoring action; it runs the project migration target such as `new-migration` through the normal engine, then relaunches the previously detached target so services restart through the graph. Normal `up` startup should still avoid hidden migration generation. `F2` and `F4` are backup keys for terminals where letter shortcuts conflict.
 
 If `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but no new migration appears, the Prisma migration task returns an explicit migration-needed error instead of pretending the database is current. Devflow records that task as `migration_needed` so the TUI can show an authoring action instead of a generic failure.
 
@@ -334,7 +334,7 @@ result, err := mgr.EnsureMigratedDatabase(ctx, database.ManagedMigrationOptions{
 
 `ApplyEach` snapshots every migration prefix. If the latest migration changes, Devflow can restore the previous prefix snapshot and apply only the changed tail.
 
-Keep migration generation as an explicit target/action, not part of normal `up` startup. The component registers Prisma config for the TUI, so `devflow tui` can flag drift, ask for a migration name, and run the same generation path without guessing paths. The TUI action is for authoring only; normal watch/flush still waits for a migration to exist instead of creating one implicitly.
+Keep migration generation as an explicit target/action, not part of normal `up` startup. The component registers Prisma config for the TUI, so `devflow tui` can flag drift, ask for a migration name, and run the same target-backed generation path without guessing paths. The TUI action is for authoring only; normal watch/flush still waits for a migration to exist instead of creating one implicitly.
 
 Typical graph shape:
 - `prisma_client`: finite task that runs `npx prisma generate`

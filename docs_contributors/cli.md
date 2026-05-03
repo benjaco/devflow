@@ -168,8 +168,8 @@ Task log files now represent the current run attempt for that task. They are tru
 - live tail of the selected task log
 - toggle to the detached supervisor log
 - `d` toggles a database/Prisma panel with managed Postgres identity and recent cached Prisma migration-prefix snapshots; `F2` is a backup key
-- the database/Prisma panel flags schema/migration drift and `m` asks for a migration name, then starts/waits for the managed database if one is recorded on the instance and runs explicit Prisma migration generation from inside the TUI; `F4` is a backup key
-- while the TUI creates a Prisma migration, the footer status reports the current phase, including database startup/readiness and the latest Prisma output line
+- the database/Prisma panel flags schema/migration drift and `m` asks for a migration name, then runs the project migration target such as `new-migration` through the normal engine and relaunches the previously detached target; `F4` is a backup key
+- while the TUI creates a Prisma migration, the footer status reports target/task state and the latest task output line
 - global shortcuts are disabled while text-input popups are focused, so migration names can contain normal letters
 - running tasks pinned first and pending work directly below them
 - `i` on the selected task invalidates the selected downstream cacheable slice and relaunches the current target

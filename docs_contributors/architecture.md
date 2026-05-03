@@ -549,7 +549,7 @@ The first usable TUI slice is now implemented as a local terminal console over p
 - task log tail
 - supervisor log toggle
 - database/Prisma panel showing managed Postgres identity and recent Prisma migration-prefix snapshots
-- explicit Prisma migration generation from inside the TUI by asking for a migration name, reconciling the managed DB through authoring prep, and running the configured/detected Prisma generate command
+- explicit Prisma migration generation from inside the TUI by asking for a migration name, running the project migration target through the normal engine, and relaunching the previously detached target after success
 - instance/worktree/runtime header
 - stable terminal rendering via a real TUI library instead of manual ANSI frame painting
 - invalidate-and-rerun from the selected task by invalidating the selected downstream cacheable once-task slice and relaunching the current target

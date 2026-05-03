@@ -297,83 +297,59 @@ func TestLoadPrismaSnapshotSummariesSortsAndSkipsNonPrismaSnapshots(t *testing.T
 	}
 }
 
-func TestGeneratePrismaMigrationFromTUIRunsDefaultCreateOnly(t *testing.T) {
+func TestGeneratePrismaMigrationFromTUIRunsProjectTargetAndRelaunches(t *testing.T) {
 	worktree := t.TempDir()
 	mustWriteTUITestFile(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id name String }\n")
-	binDir := filepath.Join(worktree, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	mustWriteTUITestExecutable(t, filepath.Join(binDir, "npx"), "#!/bin/sh\nprintf '%s' \"$*\" > \"$OUT_FILE\"\nprintf '%s' \"$DATABASE_URL\" > \"$OUT_FILE.url\"\n")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	output := filepath.Join(worktree, "migration-name.txt")
+	projectName := "tui-prisma-migration-target"
+	project.Register(testProject{
+		name: projectName,
+		tasks: []project.Task{
+			{
+				Name: "prisma_new_migration",
+				Kind: project.KindOnce,
+				Run: func(ctx context.Context, rt *project.Runtime) error {
+					_ = ctx
+					name := rt.Env["DEVFLOW_MIGRATION_NAME"]
+					rt.EmitLogLine("stdout", "created migration "+name)
+					return os.WriteFile(output, []byte(name), 0o644)
+				},
+			},
+			{Name: "app", Kind: project.KindOnce},
+		},
+		targets: []project.Target{
+			{Name: "new-migration", RootTasks: []string{"prisma_new_migration"}},
+			{Name: "up", RootTasks: []string{"app"}},
+		},
+	})
 
 	inst, err := instance.Resolve(worktree, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	output := filepath.Join(worktree, "prisma-command.txt")
-	inst.Env = map[string]string{"OUT_FILE": output}
-	inst.DB = api.DBInstance{URL: "postgres://devflow:devflow@127.0.0.1:55432/app?sslmode=disable"}
-	if err := instance.Save(inst); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := generatePrismaMigrationFromTUI(worktree, inst.ID, "add-user-name"); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := strings.TrimSpace(string(data))
-	want := "prisma migrate dev --name add-user-name --schema prisma/schema.prisma --create-only"
-	if got != want {
-		t.Fatalf("unexpected Prisma migration command: got %q want %q", got, want)
-	}
-	url, err := os.ReadFile(output + ".url")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(string(url)) == "" {
-		t.Fatal("expected DATABASE_URL to be supplied to Prisma migration command")
-	}
-}
-
-func TestGeneratePrismaMigrationFromTUIReconcilesManagedDatabase(t *testing.T) {
-	worktree := t.TempDir()
-	mustWriteTUITestFile(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id name String }\n")
-	mustWriteTUITestFile(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table users(id int primary key);\n")
-	binDir := filepath.Join(worktree, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	mustWriteTUITestExecutable(t, filepath.Join(binDir, "npx"), "#!/bin/sh\nprintf ok > \"$OUT_FILE\"\nprintf 'migration created\\n'\n")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	manager := &recordingTUIDatabaseManager{}
-	previousManager := newDatabaseManagerForTUI
-	newDatabaseManagerForTUI = func() tuiDatabaseManager { return manager }
-	t.Cleanup(func() { newDatabaseManagerForTUI = previousManager })
-
-	inst, err := instance.Resolve(worktree, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	output := filepath.Join(worktree, "prisma-command.txt")
-	inst.Env = map[string]string{"OUT_FILE": output}
-	inst.DB = api.DBInstance{
-		Name:          "app",
-		URL:           "postgres://devflow:devflow@127.0.0.1:55432/app?sslmode=disable",
-		Host:          "127.0.0.1",
-		Port:          55432,
-		User:          "devflow",
-		Password:      "devflow",
-		ContainerName: "devflow-pg-test",
-		VolumeName:    "devflow-pgdata-test",
+	inst.LastRun = api.RunConfig{
+		Project:     projectName,
+		Target:      "up",
+		Mode:        api.ModeWatch,
+		MaxParallel: 3,
+		Detached:    true,
 	}
 	if err := instance.Save(inst); err != nil {
 		t.Fatal(err)
 	}
+
+	var launchedTarget, launchedProject string
+	var launchedMode api.RunMode
+	var launchedMaxParallel int
+	previousLaunch := launchDetachedForTUI
+	launchDetachedForTUI = func(root string, inst *api.Instance, target, projectName string, mode api.RunMode, maxParallel int) (int, error) {
+		launchedTarget = target
+		launchedProject = projectName
+		launchedMode = mode
+		launchedMaxParallel = maxParallel
+		return 12345, nil
+	}
+	t.Cleanup(func() { launchDetachedForTUI = previousLaunch })
 
 	var progress []string
 	if err := generatePrismaMigrationFromTUI(worktree, inst.ID, "add-age", func(message string) {
@@ -381,29 +357,43 @@ func TestGeneratePrismaMigrationFromTUIReconcilesManagedDatabase(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if !manager.prepareCalled {
-		t.Fatal("expected TUI migration generation to reconcile the managed database")
-	}
-	if manager.prepareOpts.DB.ContainerName != inst.DB.ContainerName {
-		t.Fatalf("expected authoring prep to receive instance database, got %+v", manager.prepareOpts.DB)
-	}
-	if manager.prepareOpts.Worktree != worktree || manager.prepareOpts.SchemaPath != "prisma/schema.prisma" || manager.prepareOpts.MigrationsDir != "prisma/migrations" {
-		t.Fatalf("unexpected authoring prep options: %+v", manager.prepareOpts)
-	}
-	if _, err := os.ReadFile(output); err != nil {
+	data, err := os.ReadFile(output)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if strings.TrimSpace(string(data)) != "add-age" {
+		t.Fatalf("expected project migration target to receive migration name, got %q", string(data))
+	}
+	if launchedTarget != "up" || launchedProject != projectName || launchedMode != api.ModeWatch || launchedMaxParallel != 3 {
+		t.Fatalf("unexpected relaunch: target=%q project=%q mode=%q max=%d", launchedTarget, launchedProject, launchedMode, launchedMaxParallel)
+	}
 	for _, want := range []string{
-		"loading Prisma migration configuration",
-		"reconciling Prisma migration database",
-		"Prisma database stdout: database prepared",
-		"managed database is ready",
-		"running Prisma migration generation",
-		"Prisma stdout: migration created",
+		"loading Prisma migration target",
+		"running project migration target",
+		"prisma_new_migration: running",
+		"prisma_new_migration stdout: created migration add-age",
+		"relaunching detached target",
+		"detached target \"up\" relaunched",
 	} {
 		if !tuiProgressContains(progress, want) {
 			t.Fatalf("expected progress to contain %q, got %+v", want, progress)
 		}
+	}
+}
+
+func TestResolvePrismaMigrationTargetUsesComponentTaskFallback(t *testing.T) {
+	p := testProject{
+		name: "tui-prisma-task-fallback",
+		tasks: []project.Task{
+			{Name: "custom_new_migration", Kind: project.KindOnce},
+		},
+	}
+	target, err := resolvePrismaMigrationTarget(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != "custom_new_migration" {
+		t.Fatalf("unexpected fallback target %q", target)
 	}
 }
 
@@ -621,26 +611,6 @@ func TestCompactTUIStatusTruncatesAndRemovesDynamicColorMarkers(t *testing.T) {
 	if got != "one (two) three..." {
 		t.Fatalf("unexpected compact status: %q", got)
 	}
-}
-
-type recordingTUIDatabaseManager struct {
-	prepareCalled bool
-	prepareOpts   database.PrismaMigrationAuthoringOptions
-}
-
-func (m *recordingTUIDatabaseManager) PreparePrismaMigrationAuthoringDatabase(_ context.Context, opts database.PrismaMigrationAuthoringOptions) (*database.PrismaMigrationAuthoringResult, error) {
-	m.prepareCalled = true
-	m.prepareOpts = opts
-	if opts.Prepare.OnLine != nil {
-		opts.Prepare.OnLine("stdout", "database prepared")
-	}
-	plan := database.PrismaRestorePlan{ExactMatch: true, SnapshotKey: "prisma_001", PrefixLength: 1}
-	return &database.PrismaMigrationAuthoringResult{
-		Plan: plan,
-		Base: &database.PrismaBaseResult{
-			Restored: &database.PrismaRestoreResult{Plan: plan},
-		},
-	}, nil
 }
 
 func tuiProgressContains(progress []string, want string) bool {
