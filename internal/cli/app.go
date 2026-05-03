@@ -1428,6 +1428,7 @@ func (a *App) upgradeCmd(args []string) error {
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
 	versionTarget := fs.String("version", "latest", "")
+	direct := fs.Bool("direct", false, "")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1442,6 +1443,9 @@ func (a *App) upgradeCmd(args []string) error {
 	command := []string{"go", "install", pkg}
 	started := time.Now()
 	cmd := exec.Command(command[0], command[1:]...)
+	if *direct {
+		cmd.Env = upgradeGoEnv(os.Environ())
+	}
 	output, err := cmd.CombinedOutput()
 	result := api.UpgradeResult{
 		Command:       command,
@@ -1469,11 +1473,34 @@ func (a *App) upgradeCmd(args []string) error {
 		}
 		return fmt.Errorf("upgrade failed: %w", err)
 	}
-	_, _ = fmt.Fprintf(a.Stdout, "upgraded devflow using %s\n", strings.Join(command, " "))
+	if *direct {
+		_, _ = fmt.Fprintf(a.Stdout, "upgraded devflow using GOPROXY=direct %s\n", strings.Join(command, " "))
+	} else {
+		_, _ = fmt.Fprintf(a.Stdout, "upgraded devflow using %s\n", strings.Join(command, " "))
+	}
 	if warning := upgradePathWarning(command[0]); warning != "" {
 		_, _ = fmt.Fprintf(a.Stdout, "warning: %s\n", warning)
 	}
 	return nil
+}
+
+func upgradeGoEnv(env []string) []string {
+	const key = "GOPROXY"
+	const value = "GOPROXY=direct"
+	out := make([]string, 0, len(env)+1)
+	replaced := false
+	for _, item := range env {
+		if strings.HasPrefix(item, key+"=") {
+			out = append(out, value)
+			replaced = true
+			continue
+		}
+		out = append(out, item)
+	}
+	if !replaced {
+		out = append(out, value)
+	}
+	return out
 }
 
 func upgradePathWarning(goCommand string) string {

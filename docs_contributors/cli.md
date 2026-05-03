@@ -127,7 +127,7 @@ Supervisor behavior:
 go install github.com/benjaco/devflow/cmd/devflow@latest
 ```
 
-`upgrade --version v0.1.2` installs that specific tag. `upgrade --json` returns the command, package, version target, success flag, duration, and any error/output. It exits non-zero when the underlying `go install` fails. In text mode, `upgrade` warns when `go install` writes a binary somewhere other than the `devflow` command currently found on `PATH`.
+`upgrade --version v0.1.2` installs that specific tag. `upgrade --direct` sets `GOPROXY=direct` for testing freshly pushed commits before the public Go proxy catches up. `upgrade --json` returns the command, package, version target, success flag, duration, and any error/output. It exits non-zero when the underlying `go install` fails. In text mode, `upgrade` warns when `go install` writes a binary somewhere other than the `devflow` command currently found on `PATH`.
 
 `docs` prints all bundled user-facing Markdown files from `docs_users/` in sorted order.
 

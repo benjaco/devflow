@@ -213,6 +213,7 @@ Last updated: 2026-05-03
 - Hardened source/install update ergonomics:
   - the repo-local launcher now rebuilds `.devflow/bin/devflow` from a content build key instead of source mtimes
   - text-mode `devflow upgrade` now warns when `go install` updates a different binary than the `devflow` command currently found on `PATH`
+  - `devflow upgrade --direct` runs `go install` with `GOPROXY=direct` for testing freshly pushed commits before the public Go proxy catches up
 - Distinct task-cancellation handling implemented:
   - tasks interrupted by parent-run cancellation now persist as `canceled` instead of `failed`
   - the TUI now renders `canceled` separately from real failures

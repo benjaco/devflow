@@ -323,12 +323,44 @@ func TestUpgradeJSONRunsGoInstallLatest(t *testing.T) {
 	if string(args) != wantArgs {
 		t.Fatalf("unexpected go args: got %q want %q", string(args), wantArgs)
 	}
+	proxy, err := os.ReadFile(argsPath + ".goproxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(proxy)); got == "direct" {
+		t.Fatalf("default upgrade should not force GOPROXY=direct")
+	}
 	var result api.UpgradeResult
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
 	if !result.Success || result.VersionTarget != "latest" {
 		t.Fatalf("unexpected upgrade result: %+v", result)
+	}
+}
+
+func TestUpgradeDirectJSONRunsGoInstallWithDirectProxy(t *testing.T) {
+	argsPath := installFakeGo(t, 0)
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	t.Setenv("GOPROXY", "https://proxy.golang.org,direct")
+	if err := app.Run([]string{"upgrade", "--json", "--direct"}); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantArgs := "install github.com/benjaco/devflow/cmd/devflow@latest\n"
+	if string(args) != wantArgs {
+		t.Fatalf("unexpected go args: got %q want %q", string(args), wantArgs)
+	}
+	proxy, err := os.ReadFile(argsPath + ".goproxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(proxy)) != "direct" {
+		t.Fatalf("expected --direct to force GOPROXY=direct, got %q", string(proxy))
 	}
 }
 
@@ -363,6 +395,31 @@ func TestUpgradeJSONReportsFailure(t *testing.T) {
 	}
 	if result.Success || result.Error == "" {
 		t.Fatalf("expected structured failure, got %+v", result)
+	}
+}
+
+func hasString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestUpgradeGoEnvForcesDirectProxy(t *testing.T) {
+	env := upgradeGoEnv([]string{"PATH=/bin", "GOPROXY=https://proxy.golang.org,direct"})
+	if !hasString(env, "GOPROXY=direct") {
+		t.Fatalf("expected direct proxy env, got %+v", env)
+	}
+	for _, item := range env {
+		if item == "GOPROXY=https://proxy.golang.org,direct" {
+			t.Fatalf("expected original GOPROXY to be replaced, got %+v", env)
+		}
+	}
+	env = upgradeGoEnv([]string{"PATH=/bin"})
+	if !hasString(env, "GOPROXY=direct") {
+		t.Fatalf("expected direct proxy env to be added, got %+v", env)
 	}
 }
 
@@ -1117,6 +1174,7 @@ func installFakeGo(t *testing.T, exitCode int) string {
 	fakeGo := filepath.Join(dir, "go")
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" > "$DEVFLOW_FAKE_GO_ARGS"
+printf '%%s\n' "${GOPROXY:-}" > "$DEVFLOW_FAKE_GO_ARGS.goproxy"
 echo fake go output
 exit %d
 `, exitCode)

@@ -46,6 +46,8 @@ Update later with:
 devflow upgrade
 ```
 
+For testing a freshly pushed commit before the public Go proxy catches up, use `devflow upgrade --direct`.
+
 ## Add Devflow To A Repo
 
 1. Add `.devflow/` to `.gitignore`.
