@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/benjaco/devflow/internal/pathspec"
 	"github.com/benjaco/devflow/pkg/project"
 )
 
@@ -232,6 +233,20 @@ func (g *Graph) ExplainAffectedByFiles(files []string) []FileImpact {
 }
 
 func explainTaskInput(task project.Task, changed string) (FileImpact, bool) {
+	for _, inputPath := range task.Inputs.Paths {
+		inputPath = cleanInputPath(inputPath)
+		if changed != inputPath && !stringsHasPathPrefix(changed, inputPath) {
+			continue
+		}
+		rel := ""
+		if changed != inputPath {
+			rel = strings.TrimPrefix(changed, inputPath+"/")
+		}
+		if pattern, ignored := ignoredByInput(task.Inputs.Ignore, changed, rel); ignored {
+			return FileImpact{File: changed, Task: task.Name, Affected: false, Reason: "ignored", Input: inputPath, Relative: rel, Ignore: pattern}, true
+		}
+		return FileImpact{File: changed, Task: task.Name, Affected: true, Reason: "path", Input: inputPath, Relative: rel}, true
+	}
 	for _, file := range task.Inputs.Files {
 		file = cleanInputPath(file)
 		if file != changed {
@@ -255,6 +270,16 @@ func explainTaskInput(task project.Task, changed string) (FileImpact, bool) {
 			return FileImpact{File: changed, Task: task.Name, Affected: false, Reason: "ignored", Input: dir, Relative: rel, Ignore: pattern}, true
 		}
 		return FileImpact{File: changed, Task: task.Name, Affected: true, Reason: "dir", Input: dir, Relative: rel}, true
+	}
+	for _, pattern := range task.Inputs.Globs {
+		pattern = cleanInputPath(pattern)
+		if !pathspec.MatchGlob(pattern, changed) {
+			continue
+		}
+		if ignore, ignored := ignoredByInput(task.Inputs.Ignore, changed, ""); ignored {
+			return FileImpact{File: changed, Task: task.Name, Affected: false, Reason: "ignored", Input: pattern, Ignore: ignore}, true
+		}
+		return FileImpact{File: changed, Task: task.Name, Affected: true, Reason: "glob", Input: pattern}, true
 	}
 	return FileImpact{}, false
 }

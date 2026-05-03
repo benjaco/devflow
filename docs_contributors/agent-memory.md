@@ -12,7 +12,7 @@ Use it on every substantial agent session to preserve project health across mode
 4. `docs_contributors/architecture.md` for package boundaries and runtime state layout.
 5. `docs_contributors/cli.md` for user-facing command behavior and JSON surfaces.
 6. `docs_contributors/testing.md` before changing behavior with broad blast radius.
-7. `docs_contributors/README.md` for contributor workflow and `docs_users/README.md` for user/adopter workflow.
+7. `docs_contributors/README.md` for contributor workflow, `docs_users/setup.md` for user setup, and `docs_users/development.md` for day-to-day user operation.
 
 ## Memory Policy
 
@@ -29,7 +29,8 @@ Use this memory together with the subsystem docs. When a change affects one of t
 
 - `docs_contributors/architecture.md`: package boundaries, runtime state layout, bootstrap flow, cache/env/database design
 - `docs_contributors/cli.md`: command behavior, JSON output contracts, TUI/operator semantics
-- `docs_users/README.md`: user-facing workflow for adding Devflow to another project
+- `docs_users/setup.md`: setup/pipeline workflow for adding Devflow to another project
+- `docs_users/development.md`: day-to-day CLI/TUI/operator workflow after Devflow is integrated
 - `docs_contributors/README.md`: contributor workflow for changing Devflow itself
 - `docs_users/adapter-guide.md`: adapter authoring expectations and project-local behavior
 - `docs_users/agent-integration.md`: agent-facing execution surfaces and future wrapper direction
@@ -39,15 +40,16 @@ Use this memory together with the subsystem docs. When a change affects one of t
 ## Working Mindset
 
 - Keep the core generic. Project-specific behavior belongs in adapters, examples, or project-local `devflow.project.go` files.
-- Keep documentation split into two lanes: user/adopter docs for applying Devflow in another project, and contributor docs for changing Devflow itself.
-- Preserve stable JSON output for every user-facing command except `devflow docs`, which intentionally prints plain bundled user Markdown only.
+- Keep documentation split into contributor docs and scoped user docs. User docs are further split into setup/pipeline context and day-to-day development/operator context so agents do not have to ingest both.
+- Preserve stable JSON output for every user-facing command except `devflow docs setup` and `devflow docs development`, which intentionally print scoped plain bundled user Markdown only. Bare `devflow docs` should stay a usage error to prevent context-heavy all-doc dumps.
 - Treat worktrees as the isolation boundary.
 - Devflow itself does not need to be developed through git worktrees; worktree support is for target projects.
 - Go is required on machines that run Devflow because project graph definitions are Go code. Round-1 install/update is `go install github.com/benjaco/devflow/cmd/devflow@latest` and `devflow upgrade`; binary releases are deliberately deferred.
 - `devflow upgrade` should keep the normal Go proxy path for ordinary user updates. `devflow upgrade --direct` exists for testing freshly pushed commits before the public Go proxy catches up. Upgrade only updates the binary written by `go install`; if a repo-local launcher or another `devflow` command shadows `$(go env GOPATH)/bin/devflow` earlier on `PATH`, the shell will keep running the shadowing command, so text-mode upgrade should warn about that.
 - Keep instance env explicit, layered, and persisted.
 - Services are supervised, not cached.
-- Cacheable tasks must declare outputs.
+- User-facing adapters should use the builder/component API rather than hand-assembling low-level `project.Task` slices. The low-level structs remain the engine representation, but docs and new examples should teach `project.Define`, `project.Builder`, `database.Postgres`, and `database.Prisma`.
+- Finite builder tasks become cacheable when they declare project output paths. Do not ask adapter authors to call `Cache()` for normal generated artifacts. Use `NoCache()` for finite output-producing actions that should never restore from cache, such as migration authoring.
 - Keep task cache storage in one OS user cache folder (`<os.UserCacheDir()>/devflow/cache`) and namespace entries by project. Per-worktree logs/state stay in the worktree `.devflow/`.
 - Prefer narrow, semantic fingerprints over hashing the whole repo.
 - Optimize cache storage only after correctness and contract coverage exist.
@@ -74,7 +76,7 @@ Service lifecycle contract: attached `run` is foreground and blocks while servic
 
 Flush startup contract: a newly detached watcher can write `watch.ready` before its first polling scan has fully settled, so `flush` must keep rewriting the sync sentinel while waiting for the ack. Do not remove that retry unless the watcher startup protocol is made stronger.
 
-Watch/input debugging contract: `Inputs.Ignore` is shared by fingerprinting and watch matching. Patterns are slash-normalized, checked root-relative, and for directory inputs also checked relative to the input dir. `devflow graph affected --files <path> --explain --json` is the first tool to use when generated files cause surprising watch cascades.
+Watch/input debugging contract: `Inputs.Ignore` is shared by fingerprinting and watch matching. Patterns are slash-normalized, checked root-relative, and for directory inputs also checked relative to the input dir. Builder `Inputs("path")` maps to path inputs and `project.Glob("...")` maps to glob inputs with `**` support. `devflow graph affected --files <path> --explain --json` is the first tool to use when generated files cause surprising watch cascades.
 
 Required CLI contract: `RequiredCLIs()` is the project catalog. `RequiredCLIs` on tasks and targets selects the subset needed for a target closure. `devflow doctor --target <target> --json` and `devflow clis status/install --target <target>` must not report unrelated catalog entries. The older `Dependencies()` provider remains only as a compatibility path.
 
@@ -82,7 +84,7 @@ Managed Postgres contract: app code connects through the host-mapped port, so da
 
 Prisma workflow contract: normal DB preparation applies migrations with `prisma migrate deploy` and snapshots prefixes; migration authoring is separate. Prisma migration inspection ignores non-directory entries such as `migration_lock.toml`. If `schema.prisma` declares models but no migrations exist, or changes without a new migration, the default Prisma workflow should return an explicit migration-needed error. The engine records errors implementing `MigrationNeeded() bool`, plus known Prisma migration-needed messages, as `migration_needed`, not generic `failed`, and downstream work must remain pending until the migration is authored.
 
-TUI database/Prisma contract: the TUI may expose managed database identity and cached Prisma migration-prefix snapshot metadata for operator visibility. It may also provide an explicit `m` action that asks for a migration name, starts/waits for the recorded managed database when present, streams phase/latest-output progress to the footer status, and runs configured Prisma migration generation. It must not turn normal boot/watch flows into implicit Prisma migration authoring or reset flows; those stay explicit adapter targets/actions.
+TUI database/Prisma contract: the TUI may expose managed database identity and cached Prisma migration-prefix snapshot metadata for operator visibility. It may also provide an explicit `m` action that asks for a migration name, starts/waits for the recorded managed database when present, streams phase/latest-output progress to the footer status, and runs configured Prisma migration generation. It must not turn normal boot/watch flows into implicit Prisma migration authoring or reset flows; those stay explicit adapter targets/actions. The common component task names are `prisma_client`, `prisma_migrations`, and `prisma_new_migration`; avoid teaching opaque names such as `migration_new`.
 
 Remote clone contract: `PostgresDumpSourcePolicy` must not use an unchecked shell pipeline. A failed `pg_dump`, including host/client version mismatch, must fail the Devflow task before `psql` can report success on empty input.
 

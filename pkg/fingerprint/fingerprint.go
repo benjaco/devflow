@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/benjaco/devflow/internal/pathspec"
 	"github.com/benjaco/devflow/pkg/project"
 )
 
@@ -104,6 +105,15 @@ func HashEnv(env map[string]string, keys []string) []string {
 
 func CollectTaskInputs(ctx context.Context, worktree string, task project.Task, rt *project.Runtime) (hashes []string, envValues []string, custom []string, err error) {
 	fileSet := map[string]bool{}
+	for _, inputPath := range task.Inputs.Paths {
+		if ignored(cleanInputPath(inputPath), "", task.Inputs.Ignore) {
+			continue
+		}
+		if collectErr := collectPathInput(worktree, inputPath, task.Inputs.Ignore, fileSet); collectErr != nil {
+			err = collectErr
+			return
+		}
+	}
 	for _, file := range task.Inputs.Files {
 		if ignored(cleanInputPath(file), "", task.Inputs.Ignore) {
 			continue
@@ -132,6 +142,30 @@ func CollectTaskInputs(ctx context.Context, worktree string, task project.Task, 
 			}
 		}
 		fileSet["dir:"+filepath.ToSlash(dir)+":"+sum] = true
+	}
+	for _, pattern := range task.Inputs.Globs {
+		matches, globErr := pathspec.ExpandGlob(worktree, pattern)
+		if globErr != nil {
+			err = globErr
+			return
+		}
+		matched := false
+		for _, rel := range matches {
+			if ignored(cleanInputPath(rel), "", task.Inputs.Ignore) {
+				continue
+			}
+			matched = true
+			path := filepath.Join(worktree, rel)
+			sum, hashErr := HashFile(path)
+			if hashErr != nil {
+				err = hashErr
+				return
+			}
+			fileSet["glob:"+filepath.ToSlash(pattern)+":"+filepath.ToSlash(rel)+":"+sum] = true
+		}
+		if !matched {
+			fileSet["glob:"+filepath.ToSlash(pattern)+":missing"] = true
+		}
 	}
 	for item := range fileSet {
 		hashes = append(hashes, item)
@@ -183,10 +217,13 @@ func TaskSignature(task project.Task) (string, error) {
 	sort.Strings(payload.Deps)
 	sort.Strings(payload.RequiredCLIs)
 	sort.Strings(payload.Tags)
+	sort.Strings(payload.Inputs.Paths)
 	sort.Strings(payload.Inputs.Files)
 	sort.Strings(payload.Inputs.Dirs)
+	sort.Strings(payload.Inputs.Globs)
 	sort.Strings(payload.Inputs.Env)
 	sort.Strings(payload.Inputs.Ignore)
+	sort.Strings(payload.Outputs.Paths)
 	sort.Strings(payload.Outputs.Files)
 	sort.Strings(payload.Outputs.Dirs)
 	data, err := json.Marshal(payload)
@@ -222,6 +259,33 @@ func TaskKey(in TaskKeyInput) (string, error) {
 
 func OverrideTaskKey(taskName, override string) string {
 	return hashStrings([]string{EngineKeyVersion, taskName, override})
+}
+
+func collectPathInput(worktree, rel string, ignore []string, fileSet map[string]bool) error {
+	rel = cleanInputPath(rel)
+	pathValue := filepath.Join(worktree, rel)
+	info, err := os.Stat(pathValue)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fileSet["path:"+filepath.ToSlash(rel)+":missing"] = true
+			return nil
+		}
+		return err
+	}
+	if info.IsDir() {
+		sum, err := HashInputDir(pathValue, rel, ignore)
+		if err != nil {
+			return err
+		}
+		fileSet["path-dir:"+filepath.ToSlash(rel)+":"+sum] = true
+		return nil
+	}
+	sum, err := HashFile(pathValue)
+	if err != nil {
+		return err
+	}
+	fileSet["path-file:"+filepath.ToSlash(rel)+":"+sum] = true
+	return nil
 }
 
 func ignored(pathValue, inputDir string, ignore []string) bool {

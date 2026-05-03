@@ -141,6 +141,29 @@ func TestExplainAffectedByFilesReportsMatchesAndIgnoredInputs(t *testing.T) {
 	}
 }
 
+func TestExplainAffectedByFilesReportsPathAndGlobInputs(t *testing.T) {
+	g, err := New([]project.Task{
+		{
+			Name: "sqlc",
+			Kind: project.KindOnce,
+			Inputs: project.Inputs{
+				Paths: []string{"sqlc.yaml"},
+				Globs: []string{"internal/storage/**/*.sql"},
+			},
+		},
+	}, []project.Target{{Name: "test", RootTasks: []string{"sqlc"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	impacts := g.ExplainAffectedByFiles([]string{"sqlc.yaml", "internal/storage/users.sql", "internal/storage/users.go"})
+	if len(impacts) != 2 {
+		t.Fatalf("expected 2 impacts, got %+v", impacts)
+	}
+	if impacts[0].Reason != "glob" && impacts[1].Reason != "glob" {
+		t.Fatalf("expected one glob impact, got %+v", impacts)
+	}
+}
+
 func join(items []string) string {
 	out := ""
 	for i, item := range items {

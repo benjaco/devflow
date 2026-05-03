@@ -38,7 +38,7 @@ Devflow is a local-first DAG runner for development workflows. Keep the core gen
 
 ## Engineering Rules
 
-- Every user-facing command must support stable JSON output, except `devflow docs`, which intentionally prints plain bundled user Markdown only.
+- Every user-facing command must support stable JSON output, except `devflow docs setup` and `devflow docs development`, which intentionally print scoped plain bundled user Markdown only.
 - Service tasks are supervised, not cached.
 - Cached tasks must declare outputs.
 - Worktree is the isolation boundary.

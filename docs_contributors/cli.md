@@ -20,12 +20,13 @@ Implemented commands:
 - `devflow tui`
 - `devflow version`
 - `devflow upgrade`
-- `devflow docs`
+- `devflow docs setup`
+- `devflow docs development`
 - `devflow graph list`
 - `devflow graph show <target>`
 - `devflow graph affected --files ...`
 
-All implemented commands support `--json` except `devflow docs`, which intentionally prints plain bundled user Markdown only.
+All implemented commands support `--json` except `devflow docs setup` and `devflow docs development`, which intentionally print plain bundled user Markdown only.
 
 Running bare `devflow` now acts as the default operator entry path:
 - it can be the installed Go binary or the repo-local launcher script
@@ -129,9 +130,9 @@ go install github.com/benjaco/devflow/cmd/devflow@latest
 
 `upgrade --version v0.1.2` installs that specific tag. `upgrade --direct` sets `GOPROXY=direct` for testing freshly pushed commits before the public Go proxy catches up. `upgrade --json` returns the command, package, version target, success flag, duration, and any error/output. It exits non-zero when the underlying `go install` fails. In text mode, `upgrade` warns when `go install` writes a binary somewhere other than the `devflow` command currently found on `PATH`.
 
-`docs` prints all bundled user-facing Markdown files from `docs_users/` in sorted order.
+`docs setup` prints the setup/pipeline user docs bundle. `docs development` prints the day-to-day CLI/TUI/operator user docs bundle.
 
-It is projectless, has no flags, has no JSON mode, and does not print contributor docs.
+Bare `docs` is intentionally a usage error so agents and users do not accidentally pull both context lanes into one prompt. The docs commands are projectless, have no flags, have no JSON mode, and do not print contributor docs.
 
 `restart` supports rerunning non-service task slices from the CLI. For service tasks, if the instance was started with a detached run, `restart` stops the detached supervisor and relaunches the last detached target.
 

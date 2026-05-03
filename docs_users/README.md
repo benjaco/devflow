@@ -1,355 +1,40 @@
-# Adopting Devflow In A Project
+# Devflow User Docs
 
-This guide is for teams that want to use Devflow in an application repository.
+Devflow user documentation is intentionally split so humans and agents can fetch only the context they need.
 
-It is not about developing Devflow itself. For that, use `docs_contributors/README.md`.
+## Setup Docs
 
-## Mental Model
-
-Devflow runs a Go-defined development graph that lives in the project repo as `devflow.project.go`.
-
-The project owns:
-- task names and commands
-- target names such as `up`, `test`, or `fullstack`
-- file inputs that trigger cache invalidation and watch reruns
-- service readiness checks
-- required CLI/tool requirements
-- runtime env layering
-
-Devflow owns:
-- graph scheduling
-- cache restore/snapshot mechanics
-- process supervision
-- detached watch mode
-- flush readiness coordination
-- instance state, logs, ports, and JSON surfaces
-
-Keep project-specific behavior in `devflow.project.go`. Do not add project-specific paths or framework assumptions to Devflow core packages.
-
-## Prerequisites
-
-Install Go first. Devflow needs Go because project graph definitions are Go code.
+Use setup docs when adding Devflow to a project, shaping the pipeline, or writing `devflow.project.go`.
 
 ```bash
-go install github.com/benjaco/devflow/cmd/devflow@latest
-devflow version
-devflow docs
+devflow docs setup
 ```
 
-Make sure `$(go env GOPATH)/bin` is on `PATH`. If `devflow upgrade` succeeds but `devflow version` does not change, run `which -a devflow`; another binary or symlink earlier on `PATH` is shadowing the Go-installed binary.
+This includes:
+- installing/upgrading Devflow
+- adding `.devflow/` and `devflow.project.go`
+- defining tasks, services, targets, inputs, and outputs
+- required CLI declarations
+- managed Postgres and Prisma setup patterns
+- what to commit
 
-`devflow docs` prints the bundled user-facing Markdown docs for the installed Devflow version. It intentionally does not print contributor docs.
+## Development Docs
 
-Update later with:
+Use development docs when Devflow is already integrated and you need to run the project day to day.
 
 ```bash
-devflow upgrade
+devflow docs development
 ```
 
-For testing a freshly pushed commit before the public Go proxy catches up, use `devflow upgrade --direct`.
-
-## Add Devflow To A Repo
-
-1. Add `.devflow/` to `.gitignore`.
-2. Add `devflow.project.go` at the project root.
-3. Define one small target first, usually `up` or `test`.
-4. Run `devflow graph list --json`.
-5. Run `devflow run <target> --json`.
-6. Add cache inputs/outputs and service readiness once the basic graph works.
-
-Minimal `devflow.project.go`:
-
-```go
-package main
-
-import (
-	"context"
-
-	"github.com/benjaco/devflow/pkg/project"
-)
-
-type localProject struct{}
-
-func init() {
-	project.Register(localProject{})
-}
-
-func (localProject) Name() string { return "my-app" }
-
-func (localProject) DefaultTarget() string { return "up" }
-
-func (localProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
-	_ = ctx
-	_ = worktree
-	return project.InstanceConfig{Label: "my-app"}, nil
-}
-
-func (localProject) Tasks() []project.Task {
-	return []project.Task{
-		{
-			Name: "check",
-			Kind: project.KindOnce,
-			Run: func(ctx context.Context, rt *project.Runtime) error {
-				return rt.RunCmd(ctx, "go", "version")
-			},
-		},
-	}
-}
-
-func (localProject) Targets() []project.Target {
-	return []project.Target{
-		{Name: "up", RootTasks: []string{"check"}},
-	}
-}
-```
-
-Replace the `check` command with a real project command once the bootstrap works.
-
-## Design The Graph
-
-Start with a graph that matches how developers already think about the repo.
-
-Common task kinds:
-- `project.KindOnce`: finite command such as build, codegen, lint, or test
-- `project.KindWarmup`: finite prep command that may be skipped or blocked in watch mode unless explicitly allowed
-- `project.KindService`: long-running process supervised by Devflow
-- `project.KindGroup`: grouping node for a target shape
-
-Common target shapes:
-- `test`: checks that should finish
-- `up`: local development services
-- `fullstack`: all services and required prep tasks
-- `codegen`: generated artifacts only
-
-Example target:
-
-```go
-func (localProject) Targets() []project.Target {
-	return []project.Target{
-		{Name: "test", RootTasks: []string{"unit_test"}},
-		{Name: "up", RootTasks: []string{"api_dev", "web_dev"}},
-	}
-}
-```
-
-## Cacheable Tasks
-
-Only mark finite tasks cacheable. Service tasks are supervised, not cached.
-
-A cacheable task must declare outputs:
-
-```go
-{
-	Name:  "codegen",
-	Kind:  project.KindOnce,
-	Cache: true,
-	Inputs: project.Inputs{
-		Files: []string{"schema.json"},
-	},
-	Outputs: project.Outputs{
-		Dirs: []string{"internal/generated"},
-	},
-	Run: func(ctx context.Context, rt *project.Runtime) error {
-		return rt.RunCmd(ctx, "go", "run", "./tools/codegen")
-	},
-}
-```
-
-Prefer narrow semantic inputs over hashing the whole repository. Add files, dirs, env vars, and custom fingerprints that actually affect the task result.
-
-Task cache storage is global for the user:
-
-```text
-<os.UserCacheDir()>/devflow/cache/
-```
-
-Entries are namespaced by project. By default the namespace is `Project.Name()`. Override it only when you need a more stable or collision-resistant namespace:
-
-```go
-func (localProject) CacheNamespace() string { return "company-my-app" }
-```
-
-## Services And Readiness
-
-Service tasks start long-running processes:
-
-```go
-{
-	Name: "api_dev",
-	Kind: project.KindService,
-	Deps: []string{"codegen"},
-	Inputs: project.Inputs{
-		Dirs: []string{"cmd/api", "internal/generated"},
-	},
-	Run: func(ctx context.Context, rt *project.Runtime) error {
-		_, err := rt.StartService(ctx, "go", "run", "./cmd/api")
-		return err
-	},
-	Ready: project.ReadyHTTPNamedPort("api", "/health", 200),
-}
-```
-
-Use readiness hooks for services that need a health check before downstream work or `flush` can report success.
-For named-port readiness, include that port name in `InstanceConfig.PortNames` and pass the assigned port to the service through env or args.
-
-## Service Lifecycle
-
-Use the lifecycle command that matches the job:
-
-- `devflow run up` is foreground/attached. It starts the target closure, waits for service readiness, then keeps the terminal attached while services run. Interrupt it from that terminal when you are done.
-- `devflow run up --ci --json` is a readiness probe for CI-style validation. If the target contains services, Devflow starts them, waits for readiness, stops them, and returns a finite result. It is not a background dev environment.
-- `devflow run up --detach --json` starts a detached supervisor and returns after launch. It does not prove the whole target is healthy; use `status`, `logs`, or a watch `flush` workflow when readiness matters.
-- `devflow watch up --detach --json` starts the recommended detached dev loop for humans and agents.
-- `devflow flush up --json` is the readiness gate for detached watch mode. It waits for file-change work to settle and checks in-chain services.
-- `devflow stop --all --json` cleans up the detached supervisor, child executor, tracked services, stale process records, and the managed database container for the worktree. It preserves the database volume.
-
-For finite check/test targets that depend on services such as Postgres or a local app, generally use `devflow run <target> --ci --json` so Devflow starts the services as readiness probes and stops them before returning.
-
-For AI-assisted development, prefer `watch --detach` plus `flush` over an attached service `run`. Attached runs are useful for a human terminal, but they are not a clean "start and return when ready" automation interface.
-
-## Watch Mode
-
-Watch mode maps changed files to task inputs, then reruns the affected downstream slice.
-
-Run:
-
-```bash
-devflow watch up --detach --json
-```
-
-Then after edits:
-
-```bash
-devflow flush up --json
-```
-
-`flush` proves the watcher has processed a sync sentinel written after your edits. It returns success only when the selected target closure has settled and in-chain services are healthy.
-
-Important watch rules:
-- downstream jobs do not run past blocked intermediate tasks
-- services default to affected-slice restarts
-- `RestartNever` prevents watch restarts
-- `RestartAlways` restarts a service on any watch cycle that affects the target
-
-Use `graph affected --explain` when a file change restarts too much or too little:
-
-```bash
-devflow graph affected --files internal/storage/sqlc/users.sql.go --explain --json
-```
-
-The explanation shows which task input matched the file, which ignore pattern suppressed it, and which files did not match any task. Ignore patterns are slash-normalized and work both root-relative and, for directory inputs, relative to that input directory.
-
-## Runtime State
-
-Per-worktree state stays under the project worktree:
-
-```text
-.devflow/state/
-.devflow/logs/
-.devflow/bin/
-.devflow/localbuild/
-```
-
-Do not commit `.devflow/`.
-
-Sibling worktrees can have isolated instance state and logs while sharing the global task cache.
-
-## Environment
-
-Adapters can load `.env` files and then layer Devflow-managed values on top.
-
-Recommended precedence:
-1. `.env`
-2. adapter defaults
-3. Devflow-managed runtime values such as ports and DB URLs
-
-Use `project.LoadOptionalDotEnvInWorktree` and `project.MergeEnvMaps` for this instead of hand-rolling env parsing.
-
-Runtime env is persisted under `.devflow/state` for detached runs, status, and relaunches. Keep `.devflow/` ignored, avoid storing long-lived production secrets in runtime env, and override service-specific values such as `PORT` for test commands when needed.
-
-## Required CLIs
-
-Expose required command-line tools through `RequiredCLIs()` and attach them to the tasks or targets that need them:
-
-```go
-func (localProject) RequiredCLIs() []project.RequiredCLI {
-	return []project.RequiredCLI{
-		{Name: "go", Command: "go"},
-		{
-			Name:    "npm",
-			Command: "npm",
-			Install: map[string]project.InstallScript{
-				"darwin": {Script: "brew install node"},
-				"linux":  {Script: "sudo apt-get update && sudo apt-get install -y nodejs npm"},
-			},
-		},
-	}
-}
-
-func (localProject) Tasks() []project.Task {
-	return []project.Task{
-		{Name: "frontend_build", Kind: project.KindOnce, RequiredCLIs: []string{"npm"}},
-		{Name: "server", Kind: project.KindService, RequiredCLIs: []string{"go"}},
-	}
-}
-
-func (localProject) Targets() []project.Target {
-	return []project.Target{
-		{Name: "up", RootTasks: []string{"server"}},
-	}
-}
-```
-
-Then users can run:
-
-```bash
-devflow clis status --json
-devflow clis status --target up --json
-devflow doctor --target up --json
-```
-
-`devflow clis install --target up` runs platform-specific install scripts only for missing required CLIs, then re-checks that each installed command is available on `PATH`.
-
-## Daily Workflow
-
-Typical human workflow:
-
-```bash
-devflow
-devflow status --json
-devflow logs api_dev
-devflow stop --all --json
-```
-
-Typical agent workflow:
-
-```bash
-devflow watch up --detach --json
-# edit files
-devflow flush up --json
-# run focused tests only after success=true
-```
-
-If `flush` fails, inspect `issues`, `nodes`, `services`, and referenced log paths before retrying.
-
-## What To Commit
-
-Commit:
-- `devflow.project.go`
-- project files referenced by task inputs
-- generated source only if your project normally commits it
-- docs explaining your project targets
-
-Do not commit:
-- `.devflow/`
-- local logs
-- worktree-local binaries
-- generated build modules under `.devflow/localbuild`
-
-## More Detail
-
-Use these next:
-- `docs_users/adapter-guide.md` for adapter APIs and deeper patterns
-- `docs_contributors/cli.md` for command and JSON behavior
-- `docs_users/agent-integration.md` for AI workflow expectations
-- `docs_contributors/architecture.md` for runtime state and package boundaries
+This includes:
+- CLI usage
+- TUI controls
+- watch/flush loops
+- status and logs
+- doctor and required CLI checks
+- cache operations
+- runtime state layout
+
+## Contributor Docs
+
+These user docs are not for changing Devflow itself. For contributor work in this repository, use `docs_contributors/README.md`, `docs_contributors/agent-memory.md`, and `PROGRESS.md`.

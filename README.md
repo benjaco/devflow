@@ -17,7 +17,7 @@ Devflow stays generic. Project-specific behavior belongs in the project-owned `d
 
 There are two documentation lanes:
 
-- **Use Devflow in your project**: start with this README, then read `docs_users/README.md` and `docs_users/adapter-guide.md`.
+- **Use Devflow in your project**: start with this README, then use `devflow docs setup` for pipeline setup or `devflow docs development` for daily usage.
 - **Develop Devflow itself**: start with `docs_contributors/README.md`, then read `AGENTS.md`, `docs_contributors/agent-memory.md`, and `PROGRESS.md`.
 
 Keep these separate when adding docs. Project adopters should not need contributor internals before they can define a useful `devflow.project.go`.
@@ -29,7 +29,7 @@ Devflow requires Go because project graph definitions are Go code.
 ```bash
 go install github.com/benjaco/devflow/cmd/devflow@latest
 devflow version
-devflow docs
+devflow docs setup
 ```
 
 Make sure `$(go env GOPATH)/bin` is on your `PATH`; that is where `go install` places the `devflow` executable by default. If `devflow upgrade` succeeds but `devflow version` does not change, run `which -a devflow`: another command earlier on `PATH` is shadowing the Go-installed binary.
@@ -50,7 +50,7 @@ There are no release binaries, npm package, Homebrew tap, or installer scripts y
 
 ## Getting Started
 
-This is the short path for adding Devflow to another project. The longer guide is `docs_users/README.md`.
+This is the short path for adding Devflow to another project. The longer setup guide is available through `devflow docs setup`.
 
 In the project you want Devflow to run, add a self-contained `devflow.project.go` file:
 
@@ -63,38 +63,16 @@ import (
 	"github.com/benjaco/devflow/pkg/project"
 )
 
-type localProject struct{}
-
 func init() {
-	project.Register(localProject{})
-}
+	project.Register(project.Define(func(ctx context.Context, b *project.Builder) error {
+		b.Name("my-project")
+		b.DefaultTarget("up")
+		b.RequiredCLIs("go")
 
-func (localProject) Name() string { return "my-project" }
-
-func (localProject) DefaultTarget() string { return "up" }
-
-func (localProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
-	_ = ctx
-	_ = worktree
-	return project.InstanceConfig{Label: "my-project"}, nil
-}
-
-func (localProject) Tasks() []project.Task {
-	return []project.Task{
-		{
-			Name: "check",
-			Kind: project.KindOnce,
-			Run: func(ctx context.Context, rt *project.Runtime) error {
-				return rt.RunCmd(ctx, "go", "version")
-			},
-		},
-	}
-}
-
-func (localProject) Targets() []project.Target {
-	return []project.Target{
-		{Name: "up", RootTasks: []string{"check"}},
-	}
+		check := b.Task("check").Command("go", "version")
+		b.Target("up", check)
+		return nil
+	}))
 }
 ```
 
@@ -144,7 +122,8 @@ Commit `devflow.project.go`. Do not commit `.devflow/`.
 ## Common Commands
 
 ```bash
-devflow docs
+devflow docs setup
+devflow docs development
 devflow version --json
 devflow doctor --json
 devflow graph list --json
@@ -158,7 +137,7 @@ devflow stop --all --json
 devflow cache status --json
 ```
 
-All user-facing commands are expected to keep stable JSON output except `devflow docs`, which intentionally prints plain user Markdown.
+All user-facing commands are expected to keep stable JSON output except `devflow docs setup` and `devflow docs development`, which intentionally print scoped plain user Markdown.
 
 ## State And Cache
 
@@ -210,6 +189,8 @@ Start substantial agent or contributor work by reading:
 
 More docs:
 - `docs_users/README.md`
+- `docs_users/setup.md`
+- `docs_users/development.md`
 - `docs_contributors/README.md`
 - `docs_contributors/architecture.md`
 - `docs_contributors/cli.md`

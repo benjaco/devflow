@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/benjaco/devflow/pkg/project"
@@ -230,6 +231,54 @@ func TestCollectTaskInputsHashChangesWhenFileChanges(t *testing.T) {
 	}
 	if first[0] == second[0] {
 		t.Fatalf("expected collected input hash to change after file edit: %v vs %v", first, second)
+	}
+}
+
+func TestCollectTaskInputsSupportsPathAndGlobInputs(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "package.json", `{"name":"demo"}`)
+	writeTestFile(t, root, "sql/users.sql", "select 1;")
+	writeTestFile(t, root, "sql/nested/rides.sql", "select 2;")
+	writeTestFile(t, root, "sql/nested/rides.go", "package sql")
+
+	rt := &project.Runtime{Worktree: root, Env: map[string]string{}}
+	task := project.Task{
+		Name: "codegen",
+		Inputs: project.Inputs{
+			Paths: []string{"package.json"},
+			Globs: []string{"sql/**/*.sql"},
+		},
+	}
+	first, _, _, err := CollectTaskInputs(context.Background(), root, task, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, root, "sql/nested/rides.sql", "select 3;")
+	second, _, _, err := CollectTaskInputs(context.Background(), root, task, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reflect.DeepEqual(first, second) {
+		t.Fatalf("expected glob input hash to change after matching file edit")
+	}
+	writeTestFile(t, root, "sql/nested/rides.go", "package sql\n")
+	third, _, _, err := CollectTaskInputs(context.Background(), root, task, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(second, third) {
+		t.Fatalf("non-matching glob file should not change inputs\nsecond: %v\n third: %v", second, third)
+	}
+}
+
+func writeTestFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	path := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

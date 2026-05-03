@@ -2,6 +2,7 @@ package project
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -35,14 +36,17 @@ type RunFunc func(ctx context.Context, rt *Runtime) error
 type ReadyFunc func(ctx context.Context, rt *Runtime) error
 
 type Inputs struct {
+	Paths  []string
 	Files  []string
 	Dirs   []string
+	Globs  []string
 	Env    []string
 	Ignore []string
 	Custom []FingerprintFunc
 }
 
 type Outputs struct {
+	Paths []string
 	Files []string
 	Dirs  []string
 }
@@ -142,6 +146,56 @@ func (rt *Runtime) Abs(path string) string {
 	return filepath.Join(rt.Worktree, path)
 }
 
+func (rt *Runtime) CloneEnv() map[string]string {
+	return mergeEnvMaps(rt.Env, nil)
+}
+
+func (rt *Runtime) EnvWith(overlay map[string]string) map[string]string {
+	return mergeEnvMaps(rt.Env, overlay)
+}
+
+func (rt *Runtime) LineEmitter() func(string, string) {
+	return func(stream, line string) {
+		rt.EmitLogLine(stream, line)
+	}
+}
+
+func (rt *Runtime) EmitJSONLine(label string, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		rt.EmitLogLine("stderr", label+": "+err.Error())
+		return err
+	}
+	rt.EmitLogLine("stdout", label+": "+string(data))
+	return nil
+}
+
+func (rt *Runtime) EmitLogLine(stream, line string) {
+	if rt == nil {
+		return
+	}
+	if rt.LogPath != "" {
+		_ = os.MkdirAll(filepath.Dir(rt.LogPath), 0o755)
+		if file, err := os.OpenFile(rt.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+			_, _ = fmt.Fprintf(file, "%s: %s\n", stream, line)
+			_ = file.Close()
+		}
+	}
+	if rt.EventFn == nil || rt.Instance == nil {
+		return
+	}
+	rt.EventFn(api.Event{
+		TS:         process.NowRFC3339Nano(),
+		Type:       api.EventLogLine,
+		InstanceID: rt.Instance.ID,
+		Worktree:   rt.Worktree,
+		Task:       rt.TaskName,
+		Mode:       rt.Mode,
+		Stream:     stream,
+		Line:       line,
+	})
+}
+
 func (rt *Runtime) WithTask(taskName, logPath string) *Runtime {
 	clone := *rt
 	clone.TaskName = taskName
@@ -167,19 +221,7 @@ func (rt *Runtime) RunCmdSpec(ctx context.Context, spec process.CommandSpec) err
 	}
 	spec.LogPath = rt.LogPath
 	spec.OnLine = func(stream, line string) {
-		if rt.EventFn == nil {
-			return
-		}
-		rt.EventFn(api.Event{
-			TS:         process.NowRFC3339Nano(),
-			Type:       api.EventLogLine,
-			InstanceID: rt.Instance.ID,
-			Worktree:   rt.Worktree,
-			Task:       rt.TaskName,
-			Mode:       rt.Mode,
-			Stream:     stream,
-			Line:       line,
-		})
+		rt.emitProcessLine(stream, line)
 	}
 	if spec.OnPrompt == nil && rt.OnPrompt != nil {
 		spec.OnPrompt = func(req process.PromptRequest) (process.PromptResponse, error) {
@@ -209,19 +251,7 @@ func (rt *Runtime) StartServiceSpec(ctx context.Context, spec process.CommandSpe
 	}
 	spec.LogPath = rt.LogPath
 	spec.OnLine = func(stream, line string) {
-		if rt.EventFn == nil {
-			return
-		}
-		rt.EventFn(api.Event{
-			TS:         process.NowRFC3339Nano(),
-			Type:       api.EventLogLine,
-			InstanceID: rt.Instance.ID,
-			Worktree:   rt.Worktree,
-			Task:       rt.TaskName,
-			Mode:       rt.Mode,
-			Stream:     stream,
-			Line:       line,
-		})
+		rt.emitProcessLine(stream, line)
 	}
 	if spec.OnPrompt == nil && rt.OnPrompt != nil {
 		spec.OnPrompt = func(req process.PromptRequest) (process.PromptResponse, error) {
@@ -237,6 +267,22 @@ func (rt *Runtime) StartServiceSpec(ctx context.Context, spec process.CommandSpe
 		rt.OnService(rt.TaskName, handle)
 	}
 	return handle, nil
+}
+
+func (rt *Runtime) emitProcessLine(stream, line string) {
+	if rt == nil || rt.EventFn == nil || rt.Instance == nil {
+		return
+	}
+	rt.EventFn(api.Event{
+		TS:         process.NowRFC3339Nano(),
+		Type:       api.EventLogLine,
+		InstanceID: rt.Instance.ID,
+		Worktree:   rt.Worktree,
+		Task:       rt.TaskName,
+		Mode:       rt.Mode,
+		Stream:     stream,
+		Line:       line,
+	})
 }
 
 func ShellTask(name, description string, kind Kind, deps []string, cache bool, outputs Outputs, inputs Inputs, command string) Task {

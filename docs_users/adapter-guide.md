@@ -2,9 +2,9 @@
 
 This is the adapter API guide for project owners who already understand the adoption flow.
 
-If you are adding Devflow to a project for the first time, start with `docs_users/README.md`. If you are changing Devflow itself, use `docs_contributors/README.md`.
+If you are adding Devflow to a project for the first time, start with `devflow docs setup`. If you are changing Devflow itself, use `docs_contributors/README.md`.
 
-Projects integrate with Devflow by implementing `pkg/project.Project` in a project-local `devflow.project.go`.
+Projects integrate with Devflow through the builder API in a project-local `devflow.project.go`.
 
 Current runtime model:
 - the project repo owns `./devflow.project.go`
@@ -20,9 +20,11 @@ Current first-version constraint:
 - arbitrary companion Go files from the project repo are not loaded yet
 
 An adapter defines:
-- tasks
+- tasks and services
 - targets
-- instance configuration
+- inputs and outputs
+- instance ports/env
+- optional managed database components
 
 Tasks should stay semantic. The adapter decides which files, directories, env vars, and custom probes contribute to each fingerprint.
 
@@ -37,90 +39,128 @@ import (
     "github.com/benjaco/devflow/pkg/project"
 )
 
-type myProject struct{}
-
 func init() {
-    project.Register(myProject{})
-}
+    project.Register(project.Define(func(ctx context.Context, b *project.Builder) error {
+        b.Name("my-project")
+        b.DefaultTarget("up")
 
-func (myProject) Name() string { return "my-project" }
+        build := b.Task("build").
+            Command("go", "build", "./...").
+            Inputs("go.mod", "go.sum", "cmd", "internal").
+            Outputs("bin/my-project")
 
-func (myProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
-    _ = ctx
-    _ = worktree
-    return project.InstanceConfig{Label: "my-project"}, nil
-}
-
-func (myProject) Tasks() []project.Task {
-    return []project.Task{
-        {
-            Name: "build",
-            Kind: project.KindOnce,
-            Run: func(ctx context.Context, rt *project.Runtime) error {
-                _ = ctx
-                _ = rt
-                return nil
-            },
-        },
-    }
-}
-
-func (myProject) Targets() []project.Target {
-    return []project.Target{
-        {Name: "up", RootTasks: []string{"build"}},
-    }
+        b.Target("up", build)
+        return nil
+    }))
 }
 ```
 
+## Fuller Example
+
+This example shows a realistic graph with generated SQL code, Prisma client generation, cached backend/frontend builds, a managed database, a fixed service readiness check, and a finite test target.
+
+```go
+package main
+
+import (
+    "context"
+    "time"
+
+    "github.com/benjaco/devflow/pkg/database"
+    "github.com/benjaco/devflow/pkg/project"
+)
+
+func init() {
+    project.Register(project.Define(func(ctx context.Context, b *project.Builder) error {
+        b.Name("bikecoach")
+        b.DefaultTarget("up")
+        b.DotEnv(".env")
+        b.RequiredCLIs("go", "npm", "npx", "sqlc", "docker")
+
+        db := database.Postgres("prisma")
+        prisma := database.Prisma("prisma").
+            Schema("prisma/schema.prisma").
+            MigrationDir("prisma/migrations").
+            Database(db).
+            CloneFromEnv("DEV_DATABASE_URL")
+
+        sqlc := b.Task("sqlc").
+            Command("sqlc", "generate").
+            Inputs("sqlc.yaml", project.Glob("internal/storage/**/*.sql")).
+            Outputs("internal/storage/sqlc")
+
+        backend := b.Task("backend_build").
+            Command("go", "build", "-o", "bin/coach", "./cmd/coach").
+            DependsOn(sqlc, prisma.Client(b), prisma.Migrations(b)).
+            Inputs("go.mod", "go.sum", "cmd", "internal", "prisma/schema.prisma").
+            Outputs("bin/coach")
+
+        frontend := b.Task("frontend_build").
+            Command("npm", "run", "build").
+            Inputs("package.json", "package-lock.json", "src", "vite.config.ts").
+            Outputs("dist")
+
+        app := b.Service("app").
+            Command("bin/coach").
+            DependsOn(backend, frontend).
+            Inputs("bin/coach", "dist", ".env").
+            Env("PORT", b.Port("app")).
+            ReadyHTTP("app", "/health", 200).
+            ReadyTimeout(30 * time.Second)
+
+        unit := b.Task("unit").
+            Command("go", "test", "./...").
+            DependsOn(sqlc, prisma.Client(b)).
+            Inputs("go.mod", "go.sum", "cmd", "internal", "prisma/schema.prisma").
+            NoCache()
+
+        b.Target("up", app)
+        b.Target("build", backend, frontend)
+        b.Target("test", unit)
+        b.Target("new-migration", prisma.NewMigration(b))
+        return nil
+    }))
+}
+```
+
+Important details:
+- `sqlc` uses a glob, so generated Go files do not become inputs unless you declare them.
+- `backend_build` depends on `sqlc`, Prisma client generation, and database migration state.
+- `Outputs("bin/coach")` and `Outputs("dist")` make those finite tasks cacheable.
+- `unit.NoCache()` keeps tests as a live check even though they have declared inputs.
+- `database.Postgres("prisma")` defaults the snapshot directory; set `SnapshotRoot(...)` only when the default is wrong.
+
 ## Required CLI Installation
 
-Adapters can expose required command-line tools through `RequiredCLIProvider`.
+Adapters expose required command-line tools through `b.RequiredCLIs(...)` and `b.RequiredCLI(...)`.
 
-`RequiredCLIs()` is the project catalog. Attach catalog entries to tasks or targets with `RequiredCLIs` when different targets need different tools.
+The required CLI catalog is project-wide. Builder command tasks automatically select a catalog entry when the command name matches it. Add explicit `RequiredCLIs(...)` on a task only when the task needs a tool that is not the command binary.
 
 Example:
 
 ```go
-func (myProject) RequiredCLIs() []project.RequiredCLI {
-    return []project.RequiredCLI{
-        {
-            Name:    "sqlc",
-            Command: "sqlc",
-            Install: map[string]project.InstallScript{
-                "darwin": {Script: "brew install sqlc"},
-                "linux":  {Script: "go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest"},
-            },
-        },
-    }
-}
+b.RequiredCLI(project.RequiredCLI{
+    Name:    "sqlc",
+    Command: "sqlc",
+    Install: map[string]project.InstallScript{
+        "darwin": {Script: "brew install sqlc"},
+        "linux":  {Script: "go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest"},
+    },
+})
+b.RequiredCLIs("go")
 
-func (myProject) Tasks() []project.Task {
-    return []project.Task{
-        {
-            Name:         "codegen",
-            Kind:         project.KindOnce,
-            RequiredCLIs: []string{"sqlc"},
-            Run:          runCodegen,
-        },
-        {
-            Name:         "app",
-            Kind:         project.KindService,
-            Deps:         []string{"codegen"},
-            RequiredCLIs: []string{"go"},
-            Run:          runApp,
-        },
-    }
-}
+codegen := b.Task("codegen").
+    Command("sqlc", "generate").
+    Inputs("sqlc.yaml", project.Glob("internal/storage/**/*.sql")).
+    Outputs("internal/storage/sqlc")
 
-func (myProject) Targets() []project.Target {
-    return []project.Target{
-        {
-            Name:         "up",
-            RootTasks:    []string{"app"},
-            RequiredCLIs: []string{"docker"},
-        },
-    }
-}
+app := b.Service("app").
+    Command("go", "run", "./cmd/app").
+    DependsOn(codegen).
+    Env("PORT", b.Port("app")).
+    ReadyHTTP("app", "/health", 200)
+
+b.Target("up", app)
 ```
 
 That enables:
@@ -139,27 +179,13 @@ Rules:
 
 ## Dotenv Loading
 
-Adapters can now load `.env` files directly through `pkg/project`.
+Adapters can load `.env` files through the builder.
 
 Example:
 
 ```go
-dotenv, err := project.LoadOptionalDotEnvInWorktree(worktree, ".env")
-if err != nil {
-    return project.InstanceConfig{}, err
-}
-
-return project.InstanceConfig{
-    Env: project.MergeEnvMaps(dotenv, map[string]string{
-        "DEVFLOW_PROJECT": "my-project",
-    }),
-    Finalize: func(inst *api.Instance) error {
-        inst.Env = project.MergeEnvMaps(inst.Env, map[string]string{
-            "DATABASE_URL": computedDatabaseURL,
-        })
-        return nil
-    },
-}
+b.DotEnv(".env")
+b.Env("DEVFLOW_PROJECT", "my-project")
 ```
 
 ### Runtime Env, Tests, And Secrets
@@ -179,7 +205,7 @@ Example:
 return rt.RunCmdSpec(ctx, process.CommandSpec{
     Name: "go",
     Args: []string{"test", "./..."},
-    Env: project.MergeEnvMaps(rt.Env, map[string]string{
+    Env: rt.EnvWith(map[string]string{
         "PORT": "8080",
     }),
 })
@@ -211,34 +237,23 @@ Use `WatchRestartOnServiceDeps` only when a service-to-service dependency should
 
 When a DB snapshot miss happens, the adapter should rebuild from a configured base source instead of implying a reset command.
 
-Current shape:
+For Prisma/Postgres, the high-level component can clone from a remote development database URL only when it needs to rebuild the local base:
 
 ```go
-policy := database.CommandSourcePolicy{
-    PolicyName: "clone-dev",
-    Spec: process.CommandSpec{
-        Name: "sh",
-        Args: []string{"-c", "./scripts/clone-dev.sh"},
-    },
-}
-
-prepared, err := database.New().PreparePrismaBase(ctx, inst.DB, state, policy, database.PrepareOptions{
-    Worktree: worktree,
-    Env:      env,
-})
+prisma := database.Prisma("prisma").
+    Schema("prisma/schema.prisma").
+    MigrationDir("prisma/migrations").
+    Database(database.Postgres("prisma")).
+    CloneFromEnv("DEV_DATABASE_URL")
 ```
 
 Semantics:
 - Devflow first tries exact or nearest-prefix snapshot restore
 - if no compatible snapshot exists, it recreates the local volume
-- if a source policy is configured, it starts a temporary Postgres runtime and applies that policy
-- then the adapter can replay only the remaining migrations and snapshot the result
+- if `DEV_DATABASE_URL` is set, it clones that remote database into the local runtime
+- then Devflow replays only the remaining migrations and snapshots the result
 
-This is the right abstraction for:
-- clone-from-dev scripts today
-- local bootstrap/startup scripts later
-
-For Postgres databases that can be cloned through host `pg_dump`/`psql`, use the built-in remote source policy:
+For lower-level custom flows, use a `database.SourcePolicy`. For Postgres databases that can be cloned through host `pg_dump`/`psql`, use the built-in remote source policy:
 
 ```go
 policy := database.PostgresDumpSourcePolicy{
@@ -253,48 +268,38 @@ It is not a "reset DB" operator action. The goal is to reuse the best compatible
 
 ## Managed Local Postgres Pattern
 
-For application targets, use host-visible readiness, not only in-container readiness. The app connects through the mapped host port, so a managed DB task should ensure the container, wait until Postgres is ready inside Docker and the host port accepts connections, then run migrations.
+For application targets, use `database.Postgres(...)` unless you need a custom container lifecycle. It allocates a Devflow port, persists the local database identity in instance state, sets standard Postgres env vars, and defaults snapshots to `.devflow/db-snapshots`.
 
 Recommended shape:
 
 ```go
-mgr := database.New()
-
-db := mgr.Desired(inst.ID, database.Config{
-    HostPort:     inst.Ports["postgres"],
-    Database:     "app_" + inst.ID,
-    User:         "devflow",
-    Password:     "devflow",
-    SnapshotRoot: filepath.Join(worktree, ".devflow", "db-snapshots"),
-})
-
-if err := mgr.EnsureRuntime(ctx, db); err != nil {
-    return err
-}
-if err := mgr.WaitReady(ctx, db, 30*time.Second); err != nil {
-    return err
-}
+db := database.Postgres("prisma")
 ```
 
-`EnsureRuntime` preserves the data volume, but recreates a stale container when its published host port does not match the current Devflow instance. Avoid unconditional container removal in normal startup paths; it can race Docker and should not be necessary for a preserved-volume workflow.
+The underlying runtime uses host-visible readiness, not only in-container readiness. The app connects through the mapped host port, so Devflow waits until Postgres is ready inside Docker and the host port accepts connections.
+
+`EnsureRuntime` preserves the data volume, but recreates a stale container when its published host port does not match the current Devflow instance. Avoid unconditional container removal in normal startup paths.
 
 For a Prisma project, the high-level path is:
 
 ```go
-result, err := mgr.EnsurePrismaDevDatabase(ctx, database.PrismaDevDatabaseOptions{
-    Worktree:      worktree,
-    DB:            db,
-    SchemaPath:    "prisma/schema.prisma",
-    MigrationsDir: "prisma/migrations",
-    SourcePolicy:  policy,
-    Prepare: database.PrepareOptions{
-        Worktree: worktree,
-        Env:      env,
-    },
-})
+prisma := database.Prisma("prisma").
+    Schema("prisma/schema.prisma").
+    MigrationDir("prisma/migrations").
+    Database(db).
+    CloneFromEnv("DEV_DATABASE_URL")
+
+app := b.Service("app").
+    Command("npx", "tsx", "src/server.ts").
+    DependsOn(prisma.Client(b), prisma.Migrations(b)).
+    Env("PORT", b.Port("app")).
+    ReadyHTTP("app", "/health", 200)
+
+b.Target("up", app)
+b.Target("new-migration", prisma.NewMigration(b))
 ```
 
-This will:
+`prisma.Migrations(b)` will:
 - inspect the Prisma schema and migration folder
 - ignore non-directory entries in `prisma/migrations`, including Prisma's `migration_lock.toml`
 - restore the nearest compatible cached migration point
@@ -307,9 +312,7 @@ That prefix snapshotting matters during development. If you edit the latest migr
 
 When a detached run is active, `devflow tui` has a `d` database/Prisma panel that shows the managed Postgres identity, recent cached Prisma migration-prefix snapshots, and schema/migration drift. Pressing `m` is an explicit migration-authoring action; normal `up` startup should still avoid hidden migration generation. `F2` and `F4` are backup keys for terminals where letter shortcuts conflict.
 
-Only override `Migrate` when you intentionally want an all-at-once custom Prisma command; that path snapshots the final state only. Use `MigrateEach` for custom per-prefix behavior.
-
-If `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but no new migration appears, `EnsurePrismaDevDatabase` returns an explicit migration-needed error instead of pretending the database is current. Devflow records that task as `migration_needed` so the TUI can show an authoring action instead of a generic failure.
+If `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but no new migration appears, the Prisma migration task returns an explicit migration-needed error instead of pretending the database is current. Devflow records that task as `migration_needed` so the TUI can show an authoring action instead of a generic failure.
 
 Custom migration guards can get the same task state by returning an error that implements `MigrationNeeded() bool`. Devflow also recognizes the built-in Prisma "generate one with GeneratePrismaMigration" guard text for compatibility.
 
@@ -327,39 +330,13 @@ result, err := mgr.EnsureMigratedDatabase(ctx, database.ManagedMigrationOptions{
 
 `ApplyEach` snapshots every migration prefix. If the latest migration changes, Devflow can restore the previous prefix snapshot and apply only the changed tail.
 
-When a Prisma schema has changed and a new migration must be authored explicitly, add a separate target/action that uses:
-
-```go
-err := database.GeneratePrismaMigration(ctx, database.PrismaMigrationGenerateOptions{
-    Worktree:   worktree,
-    SchemaPath: "prisma/schema.prisma",
-    Name:       "add-bike-ride-index",
-    CreateOnly: true,
-})
-```
-
-Keep migration generation as an explicit target/action, not part of normal `up` startup.
-
-To let the TUI create migrations without guessing paths, implement `project.PrismaConfigProvider`:
-
-```go
-func (myProject) PrismaConfig() project.PrismaConfig {
-    return project.PrismaConfig{
-        SchemaPath:    "prisma/schema.prisma",
-        MigrationsDir: "prisma/migrations",
-        BasePaths:     []string{"prisma/bootstrap.sql"},
-        CreateOnly:    true,
-    }
-}
-```
-
-Then `devflow tui` can flag schema/migration drift in the `d` database/Prisma panel. Press `m`, enter a migration name, and Devflow starts/waits for the managed database recorded on the instance before running `GeneratePrismaMigration` from inside the TUI. The footer status reports the current migration-generation phase while this runs. If no provider is implemented, the TUI tries common layouts such as `prisma/schema.prisma` and `db/schema.prisma`.
+Keep migration generation as an explicit target/action, not part of normal `up` startup. The component registers Prisma config for the TUI, so `devflow tui` can flag drift, ask for a migration name, and run the same generation path without guessing paths.
 
 Typical graph shape:
-- `postgres`: service task that calls `EnsureRuntime`, `WaitReady`, and supervises database lifetime/logs
-- `db_prepare`: finite task that restores/rebuilds the volume from snapshots or a base source
-- `db_migrate`: finite task that runs migrations against the host DSN after host readiness passes
-- `app`: service task depending on `db_migrate`
+- `prisma_client`: finite task that runs `npx prisma generate`
+- `prisma_migrations`: finite task that restores/rebuilds the local DB and applies migrations
+- `prisma_new_migration`: explicit authoring task, not part of normal `up`
+- `app`: service task depending on `prisma_client` and `prisma_migrations`
 
 When validating a finite target that has service dependencies, prefer:
 
@@ -423,44 +400,30 @@ Do not make normal boot targets depend on interactive `prisma migrate dev`. From
 
 ## Built Binary Tools
 
-For repo-local helper executables, use the built-in binary-tool helper in `pkg/project`.
+For repo-local helper executables, define the built binary as a normal output-producing builder task.
 
 Example:
 
 ```go
-tool := project.BinaryTool{
-    TaskName: "build_auth_mapping",
-    Inputs: project.Inputs{
-        Files: []string{"tools/auth-mapping/main.go", "go.mod", "go.sum"},
-    },
-    Output: ".devflow/tools/auth-mapping",
-    Build: process.CommandSpec{
-        Name: "go",
-        Args: []string{"build", "-o", ".devflow/tools/auth-mapping", "./tools/auth-mapping"},
-    },
-}
-buildTask := tool.BuildTask()
+tool := b.Task("build_auth_mapping").
+    Command("go", "build", "-o", "bin/auth-mapping", "./tools/auth-mapping").
+    Inputs("tools/auth-mapping", "go.mod", "go.sum").
+    Outputs("bin/auth-mapping")
 
-tasks := []project.Task{
-    buildTask,
-    {
-        Name: "auth_mapping",
-        Kind: project.KindOnce,
-        Deps: []string{buildTask.Name},
-        Run: func(ctx context.Context, rt *project.Runtime) error {
-            return tool.Run(ctx, rt, "--config", rt.Abs("backend/auth/config.json"))
-        },
-    },
-}
+authMapping := b.Task("auth_mapping").
+    Command("bin/auth-mapping", "--config", "backend/auth/config.json").
+    DependsOn(tool).
+    Inputs("backend/auth/config.json").
+    Outputs("backend/auth/generated")
 ```
 
 Rules:
-- the tool output path should be worktree-relative so it can be cached and restored
-- keep the binary output outside the input directories you fingerprint, or ignore it explicitly
-- use the task `Inputs` to describe what should invalidate the build
-- use `Signature` if the build command itself needs a stable explicit version marker
+- output paths should be real project artifact paths such as `bin/...`, `dist`, or generated source dirs
+- do not put normal cache outputs under `.devflow/` unless the project truly treats that path as the artifact location
+- keep outputs outside the input directories you fingerprint, or ignore them explicitly
+- use task `Inputs(...)` to describe what should invalidate the build
 
-For generated files, prefer an explicit ignore pattern on the task that owns the source directory. Ignore patterns are slash-normalized and are checked both root-relative and, for directory inputs, relative to that input directory. For example, if a task has `Inputs.Dirs: []string{"internal/storage"}`, both `internal/storage/sqlc` and `sqlc` suppress generated files below `internal/storage/sqlc`.
+For generated files, prefer narrow source globs. For example, `project.Glob("internal/storage/**/*.sql")` lets sqlc depend on query files without making `internal/storage/sqlc/*.go` upstream inputs.
 
 Use this command when tuning watch inputs:
 
@@ -474,19 +437,14 @@ This gives you a standard way to compile helper binaries once, cache them by inp
 
 Service tasks can define an optional readiness function.
 
-Current shape:
+Builder shape:
 
 ```go
-type ReadyFunc func(ctx context.Context, rt *Runtime) error
-
-type Task struct {
-    Name         string
-    Kind         Kind
-    Run          RunFunc
-    Ready        ReadyFunc
-    ReadyTimeout time.Duration
-    // ...
-}
+app := b.Service("app").
+    Command("go", "run", "./cmd/app").
+    Env("PORT", b.Port("app")).
+    ReadyHTTP("app", "/health", 200).
+    ReadyTimeout(30 * time.Second)
 ```
 
 Use readiness when process start is not the same as service usability.

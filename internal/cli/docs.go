@@ -3,26 +3,28 @@ package cli
 import (
 	"fmt"
 	"io"
-	"path/filepath"
-	"sort"
 	"strings"
 
 	docsusers "github.com/benjaco/devflow/docs_users"
 )
 
-func writeUserDocs(w io.Writer) error {
-	entries, err := docsusers.Files.ReadDir(".")
-	if err != nil {
-		return err
+type docsBundle string
+
+const (
+	docsBundleSetup       docsBundle = "setup"
+	docsBundleDevelopment docsBundle = "development"
+)
+
+var docsBundleFiles = map[docsBundle][]string{
+	docsBundleSetup:       {"setup.md", "adapter-guide.md"},
+	docsBundleDevelopment: {"development.md", "agent-integration.md"},
+}
+
+func writeUserDocs(w io.Writer, bundle docsBundle) error {
+	paths, ok := docsBundleFiles[bundle]
+	if !ok {
+		return fmt.Errorf("unknown docs bundle %q", bundle)
 	}
-	paths := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
-			continue
-		}
-		paths = append(paths, entry.Name())
-	}
-	sort.Strings(paths)
 	for i, path := range paths {
 		data, err := docsusers.Files.ReadFile(path)
 		if err != nil {

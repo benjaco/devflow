@@ -2,7 +2,7 @@
 
 This guide is for contributors changing Devflow itself.
 
-If you are adding Devflow to an application repository, use `docs_users/README.md` instead.
+If you are adding Devflow to an application repository, use `devflow docs setup` or `docs_users/setup.md` instead.
 
 ## Start Here
 
@@ -159,8 +159,9 @@ DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run Docker -v
 
 ## Documentation Rules
 
-Keep two documentation lanes explicit:
-- user/adopter docs explain how to use Devflow in another project
+Keep documentation lanes explicit:
+- setup user docs explain how to add Devflow to another project and shape the pipeline
+- development user docs explain CLI/TUI/operator usage after Devflow is integrated
 - contributor docs explain how to change Devflow itself
 
 Do not put contributor-only internals in the first page a project adopter needs to read. Link to internals when useful.
@@ -169,7 +170,8 @@ When behavior changes, update the subsystem doc in the same change:
 - CLI contracts: `docs_contributors/cli.md`
 - runtime/package boundaries: `docs_contributors/architecture.md`
 - adapter API: `docs_users/adapter-guide.md`
-- user adoption workflow: `docs_users/README.md`
+- user setup workflow: `docs_users/setup.md`
+- user development workflow: `docs_users/development.md`
 - contributor workflow: `docs_contributors/README.md`
 - tests: `docs_contributors/testing.md`
 - durable cross-cutting project memory: `docs_contributors/agent-memory.md`

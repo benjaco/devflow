@@ -3,6 +3,7 @@ package cache
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -47,6 +48,53 @@ func TestSnapshotRestoreReplacesDeclaredOutputsOnly(t *testing.T) {
 	if string(keep) != "keep" {
 		t.Fatalf("undeclared file changed: %q", string(keep))
 	}
+}
+
+func TestSnapshotClassifiesOutputPaths(t *testing.T) {
+	worktree := t.TempDir()
+	store := New(filepath.Join(worktree, ".devflow", "cache"))
+	task := project.Task{
+		Name:    "build",
+		Kind:    project.KindOnce,
+		Outputs: project.Outputs{Paths: []string{"bin/tool", "dist"}},
+	}
+	if err := os.MkdirAll(filepath.Join(worktree, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "bin", "tool"), []byte("binary"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktree, "dist"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "dist", "app.js"), []byte("bundle"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := store.Snapshot(worktree, task, "key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(manifest.Outputs.Files, []string{"bin/tool"}) {
+		t.Fatalf("unexpected files: %+v", manifest.Outputs.Files)
+	}
+	if !reflect.DeepEqual(manifest.Outputs.Dirs, []string{"dist"}) {
+		t.Fatalf("unexpected dirs: %+v", manifest.Outputs.Dirs)
+	}
+	if err := os.RemoveAll(filepath.Join(worktree, "bin")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(worktree, "dist")); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := store.Restore(worktree, "build", "key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected restore hit")
+	}
+	assertFileContent(t, filepath.Join(worktree, "bin", "tool"), "binary")
+	assertFileContent(t, filepath.Join(worktree, "dist", "app.js"), "bundle")
 }
 
 func TestCorruptManifestIsTreatedAsMiss(t *testing.T) {
@@ -195,5 +243,16 @@ func TestConcurrentSnapshotSameKeyPublishesOneEntry(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("expected one published entry, got %+v", entries)
+	}
+}
+
+func assertFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != want {
+		t.Fatalf("%s = %q, want %q", path, string(data), want)
 	}
 }

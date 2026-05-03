@@ -5,7 +5,7 @@ Last updated: 2026-05-03
 ## Current Status
 
 - Phase: post-bootstrap core implementation
-- State: Go-first release/install flow, installed project bootstrap, `version`/`upgrade`, a single global task cache, split docs, `devflow docs`, per-worktree localbuild locking, reliable detached cleanup, explicit service lifecycle contracts, graph affected explanations, target-scoped required CLI checks, managed Postgres host-port hardening, and higher-level managed database workflows are implemented; BikeCoach real-project integration feedback is integrated into the roadmap
+- State: Go-first release/install flow, installed project bootstrap, `version`/`upgrade`, a single global task cache, split contributor/user docs, scoped `devflow docs setup` and `devflow docs development`, per-worktree localbuild locking, reliable detached cleanup, explicit service lifecycle contracts, graph affected explanations, target-scoped required CLI checks, managed Postgres host-port hardening, higher-level managed database workflows, and the first builder/component adapter API reshape are implemented; BikeCoach real-project integration feedback is integrated into the roadmap
 - Confidence: core parallel/watch/operator/readiness/bootstrap/database paths are working; the BikeCoach integration exposed remaining adoption-hardening gaps around full adoption examples and fixed-port guidance
 
 ## Completed
@@ -419,6 +419,24 @@ Last updated: 2026-05-03
 
 - None
 
+## Latest Work
+
+- Added the first adapter API reshape:
+  - `project.Define` and `project.Builder` for declaring project name, targets, tasks, services, ports, dotenv/env, required CLIs, readiness, inputs, and outputs
+  - finite builder tasks become cacheable when project output paths are declared; `NoCache()` is the escape hatch
+  - `project.Glob(...)`, `Inputs.Paths`, and `Inputs.Globs` are now fingerprinted and explained by `graph affected --explain`
+  - `Runtime` now exposes `CloneEnv`, `EnvWith`, `LineEmitter`, `EmitLogLine`, and `EmitJSONLine` so adapters do not need custom log/event helpers
+  - `database.Postgres` wires common managed Postgres instance env/ports/default snapshot root
+  - `database.Prisma` wires common Prisma client generation, migration-prefix DB preparation, and explicit non-cacheable migration authoring tasks
+  - `database.EnsurePrismaDevDatabaseForRuntime`, `GeneratePrismaMigrationForRuntime`, and `SummarizePrismaDevDatabase` remove repeated runtime/log/summary boilerplate
+- Updated user/contributor docs so new adapters are taught through the builder/component API instead of hand-assembled low-level task structs.
+- Added coverage for builder behavior, path/glob input hashing, graph explanations, path output cache snapshotting, and database component task generation/finalization.
+- Split bundled user docs into scoped setup and development lanes:
+  - `devflow docs setup` prints setup/pipeline docs only
+  - `devflow docs development` prints day-to-day CLI/TUI/operator docs only
+  - bare `devflow docs` is now a usage error so agents and users do not accidentally pull both lanes into one context
+  - user/contributor docs and tests now cover the scoped docs command contract
+
 ## Recent Feedback
 
 - Prisma/Postgres clean retry confirmed the prior fixes worked:
@@ -435,7 +453,8 @@ Last updated: 2026-05-03
 
 ## Next Steps
 
-- Expand user docs/examples for script-to-Devflow convergence, a complete managed database example, and fixed-port service guidance
+- Convert bundled example adapters to the builder/component API so source examples match the new user-facing shape
+- Expand user docs/examples for script-to-Devflow convergence and fixed-port service guidance
 - Add binary artifacts, npm/Homebrew/Scoop installers, or richer update channels later only if Go install stops being enough
 
 ## Deferred / Known Gaps

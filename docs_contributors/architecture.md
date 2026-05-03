@@ -111,8 +111,10 @@ Instance env is persisted under `.devflow/state` so detached supervisors, status
 ## Watch Cascades
 
 Watch mode uses task inputs as the file-change interface:
+- `Inputs.Paths` matches exact relative paths and descendants
 - `Inputs.Files` matches exact relative files
 - `Inputs.Dirs` matches relative directories and descendants
+- `Inputs.Globs` matches slash-normalized glob patterns, including `**`
 - `Inputs.Ignore` can suppress matching paths
 
 When a file batch arrives, the engine:
@@ -134,6 +136,8 @@ Ignore semantics are shared by watch matching and fingerprinting:
 - for explicit file inputs, root-relative ignore patterns can suppress that file from both watch matching and fingerprinting
 
 This lets adapters use either `internal/storage/sqlc` or `sqlc` to ignore generated files under `Inputs.Dirs: []string{"internal/storage"}`. `devflow graph affected --files <path> --explain --json` exposes which input matched or which ignore pattern suppressed a file.
+
+New user-facing adapters should normally use the builder API, where `Inputs("path")` populates `Inputs.Paths` and `project.Glob("internal/storage/**/*.sql")` populates `Inputs.Globs`. The older `Files`/`Dirs` fields remain the lower-level internal representation for existing engine tests and helpers.
 
 Current service restart policy meanings in watch mode:
 - `RestartNever`: never restart from file-change cascades
@@ -222,7 +226,7 @@ Current limitation:
 
 Adapters define required command-line tools together with platform-specific install scripts.
 
-`RequiredCLIs()` is the project-level catalog. Tasks and targets select from that catalog with `RequiredCLIs`, allowing target-scoped commands to avoid over-reporting tools that belong only to unrelated flows. The older `Dependencies()` provider remains as a compatibility shim for early adapters.
+`RequiredCLIs()` is the project-level catalog at the engine boundary. New adapters normally populate it through `project.Builder.RequiredCLIs` or `RequiredCLI`. Builder command tasks automatically select a matching catalog entry when the command name matches it. Tasks and targets select from that catalog with `RequiredCLIs`, allowing target-scoped commands to avoid over-reporting tools that belong only to unrelated flows. The older `Dependencies()` provider remains as a compatibility shim for early adapters.
 
 Current shape:
 
@@ -318,6 +322,8 @@ The bundled example adapter now exercises this shape structurally:
 - start the final per-instance Postgres service for app runtime
 
 Higher-level workflow helpers now exist on top of those primitives:
+- `database.Postgres` for the common managed local Postgres instance wiring, including default snapshot root, runtime env, and port allocation
+- `database.Prisma` for common Prisma tasks: client generation, migration-prefix DB preparation, and explicit migration authoring
 - `EnsureMigratedDatabase` for generic migration folders
 - `PostgresMigrationFileApplier` for applying one SQL file per migration and snapshotting every prefix
 - `EnsurePrismaDevDatabase` for Prisma schema + migration folders, applying pending migrations through prefix-limited `prisma migrate deploy` runs by default

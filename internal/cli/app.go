@@ -1563,10 +1563,17 @@ func sameExecutablePath(a, b string) bool {
 }
 
 func (a *App) docsCmd(args []string) error {
-	if len(args) != 0 {
-		return fmt.Errorf("usage: devflow docs")
+	if len(args) != 1 {
+		return fmt.Errorf("usage: devflow docs <setup|development>")
 	}
-	return writeUserDocs(a.Stdout)
+	switch args[0] {
+	case "setup", "pipeline":
+		return writeUserDocs(a.Stdout, docsBundleSetup)
+	case "development", "dev", "daily":
+		return writeUserDocs(a.Stdout, docsBundleDevelopment)
+	default:
+		return fmt.Errorf("usage: devflow docs <setup|development>")
+	}
 }
 
 func (a *App) graphListCmd(args []string) error {

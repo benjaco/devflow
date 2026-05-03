@@ -10,7 +10,7 @@ Agents should use the normal installed command:
 
 ```bash
 go install github.com/benjaco/devflow/cmd/devflow@latest
-devflow docs
+devflow docs setup
 ```
 
 Updates are intentionally Go-first:
@@ -21,7 +21,7 @@ devflow upgrade
 
 Because project graph definitions are Go code, Go is expected to be available on machines where agents use Devflow.
 
-`devflow docs` prints the bundled user-facing Markdown docs for the installed version. It has no JSON mode. Use it when integrating Devflow into another project instead of fetching contributor docs or browsing the repository.
+`devflow docs setup` prints only the bundled setup/pipeline Markdown docs for the installed version. `devflow docs development` prints only the day-to-day CLI/TUI/operator docs. Both commands intentionally have no JSON mode. Use the scoped docs command that matches the task instead of fetching all docs or browsing the repository.
 
 The intended sequencing is:
 1. CLI

@@ -105,8 +105,10 @@ func (s *Store) Snapshot(worktree string, task project.Task, key string) (*Manif
 		return nil, err
 	}
 
-	files := append([]string(nil), task.Outputs.Files...)
-	dirs := append([]string(nil), task.Outputs.Dirs...)
+	files, dirs, err := classifyOutputs(worktree, task.Outputs)
+	if err != nil {
+		return nil, err
+	}
 	sort.Strings(files)
 	sort.Strings(dirs)
 
@@ -139,7 +141,7 @@ func (s *Store) Snapshot(worktree string, task project.Task, key string) (*Manif
 			Dirs:  dirs,
 		},
 		InputsSummary: Summary{
-			FileCount: len(task.Inputs.Files),
+			FileCount: len(task.Inputs.Paths) + len(task.Inputs.Files) + len(task.Inputs.Globs),
 			DirCount:  len(task.Inputs.Dirs),
 			Env:       append([]string(nil), task.Inputs.Env...),
 		},
@@ -157,6 +159,23 @@ func (s *Store) Snapshot(worktree string, task project.Task, key string) (*Manif
 		}
 	}
 	return manifest, nil
+}
+
+func classifyOutputs(worktree string, outputs project.Outputs) ([]string, []string, error) {
+	files := append([]string(nil), outputs.Files...)
+	dirs := append([]string(nil), outputs.Dirs...)
+	for _, rel := range outputs.Paths {
+		info, err := os.Stat(filepath.Join(worktree, rel))
+		if err != nil {
+			return nil, nil, fmt.Errorf("declared output path %q missing: %w", rel, err)
+		}
+		if info.IsDir() {
+			dirs = append(dirs, rel)
+		} else {
+			files = append(files, rel)
+		}
+	}
+	return files, dirs, nil
 }
 
 func (s *Store) Restore(worktree string, taskName, key string) (bool, error) {

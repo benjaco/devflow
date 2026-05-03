@@ -277,23 +277,77 @@ func TestVersionJSON(t *testing.T) {
 	}
 }
 
-func TestDocsPrintsUserMarkdownOnly(t *testing.T) {
+func TestDocsRequiresScopedBundle(t *testing.T) {
 	stdout := &bytes.Buffer{}
 	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
-	if err := app.Run([]string{"docs"}); err != nil {
+	err := app.Run([]string{"docs"})
+	if err == nil {
+		t.Fatal("expected bare docs command to fail")
+	}
+	if !strings.Contains(err.Error(), "devflow docs <setup|development>") {
+		t.Fatalf("unexpected docs error: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("bare docs should not print bundled docs, got %q", stdout.String())
+	}
+}
+
+func TestDocsSetupPrintsSetupMarkdownOnly(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"docs", "setup"}); err != nil {
 		t.Fatal(err)
 	}
 	output := stdout.String()
-	want := []string{
-		"<!-- docs_users/README.md -->",
-		"# Adopting Devflow In A Project",
+	assertDocsMarkersInOrder(t, output, []string{
+		"<!-- docs_users/setup.md -->",
+		"# Devflow Setup Docs",
 		"<!-- docs_users/adapter-guide.md -->",
 		"# Adapter Guide",
+	})
+	for _, forbidden := range []string{
+		"<!-- docs_users/development.md -->",
+		"# Devflow Development Docs",
 		"<!-- docs_users/agent-integration.md -->",
 		"# Agent Integration",
+		"# Developing Devflow",
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("setup docs included forbidden content %q", forbidden)
+		}
 	}
+}
+
+func TestDocsDevelopmentPrintsDevelopmentMarkdownOnly(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"docs", "development"}); err != nil {
+		t.Fatal(err)
+	}
+	output := stdout.String()
+	assertDocsMarkersInOrder(t, output, []string{
+		"<!-- docs_users/development.md -->",
+		"# Devflow Development Docs",
+		"<!-- docs_users/agent-integration.md -->",
+		"# Agent Integration",
+	})
+	for _, forbidden := range []string{
+		"<!-- docs_users/setup.md -->",
+		"# Devflow Setup Docs",
+		"<!-- docs_users/adapter-guide.md -->",
+		"# Adapter Guide",
+		"# Developing Devflow",
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("development docs included forbidden content %q", forbidden)
+		}
+	}
+}
+
+func assertDocsMarkersInOrder(t *testing.T, output string, markers []string) {
+	t.Helper()
 	last := -1
-	for _, marker := range want {
+	for _, marker := range markers {
 		idx := strings.Index(output, marker)
 		if idx < 0 {
 			t.Fatalf("missing docs marker %q in output", marker)
@@ -302,9 +356,6 @@ func TestDocsPrintsUserMarkdownOnly(t *testing.T) {
 			t.Fatalf("marker %q appeared out of order", marker)
 		}
 		last = idx
-	}
-	if strings.Contains(output, "# Developing Devflow") {
-		t.Fatalf("docs command should not include contributor docs")
 	}
 }
 
