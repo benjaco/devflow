@@ -45,6 +45,26 @@ type PrismaMigrationGenerateOptions struct {
 	Command    process.CommandSpec
 }
 
+type PrismaMigrationAuthoringOptions struct {
+	Worktree      string
+	DB            api.DBInstance
+	SchemaPath    string
+	MigrationsDir string
+	BasePaths     []string
+	SourcePolicy  SourcePolicy
+	Prepare       PrepareOptions
+	MigrateEach   PrismaMigrationApplyFunc
+	ReadyTimeout  time.Duration
+}
+
+type PrismaMigrationAuthoringResult struct {
+	State             *PrismaState      `json:"state,omitempty"`
+	Base              *PrismaBaseResult `json:"base,omitempty"`
+	Plan              PrismaRestorePlan `json:"plan"`
+	Applied           bool              `json:"applied"`
+	AppliedMigrations []string          `json:"appliedMigrations,omitempty"`
+}
+
 type MigrationNeededError struct {
 	Reason  string
 	Message string
@@ -152,6 +172,76 @@ func (m *Manager) EnsurePrismaDevDatabase(ctx context.Context, opts PrismaDevDat
 		if err := m.WaitReady(ctx, opts.DB, timeout); err != nil {
 			return nil, err
 		}
+	}
+	return result, nil
+}
+
+func (m *Manager) PreparePrismaMigrationAuthoringDatabase(ctx context.Context, opts PrismaMigrationAuthoringOptions) (*PrismaMigrationAuthoringResult, error) {
+	state, err := InspectPrismaState(opts.Worktree, opts.SchemaPath, opts.MigrationsDir, opts.BasePaths)
+	if err != nil {
+		return nil, err
+	}
+	base, err := m.PreparePrismaBase(ctx, opts.DB, state, opts.SourcePolicy, opts.Prepare)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.EnsureRuntime(ctx, opts.DB); err != nil {
+		return nil, err
+	}
+	timeout := opts.ReadyTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	if err := m.WaitReady(ctx, opts.DB, timeout); err != nil {
+		return nil, err
+	}
+	plan := PrismaRestorePlan{}
+	if base != nil && base.Restored != nil {
+		plan = base.Restored.Plan
+	}
+	result := &PrismaMigrationAuthoringResult{
+		State: state,
+		Base:  base,
+		Plan:  plan,
+	}
+	start := plan.PrefixLength
+	if plan.SnapshotKey == "" {
+		start = 0
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start > len(state.Migrations) {
+		start = len(state.Migrations)
+	}
+	if start >= len(state.Migrations) {
+		return result, nil
+	}
+	applier := opts.MigrateEach
+	if applier == nil {
+		applier = PrismaMigrateDeployPrefixApplier()
+	}
+	for i := start; i < len(state.Migrations); i++ {
+		migration := state.Migrations[i]
+		if err := applier(ctx, opts.DB, migration, PrismaMigrationApplyOptions{
+			Worktree:      opts.Worktree,
+			SchemaPath:    opts.SchemaPath,
+			MigrationsDir: opts.MigrationsDir,
+			Index:         i,
+			LogPath:       opts.Prepare.LogPath,
+			OnLine:        opts.Prepare.OnLine,
+			Env:           opts.Prepare.Env,
+		}); err != nil {
+			return nil, err
+		}
+		result.Applied = true
+		result.AppliedMigrations = append(result.AppliedMigrations, migration.Name)
+	}
+	if err := m.EnsureRuntime(ctx, opts.DB); err != nil {
+		return nil, err
+	}
+	if err := m.WaitReady(ctx, opts.DB, timeout); err != nil {
+		return nil, err
 	}
 	return result, nil
 }

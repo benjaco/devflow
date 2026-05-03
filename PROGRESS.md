@@ -421,6 +421,20 @@ Last updated: 2026-05-03
 
 ## Latest Work
 
+- Added focused regression coverage for the recent Prisma authoring/component/TUI edge cases:
+  - first-migration authoring prep succeeds without tripping the normal no-migrations guard
+  - source-policy authoring prep rebuilds the base and applies all migrations on snapshot miss
+  - exact-snapshot authoring prep is a no-op beyond restore/readiness
+  - `prisma_new_migration` fingerprints the configured clone/source env key
+  - TUI migration generation reports progress in the footer
+- Aligned the TUI migration action with the component contract: it now reconciles the managed Prisma database through authoring prep before invoking Prisma migration generation.
+- Verified with `go test ./pkg/database ./pkg/tui` and `go test ./...`.
+- Folded the reworked Prisma/Postgres adoption feedback into the component API:
+  - added `PreparePrismaMigrationAuthoringDatabase` and runtime summary helpers
+  - `prisma.NewMigration(b)` now reconciles the managed database to the best compatible migration-prefix state before invoking Prisma migration generation
+  - edited latest migrations are restored from the prior prefix and replayed before Prisma authors the next migration, avoiding Prisma's modified-applied migration reset prompt
+  - user/contributor docs now clarify component task names, consumer-owned target names, `pg_dump` major-version compatibility, and stopped managed DB status metadata
+  - verified with `go test ./pkg/database` and `go test ./...`
 - Added the first adapter API reshape:
   - `project.Define` and `project.Builder` for declaring project name, targets, tasks, services, ports, dotenv/env, required CLIs, readiness, inputs, and outputs
   - finite builder tasks become cacheable when project output paths are declared; `NoCache()` is the escape hatch
@@ -450,6 +464,7 @@ Last updated: 2026-05-03
   - `flush` now periodically rewrites the sync sentinel while waiting for an ack to avoid a first-flush startup race after `watch --detach`
 - Remaining accepted improvement:
   - expose DB snapshot restore/apply/snapshot activity as first-class JSON/events instead of relying on adapter summary logs
+- Reworked Prisma/Postgres setup feedback confirmed the builder/component shape is substantially easier for adapters; the remaining accepted improvement is still first-class DB snapshot activity in top-level JSON/events rather than only task logs.
 
 ## Next Steps
 

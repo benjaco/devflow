@@ -26,7 +26,7 @@ Devflow uses three testing layers:
 - builder API coverage for command tasks, services, target definitions, automatic cacheability from outputs, port env references, dotenv loading, path inputs, and glob inputs
 - database component coverage for common Postgres/Prisma task generation, optional snapshot-root defaults, instance DB/env finalization, and explicit non-cacheable migration authoring
 - database runtime host-port readiness and stale published-port reconciliation coverage
-- managed migration workflow coverage for exact snapshot reuse, nearest-prefix restore, incompatible base fingerprint misses, changed-latest tail replay, per-migration prefix snapshots, checked remote Postgres clone policy failures, Prisma directory-only migration inspection, Prisma lock-file churn, model-free schemas without migrations, added/deleted Prisma migrations, changed older Prisma migration rebuilds, failed Prisma migration apply without snapshotting, Prisma prefix deploy snapshots, fresh/no-migration migration-needed errors, schema-without-migration migration-needed errors, and Prisma generate helpers
+- managed migration workflow coverage for exact snapshot reuse, nearest-prefix restore, incompatible base fingerprint misses, changed-latest tail replay, per-migration prefix snapshots, checked remote Postgres clone policy failures, Prisma directory-only migration inspection, Prisma lock-file churn, model-free schemas without migrations, added/deleted Prisma migrations, changed older Prisma migration rebuilds, failed Prisma migration apply without snapshotting, Prisma prefix deploy snapshots, fresh/no-migration migration-needed errors, schema-without-migration migration-needed errors, Prisma authoring database reconciliation, and Prisma generate helpers
 - Prisma schema/migration inspection and nearest-prefix snapshot planning coverage
 - dotenv parsing and merged runtime-env coverage with devflow-managed DB overrides
 - CLI JSON output shape, including command-level lifecycle coverage for `run`, `status`, `logs`, `instances`, `doctor`, and `stop`
@@ -37,7 +37,7 @@ Devflow uses three testing layers:
 - global cache coverage for the single OS user cache root and project cache namespaces
 - required CLI detection, target-scoped required CLI selection, and platform-script install coverage in `pkg/project` and `internal/cli`
 - engine-level interactive prompt event plus answer-file integration coverage
-- TUI database/Prisma panel rendering, drift warning, Prisma snapshot-summary loading, and migration-generation action coverage
+- TUI database/Prisma panel rendering, drift warning, Prisma snapshot-summary loading, migration-generation authoring prep, and progress/footer status coverage
 - sequential engine execution with cache hits
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work, plus explicit `migration_needed` task-state classification for database migration authoring guards
 - scheduler error preservation so a canceled sibling does not replace the first actionable task failure with `context canceled`

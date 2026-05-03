@@ -41,6 +41,8 @@ Use the lifecycle command that matches the job:
 - `devflow flush up --json` is the readiness gate for detached watch mode. It waits for file-change work to settle and checks in-chain services.
 - `devflow stop --all --json` cleans up the detached supervisor, child executor, tracked services, stale process records, and the managed database container for the worktree. It preserves the database volume.
 
+After `stop --all`, `status --json` may still include a `db` object. That object is the desired managed database identity and connection metadata for the instance, not proof that the container is currently running.
+
 For finite check/test targets that depend on services such as Postgres or a local app, generally use `devflow run <target> --ci --json` so Devflow starts the services as readiness probes and stops them before returning.
 
 For AI-assisted development, prefer `watch --detach` plus `flush` over an attached service `run`. Attached runs are useful for a human terminal, but they are not a clean "start and return when ready" automation interface.
@@ -59,7 +61,7 @@ Useful TUI keys:
 - `i`: invalidate selected task and rerun downstream
 - `t`: retarget to the selected task
 
-The database/Prisma panel shows managed Postgres identity, cached migration-prefix snapshots, and schema/migration drift. Migration authoring is explicit; normal startup does not secretly generate migrations.
+The database/Prisma panel shows managed Postgres identity, cached migration-prefix snapshots, and schema/migration drift. Migration authoring is explicit; normal startup does not secretly generate migrations. When you create a migration from the TUI, Devflow first reconciles the managed database to the best compatible migration-prefix state, then runs the configured Prisma migration generator.
 
 ## Watch Mode
 

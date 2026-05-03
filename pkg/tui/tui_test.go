@@ -339,9 +339,10 @@ func TestGeneratePrismaMigrationFromTUIRunsDefaultCreateOnly(t *testing.T) {
 	}
 }
 
-func TestGeneratePrismaMigrationFromTUIEnsuresManagedDatabase(t *testing.T) {
+func TestGeneratePrismaMigrationFromTUIReconcilesManagedDatabase(t *testing.T) {
 	worktree := t.TempDir()
 	mustWriteTUITestFile(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id name String }\n")
+	mustWriteTUITestFile(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table users(id int primary key);\n")
 	binDir := filepath.Join(worktree, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -380,22 +381,23 @@ func TestGeneratePrismaMigrationFromTUIEnsuresManagedDatabase(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if !manager.ensureCalled {
-		t.Fatal("expected TUI migration generation to ensure the managed database runtime")
+	if !manager.prepareCalled {
+		t.Fatal("expected TUI migration generation to reconcile the managed database")
 	}
-	if !manager.waitCalled {
-		t.Fatal("expected TUI migration generation to wait for managed database readiness")
+	if manager.prepareOpts.DB.ContainerName != inst.DB.ContainerName {
+		t.Fatalf("expected authoring prep to receive instance database, got %+v", manager.prepareOpts.DB)
 	}
-	if manager.ensureDB.ContainerName != inst.DB.ContainerName || manager.waitDB.ContainerName != inst.DB.ContainerName {
-		t.Fatalf("expected manager to receive instance database, got ensure=%+v wait=%+v", manager.ensureDB, manager.waitDB)
+	if manager.prepareOpts.Worktree != worktree || manager.prepareOpts.SchemaPath != "prisma/schema.prisma" || manager.prepareOpts.MigrationsDir != "prisma/migrations" {
+		t.Fatalf("unexpected authoring prep options: %+v", manager.prepareOpts)
 	}
 	if _, err := os.ReadFile(output); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
 		"loading Prisma migration configuration",
-		"starting managed database",
-		"waiting for managed database readiness",
+		"reconciling Prisma migration database",
+		"Prisma database stdout: database prepared",
+		"managed database is ready",
 		"running Prisma migration generation",
 		"Prisma stdout: migration created",
 	} {
@@ -575,6 +577,18 @@ func TestRenderFooterIncludesRetargetKey(t *testing.T) {
 	}
 }
 
+func TestRenderFooterShowsPrismaMigrationProgressStatus(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	d.setStatus(`[yellow]running Prisma migration generation for "add-age"...`)
+	text := d.footer.GetText(false)
+	if !strings.Contains(text, "m migration") {
+		t.Fatalf("expected footer to keep migration shortcut while showing progress, got %q", text)
+	}
+	if !strings.Contains(text, `running Prisma migration generation for "add-age"`) {
+		t.Fatalf("expected footer to render Prisma migration progress, got %q", text)
+	}
+}
+
 func TestHandleKeysPassesInputThroughWhenPopupActive(t *testing.T) {
 	d := newDashboard(t.TempDir(), "abc123")
 	d.activeInput = true
@@ -610,22 +624,23 @@ func TestCompactTUIStatusTruncatesAndRemovesDynamicColorMarkers(t *testing.T) {
 }
 
 type recordingTUIDatabaseManager struct {
-	ensureCalled bool
-	waitCalled   bool
-	ensureDB     api.DBInstance
-	waitDB       api.DBInstance
+	prepareCalled bool
+	prepareOpts   database.PrismaMigrationAuthoringOptions
 }
 
-func (m *recordingTUIDatabaseManager) EnsureRuntime(_ context.Context, db api.DBInstance) error {
-	m.ensureCalled = true
-	m.ensureDB = db
-	return nil
-}
-
-func (m *recordingTUIDatabaseManager) WaitReady(_ context.Context, db api.DBInstance, _ time.Duration) error {
-	m.waitCalled = true
-	m.waitDB = db
-	return nil
+func (m *recordingTUIDatabaseManager) PreparePrismaMigrationAuthoringDatabase(_ context.Context, opts database.PrismaMigrationAuthoringOptions) (*database.PrismaMigrationAuthoringResult, error) {
+	m.prepareCalled = true
+	m.prepareOpts = opts
+	if opts.Prepare.OnLine != nil {
+		opts.Prepare.OnLine("stdout", "database prepared")
+	}
+	plan := database.PrismaRestorePlan{ExactMatch: true, SnapshotKey: "prisma_001", PrefixLength: 1}
+	return &database.PrismaMigrationAuthoringResult{
+		Plan: plan,
+		Base: &database.PrismaBaseResult{
+			Restored: &database.PrismaRestoreResult{Plan: plan},
+		},
+	}, nil
 }
 
 func tuiProgressContains(progress []string, want string) bool {

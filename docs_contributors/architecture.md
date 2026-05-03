@@ -327,6 +327,7 @@ Higher-level workflow helpers now exist on top of those primitives:
 - `EnsureMigratedDatabase` for generic migration folders
 - `PostgresMigrationFileApplier` for applying one SQL file per migration and snapshotting every prefix
 - `EnsurePrismaDevDatabase` for Prisma schema + migration folders, applying pending migrations through prefix-limited `prisma migrate deploy` runs by default
+- `PreparePrismaMigrationAuthoringDatabase` for reconciling a managed Prisma database before migration authoring
 - `GeneratePrismaMigration` for explicit Prisma migration authoring
 - `PostgresDumpSourcePolicy` for cloning a remote development Postgres database into the local runtime
 
@@ -334,7 +335,9 @@ Prisma migration inspection is directory-only. Files under `prisma/migrations`, 
 
 The important cache invariant is prefix safety. A snapshot can only be reused when its migration list is a valid prefix of the current migration list and the base fingerprint still matches. `EnsureMigratedDatabase` with `ApplyEach` and the default `EnsurePrismaDevDatabase` path snapshot every prefix after applying it, so editing the latest migration can restore the previous prefix snapshot and apply only the changed tail.
 
-Prisma has two authoring guards: if `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but the migration list has not advanced beyond the restored prefix, the default workflow returns a migration-needed error telling the adapter to generate a migration first. The engine writes errors that implement `MigrationNeeded() bool`, plus known Prisma migration-needed messages, as `migration_needed` rather than `failed`, and downstream work remains pending. Migration generation must be modeled as an explicit target/action using `GeneratePrismaMigration`, or as the explicit TUI `m` action, not hidden inside normal `up`. The TUI action starts and waits for the recorded managed database when the instance has one, reports progress through the footer status, then runs Prisma migration generation.
+Prisma has two authoring guards: if `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but the migration list has not advanced beyond the restored prefix, the default workflow returns a migration-needed error telling the adapter to generate a migration first. The engine writes errors that implement `MigrationNeeded() bool`, plus known Prisma migration-needed messages, as `migration_needed` rather than `failed`, and downstream work remains pending. Migration generation must be modeled as an explicit target/action using `PreparePrismaMigrationAuthoringDatabase` plus `GeneratePrismaMigration`, or as the explicit TUI `m` action, not hidden inside normal `up`.
+
+Migration authoring prep intentionally differs from normal DB prep: it restores/rebuilds the managed database to the best compatible prefix, reapplies any missing or edited tail migrations, and does not snapshot the schema-drift state it prepares for Prisma. That lets `prisma migrate dev --create-only` compare the current schema against a compatible database without hitting Prisma's "migration was modified after it was applied" reset prompt after a developer edits the latest migration.
 
 Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`. `Migrate` is an all-at-once command and only snapshots the final state; `MigrateEach` preserves the per-prefix cache contract.
 
@@ -546,7 +549,7 @@ The first usable TUI slice is now implemented as a local terminal console over p
 - task log tail
 - supervisor log toggle
 - database/Prisma panel showing managed Postgres identity and recent Prisma migration-prefix snapshots
-- explicit Prisma migration generation from inside the TUI by asking for a migration name and running the configured/detected Prisma generate command
+- explicit Prisma migration generation from inside the TUI by asking for a migration name, reconciling the managed DB through authoring prep, and running the configured/detected Prisma generate command
 - instance/worktree/runtime header
 - stable terminal rendering via a real TUI library instead of manual ANSI frame painting
 - invalidate-and-rerun from the selected task by invalidating the selected downstream cacheable once-task slice and relaunching the current target

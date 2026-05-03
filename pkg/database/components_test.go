@@ -47,6 +47,11 @@ func TestPrismaComponentDefinesCommonTasksAndInstanceDB(t *testing.T) {
 	if len(newMigration.Outputs.Paths) != 1 || newMigration.Outputs.Paths[0] != "prisma/migrations" {
 		t.Fatalf("unexpected new migration outputs: %+v", newMigration.Outputs)
 	}
+	for _, key := range []string{"DEVFLOW_MIGRATION_NAME", "DATABASE_URL", "DEV_DATABASE_URL"} {
+		if !stringSliceContainsDatabaseTest(newMigration.Inputs.Env, key) {
+			t.Fatalf("expected new migration input env to include %q, got %+v", key, newMigration.Inputs.Env)
+		}
+	}
 
 	cfg, err := p.ConfigureInstance(context.Background(), t.TempDir())
 	if err != nil {
@@ -70,6 +75,15 @@ func TestPrismaComponentDefinesCommonTasksAndInstanceDB(t *testing.T) {
 	if inst.Env["DATABASE_URL"] == "" {
 		t.Fatal("expected DATABASE_URL in instance env")
 	}
+}
+
+func stringSliceContainsDatabaseTest(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func taskByName(tasks []project.Task, name string) project.Task {

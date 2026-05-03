@@ -62,8 +62,7 @@ type tuiPrismaConfig struct {
 }
 
 type tuiDatabaseManager interface {
-	EnsureRuntime(context.Context, api.DBInstance) error
-	WaitReady(context.Context, api.DBInstance, time.Duration) error
+	PreparePrismaMigrationAuthoringDatabase(context.Context, database.PrismaMigrationAuthoringOptions) (*database.PrismaMigrationAuthoringResult, error)
 }
 
 var newDatabaseManagerForTUI = func() tuiDatabaseManager {
@@ -1117,7 +1116,8 @@ func generatePrismaMigrationFromTUI(root, instanceID, name string, progressFns .
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	if err := ensureManagedDatabaseForTUI(ctx, inst.DB, progress); err != nil {
+	logPath := instance.LogPath(root, instanceID, "prisma_migration")
+	if err := preparePrismaMigrationAuthoringDatabaseForTUI(ctx, root, inst.DB, cfg, env, logPath, progress); err != nil {
 		return err
 	}
 	reportTUIProgress(progress, "running Prisma migration generation for %q...", name)
@@ -1127,7 +1127,7 @@ func generatePrismaMigrationFromTUI(root, instanceID, name string, progressFns .
 		Name:       name,
 		CreateOnly: cfg.CreateOnly,
 		Env:        env,
-		LogPath:    instance.LogPath(root, instanceID, "prisma_migration"),
+		LogPath:    logPath,
 		Command:    cfg.Command,
 		OnLine: func(stream, line string) {
 			line = strings.TrimSpace(line)
@@ -1139,20 +1139,36 @@ func generatePrismaMigrationFromTUI(root, instanceID, name string, progressFns .
 	})
 }
 
-func ensureManagedDatabaseForTUI(ctx context.Context, db api.DBInstance, progress func(string)) error {
+func preparePrismaMigrationAuthoringDatabaseForTUI(ctx context.Context, root string, db api.DBInstance, cfg tuiPrismaConfig, env map[string]string, logPath string, progress func(string)) error {
 	if db.ContainerName == "" && db.VolumeName == "" {
 		return nil
 	}
 	manager := newDatabaseManagerForTUI()
-	reportTUIProgress(progress, "starting managed database for Prisma migration...")
-	if err := manager.EnsureRuntime(ctx, db); err != nil {
-		return fmt.Errorf("ensure managed database runtime: %w", err)
+	reportTUIProgress(progress, "reconciling Prisma migration database...")
+	result, err := manager.PreparePrismaMigrationAuthoringDatabase(ctx, database.PrismaMigrationAuthoringOptions{
+		Worktree:      root,
+		DB:            db,
+		SchemaPath:    cfg.SchemaPath,
+		MigrationsDir: cfg.MigrationsDir,
+		BasePaths:     cfg.BasePaths,
+		Prepare: database.PrepareOptions{
+			Worktree: root,
+			Env:      env,
+			LogPath:  logPath,
+			OnLine: func(stream, line string) {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					return
+				}
+				reportTUIProgress(progress, "Prisma database %s: %s", stream, compactTUIStatus(line, 120))
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("prepare Prisma migration database: %w", err)
 	}
-	reportTUIProgress(progress, "waiting for managed database readiness...")
-	if err := manager.WaitReady(ctx, db, 45*time.Second); err != nil {
-		return fmt.Errorf("wait for managed database readiness: %w", err)
-	}
-	reportTUIProgress(progress, "managed database is ready; invoking Prisma...")
+	summary := database.SummarizePrismaMigrationAuthoring(result)
+	reportTUIProgress(progress, "managed database is ready; restored=%v applied=%v prefix=%d", summary.Restored, summary.Applied, summary.PrefixLength)
 	return nil
 }
 

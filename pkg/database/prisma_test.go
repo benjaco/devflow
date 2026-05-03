@@ -1036,6 +1036,221 @@ model User {
 	}
 }
 
+func TestPreparePrismaMigrationAuthoringDatabaseAllowsSchemaDriftForNewMigration(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id }\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table users(id int primary key);\n")
+	oldState, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotRoot := t.TempDir()
+	oldKey := PrismaSnapshotKey(oldState)
+	writePrismaSnapshotFixture(t, snapshotRoot, oldKey, oldState)
+
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id name String? }\n")
+	responses := prismaRuntimeResponses(snapshotRoot)
+	addPrismaRestoreResponse(responses, snapshotRoot, oldKey)
+	runner := &fakeRunner{responses: responses}
+	mgr := NewWithRunner(runner)
+
+	result, err := mgr.PreparePrismaMigrationAuthoringDatabase(context.Background(), PrismaMigrationAuthoringOptions{
+		Worktree:      worktree,
+		DB:            migrationTestDB(snapshotRoot),
+		SchemaPath:    "prisma/schema.prisma",
+		MigrationsDir: "prisma/migrations",
+		MigrateEach: func(ctx context.Context, db api.DBInstance, migration PrismaMigration, opts PrismaMigrationApplyOptions) error {
+			t.Fatalf("did not expect migration authoring prep to replay migration %s for schema-only drift", migration.Name)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil || result.Applied {
+		t.Fatalf("expected schema drift authoring prep to restore without applying tail, got %+v", result)
+	}
+	if result.Plan.ExactMatch || result.Plan.SnapshotKey != oldKey || result.Plan.PrefixLength != 1 {
+		t.Fatalf("expected non-exact one-migration restore plan, got %+v", result.Plan)
+	}
+	if result.Base == nil || result.Base.Restored == nil {
+		t.Fatalf("expected authoring prep to restore previous migration state, got %+v", result.Base)
+	}
+	if runner.sawPrefix("docker stop -t 10 devflow-pg-abc") {
+		t.Fatal("did not expect authoring prep to snapshot schema-drift state")
+	}
+}
+
+func TestPreparePrismaMigrationAuthoringDatabaseAllowsFreshModelSchemaWithoutMigrations(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), `
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id Int @id @default(autoincrement())
+}
+`)
+	snapshotRoot := t.TempDir()
+	runner := &fakeRunner{responses: prismaRuntimeResponses(snapshotRoot)}
+	mgr := NewWithRunner(runner)
+
+	result, err := mgr.PreparePrismaMigrationAuthoringDatabase(context.Background(), PrismaMigrationAuthoringOptions{
+		Worktree:      worktree,
+		DB:            migrationTestDB(snapshotRoot),
+		SchemaPath:    "prisma/schema.prisma",
+		MigrationsDir: "prisma/migrations",
+		MigrateEach: func(ctx context.Context, db api.DBInstance, migration PrismaMigration, opts PrismaMigrationApplyOptions) error {
+			t.Fatalf("did not expect fresh migration authoring prep to replay migration %s", migration.Name)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil || result.Applied || len(result.State.Migrations) != 0 {
+		t.Fatalf("unexpected fresh migration authoring result: %+v", result)
+	}
+	if result.Base == nil || !result.Base.Recreated {
+		t.Fatalf("expected fresh migration authoring prep to recreate an empty runtime, got %+v", result.Base)
+	}
+	if runner.sawPrefix("docker stop -t 10 devflow-pg-abc") {
+		t.Fatal("did not expect fresh migration authoring prep to snapshot")
+	}
+}
+
+func TestPreparePrismaMigrationAuthoringDatabaseReplaysChangedLatestTail(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id }\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table users(id int primary key);\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "002_role", "migration.sql"), "alter table users add column role text;\n")
+	original, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefixState := prismaStatePrefix(original, 1)
+	snapshotRoot := t.TempDir()
+	prefixKey := PrismaSnapshotKey(prefixState)
+	writePrismaSnapshotFixture(t, snapshotRoot, prefixKey, prefixState)
+
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "002_role", "migration.sql"), "alter table users add column role text default 'rider';\n")
+	responses := prismaRuntimeResponses(snapshotRoot)
+	addPrismaRestoreResponse(responses, snapshotRoot, prefixKey)
+	runner := &fakeRunner{responses: responses}
+	mgr := NewWithRunner(runner)
+	applied := make([]string, 0, 1)
+
+	result, err := mgr.PreparePrismaMigrationAuthoringDatabase(context.Background(), PrismaMigrationAuthoringOptions{
+		Worktree:      worktree,
+		DB:            migrationTestDB(snapshotRoot),
+		SchemaPath:    "prisma/schema.prisma",
+		MigrationsDir: "prisma/migrations",
+		MigrateEach: func(ctx context.Context, db api.DBInstance, migration PrismaMigration, opts PrismaMigrationApplyOptions) error {
+			applied = append(applied, migration.Name)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(applied, ",") != "002_role" {
+		t.Fatalf("expected authoring prep to apply only changed latest tail, got %v", applied)
+	}
+	if result == nil || !result.Applied || strings.Join(result.AppliedMigrations, ",") != "002_role" {
+		t.Fatalf("unexpected authoring prep result: %+v", result)
+	}
+	if result.Base == nil || result.Base.Restored == nil || result.Base.Restored.Plan.PrefixLength != 1 {
+		t.Fatalf("expected one-migration prefix restore, got %+v", result.Base)
+	}
+	if runner.sawPrefix("docker stop -t 10 devflow-pg-abc") {
+		t.Fatal("did not expect authoring prep to write a migration-prefix snapshot")
+	}
+}
+
+func TestPreparePrismaMigrationAuthoringDatabaseSourcePolicyAppliesAllMigrationsOnSnapshotMiss(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id role String? }\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table users(id int primary key);\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "002_role", "migration.sql"), "alter table users add column role text;\n")
+	snapshotRoot := t.TempDir()
+	runner := &fakeRunner{responses: prismaRuntimeResponses(snapshotRoot)}
+	mgr := NewWithRunner(runner)
+	sourceCalled := false
+	applied := make([]string, 0, 2)
+
+	result, err := mgr.PreparePrismaMigrationAuthoringDatabase(context.Background(), PrismaMigrationAuthoringOptions{
+		Worktree:      worktree,
+		DB:            migrationTestDB(snapshotRoot),
+		SchemaPath:    "prisma/schema.prisma",
+		MigrationsDir: "prisma/migrations",
+		SourcePolicy: SourcePolicyFunc{
+			PolicyName: "clone-dev",
+			Fn: func(ctx context.Context, db api.DBInstance, opts PrepareOptions) error {
+				sourceCalled = true
+				return nil
+			},
+		},
+		MigrateEach: func(ctx context.Context, db api.DBInstance, migration PrismaMigration, opts PrismaMigrationApplyOptions) error {
+			applied = append(applied, migration.Name)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sourceCalled {
+		t.Fatal("expected source policy to run when authoring prep has no compatible snapshot")
+	}
+	if strings.Join(applied, ",") != "001_init,002_role" {
+		t.Fatalf("expected authoring prep to apply all migrations after source rebuild, got %v", applied)
+	}
+	if result == nil || !result.Applied || result.Base == nil || !result.Base.SourceApplied || result.Base.SourcePolicy != "clone-dev" {
+		t.Fatalf("unexpected source-policy authoring prep result: %+v", result)
+	}
+}
+
+func TestPreparePrismaMigrationAuthoringDatabaseExactSnapshotIsNoOp(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id }\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table users(id int primary key);\n")
+	state, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotRoot := t.TempDir()
+	key := PrismaSnapshotKey(state)
+	writePrismaSnapshotFixture(t, snapshotRoot, key, state)
+	responses := prismaRuntimeResponses(snapshotRoot)
+	addPrismaRestoreResponse(responses, snapshotRoot, key)
+	runner := &fakeRunner{responses: responses}
+	mgr := NewWithRunner(runner)
+
+	result, err := mgr.PreparePrismaMigrationAuthoringDatabase(context.Background(), PrismaMigrationAuthoringOptions{
+		Worktree:      worktree,
+		DB:            migrationTestDB(snapshotRoot),
+		SchemaPath:    "prisma/schema.prisma",
+		MigrationsDir: "prisma/migrations",
+		MigrateEach: func(ctx context.Context, db api.DBInstance, migration PrismaMigration, opts PrismaMigrationApplyOptions) error {
+			t.Fatalf("did not expect exact authoring prep to replay migration %s", migration.Name)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil || result.Applied || !result.Plan.ExactMatch || result.Plan.SnapshotKey != key {
+		t.Fatalf("unexpected exact authoring prep result: %+v", result)
+	}
+	if result.Base == nil || result.Base.Restored == nil {
+		t.Fatalf("expected exact authoring prep to restore the current snapshot, got %+v", result.Base)
+	}
+	if runner.sawPrefix("docker stop -t 10 devflow-pg-abc") {
+		t.Fatal("did not expect exact authoring prep to snapshot")
+	}
+}
+
 func TestPrismaCommandBuilders(t *testing.T) {
 	deploy := PrismaMigrateDeployCommand("prisma/schema.prisma")
 	if deploy.Name != "npx" || strings.Join(deploy.Args, " ") != "prisma migrate deploy --schema prisma/schema.prisma" {

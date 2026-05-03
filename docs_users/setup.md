@@ -177,7 +177,9 @@ b.Target("new-migration", prisma.NewMigration(b))
 
 `prisma.Migrations(b)` restores the best cached migration-prefix database state, applies only the missing tail, snapshots each prefix, and reports migration-needed states when `schema.prisma` and `prisma/migrations` are out of sync.
 
-`prisma.NewMigration(b)` is an explicit authoring action. It reads `DEVFLOW_MIGRATION_NAME`, creates a Prisma migration, and is intentionally not task-cacheable.
+`prisma.NewMigration(b)` is an explicit authoring action. It reads `DEVFLOW_MIGRATION_NAME`, reconciles the managed database to the best compatible migration-prefix state, creates a Prisma migration, and is intentionally not task-cacheable. This keeps edited latest migrations usable: Devflow restores the prior prefix and reapplies the changed tail before Prisma authors the next migration.
+
+The component task names are `prisma_client`, `prisma_migrations`, and `prisma_new_migration` when the component name is `prisma`. Target names are yours to choose. The docs use `new-migration`, but an adapter can also expose an alias such as `migration_new` while migrating from older scripts.
 
 ## Environment
 

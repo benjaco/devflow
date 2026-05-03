@@ -183,9 +183,13 @@ func (p *PrismaComponent) NewMigration(b *project.Builder) *project.TaskBuilder 
 	if p.newMigrationTask != nil {
 		return p.newMigrationTask
 	}
+	inputEnv := []string{"DEVFLOW_MIGRATION_NAME", "DATABASE_URL"}
+	if p.sourceEnv != "" {
+		inputEnv = append(inputEnv, p.sourceEnv)
+	}
 	p.newMigrationTask = b.Task(p.name+"_new_migration").
 		Inputs(p.schemaPath, p.migrationsDir, "package.json", "package-lock.json").
-		InputEnv("DEVFLOW_MIGRATION_NAME", "DATABASE_URL").
+		InputEnv(inputEnv...).
 		Outputs(p.migrationsDir).
 		NoCache().
 		Run(func(ctx context.Context, rt *project.Runtime) error {
@@ -196,13 +200,18 @@ func (p *PrismaComponent) NewMigration(b *project.Builder) *project.TaskBuilder 
 			if name == "" {
 				return fmt.Errorf("DEVFLOW_MIGRATION_NAME is required")
 			}
-			manager := New()
-			if err := manager.EnsureRuntime(ctx, rt.Instance.DB); err != nil {
+			result, err := PreparePrismaMigrationAuthoringDatabaseForRuntime(ctx, rt, PrismaMigrationAuthoringOptions{
+				SchemaPath:    p.schemaPath,
+				MigrationsDir: p.migrationsDir,
+				BasePaths:     append([]string(nil), p.basePaths...),
+				SourcePolicy:  p.sourcePolicyForRuntime(rt),
+				ReadyTimeout:  p.readyTimeout,
+			})
+			if err != nil {
+				rt.EmitLogLine("stderr", p.name+"_new_migration database failed: "+err.Error())
 				return err
 			}
-			if err := manager.WaitReady(ctx, rt.Instance.DB, p.readyTimeout); err != nil {
-				return err
-			}
+			_ = rt.EmitJSONLine(p.name+"_new_migration database", SummarizePrismaMigrationAuthoring(result))
 			if err := GeneratePrismaMigrationForRuntime(ctx, rt, PrismaMigrationGenerateOptions{
 				SchemaPath: p.schemaPath,
 				Name:       name,
