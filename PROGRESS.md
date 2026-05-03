@@ -200,6 +200,11 @@ Last updated: 2026-05-03
 - Improved TUI log interaction:
   - the log pane is now the default focus when the TUI opens
   - mouse-wheel scrolling over the task table now scrolls the log pane instead of the task list
+- Added TUI database/Prisma visibility:
+  - `d` toggles a database/Prisma panel in the log area
+  - the panel shows managed Postgres identity without the DB password
+  - recent cached Prisma migration-prefix snapshots are loaded from the instance snapshot root and summarized by key, migration count, and latest migration
+  - the panel flags schema/migration drift and `m` asks for a migration name, then runs Prisma migration generation without leaving the TUI
 - Distinct task-cancellation handling implemented:
   - tasks interrupted by parent-run cancellation now persist as `canceled` instead of `failed`
   - the TUI now renders `canceled` separately from real failures

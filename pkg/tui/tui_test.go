@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/database"
 	"github.com/benjaco/devflow/pkg/graph"
 	"github.com/benjaco/devflow/pkg/instance"
 	"github.com/benjaco/devflow/pkg/project"
@@ -114,6 +115,166 @@ func TestRenderLogPanelIncludesSelection(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected log panel to contain %q, got:\n%s", want, joined)
 		}
+	}
+}
+
+func TestRenderDatabasePanelIncludesPrismaSnapshots(t *testing.T) {
+	snap := snapshot{
+		instance: &api.Instance{
+			DB: api.DBInstance{
+				Name:          "app_wt_abc",
+				Host:          "127.0.0.1",
+				Port:          55432,
+				User:          "devflow",
+				Password:      "secret",
+				Image:         "postgres:16.3",
+				ContainerName: "devflow-pg-abc",
+				VolumeName:    "devflow-pgdata-abc",
+				SnapshotRoot:  "/tmp/devflow/db-snapshots",
+			},
+		},
+		logTitle: databasePanelTitle,
+		prisma: []prismaSnapshotSummary{
+			{
+				Key:            "prisma_new",
+				CreatedAt:      time.Date(2026, 5, 3, 10, 30, 0, 0, time.UTC),
+				MigrationNames: []string{"001_init", "002_add_role"},
+			},
+		},
+	}
+	lines := renderLogPanel(snap, "")
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"managed postgres",
+		"host=127.0.0.1",
+		"port=55432",
+		"container=devflow-pg-abc",
+		"prisma snapshots: 1 cached migration-prefix states",
+		"latest=prisma_new migrations=2",
+		"002_add_role",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected database panel to contain %q, got:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "secret") {
+		t.Fatalf("database panel leaked DB password:\n%s", joined)
+	}
+}
+
+func TestRenderDatabasePanelFlagsPrismaMigrationDrift(t *testing.T) {
+	snap := snapshot{
+		instance: &api.Instance{
+			DB: api.DBInstance{Name: "app_wt_abc", Host: "127.0.0.1", Port: 55432, SnapshotRoot: "/tmp/snapshots"},
+		},
+		logTitle: databasePanelTitle,
+		prismaCfg: tuiPrismaConfig{
+			PrismaConfig: project.PrismaConfig{SchemaPath: "prisma/schema.prisma", MigrationsDir: "prisma/migrations"},
+			Source:       "adapter",
+			Available:    true,
+		},
+		prismaDev: &database.PrismaDevelopmentStatus{
+			NeedsNewMigration: true,
+			Reason:            "schema_changed",
+			Message:           "Prisma schema changed without a new migration",
+		},
+	}
+	lines := renderLogPanel(snap, "")
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"migration folder/state: needs new migration",
+		"reason=schema_changed",
+		"press m to create a Prisma migration",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected database panel to contain %q, got:\n%s", want, joined)
+		}
+	}
+}
+
+func TestLoadPrismaSnapshotSummariesSortsAndSkipsNonPrismaSnapshots(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "generic_migration_snapshot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "generic_migration_snapshot", "migrations.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.SavePrismaSnapshot(root, "prisma_old", &database.PrismaState{
+		SchemaHash: "schema-old",
+		Migrations: []database.PrismaMigration{
+			{Name: "001_init", Hash: "a"},
+		},
+		FullHash: "old",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	if _, err := database.SavePrismaSnapshot(root, "prisma_new", &database.PrismaState{
+		SchemaHash: "schema-new",
+		Migrations: []database.PrismaMigration{
+			{Name: "001_init", Hash: "a"},
+			{Name: "002_posts", Hash: "b"},
+		},
+		FullHash: "new",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := loadPrismaSnapshotSummaries(root, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected only Prisma snapshots, got %+v", items)
+	}
+	if items[0].Key != "prisma_new" {
+		t.Fatalf("expected newest Prisma snapshot first, got %+v", items)
+	}
+	if strings.Join(items[0].MigrationNames, ",") != "001_init,002_posts" {
+		t.Fatalf("unexpected migration names: %+v", items[0].MigrationNames)
+	}
+}
+
+func TestGeneratePrismaMigrationFromTUIRunsDefaultCreateOnly(t *testing.T) {
+	worktree := t.TempDir()
+	mustWriteTUITestFile(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id name String }\n")
+	binDir := filepath.Join(worktree, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTUITestExecutable(t, filepath.Join(binDir, "npx"), "#!/bin/sh\nprintf '%s' \"$*\" > \"$OUT_FILE\"\nprintf '%s' \"$DATABASE_URL\" > \"$OUT_FILE.url\"\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(worktree, "prisma-command.txt")
+	inst.Env = map[string]string{"OUT_FILE": output}
+	inst.DB = api.DBInstance{URL: "postgres://devflow:devflow@127.0.0.1:55432/app?sslmode=disable"}
+	if err := instance.Save(inst); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := generatePrismaMigrationFromTUI(worktree, inst.ID, "add-user-name"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.TrimSpace(string(data))
+	want := "prisma migrate dev --name add-user-name --schema prisma/schema.prisma --create-only"
+	if got != want {
+		t.Fatalf("unexpected Prisma migration command: got %q want %q", got, want)
+	}
+	url, err := os.ReadFile(output + ".url")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(url)) == "" {
+		t.Fatal("expected DATABASE_URL to be supplied to Prisma migration command")
 	}
 }
 
@@ -273,8 +434,11 @@ func TestRenderFooterIncludesRetargetKey(t *testing.T) {
 	d := newDashboard(t.TempDir(), "abc123")
 	d.setStatus("[green]ready")
 	text := d.footer.GetText(false)
-	if !strings.Contains(text, "t retarget to selected task") {
+	if !strings.Contains(text, "t retarget") {
 		t.Fatalf("expected footer to advertise retarget key, got %q", text)
+	}
+	if !strings.Contains(text, "d database/prisma") {
+		t.Fatalf("expected footer to advertise database panel key, got %q", text)
 	}
 }
 
@@ -301,7 +465,7 @@ func TestLoadSnapshotAllowsMissingInitialStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snap, err := loadSnapshot(worktree, inst.ID, false, "")
+	snap, err := loadSnapshot(worktree, inst.ID, false, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,6 +480,65 @@ func TestLoadSnapshotAllowsMissingInitialStatus(t *testing.T) {
 	}
 	if len(snap.nodes) != 0 {
 		t.Fatalf("expected no nodes before initial status, got %d", len(snap.nodes))
+	}
+}
+
+func TestLoadSnapshotDatabasePanelReadsPrismaSnapshots(t *testing.T) {
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotRoot := t.TempDir()
+	inst.DB = api.DBInstance{
+		Name:          "app_wt_abc",
+		Host:          "127.0.0.1",
+		Port:          55432,
+		ContainerName: "devflow-pg-abc",
+		SnapshotRoot:  snapshotRoot,
+	}
+	if err := instance.Save(inst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.SavePrismaSnapshot(snapshotRoot, "prisma_001", &database.PrismaState{
+		SchemaHash: "schema",
+		Migrations: []database.PrismaMigration{
+			{Name: "001_init", Hash: "a"},
+		},
+		FullHash: "full",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := loadSnapshot(worktree, inst.ID, false, true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.logTitle != databasePanelTitle {
+		t.Fatalf("expected database panel snapshot, got %q", snap.logTitle)
+	}
+	if len(snap.prisma) != 1 || snap.prisma[0].Key != "prisma_001" {
+		t.Fatalf("expected loaded Prisma snapshot summary, got %+v", snap.prisma)
+	}
+}
+
+func mustWriteTUITestFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustWriteTUITestExecutable(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 

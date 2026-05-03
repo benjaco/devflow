@@ -46,6 +46,15 @@ func (workspaceProject) DetectWorktree(worktree string) bool {
 	return true
 }
 
+func (workspaceProject) PrismaConfig() project.PrismaConfig {
+	return project.PrismaConfig{
+		SchemaPath:    "db/schema.prisma",
+		MigrationsDir: "db/migrations",
+		BasePaths:     []string{"db/bootstrap.sql"},
+		CreateOnly:    true,
+	}
+}
+
 func (workspaceProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
 	_ = ctx
 	dotenv, err := project.LoadOptionalDotEnvInWorktree(worktree, ".env")

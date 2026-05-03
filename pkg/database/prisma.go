@@ -52,6 +52,14 @@ type PrismaRestoreResult struct {
 	Plan     PrismaRestorePlan `json:"plan"`
 }
 
+type PrismaDevelopmentStatus struct {
+	State             *PrismaState      `json:"state,omitempty"`
+	Plan              PrismaRestorePlan `json:"plan"`
+	NeedsNewMigration bool              `json:"needsNewMigration"`
+	Reason            string            `json:"reason,omitempty"`
+	Message           string            `json:"message,omitempty"`
+}
+
 func InspectPrismaState(worktree, schemaPath, migrationsDir string, extraPaths []string) (*PrismaState, error) {
 	schemaHash, err := hashPath(filepath.Join(worktree, schemaPath))
 	if err != nil {
@@ -90,6 +98,39 @@ func InspectPrismaState(worktree, schemaPath, migrationsDir string, extraPaths [
 		Migrations:      migrations,
 		FullHash:        hashStrings(fullParts),
 	}, nil
+}
+
+func InspectPrismaDevelopmentStatus(worktree, schemaPath, migrationsDir string, extraPaths []string, snapshotRoot string) (*PrismaDevelopmentStatus, error) {
+	state, err := InspectPrismaState(worktree, schemaPath, migrationsDir, extraPaths)
+	if err != nil {
+		return nil, err
+	}
+	plan := PrismaRestorePlan{}
+	if snapshotRoot != "" {
+		plan, err = PlanPrismaRestore(snapshotRoot, state)
+		if err != nil {
+			return nil, err
+		}
+	}
+	status := &PrismaDevelopmentStatus{State: state, Plan: plan}
+	if len(state.Migrations) == 0 {
+		hasModels, err := prismaSchemaDeclaresModels(worktree, schemaPath)
+		if err != nil {
+			return nil, err
+		}
+		if hasModels {
+			status.NeedsNewMigration = true
+			status.Reason = "no_migrations"
+			status.Message = "Prisma schema declares models but no migrations exist"
+		}
+		return status, nil
+	}
+	if plan.SnapshotKey != "" && plan.PrefixLength == len(state.Migrations) && plan.Snapshot != nil && plan.Snapshot.SchemaHash != state.SchemaHash {
+		status.NeedsNewMigration = true
+		status.Reason = "schema_changed"
+		status.Message = "Prisma schema changed without a new migration"
+	}
+	return status, nil
 }
 
 func SavePrismaSnapshot(root, key string, state *PrismaState) (*PrismaSnapshot, error) {

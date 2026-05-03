@@ -328,7 +328,7 @@ Prisma migration inspection is directory-only. Files under `prisma/migrations`, 
 
 The important cache invariant is prefix safety. A snapshot can only be reused when its migration list is a valid prefix of the current migration list and the base fingerprint still matches. `EnsureMigratedDatabase` with `ApplyEach` and the default `EnsurePrismaDevDatabase` path snapshot every prefix after applying it, so editing the latest migration can restore the previous prefix snapshot and apply only the changed tail.
 
-Prisma has two authoring guards: if `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but the migration list has not advanced beyond the restored prefix, the default workflow returns an error telling the adapter to generate a migration first. Migration generation must be modeled as an explicit target/action using `GeneratePrismaMigration`, not hidden inside normal `up`.
+Prisma has two authoring guards: if `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but the migration list has not advanced beyond the restored prefix, the default workflow returns an error telling the adapter to generate a migration first. Migration generation must be modeled as an explicit target/action using `GeneratePrismaMigration`, or as the explicit TUI `m` action, not hidden inside normal `up`.
 
 Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`. `Migrate` is an all-at-once command and only snapshots the final state; `MigrateEach` preserves the per-prefix cache contract.
 
@@ -539,6 +539,8 @@ The first usable TUI slice is now implemented as a local terminal console over p
 - selected-task details
 - task log tail
 - supervisor log toggle
+- database/Prisma panel showing managed Postgres identity and recent Prisma migration-prefix snapshots
+- explicit Prisma migration generation from inside the TUI by asking for a migration name and running the configured/detected Prisma generate command
 - instance/worktree/runtime header
 - stable terminal rendering via a real TUI library instead of manual ANSI frame painting
 - invalidate-and-rerun from the selected task by invalidating the selected downstream cacheable once-task slice and relaunching the current target

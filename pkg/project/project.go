@@ -86,11 +86,23 @@ type InstanceConfig struct {
 	Finalize  func(inst *api.Instance) error
 }
 
+type PrismaConfig struct {
+	SchemaPath    string
+	MigrationsDir string
+	BasePaths     []string
+	CreateOnly    bool
+	Command       process.CommandSpec
+}
+
 type Project interface {
 	Name() string
 	Tasks() []Task
 	Targets() []Target
 	ConfigureInstance(ctx context.Context, worktree string) (InstanceConfig, error)
+}
+
+type PrismaConfigProvider interface {
+	PrismaConfig() PrismaConfig
 }
 
 type CacheNamespacer interface {

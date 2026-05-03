@@ -49,6 +49,15 @@ func (exampleProject) DetectWorktree(worktree string) bool {
 	return true
 }
 
+func (exampleProject) PrismaConfig() project.PrismaConfig {
+	return project.PrismaConfig{
+		SchemaPath:    "db/schema.prisma",
+		MigrationsDir: "db/migrations",
+		BasePaths:     []string{"db/bootstrap.sql"},
+		CreateOnly:    true,
+	}
+}
+
 func (exampleProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
 	_ = ctx
 	id, _, err := instance.IDForWorktree(worktree)

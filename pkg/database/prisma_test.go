@@ -102,6 +102,42 @@ func TestPrismaMigrationLockChurnDoesNotChangeState(t *testing.T) {
 	}
 }
 
+func TestInspectPrismaDevelopmentStatusFlagsSchemaWithoutMigration(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id }\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table users(id int primary key);\n")
+	oldState, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotRoot := t.TempDir()
+	if _, err := SavePrismaSnapshot(snapshotRoot, PrismaSnapshotKey(oldState), oldState); err != nil {
+		t.Fatal(err)
+	}
+
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id name String }\n")
+	status, err := InspectPrismaDevelopmentStatus(worktree, "prisma/schema.prisma", "prisma/migrations", nil, snapshotRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.NeedsNewMigration || status.Reason != "schema_changed" {
+		t.Fatalf("expected schema-changed migration status, got %+v", status)
+	}
+}
+
+func TestInspectPrismaDevelopmentStatusFlagsModelSchemaWithoutMigrations(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id }\n")
+
+	status, err := InspectPrismaDevelopmentStatus(worktree, "prisma/schema.prisma", "prisma/migrations", nil, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.NeedsNewMigration || status.Reason != "no_migrations" {
+		t.Fatalf("expected no-migrations status, got %+v", status)
+	}
+}
+
 func TestRestoreNearestPrismaSnapshotUsesSelectedSnapshot(t *testing.T) {
 	root := t.TempDir()
 	state := &PrismaState{

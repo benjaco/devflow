@@ -19,6 +19,7 @@ import (
 	"github.com/benjaco/devflow/internal/fsutil"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/cache"
+	"github.com/benjaco/devflow/pkg/database"
 	"github.com/benjaco/devflow/pkg/graph"
 	"github.com/benjaco/devflow/pkg/instance"
 	"github.com/benjaco/devflow/pkg/process"
@@ -32,13 +33,32 @@ type Options struct {
 }
 
 type snapshot struct {
-	instance   *api.Instance
-	state      *instance.State
-	nodes      []api.NodeStatus
-	supervisor *api.SupervisorStatus
-	urls       map[string]string
-	logTitle   string
-	logLines   []string
+	instance     *api.Instance
+	state        *instance.State
+	nodes        []api.NodeStatus
+	supervisor   *api.SupervisorStatus
+	urls         map[string]string
+	logTitle     string
+	logLines     []string
+	prisma       []prismaSnapshotSummary
+	prismaErr    string
+	prismaCfg    tuiPrismaConfig
+	prismaDev    *database.PrismaDevelopmentStatus
+	prismaDevErr string
+}
+
+type prismaSnapshotSummary struct {
+	Key             string
+	CreatedAt       time.Time
+	SchemaHash      string
+	BaseFingerprint string
+	MigrationNames  []string
+}
+
+type tuiPrismaConfig struct {
+	project.PrismaConfig
+	Source    string
+	Available bool
 }
 
 type dashboard struct {
@@ -52,6 +72,7 @@ type dashboard struct {
 	logs              *tview.TextView
 	footer            *tview.TextView
 	showSupervisorLog bool
+	showDatabasePanel bool
 	selectedName      string
 	currentNodes      []api.NodeStatus
 	statusMessage     string
@@ -62,6 +83,8 @@ type dashboard struct {
 
 const (
 	fallbackRefreshInterval = 2 * time.Second
+	databasePanelTitle      = "database / prisma"
+	supervisorLogTitle      = "supervisor log"
 )
 
 func Run(opts Options) error {
@@ -234,7 +257,20 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 			return nil
 		case 'l':
 			d.showSupervisorLog = !d.showSupervisorLog
+			if d.showSupervisorLog {
+				d.showDatabasePanel = false
+			}
 			d.updateLogs()
+			return nil
+		case 'd':
+			d.showDatabasePanel = !d.showDatabasePanel
+			if d.showDatabasePanel {
+				d.showSupervisorLog = false
+			}
+			d.updateLogs()
+			return nil
+		case 'm':
+			d.openPrismaMigrationPrompt()
 			return nil
 		case 'i':
 			d.triggerInvalidateSelected()
@@ -273,7 +309,7 @@ func (d *dashboard) selectIndex(index int) {
 }
 
 func (d *dashboard) refresh() error {
-	snap, err := loadSnapshot(d.root, d.instanceID, d.showSupervisorLog, d.selectedName)
+	snap, err := loadSnapshot(d.root, d.instanceID, d.showSupervisorLog, d.showDatabasePanel, d.selectedName)
 	if err != nil {
 		d.header.SetText(fmt.Sprintf("[red]failed to load instance state: %v", err))
 		return err
@@ -329,7 +365,7 @@ func (d *dashboard) reconcileSelection() {
 }
 
 func (d *dashboard) updateLogs() {
-	snap, err := loadSnapshot(d.root, d.instanceID, d.showSupervisorLog, d.selectedName)
+	snap, err := loadSnapshot(d.root, d.instanceID, d.showSupervisorLog, d.showDatabasePanel, d.selectedName)
 	if err != nil {
 		d.logs.SetTitle(" Logs ")
 		d.logs.SetText(fmt.Sprintf("failed to load logs: %v", err))
@@ -366,7 +402,75 @@ func (d *dashboard) renderFooter() {
 	if status == "" {
 		status = "[green]ready"
 	}
-	d.footer.SetText("q quit  j/k move  g/G top/bottom  l toggle selected/supervisor log  i invalidate+rerun downstream  t retarget to selected task\n" + status)
+	d.footer.SetText("q quit  j/k move  g/G top/bottom  l selected/supervisor log  d database/prisma  m new prisma migration  i invalidate+rerun downstream  t retarget\n" + status)
+}
+
+func (d *dashboard) openPrismaMigrationPrompt() {
+	if d.busy {
+		d.setStatus("[yellow]action already running")
+		return
+	}
+	inst, err := instance.Load(d.root, d.instanceID)
+	if err != nil {
+		d.setStatus(fmt.Sprintf("[red]failed to load instance: %v", err))
+		return
+	}
+	cfg, err := resolvePrismaConfig(d.root, inst)
+	if err != nil {
+		d.setStatus(fmt.Sprintf("[red]failed to resolve prisma config: %v", err))
+		return
+	}
+	if !cfg.Available {
+		d.setStatus("[red]no Prisma schema detected or configured")
+		return
+	}
+	var input *tview.InputField
+	input = tview.NewInputField().
+		SetLabel("Migration name ").
+		SetFieldWidth(48).
+		SetDoneFunc(func(key tcell.Key) {
+			if key != tcell.KeyEnter {
+				return
+			}
+			name := strings.TrimSpace(input.GetText())
+			d.pages.RemovePage("prisma_migration")
+			d.app.SetFocus(d.logs)
+			d.triggerGeneratePrismaMigration(name)
+		})
+	frame := tview.NewFrame(input).
+		SetBorders(1, 1, 1, 1, 1, 1).
+		AddText("Create Prisma Migration", true, tview.AlignCenter, tcell.ColorWhite).
+		AddText(fmt.Sprintf("%s -> %s", cfg.SchemaPath, cfg.MigrationsDir), false, tview.AlignCenter, tcell.ColorGray)
+	d.pages.AddPage("prisma_migration", centered(frame, 84, 8), true, true)
+	d.app.SetFocus(input)
+}
+
+func (d *dashboard) triggerGeneratePrismaMigration(name string) {
+	if d.busy {
+		d.setStatus("[yellow]action already running")
+		return
+	}
+	if strings.TrimSpace(name) == "" {
+		d.setStatus("[red]migration name is required")
+		return
+	}
+	d.busy = true
+	d.setStatus(fmt.Sprintf("[yellow]creating Prisma migration %q...", name))
+	go func() {
+		err := generatePrismaMigrationFromTUI(d.root, d.instanceID, name)
+		d.app.QueueUpdateDraw(func() {
+			d.busy = false
+			d.showDatabasePanel = true
+			d.showSupervisorLog = false
+			if err != nil {
+				d.setStatus(fmt.Sprintf("[red]Prisma migration failed: %v", err))
+				_ = d.refresh()
+				return
+			}
+			d.setStatus(fmt.Sprintf("[green]created Prisma migration %q", name))
+			_ = d.refresh()
+		})
+	}()
 }
 
 func (d *dashboard) triggerInvalidateSelected() {
@@ -430,7 +534,7 @@ func (d *dashboard) triggerRetargetSelected() {
 	}()
 }
 
-func loadSnapshot(root, instanceID string, showSupervisor bool, selectedName string) (snapshot, error) {
+func loadSnapshot(root, instanceID string, showSupervisor bool, showDatabase bool, selectedName string) (snapshot, error) {
 	inst, err := instance.Load(root, instanceID)
 	if err != nil {
 		return snapshot{}, err
@@ -472,8 +576,29 @@ func loadSnapshot(root, instanceID string, showSupervisor bool, selectedName str
 	selected := findSelectedNode(nodes, selectedName)
 	logTitle := "selected log"
 	logPath := ""
-	if showSupervisor {
-		logTitle = "supervisor log"
+	var prisma []prismaSnapshotSummary
+	var prismaErr string
+	var prismaCfg tuiPrismaConfig
+	var prismaDev *database.PrismaDevelopmentStatus
+	var prismaDevErr string
+	if showDatabase {
+		logTitle = databasePanelTitle
+		prismaCfg, err = resolvePrismaConfig(root, inst)
+		if err != nil {
+			prismaDevErr = err.Error()
+		}
+		if prismaCfg.Available {
+			prismaDev, err = database.InspectPrismaDevelopmentStatus(root, prismaCfg.SchemaPath, prismaCfg.MigrationsDir, prismaCfg.BasePaths, inst.DB.SnapshotRoot)
+			if err != nil {
+				prismaDevErr = err.Error()
+			}
+		}
+		prisma, err = loadPrismaSnapshotSummaries(inst.DB.SnapshotRoot, 10)
+		if err != nil {
+			prismaErr = err.Error()
+		}
+	} else if showSupervisor {
+		logTitle = supervisorLogTitle
 		if supervisor != nil {
 			logPath = supervisor.LogPath
 		}
@@ -484,13 +609,18 @@ func loadSnapshot(root, instanceID string, showSupervisor bool, selectedName str
 	logLines, _ := readLastLines(logPath, 200)
 
 	return snapshot{
-		instance:   inst,
-		state:      state,
-		nodes:      nodes,
-		supervisor: supervisor,
-		urls:       instanceURLs(inst),
-		logTitle:   logTitle,
-		logLines:   logLines,
+		instance:     inst,
+		state:        state,
+		nodes:        nodes,
+		supervisor:   supervisor,
+		urls:         instanceURLs(inst),
+		logTitle:     logTitle,
+		logLines:     logLines,
+		prisma:       prisma,
+		prismaErr:    prismaErr,
+		prismaCfg:    prismaCfg,
+		prismaDev:    prismaDev,
+		prismaDevErr: prismaDevErr,
 	}, nil
 }
 
@@ -671,8 +801,11 @@ func centered(p tview.Primitive, width, height int) tview.Primitive {
 }
 
 func renderLogPanel(snap snapshot, selectedName string) []string {
+	if snap.logTitle == databasePanelTitle {
+		return renderDatabasePanel(snap)
+	}
 	lines := []string{}
-	if snap.logTitle == "supervisor log" {
+	if snap.logTitle == supervisorLogTitle {
 		lines = append(lines, "selected: supervisor")
 	} else if node := findSelectedNode(snap.nodes, selectedName); node != nil {
 		lines = append(lines, fmt.Sprintf("selected: %s    kind=%s    state=%s", node.Name, node.Kind, node.State))
@@ -693,6 +826,217 @@ func renderLogPanel(snap snapshot, selectedName string) []string {
 	}
 	lines = append(lines, snap.logLines...)
 	return lines
+}
+
+func renderDatabasePanel(snap snapshot) []string {
+	lines := []string{"selected: database / prisma", ""}
+	if snap.instance == nil {
+		lines = append(lines, "managed postgres: not configured")
+		return lines
+	}
+	db := snap.instance.DB
+	if db.Name == "" && db.ContainerName == "" && db.SnapshotRoot == "" {
+		lines = append(lines, "managed postgres: not configured")
+		return lines
+	}
+	lines = append(lines, "managed postgres:")
+	lines = append(lines, fmt.Sprintf("name=%s host=%s port=%d user=%s image=%s", db.Name, db.Host, db.Port, db.User, db.Image))
+	lines = append(lines, fmt.Sprintf("container=%s volume=%s", db.ContainerName, db.VolumeName))
+	if db.SnapshotRoot != "" {
+		lines = append(lines, fmt.Sprintf("snapshotRoot=%s", db.SnapshotRoot))
+	} else {
+		lines = append(lines, "snapshotRoot=not configured")
+	}
+	lines = append(lines, "")
+	if snap.prismaCfg.Available {
+		lines = append(lines, fmt.Sprintf("prisma config: schema=%s migrations=%s source=%s", snap.prismaCfg.SchemaPath, snap.prismaCfg.MigrationsDir, snap.prismaCfg.Source))
+		if snap.prismaDevErr != "" {
+			lines = append(lines, "[red]migration folder/state: error[-] "+snap.prismaDevErr)
+		} else if snap.prismaDev != nil && snap.prismaDev.NeedsNewMigration {
+			lines = append(lines, fmt.Sprintf("[red]migration folder/state: needs new migration[-] reason=%s", snap.prismaDev.Reason))
+			if snap.prismaDev.Message != "" {
+				lines = append(lines, snap.prismaDev.Message)
+			}
+			lines = append(lines, "press m to create a Prisma migration")
+		} else if snap.prismaDev != nil {
+			lines = append(lines, formatPrismaDevelopmentStatus(snap.prismaDev))
+		}
+	} else {
+		lines = append(lines, "prisma config: not detected")
+	}
+	lines = append(lines, "")
+	if snap.prismaErr != "" {
+		lines = append(lines, "prisma snapshots: error="+snap.prismaErr)
+		return lines
+	}
+	if len(snap.prisma) == 0 {
+		lines = append(lines, "prisma snapshots: none")
+		return lines
+	}
+	latest := snap.prisma[0]
+	lines = append(lines, fmt.Sprintf("prisma snapshots: %d cached migration-prefix states", len(snap.prisma)))
+	lines = append(lines, fmt.Sprintf("latest=%s migrations=%d created=%s", latest.Key, len(latest.MigrationNames), formatSnapshotTime(latest.CreatedAt)))
+	lines = append(lines, "")
+	lines = append(lines, "recent prisma snapshots:")
+	for _, item := range snap.prisma {
+		lines = append(lines, fmt.Sprintf("%s  migrations=%d  latest=%s", item.Key, len(item.MigrationNames), latestMigrationName(item.MigrationNames)))
+		lines = append(lines, "  "+formatMigrationNames(item.MigrationNames))
+	}
+	return lines
+}
+
+func formatPrismaDevelopmentStatus(status *database.PrismaDevelopmentStatus) string {
+	if status == nil || status.State == nil {
+		return "migration folder/state: unknown"
+	}
+	migrationCount := len(status.State.Migrations)
+	switch {
+	case status.Plan.ExactMatch:
+		return fmt.Sprintf("[green]migration folder/state: in sync[-] migrations=%d snapshot=%s", migrationCount, status.Plan.SnapshotKey)
+	case status.Plan.SnapshotKey != "":
+		return fmt.Sprintf("[yellow]migration folder/state: pending apply[-] migrations=%d nearest=%s prefix=%d", migrationCount, status.Plan.SnapshotKey, status.Plan.PrefixLength)
+	default:
+		return fmt.Sprintf("[yellow]migration folder/state: no compatible snapshot[-] migrations=%d", migrationCount)
+	}
+}
+
+func loadPrismaSnapshotSummaries(root string, limit int) ([]prismaSnapshotSummary, error) {
+	if root == "" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]prismaSnapshotSummary, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		meta, err := database.LoadPrismaSnapshot(root, entry.Name())
+		if err != nil {
+			continue
+		}
+		snapshotKey := meta.Key
+		if snapshotKey == "" {
+			snapshotKey = entry.Name()
+		}
+		names := make([]string, 0, len(meta.Migrations))
+		for _, migration := range meta.Migrations {
+			names = append(names, migration.Name)
+		}
+		out = append(out, prismaSnapshotSummary{
+			Key:             snapshotKey,
+			CreatedAt:       meta.CreatedAt,
+			SchemaHash:      meta.SchemaHash,
+			BaseFingerprint: meta.BaseFingerprint,
+			MigrationNames:  names,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].Key > out[j].Key
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func formatSnapshotTime(t time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+	return t.Local().Format("2006-01-02 15:04:05")
+}
+
+func latestMigrationName(names []string) string {
+	if len(names) == 0 {
+		return "none"
+	}
+	return names[len(names)-1]
+}
+
+func formatMigrationNames(names []string) string {
+	if len(names) == 0 {
+		return "migrations=none"
+	}
+	if len(names) <= 4 {
+		return "migrations=" + strings.Join(names, ",")
+	}
+	return "migrations=" + strings.Join(names[:2], ",") + ",...," + names[len(names)-1]
+}
+
+func resolvePrismaConfig(worktree string, inst *api.Instance) (tuiPrismaConfig, error) {
+	if _, p, err := resolveRelaunchProject(worktree, inst); err == nil {
+		if provider, ok := p.(project.PrismaConfigProvider); ok {
+			cfg := normalizePrismaConfig(provider.PrismaConfig())
+			if cfg.SchemaPath != "" {
+				return tuiPrismaConfig{PrismaConfig: cfg, Source: "adapter", Available: true}, nil
+			}
+		}
+	}
+	for _, cfg := range []project.PrismaConfig{
+		{SchemaPath: "prisma/schema.prisma", MigrationsDir: "prisma/migrations", CreateOnly: true},
+		{SchemaPath: "db/schema.prisma", MigrationsDir: "db/migrations", CreateOnly: true},
+	} {
+		if _, err := os.Stat(filepath.Join(worktree, cfg.SchemaPath)); err == nil {
+			return tuiPrismaConfig{PrismaConfig: normalizePrismaConfig(cfg), Source: "detected", Available: true}, nil
+		}
+	}
+	return tuiPrismaConfig{}, nil
+}
+
+func normalizePrismaConfig(cfg project.PrismaConfig) project.PrismaConfig {
+	cfg.SchemaPath = filepath.ToSlash(strings.TrimSpace(cfg.SchemaPath))
+	cfg.MigrationsDir = filepath.ToSlash(strings.TrimSpace(cfg.MigrationsDir))
+	if cfg.SchemaPath != "" && cfg.MigrationsDir == "" {
+		cfg.MigrationsDir = filepath.ToSlash(filepath.Join(filepath.Dir(cfg.SchemaPath), "migrations"))
+	}
+	if cfg.Command.Name == "" {
+		cfg.CreateOnly = true
+	}
+	return cfg
+}
+
+func generatePrismaMigrationFromTUI(root, instanceID, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("migration name is required")
+	}
+	inst, err := instance.Load(root, instanceID)
+	if err != nil {
+		return err
+	}
+	cfg, err := resolvePrismaConfig(root, inst)
+	if err != nil {
+		return err
+	}
+	if !cfg.Available {
+		return fmt.Errorf("no Prisma schema detected or configured")
+	}
+	env := project.MergeEnvMaps(inst.Env, map[string]string{
+		"DEVFLOW_MIGRATION_NAME": name,
+	})
+	if env["DATABASE_URL"] == "" && inst.DB.URL != "" {
+		env["DATABASE_URL"] = inst.DB.URL
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	return database.GeneratePrismaMigration(ctx, database.PrismaMigrationGenerateOptions{
+		Worktree:   root,
+		SchemaPath: cfg.SchemaPath,
+		Name:       name,
+		CreateOnly: cfg.CreateOnly,
+		Env:        env,
+		LogPath:    instance.LogPath(root, instanceID, "prisma_migration"),
+		Command:    cfg.Command,
+	})
 }
 
 func findSelectedNode(nodes []api.NodeStatus, selectedName string) *api.NodeStatus {

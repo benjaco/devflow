@@ -34,6 +34,7 @@ Devflow uses three testing layers:
 - global cache coverage for the single OS user cache root and project cache namespaces
 - required CLI detection, target-scoped required CLI selection, and platform-script install coverage in `pkg/project` and `internal/cli`
 - engine-level interactive prompt event plus answer-file integration coverage
+- TUI database/Prisma panel rendering, drift warning, Prisma snapshot-summary loading, and migration-generation action coverage
 - sequential engine execution with cache hits
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work
 - scheduler error preservation so a canceled sibling does not replace the first actionable task failure with `context canceled`

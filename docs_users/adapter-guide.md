@@ -305,6 +305,8 @@ This will:
 
 That prefix snapshotting matters during development. If you edit the latest migration, Devflow can restore the previous compatible prefix and apply only the changed tail instead of rebuilding from the remote/base source.
 
+When a detached run is active, `devflow tui` has a `d` database/Prisma panel that shows the managed Postgres identity, recent cached Prisma migration-prefix snapshots, and schema/migration drift. Pressing `m` is an explicit migration-authoring action; normal `up` startup should still avoid hidden migration generation.
+
 Only override `Migrate` when you intentionally want an all-at-once custom Prisma command; that path snapshots the final state only. Use `MigrateEach` for custom per-prefix behavior.
 
 If `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but no new migration appears, `EnsurePrismaDevDatabase` returns an explicit error instead of pretending the database is current.
@@ -335,6 +337,21 @@ err := database.GeneratePrismaMigration(ctx, database.PrismaMigrationGenerateOpt
 ```
 
 Keep migration generation as an explicit target/action, not part of normal `up` startup.
+
+To let the TUI create migrations without guessing paths, implement `project.PrismaConfigProvider`:
+
+```go
+func (myProject) PrismaConfig() project.PrismaConfig {
+    return project.PrismaConfig{
+        SchemaPath:    "prisma/schema.prisma",
+        MigrationsDir: "prisma/migrations",
+        BasePaths:     []string{"prisma/bootstrap.sql"},
+        CreateOnly:    true,
+    }
+}
+```
+
+Then `devflow tui` can flag schema/migration drift in the `d` database/Prisma panel. Press `m`, enter a migration name, and Devflow runs `GeneratePrismaMigration` from inside the TUI. If no provider is implemented, the TUI tries common layouts such as `prisma/schema.prisma` and `db/schema.prisma`.
 
 Typical graph shape:
 - `postgres`: service task that calls `EnsureRuntime`, `WaitReady`, and supervises database lifetime/logs
