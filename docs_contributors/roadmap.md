@@ -37,6 +37,7 @@ The BikeCoach real-project integration moved the next focus from generic operato
    - Add a full "converge from scripts to Devflow" user guide based on the BikeCoach integration pattern.
    - Expand the managed database APIs into a complete example that starts a container, waits for host readiness, creates/prepares the database, runs migrations, preserves prefix snapshots, and stops cleanly.
    - Add a fixed-port service example for apps that need stable callback URLs such as OAuth redirects.
+   - Add first-class DB snapshot activity visibility in JSON/events so adapters do not need custom summary logging for restored snapshot, prefix length, applied count, and final snapshot key.
 
 2. Broader operator surface
    - Add fine-grained detached service restart/control beyond whole-target relaunch once process cleanup and lifecycle contracts are solid.
@@ -53,6 +54,7 @@ The BikeCoach real-project integration moved the next focus from generic operato
 - Completed from BikeCoach feedback: target-scoped required CLI declarations plus `doctor --target <target> --json`.
 - Completed from BikeCoach feedback: managed Postgres host-port readiness, stale published-port reconciliation, `run --help` flag descriptions, finite service-dependent target guidance, and secret/runtime-env documentation.
 - Completed from Prisma/Postgres adoption test: Prisma migration inspection ignores `migration_lock.toml`, fresh schemas with models fail before smoke tests when no migrations exist, remote clone failures from `pg_dump` are not masked, `stop --all` stops the managed DB container, and first task errors are preserved over sibling cancellation noise.
+- Completed from Prisma/Postgres clean retry: first `flush` after `watch --detach` now periodically rewrites the sync sentinel while waiting so watcher startup scan races do not cause false ack timeouts.
 - Accepted as immediate roadmap input: complete script-convergence docs, a full managed Postgres example, and fixed-port examples.
 - Reframed: "service target `run` returns after readiness" should not silently change attached `run` semantics. The current automation path is `watch --detach` plus `flush`; CI mode can probe readiness but stops services before returning.
 - Reframed: a fixed-port HTTP readiness helper should probably be part of broader env-aware readiness patterns rather than a BikeCoach-specific helper.

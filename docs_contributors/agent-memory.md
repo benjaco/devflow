@@ -70,6 +70,8 @@ The first real BikeCoach integration showed that adoption hardening is now more 
 
 Service lifecycle contract: attached `run` is foreground and blocks while services live; `run --ci` may start services as readiness probes but stops them before returning; `run --detach` only proves supervisor launch; `watch --detach` plus `flush` is the readiness-gated background workflow for humans and agents.
 
+Flush startup contract: a newly detached watcher can write `watch.ready` before its first polling scan has fully settled, so `flush` must keep rewriting the sync sentinel while waiting for the ack. Do not remove that retry unless the watcher startup protocol is made stronger.
+
 Watch/input debugging contract: `Inputs.Ignore` is shared by fingerprinting and watch matching. Patterns are slash-normalized, checked root-relative, and for directory inputs also checked relative to the input dir. `devflow graph affected --files <path> --explain --json` is the first tool to use when generated files cause surprising watch cascades.
 
 Required CLI contract: `RequiredCLIs()` is the project catalog. `RequiredCLIs` on tasks and targets selects the subset needed for a target closure. `devflow doctor --target <target> --json` and `devflow clis status/install --target <target>` must not report unrelated catalog entries. The older `Dependencies()` provider remains only as a compatibility path.

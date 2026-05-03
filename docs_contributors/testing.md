@@ -24,7 +24,7 @@ Devflow uses three testing layers:
 - built-binary helper build/run/start coverage and cache-restore coverage
 - database runtime command planning and snapshot-manifest coverage
 - database runtime host-port readiness and stale published-port reconciliation coverage
-- managed migration workflow coverage for exact snapshot reuse, nearest-prefix restore, incompatible base fingerprint misses, changed-latest tail replay, per-migration prefix snapshots, checked remote Postgres clone policy failures, Prisma directory-only migration inspection, Prisma prefix deploy snapshots, fresh/no-migration schema errors, schema-without-migration errors, and Prisma generate helpers
+- managed migration workflow coverage for exact snapshot reuse, nearest-prefix restore, incompatible base fingerprint misses, changed-latest tail replay, per-migration prefix snapshots, checked remote Postgres clone policy failures, Prisma directory-only migration inspection, Prisma lock-file churn, model-free schemas without migrations, added/deleted Prisma migrations, changed older Prisma migration rebuilds, failed Prisma migration apply without snapshotting, Prisma prefix deploy snapshots, fresh/no-migration schema errors, schema-without-migration errors, and Prisma generate helpers
 - Prisma schema/migration inspection and nearest-prefix snapshot planning coverage
 - dotenv parsing and merged runtime-env coverage with devflow-managed DB overrides
 - CLI JSON output shape, including command-level lifecycle coverage for `run`, `status`, `logs`, `instances`, `doctor`, and `stop`
@@ -41,7 +41,7 @@ Devflow uses three testing layers:
 - graph affected explanations for file, directory, ignored, and unmatched paths
 - watch cascade pruning so downstream tasks do not run past warmups or services that are blocked from watch execution, including full watch execution and mixed blocked/allowed branch coverage
 - watch service restart policies, including `RestartAlways` selection and full watch execution behavior
-- flush coordination coverage for request/ack path generation, watcher inclusion of the flush sync directory under `.devflow`, engine ack timing after reruns and sync-only batches, failed-task ack issues, service readiness health issues, and CLI supervisor/timeout behavior
+- flush coordination coverage for request/ack path generation, watcher inclusion of the flush sync directory under `.devflow`, engine ack timing after reruns and sync-only batches, failed-task ack issues, service readiness health issues, CLI supervisor/timeout behavior, and sync-sentinel retouch while waiting for an ack
 - opt-in real Docker-backed database runtime snapshot/restore coverage in `pkg/database`
 - opt-in real Docker-backed Prisma snapshot metadata + restore coverage in `pkg/database`
 

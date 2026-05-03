@@ -75,6 +75,33 @@ func TestInspectPrismaStateAndPlanRestore(t *testing.T) {
 	}
 }
 
+func TestPrismaMigrationLockChurnDoesNotChangeState(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id }\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table users(id int primary key);\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "migration_lock.toml"), "provider = \"postgresql\"\n")
+
+	before, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "migration_lock.toml"), "provider = \"postgresql\"\n# rewritten by prisma\n")
+	after, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if before.FullHash != after.FullHash {
+		t.Fatalf("expected migration_lock.toml churn not to affect Prisma state hash, before %s after %s", before.FullHash, after.FullHash)
+	}
+	if PrismaSnapshotKey(before) != PrismaSnapshotKey(after) {
+		t.Fatalf("expected migration_lock.toml churn not to affect snapshot key, before %s after %s", PrismaSnapshotKey(before), PrismaSnapshotKey(after))
+	}
+	if len(after.Migrations) != 1 || after.Migrations[0].Name != "001_init" {
+		t.Fatalf("expected only directory migrations, got %+v", after.Migrations)
+	}
+}
+
 func TestRestoreNearestPrismaSnapshotUsesSelectedSnapshot(t *testing.T) {
 	root := t.TempDir()
 	state := &PrismaState{
@@ -281,6 +308,54 @@ func TestPreparePrismaBaseRecreatesEmptyVolumeWithoutSourcePolicy(t *testing.T) 
 	}
 	if runner.sawPrefix("docker run -d --name devflow-pg-abc") {
 		t.Fatal("did not expect runtime creation without a source policy")
+	}
+}
+
+func TestEnsurePrismaDevDatabaseAllowsModelFreeSchemaWithoutMigrations(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), `
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+`)
+	state, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Migrations) != 0 {
+		t.Fatalf("expected no Prisma migrations, got %+v", state.Migrations)
+	}
+	snapshotRoot := t.TempDir()
+	finalKey := PrismaSnapshotKey(state)
+	runner := &fakeRunner{responses: prismaRuntimeResponses(snapshotRoot, finalKey)}
+	mgr := NewWithRunner(runner)
+
+	result, err := mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
+		Worktree:      worktree,
+		DB:            migrationTestDB(snapshotRoot),
+		SchemaPath:    "prisma/schema.prisma",
+		MigrationsDir: "prisma/migrations",
+		MigrateEach: func(ctx context.Context, db api.DBInstance, migration PrismaMigration, opts PrismaMigrationApplyOptions) error {
+			t.Fatalf("did not expect model-free Prisma schema to apply migration %s", migration.Name)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil || result.Applied || result.SnapshotKey != finalKey || !result.Plan.ExactMatch {
+		t.Fatalf("unexpected model-free Prisma result: %+v", result)
+	}
+	if result.Base == nil || !result.Base.Recreated {
+		t.Fatalf("expected empty runtime to be prepared for model-free schema, got %+v", result.Base)
+	}
+	if _, err := os.Stat(filepath.Join(snapshotRoot, finalKey, "prisma.json")); err != nil {
+		t.Fatalf("expected model-free Prisma snapshot metadata: %v", err)
 	}
 }
 
@@ -500,6 +575,106 @@ func TestEnsurePrismaDevDatabaseReusesExactSnapshotWithoutApplying(t *testing.T)
 	}
 }
 
+func TestEnsurePrismaDevDatabaseNewMigrationRestoresExistingPrefix(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id }\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table users(id int primary key);\n")
+	prefixState, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotRoot := t.TempDir()
+	prefixKey := PrismaSnapshotKey(prefixState)
+	writePrismaSnapshotFixture(t, snapshotRoot, prefixKey, prefixState)
+
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id }\nmodel Post { id Int @id userId Int }\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "002_posts", "migration.sql"), "create table posts(id int primary key, user_id int not null);\n")
+	current, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalKey := PrismaSnapshotKey(current)
+	responses := prismaRuntimeResponses(snapshotRoot, finalKey)
+	addPrismaRestoreResponse(responses, snapshotRoot, prefixKey)
+	runner := &fakeRunner{responses: responses}
+	mgr := NewWithRunner(runner)
+	applied := make([]string, 0, 1)
+
+	result, err := mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
+		Worktree:      worktree,
+		DB:            migrationTestDB(snapshotRoot),
+		SchemaPath:    "prisma/schema.prisma",
+		MigrationsDir: "prisma/migrations",
+		MigrateEach: func(ctx context.Context, db api.DBInstance, migration PrismaMigration, opts PrismaMigrationApplyOptions) error {
+			applied = append(applied, migration.Name)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(applied, ",") != "002_posts" {
+		t.Fatalf("expected only new Prisma migration to apply, got %v", applied)
+	}
+	if result == nil || !result.Applied || result.SnapshotKey != finalKey || !result.Plan.ExactMatch {
+		t.Fatalf("unexpected new Prisma migration result: %+v", result)
+	}
+	if result.Base == nil || result.Base.Restored == nil || result.Base.Restored.Plan.PrefixLength != 1 {
+		t.Fatalf("expected one-migration prefix restore, got %+v", result.Base)
+	}
+}
+
+func TestEnsurePrismaDevDatabaseMultipleNewMigrationsApplyTailInOrder(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id }\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table users(id int primary key);\n")
+	prefixState, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotRoot := t.TempDir()
+	prefixKey := PrismaSnapshotKey(prefixState)
+	writePrismaSnapshotFixture(t, snapshotRoot, prefixKey, prefixState)
+
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id name String? }\nmodel Post { id Int @id userId Int }\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "002_user_name", "migration.sql"), "alter table users add column name text;\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "003_posts", "migration.sql"), "create table posts(id int primary key, user_id int not null);\n")
+	current, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondKey := PrismaSnapshotKey(prismaStatePrefix(current, 2))
+	finalKey := PrismaSnapshotKey(current)
+	responses := prismaRuntimeResponses(snapshotRoot, secondKey, finalKey)
+	addPrismaRestoreResponse(responses, snapshotRoot, prefixKey)
+	runner := &fakeRunner{responses: responses}
+	mgr := NewWithRunner(runner)
+	applied := make([]string, 0, 2)
+
+	result, err := mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
+		Worktree:      worktree,
+		DB:            migrationTestDB(snapshotRoot),
+		SchemaPath:    "prisma/schema.prisma",
+		MigrationsDir: "prisma/migrations",
+		MigrateEach: func(ctx context.Context, db api.DBInstance, migration PrismaMigration, opts PrismaMigrationApplyOptions) error {
+			applied = append(applied, migration.Name)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(applied, ",") != "002_user_name,003_posts" {
+		t.Fatalf("expected new Prisma migrations to apply in order, got %v", applied)
+	}
+	if result == nil || !result.Applied || result.SnapshotKey != finalKey || !result.Plan.ExactMatch {
+		t.Fatalf("unexpected multiple Prisma migration result: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(snapshotRoot, secondKey, "prisma.json")); err != nil {
+		t.Fatalf("expected intermediate Prisma prefix snapshot: %v", err)
+	}
+}
+
 func TestEnsurePrismaDevDatabaseChangedLatestMigrationAppliesOnlyTail(t *testing.T) {
 	worktree := t.TempDir()
 	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\n")
@@ -570,6 +745,148 @@ func TestEnsurePrismaDevDatabaseChangedLatestMigrationAppliesOnlyTail(t *testing
 	}
 	if result == nil || result.SnapshotKey != finalKey || !result.Plan.ExactMatch {
 		t.Fatalf("unexpected changed Prisma tail result: %+v", result)
+	}
+}
+
+func TestEnsurePrismaDevDatabaseDeletedLatestMigrationRestoresOlderExactSnapshot(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id }\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table users(id int primary key);\n")
+	firstState, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "002_posts", "migration.sql"), "create table posts(id int primary key);\n")
+	twoMigrationState, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotRoot := t.TempDir()
+	firstKey := PrismaSnapshotKey(firstState)
+	finalOldKey := PrismaSnapshotKey(twoMigrationState)
+	writePrismaSnapshotFixture(t, snapshotRoot, firstKey, firstState)
+	writePrismaSnapshotFixture(t, snapshotRoot, finalOldKey, twoMigrationState)
+	if err := os.RemoveAll(filepath.Join(worktree, "prisma", "migrations", "002_posts")); err != nil {
+		t.Fatal(err)
+	}
+	current, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if PrismaSnapshotKey(current) != firstKey {
+		t.Fatalf("test setup expected deleted latest migration to return to first snapshot key, got %s want %s", PrismaSnapshotKey(current), firstKey)
+	}
+	responses := prismaRuntimeResponses(snapshotRoot)
+	addPrismaRestoreResponse(responses, snapshotRoot, firstKey)
+	runner := &fakeRunner{responses: responses}
+	mgr := NewWithRunner(runner)
+
+	result, err := mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
+		Worktree:      worktree,
+		DB:            migrationTestDB(snapshotRoot),
+		SchemaPath:    "prisma/schema.prisma",
+		MigrationsDir: "prisma/migrations",
+		MigrateEach: func(ctx context.Context, db api.DBInstance, migration PrismaMigration, opts PrismaMigrationApplyOptions) error {
+			t.Fatalf("did not expect deleted-latest Prisma state to apply migration %s", migration.Name)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil || result.Applied || !result.Plan.ExactMatch || result.Plan.SnapshotKey != firstKey {
+		t.Fatalf("unexpected deleted latest migration result: %+v", result)
+	}
+	if runner.sawPrefix("docker stop -t 10 devflow-pg-abc") {
+		t.Fatal("did not expect a new snapshot when exact older Prisma snapshot was restored")
+	}
+}
+
+func TestEnsurePrismaDevDatabaseChangedOlderMigrationRebuildsFromSource(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id }\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table users(id int primary key);\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "002_users_name", "migration.sql"), "alter table users add column name text;\n")
+	original, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotRoot := t.TempDir()
+	writePrismaSnapshotFixture(t, snapshotRoot, PrismaSnapshotKey(prismaStatePrefix(original, 1)), prismaStatePrefix(original, 1))
+	writePrismaSnapshotFixture(t, snapshotRoot, PrismaSnapshotKey(original), original)
+
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table users(id int primary key, created_at timestamp);\n")
+	current, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstKey := PrismaSnapshotKey(prismaStatePrefix(current, 1))
+	finalKey := PrismaSnapshotKey(current)
+	runner := &fakeRunner{responses: prismaRuntimeResponses(snapshotRoot, firstKey, finalKey)}
+	mgr := NewWithRunner(runner)
+	sourceCalled := false
+	applied := make([]string, 0, 2)
+
+	result, err := mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
+		Worktree:      worktree,
+		DB:            migrationTestDB(snapshotRoot),
+		SchemaPath:    "prisma/schema.prisma",
+		MigrationsDir: "prisma/migrations",
+		SourcePolicy: SourcePolicyFunc{
+			PolicyName: "clone-dev",
+			Fn: func(ctx context.Context, db api.DBInstance, opts PrepareOptions) error {
+				sourceCalled = true
+				return nil
+			},
+		},
+		MigrateEach: func(ctx context.Context, db api.DBInstance, migration PrismaMigration, opts PrismaMigrationApplyOptions) error {
+			applied = append(applied, migration.Name)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sourceCalled {
+		t.Fatal("expected source policy to rebuild base after older Prisma migration changed")
+	}
+	if strings.Join(applied, ",") != "001_init,002_users_name" {
+		t.Fatalf("expected all Prisma migrations to replay after older migration changed, got %v", applied)
+	}
+	if result == nil || result.Base == nil || !result.Base.SourceApplied || result.SnapshotKey != finalKey || !result.Plan.ExactMatch {
+		t.Fatalf("unexpected older Prisma migration change result: %+v", result)
+	}
+}
+
+func TestEnsurePrismaDevDatabaseMigrationFailureDoesNotSnapshot(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id }\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table users(id int primary key);\n")
+	state, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotRoot := t.TempDir()
+	runner := &fakeRunner{responses: prismaRuntimeResponses(snapshotRoot)}
+	mgr := NewWithRunner(runner)
+
+	_, err = mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
+		Worktree:      worktree,
+		DB:            migrationTestDB(snapshotRoot),
+		SchemaPath:    "prisma/schema.prisma",
+		MigrationsDir: "prisma/migrations",
+		MigrateEach: func(ctx context.Context, db api.DBInstance, migration PrismaMigration, opts PrismaMigrationApplyOptions) error {
+			return errors.New("migration failed")
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "migration failed") {
+		t.Fatalf("expected Prisma migration failure, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(snapshotRoot, PrismaSnapshotKey(state), "prisma.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected failed Prisma migration not to snapshot, stat error %v", statErr)
+	}
+	if runner.sawPrefix("docker stop -t 10 devflow-pg-abc") {
+		t.Fatal("did not expect snapshot stop after failed Prisma migration")
 	}
 }
 
@@ -785,4 +1102,46 @@ func mustWrite(t *testing.T, path, contents string) {
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writePrismaSnapshotFixture(t *testing.T, snapshotRoot, snapshotKey string, state *PrismaState) {
+	t.Helper()
+	if _, err := SavePrismaSnapshot(snapshotRoot, snapshotKey, state); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(snapshotRoot, snapshotKey, "volume.tgz"), "fake")
+	if err := jsonWrite(filepath.Join(snapshotRoot, snapshotKey, "manifest.json"), SnapshotManifest{
+		Version:       1,
+		Key:           snapshotKey,
+		Image:         DefaultPostgresImage,
+		ContainerName: "devflow-pg-abc",
+		VolumeName:    "devflow-pgdata-abc",
+		Database:      "app_wt_abc",
+		User:          "devflow",
+		Port:          55432,
+		ArchivePath:   filepath.Join(snapshotRoot, snapshotKey, "volume.tgz"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func prismaRuntimeResponses(snapshotRoot string, snapshotKeys ...string) map[string]response {
+	responses := map[string]response{
+		key("docker", "rm", "-f", "devflow-pg-abc"):                            {err: errors.New("Error: No such container: devflow-pg-abc")},
+		key("docker", "volume", "rm", "-f", "devflow-pgdata-abc"):              {err: errors.New("Error: No such volume: devflow-pgdata-abc")},
+		key("docker", "inspect", "-f", "{{.State.Running}}", "devflow-pg-abc"): {err: errors.New("Error: No such container: devflow-pg-abc")},
+		key("docker", "volume", "inspect", "devflow-pgdata-abc"):               {err: errors.New("Error: No such volume: devflow-pgdata-abc")},
+		key("docker", "volume", "create", "devflow-pgdata-abc"):                {},
+		key("docker", "run", "-d", "--name", "devflow-pg-abc", "--label", "devflow.managed=true", "--label", "devflow.database=true", "-p", "55432:5432", "-e", "POSTGRES_USER=devflow", "-e", "POSTGRES_PASSWORD=secret", "-e", "POSTGRES_DB=app_wt_abc", "-v", "devflow-pgdata-abc:/var/lib/postgresql/data", "postgres:16.3"): {},
+		key("docker", "exec", "devflow-pg-abc", "pg_isready", "-U", "devflow", "-d", "app_wt_abc"): {},
+		key("docker", "stop", "-t", "10", "devflow-pg-abc"):                                        {},
+	}
+	for _, snapshotKey := range snapshotKeys {
+		responses[key("docker", "run", "--rm", "-v", "devflow-pgdata-abc:/from", "-v", filepath.Join(snapshotRoot, snapshotKey)+":/to", DefaultSidecarImage, "sh", "-c", "cd /from && tar czf /to/volume.tgz .")] = response{}
+	}
+	return responses
+}
+
+func addPrismaRestoreResponse(responses map[string]response, snapshotRoot, snapshotKey string) {
+	responses[key("docker", "run", "--rm", "-v", "devflow-pgdata-abc:/to", "-v", filepath.Join(snapshotRoot, snapshotKey)+":/from", DefaultSidecarImage, "sh", "-c", "cd /to && tar xzf /from/volume.tgz")] = response{}
 }

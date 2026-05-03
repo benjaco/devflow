@@ -418,7 +418,7 @@ func (a *App) flushCmd(args []string) error {
 		return err
 	}
 
-	result, ok, err := waitForFlushAck(root, id, requestID, time.Until(startedAt.Add(*timeout)))
+	result, ok, err := waitForFlushAck(root, id, requestID, req.SyncPath, time.Until(startedAt.Add(*timeout)))
 	if err != nil {
 		return err
 	}
@@ -1903,11 +1903,12 @@ func (a *App) writeFlushResult(result api.FlushResult, jsonOut bool) error {
 	return nil
 }
 
-func waitForFlushAck(worktree, instanceID, requestID string, timeout time.Duration) (api.FlushResult, bool, error) {
+func waitForFlushAck(worktree, instanceID, requestID, syncPath string, timeout time.Duration) (api.FlushResult, bool, error) {
 	if timeout <= 0 {
 		return api.FlushResult{}, false, nil
 	}
 	deadline := time.Now().Add(timeout)
+	nextTouch := time.Now().Add(250 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		result, err := instance.LoadFlushAck(worktree, instanceID, requestID)
 		if err == nil {
@@ -1915,6 +1916,10 @@ func waitForFlushAck(worktree, instanceID, requestID string, timeout time.Durati
 		}
 		if !os.IsNotExist(err) {
 			return api.FlushResult{}, false, err
+		}
+		if syncPath != "" && !time.Now().Before(nextTouch) {
+			_ = os.WriteFile(syncPath, []byte(requestID+"\n"+time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o644)
+			nextTouch = time.Now().Add(250 * time.Millisecond)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
