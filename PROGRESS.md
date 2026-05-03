@@ -205,6 +205,7 @@ Last updated: 2026-05-03
   - the panel shows managed Postgres identity without the DB password
   - recent cached Prisma migration-prefix snapshots are loaded from the instance snapshot root and summarized by key, migration count, and latest migration
   - the panel flags schema/migration drift and `m` asks for a migration name, starts/waits for the managed database when the instance has one, then runs Prisma migration generation without leaving the TUI; `F4` remains a backup
+  - while the panel creates a Prisma migration, the footer status reports database startup/readiness, Prisma invocation, and the latest Prisma output line
   - global shortcuts are bypassed while text-input popups are focused, so migration-name typing is not intercepted
   - the footer now presents letter shortcuts as the primary controls while preserving F-key backups internally
 - Distinct task-cancellation handling implemented:

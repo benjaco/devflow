@@ -515,7 +515,18 @@ func (d *dashboard) triggerGeneratePrismaMigration(name string) {
 	d.busy = true
 	d.setStatus(fmt.Sprintf("[yellow]creating Prisma migration %q...", name))
 	go func() {
-		err := generatePrismaMigrationFromTUI(d.root, d.instanceID, name)
+		progress := func(message string) {
+			message = strings.TrimSpace(message)
+			if message == "" {
+				return
+			}
+			d.app.QueueUpdateDraw(func() {
+				if d.busy {
+					d.setStatus("[yellow]" + message)
+				}
+			})
+		}
+		err := generatePrismaMigrationFromTUI(d.root, d.instanceID, name, progress)
 		d.app.QueueUpdateDraw(func() {
 			d.busy = false
 			d.showDatabasePanel = true
@@ -1064,11 +1075,13 @@ func normalizePrismaConfig(cfg project.PrismaConfig) project.PrismaConfig {
 	return cfg
 }
 
-func generatePrismaMigrationFromTUI(root, instanceID, name string) error {
+func generatePrismaMigrationFromTUI(root, instanceID, name string, progressFns ...func(string)) error {
+	progress := firstTUIProgress(progressFns)
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("migration name is required")
 	}
+	reportTUIProgress(progress, "loading Prisma migration configuration...")
 	inst, err := instance.Load(root, instanceID)
 	if err != nil {
 		return err
@@ -1088,9 +1101,10 @@ func generatePrismaMigrationFromTUI(root, instanceID, name string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	if err := ensureManagedDatabaseForTUI(ctx, inst.DB); err != nil {
+	if err := ensureManagedDatabaseForTUI(ctx, inst.DB, progress); err != nil {
 		return err
 	}
+	reportTUIProgress(progress, "running Prisma migration generation for %q...", name)
 	return database.GeneratePrismaMigration(ctx, database.PrismaMigrationGenerateOptions{
 		Worktree:   root,
 		SchemaPath: cfg.SchemaPath,
@@ -1099,21 +1113,58 @@ func generatePrismaMigrationFromTUI(root, instanceID, name string) error {
 		Env:        env,
 		LogPath:    instance.LogPath(root, instanceID, "prisma_migration"),
 		Command:    cfg.Command,
+		OnLine: func(stream, line string) {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				return
+			}
+			reportTUIProgress(progress, "Prisma %s: %s", stream, compactTUIStatus(line, 120))
+		},
 	})
 }
 
-func ensureManagedDatabaseForTUI(ctx context.Context, db api.DBInstance) error {
+func ensureManagedDatabaseForTUI(ctx context.Context, db api.DBInstance, progress func(string)) error {
 	if db.ContainerName == "" && db.VolumeName == "" {
 		return nil
 	}
 	manager := newDatabaseManagerForTUI()
+	reportTUIProgress(progress, "starting managed database for Prisma migration...")
 	if err := manager.EnsureRuntime(ctx, db); err != nil {
 		return fmt.Errorf("ensure managed database runtime: %w", err)
 	}
+	reportTUIProgress(progress, "waiting for managed database readiness...")
 	if err := manager.WaitReady(ctx, db, 45*time.Second); err != nil {
 		return fmt.Errorf("wait for managed database readiness: %w", err)
 	}
+	reportTUIProgress(progress, "managed database is ready; invoking Prisma...")
 	return nil
+}
+
+func firstTUIProgress(progressFns []func(string)) func(string) {
+	for _, progress := range progressFns {
+		if progress != nil {
+			return progress
+		}
+	}
+	return nil
+}
+
+func reportTUIProgress(progress func(string), format string, args ...any) {
+	if progress == nil {
+		return
+	}
+	progress(fmt.Sprintf(format, args...))
+}
+
+func compactTUIStatus(text string, maxLen int) string {
+	text = strings.NewReplacer("[", "(", "]", ")").Replace(strings.Join(strings.Fields(text), " "))
+	if maxLen <= 0 || len(text) <= maxLen {
+		return text
+	}
+	if maxLen <= 3 {
+		return text[:maxLen]
+	}
+	return text[:maxLen-3] + "..."
 }
 
 func findSelectedNode(nodes []api.NodeStatus, selectedName string) *api.NodeStatus {

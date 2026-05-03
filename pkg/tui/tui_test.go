@@ -287,7 +287,7 @@ func TestGeneratePrismaMigrationFromTUIEnsuresManagedDatabase(t *testing.T) {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	mustWriteTUITestExecutable(t, filepath.Join(binDir, "npx"), "#!/bin/sh\nprintf ok > \"$OUT_FILE\"\n")
+	mustWriteTUITestExecutable(t, filepath.Join(binDir, "npx"), "#!/bin/sh\nprintf ok > \"$OUT_FILE\"\nprintf 'migration created\\n'\n")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	manager := &recordingTUIDatabaseManager{}
@@ -315,7 +315,10 @@ func TestGeneratePrismaMigrationFromTUIEnsuresManagedDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := generatePrismaMigrationFromTUI(worktree, inst.ID, "add-age"); err != nil {
+	var progress []string
+	if err := generatePrismaMigrationFromTUI(worktree, inst.ID, "add-age", func(message string) {
+		progress = append(progress, message)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if !manager.ensureCalled {
@@ -329,6 +332,17 @@ func TestGeneratePrismaMigrationFromTUIEnsuresManagedDatabase(t *testing.T) {
 	}
 	if _, err := os.ReadFile(output); err != nil {
 		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"loading Prisma migration configuration",
+		"starting managed database",
+		"waiting for managed database readiness",
+		"running Prisma migration generation",
+		"Prisma stdout: migration created",
+	} {
+		if !tuiProgressContains(progress, want) {
+			t.Fatalf("expected progress to contain %q, got %+v", want, progress)
+		}
 	}
 }
 
@@ -529,6 +543,13 @@ func TestHandleKeysUsesLetterShortcutsWhenNoInputActive(t *testing.T) {
 	}
 }
 
+func TestCompactTUIStatusTruncatesAndRemovesDynamicColorMarkers(t *testing.T) {
+	got := compactTUIStatus("one   [two]   three four five", 18)
+	if got != "one (two) three..." {
+		t.Fatalf("unexpected compact status: %q", got)
+	}
+}
+
 type recordingTUIDatabaseManager struct {
 	ensureCalled bool
 	waitCalled   bool
@@ -546,6 +567,15 @@ func (m *recordingTUIDatabaseManager) WaitReady(_ context.Context, db api.DBInst
 	m.waitCalled = true
 	m.waitDB = db
 	return nil
+}
+
+func tuiProgressContains(progress []string, want string) bool {
+	for _, message := range progress {
+		if strings.Contains(message, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestScrollLogsClampsAtTop(t *testing.T) {

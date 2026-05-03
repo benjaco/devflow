@@ -351,7 +351,7 @@ func (myProject) PrismaConfig() project.PrismaConfig {
 }
 ```
 
-Then `devflow tui` can flag schema/migration drift in the `d` database/Prisma panel. Press `m`, enter a migration name, and Devflow starts/waits for the managed database recorded on the instance before running `GeneratePrismaMigration` from inside the TUI. If no provider is implemented, the TUI tries common layouts such as `prisma/schema.prisma` and `db/schema.prisma`.
+Then `devflow tui` can flag schema/migration drift in the `d` database/Prisma panel. Press `m`, enter a migration name, and Devflow starts/waits for the managed database recorded on the instance before running `GeneratePrismaMigration` from inside the TUI. The footer status reports the current migration-generation phase while this runs. If no provider is implemented, the TUI tries common layouts such as `prisma/schema.prisma` and `db/schema.prisma`.
 
 Typical graph shape:
 - `postgres`: service task that calls `EnsureRuntime`, `WaitReady`, and supervises database lifetime/logs
