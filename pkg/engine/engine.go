@@ -855,6 +855,9 @@ func classifyTaskError(ctx context.Context, err error) api.NodeState {
 	if isMigrationNeededError(err) {
 		return api.StateMigrationNeeded
 	}
+	if looksLikeMigrationNeededError(err) {
+		return api.StateMigrationNeeded
+	}
 	return api.StateFailed
 }
 
@@ -865,6 +868,17 @@ type migrationNeededError interface {
 func isMigrationNeededError(err error) bool {
 	var migrationNeeded migrationNeededError
 	return errors.As(err, &migrationNeeded) && migrationNeeded.MigrationNeeded()
+}
+
+func looksLikeMigrationNeededError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "generate one with generateprismamigration") ||
+		strings.Contains(text, "generate a migration") ||
+		strings.Contains(text, "needs new migration") ||
+		strings.Contains(text, "migration_needed")
 }
 
 func displayTaskError(ctx context.Context, err error) string {

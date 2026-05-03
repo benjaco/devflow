@@ -390,6 +390,13 @@ func TestMigrationNeededErrorUsesMigrationNeededState(t *testing.T) {
 	}
 }
 
+func TestMigrationNeededMessageUsesMigrationNeededState(t *testing.T) {
+	err := fmt.Errorf("prisma schema changed without a new migration; generate one with GeneratePrismaMigration before preparing the database")
+	if got := classifyTaskError(context.Background(), err); got != api.StateMigrationNeeded {
+		t.Fatalf("expected migration-needed state from Prisma guard message, got %q", got)
+	}
+}
+
 type interactiveProject struct{}
 
 func (interactiveProject) Name() string { return "interactive-project" }

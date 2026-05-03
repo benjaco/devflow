@@ -123,6 +123,40 @@ func TestApplyEventsReportsMigrationNeededState(t *testing.T) {
 	}
 }
 
+func TestApplyEventsReportsFailedMigrationNeededMessage(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	d.applyEvents([]api.Event{{
+		Type:  api.EventTaskState,
+		Task:  "db_prepare",
+		State: api.StateFailed,
+		Error: "prisma schema changed without a new migration; generate one with GeneratePrismaMigration before preparing the database",
+	}})
+	if got := d.statusMessage; !strings.Contains(got, "needs a migration") || strings.Contains(got, "failed") {
+		t.Fatalf("expected failed migration-needed message to be presented as migration-needed, got %q", got)
+	}
+}
+
+func TestNormalizeTUIStatePromotesFailedMigrationNeededSnapshot(t *testing.T) {
+	node := normalizeTUIState(api.NodeStatus{
+		Name:      "db_prepare",
+		State:     api.StateFailed,
+		LastError: "prisma schema changed without a new migration; generate one with GeneratePrismaMigration before preparing the database",
+	}, nil)
+	if node.State != api.StateMigrationNeeded {
+		t.Fatalf("expected stale failed migration snapshot to render as migration-needed, got %q", node.State)
+	}
+}
+
+func TestNormalizeTUIStatePromotesFailedDBPrepareWhenPrismaNeedsMigration(t *testing.T) {
+	node := normalizeTUIState(api.NodeStatus{
+		Name:  "db_prepare",
+		State: api.StateFailed,
+	}, &database.PrismaDevelopmentStatus{NeedsNewMigration: true})
+	if node.State != api.StateMigrationNeeded {
+		t.Fatalf("expected failed db_prepare to render as migration-needed when Prisma panel detects drift, got %q", node.State)
+	}
+}
+
 func TestRenderLogPanelIncludesSelection(t *testing.T) {
 	snap := snapshot{
 		nodes: []api.NodeStatus{

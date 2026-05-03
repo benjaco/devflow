@@ -629,29 +629,12 @@ func loadSnapshot(root, instanceID string, showSupervisor bool, showDatabase boo
 		}
 	}
 
-	nodes := make([]api.NodeStatus, 0, len(state.Nodes))
-	for _, node := range state.Nodes {
-		nodes = append(nodes, node)
-	}
-	sort.Slice(nodes, func(i, j int) bool {
-		left := taskStatePriority(nodes[i].State)
-		right := taskStatePriority(nodes[j].State)
-		if left != right {
-			return left < right
-		}
-		return nodes[i].Name < nodes[j].Name
-	})
-
-	selected := findSelectedNode(nodes, selectedName)
-	logTitle := "selected log"
-	logPath := ""
 	var prisma []prismaSnapshotSummary
 	var prismaErr string
 	var prismaCfg tuiPrismaConfig
 	var prismaDev *database.PrismaDevelopmentStatus
 	var prismaDevErr string
 	if showDatabase {
-		logTitle = databasePanelTitle
 		prismaCfg, err = resolvePrismaConfig(root, inst)
 		if err != nil {
 			prismaDevErr = err.Error()
@@ -666,6 +649,26 @@ func loadSnapshot(root, instanceID string, showSupervisor bool, showDatabase boo
 		if err != nil {
 			prismaErr = err.Error()
 		}
+	}
+
+	nodes := make([]api.NodeStatus, 0, len(state.Nodes))
+	for _, node := range state.Nodes {
+		nodes = append(nodes, normalizeTUIState(node, prismaDev))
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		left := taskStatePriority(nodes[i].State)
+		right := taskStatePriority(nodes[j].State)
+		if left != right {
+			return left < right
+		}
+		return nodes[i].Name < nodes[j].Name
+	})
+
+	selected := findSelectedNode(nodes, selectedName)
+	logTitle := "selected log"
+	logPath := ""
+	if showDatabase {
+		logTitle = databasePanelTitle
 	} else if showSupervisor {
 		logTitle = supervisorLogTitle
 		if supervisor != nil {
@@ -691,6 +694,16 @@ func loadSnapshot(root, instanceID string, showSupervisor bool, showDatabase boo
 		prismaDev:    prismaDev,
 		prismaDevErr: prismaDevErr,
 	}, nil
+}
+
+func normalizeTUIState(node api.NodeStatus, prismaDev *database.PrismaDevelopmentStatus) api.NodeStatus {
+	if node.State == api.StateFailed && looksLikeMigrationNeededStatus(node.LastError) {
+		node.State = api.StateMigrationNeeded
+	}
+	if node.State == api.StateFailed && prismaDev != nil && prismaDev.NeedsNewMigration && node.Name == "db_prepare" {
+		node.State = api.StateMigrationNeeded
+	}
+	return node
 }
 
 func renderHeader(snap snapshot) []string {
@@ -793,7 +806,7 @@ func (d *dashboard) applyEvents(events []api.Event) {
 				d.setStatus(fmt.Sprintf("[red]run failed: %s", evt.Error))
 			}
 		case api.EventTaskState:
-			if evt.State == api.StateMigrationNeeded && evt.Task != "" {
+			if evt.Task != "" && (evt.State == api.StateMigrationNeeded || looksLikeMigrationNeededStatus(evt.Error)) {
 				d.setStatus(fmt.Sprintf("[yellow]%s needs a migration: %s", evt.Task, evt.Error))
 			} else if evt.State == api.StateFailed && evt.Task != "" {
 				d.setStatus(fmt.Sprintf("[red]%s failed: %s", evt.Task, evt.Error))
@@ -1168,6 +1181,14 @@ func compactTUIStatus(text string, maxLen int) string {
 		return text[:maxLen]
 	}
 	return text[:maxLen-3] + "..."
+}
+
+func looksLikeMigrationNeededStatus(text string) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	return strings.Contains(text, "generate one with generateprismamigration") ||
+		strings.Contains(text, "generate a migration") ||
+		strings.Contains(text, "needs new migration") ||
+		strings.Contains(text, "migration_needed")
 }
 
 func findSelectedNode(nodes []api.NodeStatus, selectedName string) *api.NodeStatus {

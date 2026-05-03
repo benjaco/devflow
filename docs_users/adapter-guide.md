@@ -311,7 +311,7 @@ Only override `Migrate` when you intentionally want an all-at-once custom Prisma
 
 If `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but no new migration appears, `EnsurePrismaDevDatabase` returns an explicit migration-needed error instead of pretending the database is current. Devflow records that task as `migration_needed` so the TUI can show an authoring action instead of a generic failure.
 
-Custom migration guards can get the same task state by returning an error that implements `MigrationNeeded() bool`.
+Custom migration guards can get the same task state by returning an error that implements `MigrationNeeded() bool`. Devflow also recognizes the built-in Prisma "generate one with GeneratePrismaMigration" guard text for compatibility.
 
 For a plain SQL migration folder, use the generic migration workflow and an apply function:
 
