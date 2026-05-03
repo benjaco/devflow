@@ -38,6 +38,7 @@ func TestTaskStatePriorityOrdersRunningThenPending(t *testing.T) {
 	nodes := []api.NodeStatus{
 		{Name: "done_task", State: api.StateDone},
 		{Name: "pending_task", State: api.StatePending},
+		{Name: "migration_task", State: api.StateMigrationNeeded},
 		{Name: "running_task", State: api.StateRunning},
 		{Name: "cached_task", State: api.StateCached},
 	}
@@ -49,8 +50,11 @@ func TestTaskStatePriorityOrdersRunningThenPending(t *testing.T) {
 		}
 		return nodes[i].Name < nodes[j].Name
 	})
-	got := []string{nodes[0].Name, nodes[1].Name, nodes[2].Name, nodes[3].Name}
-	want := []string{"running_task", "pending_task", "cached_task", "done_task"}
+	got := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		got = append(got, node.Name)
+	}
+	want := []string{"running_task", "pending_task", "migration_task", "cached_task", "done_task"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("unexpected node order: got %v want %v", got, want)
 	}
@@ -78,6 +82,7 @@ func TestRenderHeaderIncludesStateSummary(t *testing.T) {
 			{Name: "backend_dev", State: api.StateRunning},
 			{Name: "build", State: api.StateCached},
 			{Name: "done", State: api.StateDone},
+			{Name: "db_prepare", State: api.StateMigrationNeeded},
 		},
 		supervisor: &api.SupervisorStatus{PID: 55, Alive: true},
 		urls:       map[string]string{"backend": "http://127.0.0.1:8080"},
@@ -91,10 +96,30 @@ func TestRenderHeaderIncludesStateSummary(t *testing.T) {
 		"RUN=2",
 		"CACHE=1",
 		"DONE=1",
+		"MIGR=1",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected header to contain %q, got:\n%s", want, joined)
 		}
+	}
+}
+
+func TestStateBadgeShowsMigrationNeeded(t *testing.T) {
+	if got := stateBadge(api.StateMigrationNeeded); got != "MIGR" {
+		t.Fatalf("expected migration-needed badge, got %q", got)
+	}
+}
+
+func TestApplyEventsReportsMigrationNeededState(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	d.applyEvents([]api.Event{{
+		Type:  api.EventTaskState,
+		Task:  "db_prepare",
+		State: api.StateMigrationNeeded,
+		Error: "generate a migration first",
+	}})
+	if got := d.statusMessage; !strings.Contains(got, "needs a migration") || !strings.Contains(got, "db_prepare") {
+		t.Fatalf("expected migration-needed status, got %q", got)
 	}
 }
 

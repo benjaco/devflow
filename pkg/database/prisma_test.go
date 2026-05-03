@@ -986,6 +986,10 @@ func TestEnsurePrismaDevDatabaseRejectsSchemaChangeWithoutMigration(t *testing.T
 	if err == nil || !strings.Contains(err.Error(), "schema changed without a new migration") {
 		t.Fatalf("expected schema-without-migration error, got %v", err)
 	}
+	var migrationNeeded *MigrationNeededError
+	if !errors.As(err, &migrationNeeded) || !migrationNeeded.MigrationNeeded() || migrationNeeded.Reason != "schema_changed" {
+		t.Fatalf("expected schema-changed error to be marked migration-needed, got %#v", err)
+	}
 }
 
 func TestEnsurePrismaDevDatabaseRejectsFreshSchemaWithModelsAndNoMigrations(t *testing.T) {
@@ -1016,6 +1020,10 @@ model User {
 	})
 	if err == nil || !strings.Contains(err.Error(), "no migrations exist") {
 		t.Fatalf("expected fresh schema missing migration error, got %v", err)
+	}
+	var migrationNeeded *MigrationNeededError
+	if !errors.As(err, &migrationNeeded) || !migrationNeeded.MigrationNeeded() || migrationNeeded.Reason != "no_migrations" {
+		t.Fatalf("expected no-migrations error to be marked migration-needed, got %#v", err)
 	}
 	if _, statErr := os.Stat(snapshotRoot); statErr == nil {
 		entries, readErr := os.ReadDir(snapshotRoot)

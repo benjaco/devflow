@@ -302,6 +302,94 @@ func TestCanceledSiblingUsesCanceledState(t *testing.T) {
 	}
 }
 
+type migrationNeededProject struct {
+	appRan *atomic.Bool
+}
+
+func (migrationNeededProject) Name() string { return "migration-needed-project" }
+
+func (migrationNeededProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "migration-needed"}, nil
+}
+
+func (migrationNeededProject) Targets() []project.Target {
+	return []project.Target{{Name: "up", RootTasks: []string{"app"}}}
+}
+
+func (p migrationNeededProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name: "db_prepare",
+			Kind: project.KindOnce,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				return testMigrationNeededError{message: "migration needed"}
+			},
+		},
+		{
+			Name: "app",
+			Kind: project.KindOnce,
+			Deps: []string{"db_prepare"},
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				if p.appRan != nil {
+					p.appRan.Store(true)
+				}
+				return nil
+			},
+		},
+	}
+}
+
+type testMigrationNeededError struct {
+	message string
+}
+
+func (e testMigrationNeededError) Error() string {
+	return e.message
+}
+
+func (e testMigrationNeededError) MigrationNeeded() bool {
+	return true
+}
+
+func TestMigrationNeededErrorUsesMigrationNeededState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	appRan := &atomic.Bool{}
+	eng, err := New(migrationNeededProject{appRan: appRan}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := eng.Run(context.Background(), Request{Target: "up", Worktree: worktree, Mode: api.ModeWatch})
+	if err == nil {
+		t.Fatal("expected run to stop for migration-needed task")
+	}
+	if out == nil {
+		t.Fatal("expected partial outcome")
+	}
+	if out.Result.FailedNode != "db_prepare" {
+		t.Fatalf("expected failed node to point at migration-needed task, got %q", out.Result.FailedNode)
+	}
+	status, err := instance.LoadStatus(worktree, out.Result.InstanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := status.Nodes["db_prepare"].State; got != api.StateMigrationNeeded {
+		t.Fatalf("expected db_prepare to be migration_needed, got %q", got)
+	}
+	if got := status.Nodes["db_prepare"].LastError; got != "migration needed" {
+		t.Fatalf("expected migration-needed last error, got %q", got)
+	}
+	if got := status.Nodes["app"].State; got != api.StatePending {
+		t.Fatalf("expected downstream task to stay pending, got %q", got)
+	}
+	if appRan.Load() {
+		t.Fatal("downstream task should not run when migration is needed")
+	}
+}
+
 type interactiveProject struct{}
 
 func (interactiveProject) Name() string { return "interactive-project" }

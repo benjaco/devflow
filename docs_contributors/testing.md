@@ -24,7 +24,7 @@ Devflow uses three testing layers:
 - built-binary helper build/run/start coverage and cache-restore coverage
 - database runtime command planning and snapshot-manifest coverage
 - database runtime host-port readiness and stale published-port reconciliation coverage
-- managed migration workflow coverage for exact snapshot reuse, nearest-prefix restore, incompatible base fingerprint misses, changed-latest tail replay, per-migration prefix snapshots, checked remote Postgres clone policy failures, Prisma directory-only migration inspection, Prisma lock-file churn, model-free schemas without migrations, added/deleted Prisma migrations, changed older Prisma migration rebuilds, failed Prisma migration apply without snapshotting, Prisma prefix deploy snapshots, fresh/no-migration schema errors, schema-without-migration errors, and Prisma generate helpers
+- managed migration workflow coverage for exact snapshot reuse, nearest-prefix restore, incompatible base fingerprint misses, changed-latest tail replay, per-migration prefix snapshots, checked remote Postgres clone policy failures, Prisma directory-only migration inspection, Prisma lock-file churn, model-free schemas without migrations, added/deleted Prisma migrations, changed older Prisma migration rebuilds, failed Prisma migration apply without snapshotting, Prisma prefix deploy snapshots, fresh/no-migration migration-needed errors, schema-without-migration migration-needed errors, and Prisma generate helpers
 - Prisma schema/migration inspection and nearest-prefix snapshot planning coverage
 - dotenv parsing and merged runtime-env coverage with devflow-managed DB overrides
 - CLI JSON output shape, including command-level lifecycle coverage for `run`, `status`, `logs`, `instances`, `doctor`, and `stop`
@@ -36,7 +36,7 @@ Devflow uses three testing layers:
 - engine-level interactive prompt event plus answer-file integration coverage
 - TUI database/Prisma panel rendering, drift warning, Prisma snapshot-summary loading, and migration-generation action coverage
 - sequential engine execution with cache hits
-- distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work
+- distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work, plus explicit `migration_needed` task-state classification for database migration authoring guards
 - scheduler error preservation so a canceled sibling does not replace the first actionable task failure with `context canceled`
 - polling watch batching and selective watch reruns
 - graph affected explanations for file, directory, ignored, and unmatched paths

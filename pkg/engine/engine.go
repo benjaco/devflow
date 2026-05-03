@@ -852,7 +852,19 @@ func classifyTaskError(ctx context.Context, err error) api.NodeState {
 	if errors.Is(err, context.Canceled) || (ctx != nil && errors.Is(ctx.Err(), context.Canceled)) {
 		return api.StateCanceled
 	}
+	if isMigrationNeededError(err) {
+		return api.StateMigrationNeeded
+	}
 	return api.StateFailed
+}
+
+type migrationNeededError interface {
+	MigrationNeeded() bool
+}
+
+func isMigrationNeededError(err error) bool {
+	var migrationNeeded migrationNeededError
+	return errors.As(err, &migrationNeeded) && migrationNeeded.MigrationNeeded()
 }
 
 func displayTaskError(ctx context.Context, err error) string {
@@ -1005,7 +1017,8 @@ func (s *runState) failedNode() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, name := range sortedNodeNames(s.status) {
-		if s.status[name].State == api.StateFailed {
+		switch s.status[name].State {
+		case api.StateFailed, api.StateMigrationNeeded:
 			return name
 		}
 	}
@@ -1395,6 +1408,8 @@ func flushTaskIssueKind(state api.NodeState) string {
 	switch state {
 	case api.StateFailed:
 		return "task_failed"
+	case api.StateMigrationNeeded:
+		return "migration_needed"
 	case api.StateCanceled:
 		return "task_canceled"
 	default:

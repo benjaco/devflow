@@ -309,7 +309,9 @@ When a detached run is active, `devflow tui` has a `d` database/Prisma panel tha
 
 Only override `Migrate` when you intentionally want an all-at-once custom Prisma command; that path snapshots the final state only. Use `MigrateEach` for custom per-prefix behavior.
 
-If `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but no new migration appears, `EnsurePrismaDevDatabase` returns an explicit error instead of pretending the database is current.
+If `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but no new migration appears, `EnsurePrismaDevDatabase` returns an explicit migration-needed error instead of pretending the database is current. Devflow records that task as `migration_needed` so the TUI can show an authoring action instead of a generic failure.
+
+Custom migration guards can get the same task state by returning an error that implements `MigrationNeeded() bool`.
 
 For a plain SQL migration folder, use the generic migration workflow and an apply function:
 

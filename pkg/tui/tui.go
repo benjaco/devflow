@@ -722,12 +722,13 @@ func renderHeader(snap snapshot) []string {
 		fmt.Sprintf("[yellow]worktree[-]: %s", snap.instance.Worktree),
 		fmt.Sprintf("[yellow]db[-]: %s host=%s port=%d container=%s", snap.instance.DB.Name, snap.instance.DB.Host, snap.instance.DB.Port, snap.instance.DB.ContainerName),
 		fmt.Sprintf("[yellow]urls[-]: %s", strings.Join(urlParts, "    ")),
-		fmt.Sprintf("[yellow]%s[-]    [yellow]states[-]: RUN=%d WAIT=%d CACHE=%d DONE=%d FAIL=%d CANC=%d STOP=%d",
+		fmt.Sprintf("[yellow]%s[-]    [yellow]states[-]: RUN=%d WAIT=%d CACHE=%d DONE=%d MIGR=%d FAIL=%d CANC=%d STOP=%d",
 			supervisorText,
 			counts[api.StateRunning],
 			counts[api.StatePending]+counts[api.StateReady]+counts[api.StateDirty],
 			counts[api.StateCached],
 			counts[api.StateDone],
+			counts[api.StateMigrationNeeded],
 			counts[api.StateFailed],
 			counts[api.StateCanceled],
 			counts[api.StateStopped],
@@ -792,7 +793,9 @@ func (d *dashboard) applyEvents(events []api.Event) {
 				d.setStatus(fmt.Sprintf("[red]run failed: %s", evt.Error))
 			}
 		case api.EventTaskState:
-			if evt.State == api.StateFailed && evt.Task != "" {
+			if evt.State == api.StateMigrationNeeded && evt.Task != "" {
+				d.setStatus(fmt.Sprintf("[yellow]%s needs a migration: %s", evt.Task, evt.Error))
+			} else if evt.State == api.StateFailed && evt.Task != "" {
 				d.setStatus(fmt.Sprintf("[red]%s failed: %s", evt.Task, evt.Error))
 			}
 		case api.EventInteractionReq:
@@ -1591,6 +1594,8 @@ func stateBadge(state api.NodeState) string {
 		return "DONE"
 	case api.StateFailed:
 		return "FAIL"
+	case api.StateMigrationNeeded:
+		return "MIGR"
 	case api.StateCanceled:
 		return "CANC"
 	case api.StateStopped:
@@ -1614,6 +1619,8 @@ func stateColor(state api.NodeState) tcell.Color {
 		return tcell.ColorWhite
 	case api.StateFailed:
 		return tcell.ColorIndianRed
+	case api.StateMigrationNeeded:
+		return tcell.ColorLightYellow
 	case api.StateCanceled:
 		return tcell.ColorOrange
 	case api.StateStopped:
@@ -1631,20 +1638,22 @@ func taskStatePriority(state api.NodeState) int {
 		return 0
 	case api.StatePending, api.StateReady, api.StateDirty:
 		return 1
-	case api.StateFailed:
+	case api.StateMigrationNeeded:
 		return 2
-	case api.StateCanceled:
+	case api.StateFailed:
 		return 3
-	case api.StateCached:
+	case api.StateCanceled:
 		return 4
-	case api.StateDone:
+	case api.StateCached:
 		return 5
-	case api.StateStopped:
+	case api.StateDone:
 		return 6
-	case api.StateSkipped:
+	case api.StateStopped:
 		return 7
-	default:
+	case api.StateSkipped:
 		return 8
+	default:
+		return 9
 	}
 }
 

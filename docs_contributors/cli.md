@@ -153,6 +153,7 @@ It is projectless, has no flags, has no JSON mode, and does not print contributo
 
 Task states now distinguish:
 - `failed`: the task itself failed
+- `migration_needed`: the task intentionally blocked because a database migration must be authored before downstream work can run
 - `canceled`: the task was interrupted because another task failed or the run was canceled
 
 `logs` supports task logs as before and also accepts `supervisor` to read the detached supervisor log directly.

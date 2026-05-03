@@ -45,6 +45,23 @@ type PrismaMigrationGenerateOptions struct {
 	Command    process.CommandSpec
 }
 
+type MigrationNeededError struct {
+	Reason  string
+	Message string
+}
+
+func (e *MigrationNeededError) Error() string {
+	return e.Message
+}
+
+func (e *MigrationNeededError) MigrationNeeded() bool {
+	return true
+}
+
+func newMigrationNeededError(reason, message string) error {
+	return &MigrationNeededError{Reason: reason, Message: message}
+}
+
 type PrismaMigrationApplyFunc func(ctx context.Context, db api.DBInstance, migration PrismaMigration, opts PrismaMigrationApplyOptions) error
 
 type PrismaMigrationApplyOptions struct {
@@ -68,7 +85,7 @@ func (m *Manager) EnsurePrismaDevDatabase(ctx context.Context, opts PrismaDevDat
 			return nil, err
 		}
 		if hasModels {
-			return nil, fmt.Errorf("prisma schema declares models but no migrations exist; generate one with GeneratePrismaMigration before preparing the database")
+			return nil, newMigrationNeededError("no_migrations", "prisma schema declares models but no migrations exist; generate one with GeneratePrismaMigration before preparing the database")
 		}
 	}
 	base, err := m.PreparePrismaBase(ctx, opts.DB, state, opts.SourcePolicy, opts.Prepare)
@@ -94,7 +111,7 @@ func (m *Manager) EnsurePrismaDevDatabase(ctx context.Context, opts PrismaDevDat
 	if needsApply && len(state.Migrations) > 0 {
 		if opts.Migrate.Name == "" {
 			if plan.SnapshotKey != "" && plan.PrefixLength == len(state.Migrations) && plan.Snapshot != nil && plan.Snapshot.SchemaHash != state.SchemaHash {
-				return nil, fmt.Errorf("prisma schema changed without a new migration; generate one with GeneratePrismaMigration before preparing the database")
+				return nil, newMigrationNeededError("schema_changed", "prisma schema changed without a new migration; generate one with GeneratePrismaMigration before preparing the database")
 			}
 			applier := opts.MigrateEach
 			if applier == nil {
