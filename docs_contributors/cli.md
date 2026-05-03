@@ -29,7 +29,7 @@ All implemented commands support `--json` except `devflow docs`, which intention
 
 Running bare `devflow` now acts as the default operator entry path:
 - it can be the installed Go binary or the repo-local launcher script
-- the repo-local launcher rebuilds the bootstrap binary when the core `devflow` source tree is newer than the repo-local `.devflow/bin/devflow`
+- the repo-local launcher rebuilds the bootstrap binary when the content build key for the core `devflow` source tree changes
 - requires `./devflow.project.go` in the selected worktree
 - compiles a worktree-local binary into `<worktree>/.devflow/bin/devflow-local` when the project file or Devflow version/source inputs are newer
 - `exec`s into that worktree-local binary for all normal commands
@@ -127,7 +127,7 @@ Supervisor behavior:
 go install github.com/benjaco/devflow/cmd/devflow@latest
 ```
 
-`upgrade --version v0.1.2` installs that specific tag. `upgrade --json` returns the command, package, version target, success flag, duration, and any error/output. It exits non-zero when the underlying `go install` fails.
+`upgrade --version v0.1.2` installs that specific tag. `upgrade --json` returns the command, package, version target, success flag, duration, and any error/output. It exits non-zero when the underlying `go install` fails. In text mode, `upgrade` warns when `go install` writes a binary somewhere other than the `devflow` command currently found on `PATH`.
 
 `docs` prints all bundled user-facing Markdown files from `docs_users/` in sorted order.
 

@@ -1470,7 +1470,69 @@ func (a *App) upgradeCmd(args []string) error {
 		return fmt.Errorf("upgrade failed: %w", err)
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "upgraded devflow using %s\n", strings.Join(command, " "))
+	if warning := upgradePathWarning(command[0]); warning != "" {
+		_, _ = fmt.Fprintf(a.Stdout, "warning: %s\n", warning)
+	}
 	return nil
+}
+
+func upgradePathWarning(goCommand string) string {
+	installedPath, err := goInstalledDevflowPath(goCommand)
+	if err != nil || installedPath == "" {
+		return ""
+	}
+	pathDevflow, err := exec.LookPath("devflow")
+	if err != nil || pathDevflow == "" {
+		return ""
+	}
+	if sameExecutablePath(pathDevflow, installedPath) {
+		return ""
+	}
+	return fmt.Sprintf("go install wrote %s, but your shell resolves devflow to %s; put %s earlier on PATH or replace the shadowing command", installedPath, pathDevflow, filepath.Dir(installedPath))
+}
+
+func goInstalledDevflowPath(goCommand string) (string, error) {
+	out, err := exec.Command(goCommand, "env", "GOBIN", "GOPATH").Output()
+	if err != nil {
+		return "", err
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\r\n"), "\n")
+	if len(lines) == 0 {
+		return "", fmt.Errorf("go env returned no output")
+	}
+	binDir := strings.TrimSpace(lines[0])
+	if binDir == "" {
+		if len(lines) < 2 || strings.TrimSpace(lines[1]) == "" {
+			return "", fmt.Errorf("go env returned no GOPATH")
+		}
+		binDir = filepath.Join(strings.TrimSpace(lines[1]), "bin")
+	}
+	return filepath.Join(binDir, "devflow"), nil
+}
+
+func sameExecutablePath(a, b string) bool {
+	aAbs, err := filepath.Abs(a)
+	if err == nil {
+		a = aAbs
+	}
+	bAbs, err := filepath.Abs(b)
+	if err == nil {
+		b = bAbs
+	}
+	aEval, errA := filepath.EvalSymlinks(a)
+	bEval, errB := filepath.EvalSymlinks(b)
+	if errA == nil {
+		a = aEval
+	}
+	if errB == nil {
+		b = bEval
+	}
+	if a == b {
+		return true
+	}
+	aInfo, errA := os.Stat(a)
+	bInfo, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(aInfo, bInfo)
 }
 
 func (a *App) docsCmd(args []string) error {

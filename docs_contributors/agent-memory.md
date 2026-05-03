@@ -44,6 +44,7 @@ Use this memory together with the subsystem docs. When a change affects one of t
 - Treat worktrees as the isolation boundary.
 - Devflow itself does not need to be developed through git worktrees; worktree support is for target projects.
 - Go is required on machines that run Devflow because project graph definitions are Go code. Round-1 install/update is `go install github.com/benjaco/devflow/cmd/devflow@latest` and `devflow upgrade`; binary releases are deliberately deferred.
+- `devflow upgrade` only updates the binary written by `go install`. If a repo-local launcher or another `devflow` command shadows `$(go env GOPATH)/bin/devflow` earlier on `PATH`, the shell will keep running the shadowing command; text-mode upgrade should warn about that.
 - Keep instance env explicit, layered, and persisted.
 - Services are supervised, not cached.
 - Cacheable tasks must declare outputs.
@@ -63,6 +64,7 @@ Runtime adapters are project-local:
 - a selected worktree must contain `devflow.project.go`
 - the bootstrap CLI compiles `<worktree>/.devflow/bin/devflow-local`
 - project-local binary stale checks and rebuilds are serialized by `<worktree>/.devflow/localbuild.lock`
+- the repo-local launcher rebuilds its source binary from a content build key rather than file mtimes
 - normal commands exec into that worktree-local binary
 - there is no built-in adapter fallback when `devflow.project.go` is missing
 

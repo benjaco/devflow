@@ -32,7 +32,7 @@ devflow version
 devflow docs
 ```
 
-Make sure `$(go env GOPATH)/bin` is on your `PATH`; that is where `go install` places the `devflow` executable by default.
+Make sure `$(go env GOPATH)/bin` is on your `PATH`; that is where `go install` places the `devflow` executable by default. If `devflow upgrade` succeeds but `devflow version` does not change, run `which -a devflow`: another command earlier on `PATH` is shadowing the Go-installed binary.
 
 Update later with:
 

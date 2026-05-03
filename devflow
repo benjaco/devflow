@@ -9,25 +9,35 @@ while [[ -L "$SOURCE" ]]; do
 done
 ROOT="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 BIN="$ROOT/.devflow/bin/devflow"
+KEY_FILE="$BIN.buildkey"
 
 mkdir -p "$(dirname "$BIN")"
 
+source_key() {
+  {
+    printf '%s\n' "$ROOT/go.mod" "$ROOT/go.sum"
+    find "$ROOT/cmd" "$ROOT/internal" "$ROOT/pkg" "$ROOT/examples" -type f -name '*.go' | sort
+  } | while IFS= read -r file; do
+    [[ -f "$file" ]] || continue
+    printf '%s\0' "${file#"$ROOT"/}"
+    cat "$file"
+    printf '\0'
+  done | shasum -a 256 | awk '{print $1}'
+}
+
+BUILD_KEY="$(source_key)"
 needs_build=0
 if [[ ! -x "$BIN" ]]; then
   needs_build=1
-elif [[ "$ROOT/go.mod" -nt "$BIN" || "$ROOT/go.sum" -nt "$BIN" ]]; then
+elif [[ ! -f "$KEY_FILE" ]]; then
   needs_build=1
-else
-  while IFS= read -r file; do
-    if [[ "$file" -nt "$BIN" ]]; then
-      needs_build=1
-      break
-    fi
-  done < <(find "$ROOT/cmd" "$ROOT/internal" "$ROOT/pkg" "$ROOT/examples" -type f -name '*.go' | sort)
+elif [[ "$(cat "$KEY_FILE")" != "$BUILD_KEY" ]]; then
+  needs_build=1
 fi
 
 if [[ "$needs_build" -eq 1 ]]; then
   (cd "$ROOT" && go build -o "$BIN" ./cmd/devflow)
+  printf '%s\n' "$BUILD_KEY" > "$KEY_FILE"
 fi
 
 export DEVFLOW_BOOTSTRAP_ENTRY=1

@@ -36,7 +36,7 @@ devflow version
 devflow docs
 ```
 
-Make sure `$(go env GOPATH)/bin` is on `PATH`.
+Make sure `$(go env GOPATH)/bin` is on `PATH`. If `devflow upgrade` succeeds but `devflow version` does not change, run `which -a devflow`; another binary or symlink earlier on `PATH` is shadowing the Go-installed binary.
 
 `devflow docs` prints the bundled user-facing Markdown docs for the installed Devflow version. It intentionally does not print contributor docs.
 

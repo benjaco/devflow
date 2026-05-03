@@ -33,7 +33,7 @@ The repo also has a source-local launcher:
 ./devflow version
 ```
 
-The launcher rebuilds `.devflow/bin/devflow` when source files change, sets the source-root bootstrap env, and then runs the built binary.
+The launcher rebuilds `.devflow/bin/devflow` when the source content build key changes, sets the source-root bootstrap env, and then runs the built binary.
 
 Do not use plain `go build ./cmd/devflow` in the repo root. The default output name is `./devflow`, which would overwrite the tracked launcher script. Always pass `-o`.
 

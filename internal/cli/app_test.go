@@ -366,6 +366,58 @@ func TestUpgradeJSONReportsFailure(t *testing.T) {
 	}
 }
 
+func TestUpgradePathWarningWhenPathShadowsGoInstall(t *testing.T) {
+	dir := t.TempDir()
+	goPath := filepath.Join(dir, "gopath")
+	installedDir := filepath.Join(goPath, "bin")
+	shadowDir := filepath.Join(dir, "shadow")
+	if err := os.MkdirAll(installedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(shadowDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installedDir, "devflow"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shadowDir, "devflow"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeGo := filepath.Join(dir, "go")
+	if err := os.WriteFile(fakeGo, []byte("#!/bin/sh\nif [ \"$1\" = env ]; then printf '\\n%s\\n' \"$DEVFLOW_TEST_GOPATH\"; exit 0; fi\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEVFLOW_TEST_GOPATH", goPath)
+	t.Setenv("PATH", shadowDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	warning := upgradePathWarning(fakeGo)
+	if !strings.Contains(warning, "go install wrote") || !strings.Contains(warning, installedDir) || !strings.Contains(warning, shadowDir) {
+		t.Fatalf("expected shadow warning, got %q", warning)
+	}
+}
+
+func TestUpgradePathWarningSkipsWhenInstalledBinaryIsOnPath(t *testing.T) {
+	dir := t.TempDir()
+	goPath := filepath.Join(dir, "gopath")
+	installedDir := filepath.Join(goPath, "bin")
+	if err := os.MkdirAll(installedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installedDir, "devflow"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeGo := filepath.Join(dir, "go")
+	if err := os.WriteFile(fakeGo, []byte("#!/bin/sh\nif [ \"$1\" = env ]; then printf '\\n%s\\n' \"$DEVFLOW_TEST_GOPATH\"; exit 0; fi\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEVFLOW_TEST_GOPATH", goPath)
+	t.Setenv("PATH", installedDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if warning := upgradePathWarning(fakeGo); warning != "" {
+		t.Fatalf("did not expect warning when installed devflow is on PATH, got %q", warning)
+	}
+}
+
 func TestRunJSONStillReturnsExecutionError(t *testing.T) {
 	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
 	err := app.Run([]string{"run", "build", "--json", "--ci", "--project", "cli-fail-project", "--worktree", t.TempDir()})

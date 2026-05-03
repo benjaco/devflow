@@ -210,6 +210,9 @@ Last updated: 2026-05-03
   - while the panel creates a Prisma migration, the footer status reports database startup/readiness, Prisma invocation, and the latest Prisma output line
   - global shortcuts are bypassed while text-input popups are focused, so migration-name typing is not intercepted
   - the footer now presents letter shortcuts as the primary controls while preserving F-key backups internally
+- Hardened source/install update ergonomics:
+  - the repo-local launcher now rebuilds `.devflow/bin/devflow` from a content build key instead of source mtimes
+  - text-mode `devflow upgrade` now warns when `go install` updates a different binary than the `devflow` command currently found on `PATH`
 - Distinct task-cancellation handling implemented:
   - tasks interrupted by parent-run cancellation now persist as `canceled` instead of `failed`
   - the TUI now renders `canceled` separately from real failures
