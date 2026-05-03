@@ -19,6 +19,7 @@ func TestInspectPrismaStateAndPlanRestore(t *testing.T) {
 	mustWrite(t, filepath.Join(worktree, "db", "schema.prisma"), "datasource db {}\n")
 	mustWrite(t, filepath.Join(worktree, "db", "migrations", "001_init", "migration.sql"), "create table a(id int);\n")
 	mustWrite(t, filepath.Join(worktree, "db", "migrations", "002_add_user", "migration.sql"), "create table b(id int);\n")
+	mustWrite(t, filepath.Join(worktree, "db", "migrations", "migration_lock.toml"), "provider = \"postgresql\"\n")
 	mustWrite(t, filepath.Join(worktree, "db", "bootstrap.sql"), "-- bootstrap\n")
 
 	state, err := InspectPrismaState(worktree, "db/schema.prisma", "db/migrations", []string{"db/bootstrap.sql"})
@@ -26,7 +27,12 @@ func TestInspectPrismaStateAndPlanRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(state.Migrations) != 2 {
-		t.Fatalf("expected 2 migrations, got %d", len(state.Migrations))
+		t.Fatalf("expected 2 directory migrations, got %+v", state.Migrations)
+	}
+	for _, migration := range state.Migrations {
+		if migration.Name == "migration_lock.toml" {
+			t.Fatalf("expected migration_lock.toml to be ignored, got %+v", state.Migrations)
+		}
 	}
 
 	root := t.TempDir()
@@ -629,6 +635,46 @@ func TestEnsurePrismaDevDatabaseRejectsSchemaChangeWithoutMigration(t *testing.T
 	}
 }
 
+func TestEnsurePrismaDevDatabaseRejectsFreshSchemaWithModelsAndNoMigrations(t *testing.T) {
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), `
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// model CommentedOut { id Int @id }
+/*
+model BlockCommentedOut {
+  id Int @id
+}
+*/
+model User {
+  id Int @id @default(autoincrement())
+}
+`)
+	snapshotRoot := t.TempDir()
+	mgr := NewWithRunner(&fakeRunner{})
+	_, err := mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
+		Worktree:      worktree,
+		DB:            migrationTestDB(snapshotRoot),
+		SchemaPath:    "prisma/schema.prisma",
+		MigrationsDir: "prisma/migrations",
+	})
+	if err == nil || !strings.Contains(err.Error(), "no migrations exist") {
+		t.Fatalf("expected fresh schema missing migration error, got %v", err)
+	}
+	if _, statErr := os.Stat(snapshotRoot); statErr == nil {
+		entries, readErr := os.ReadDir(snapshotRoot)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("expected no snapshot to be written for missing migrations, got %v", entries)
+		}
+	}
+}
+
 func TestPrismaCommandBuilders(t *testing.T) {
 	deploy := PrismaMigrateDeployCommand("prisma/schema.prisma")
 	if deploy.Name != "npx" || strings.Join(deploy.Args, " ") != "prisma migrate deploy --schema prisma/schema.prisma" {
@@ -685,6 +731,7 @@ func TestPrismaMigrateDeployPrefixApplierCopiesOnlyPrefix(t *testing.T) {
 	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\n")
 	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "create table a(id int);\n")
 	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "002_users", "migration.sql"), "create table users(id int);\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "migration_lock.toml"), "provider = \"postgresql\"\n")
 	binDir := filepath.Join(worktree, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)

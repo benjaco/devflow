@@ -387,6 +387,12 @@ Last updated: 2026-05-02
   - incompatible base fingerprints miss the old snapshot and rebuild from the source policy
   - stopped containers with the expected host port are restarted instead of recreated
   - Prisma migration generation runs the expected default command
+- Fixed Prisma/Postgres adoption-test regressions:
+  - ignore `migration_lock.toml` and other non-directory entries in Prisma migration inspection
+  - `PostgresDumpSourcePolicy` now fails when `pg_dump` fails instead of letting `psql` mask an empty restore
+  - fresh Prisma schemas with models but no migrations fail during DB preparation before snapshotting
+  - `devflow stop --all` now stops the instance-managed database container while preserving the volume
+  - engine run errors preserve the first actionable task failure instead of being overwritten by sibling `context canceled`
 
 ## In Progress
 

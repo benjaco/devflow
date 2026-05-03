@@ -284,6 +284,9 @@ func TestCanceledSiblingUsesCanceledState(t *testing.T) {
 	if out == nil {
 		t.Fatal("expected partial outcome")
 	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected first task error to be preserved, got %v", err)
+	}
 	status, err := instance.LoadStatus(worktree, out.Result.InstanceID)
 	if err != nil {
 		t.Fatal(err)

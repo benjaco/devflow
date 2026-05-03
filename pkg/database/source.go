@@ -77,8 +77,14 @@ func (p PostgresDumpSourcePolicy) PrepareBase(ctx context.Context, db api.DBInst
 	}
 	spec := process.CommandSpec{
 		Name: "sh",
-		Args: []string{"-c", `pg_dump --no-owner --no-privileges "$DEVFLOW_REMOTE_DATABASE_URL" | psql "$DATABASE_URL"`},
-		Dir:  opts.Worktree,
+		Args: []string{"-c", `
+set -eu
+dump_file="$(mktemp "${TMPDIR:-/tmp}/devflow-pg-dump.XXXXXX")"
+trap 'rm -f "$dump_file"' EXIT
+pg_dump --no-owner --no-privileges -f "$dump_file" "$DEVFLOW_REMOTE_DATABASE_URL"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$dump_file"
+`},
+		Dir: opts.Worktree,
 		Env: mergeStringMaps(opts.Env, mergeStringMaps(databaseEnv(db), map[string]string{
 			"DEVFLOW_REMOTE_DATABASE_URL": p.RemoteURL,
 		})),

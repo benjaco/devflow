@@ -1308,6 +1308,57 @@ func TestStopAllStopsDetachedSupervisorExecutorAndStaleStatusProcesses(t *testin
 	}
 }
 
+func TestStopAllStopsManagedDatabaseContainer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based fake docker test is Unix-only")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	binDir := filepath.Join(worktree, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dockerLog := filepath.Join(worktree, "docker.log")
+	if err := os.WriteFile(filepath.Join(binDir, "docker"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+shellQuote(dockerLog)+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.DB = api.DBInstance{ContainerName: "devflow-pg-test"}
+	if err := instance.Save(inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.SaveStatus(worktree, inst.ID, "dev", api.ModeWatch, map[string]api.NodeStatus{}); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"stop", "--worktree", worktree, "--all", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	stopped := stringSetFromJSONList(t, payload["stopped"])
+	if !stopped["database"] {
+		t.Fatalf("expected managed database in stopped payload: %v", payload["stopped"])
+	}
+	data, err := os.ReadFile(dockerLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(data)) != "stop -t 10 devflow-pg-test" {
+		t.Fatalf("unexpected docker command log %q", string(data))
+	}
+}
+
 func TestStopAllUsesSupervisorLogChildPIDFallback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell process-group test is Unix-only")

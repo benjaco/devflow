@@ -461,7 +461,9 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 
 		if res.err != nil {
 			failed = true
-			runErr = res.err
+			if runErr == nil {
+				runErr = res.err
+			}
 			cancel()
 			continue
 		}

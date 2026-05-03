@@ -19,11 +19,12 @@ Devflow uses three testing layers:
 - service lifecycle management
 - CI-mode service targets act as readiness probes and stop services before returning
 - detached stop cleanup for supervisor, child executor, tracked service, and stale status process groups
+- `stop --all` cleanup for the instance-managed database container while preserving the volume
 - service readiness success and timeout behavior
 - built-binary helper build/run/start coverage and cache-restore coverage
 - database runtime command planning and snapshot-manifest coverage
 - database runtime host-port readiness and stale published-port reconciliation coverage
-- managed migration workflow coverage for exact snapshot reuse, nearest-prefix restore, incompatible base fingerprint misses, changed-latest tail replay, per-migration prefix snapshots, remote Postgres clone policy, Prisma prefix deploy snapshots, schema-without-migration errors, and Prisma generate helpers
+- managed migration workflow coverage for exact snapshot reuse, nearest-prefix restore, incompatible base fingerprint misses, changed-latest tail replay, per-migration prefix snapshots, checked remote Postgres clone policy failures, Prisma directory-only migration inspection, Prisma prefix deploy snapshots, fresh/no-migration schema errors, schema-without-migration errors, and Prisma generate helpers
 - Prisma schema/migration inspection and nearest-prefix snapshot planning coverage
 - dotenv parsing and merged runtime-env coverage with devflow-managed DB overrides
 - CLI JSON output shape, including command-level lifecycle coverage for `run`, `status`, `logs`, `instances`, `doctor`, and `stop`
@@ -35,6 +36,7 @@ Devflow uses three testing layers:
 - engine-level interactive prompt event plus answer-file integration coverage
 - sequential engine execution with cache hits
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work
+- scheduler error preservation so a canceled sibling does not replace the first actionable task failure with `context canceled`
 - polling watch batching and selective watch reruns
 - graph affected explanations for file, directory, ignored, and unmatched paths
 - watch cascade pruning so downstream tasks do not run past warmups or services that are blocked from watch execution, including full watch execution and mixed blocked/allowed branch coverage

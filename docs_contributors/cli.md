@@ -48,6 +48,7 @@ Service lifecycle contract:
 - `devflow run <target> --detach --json` returns after launching the detached supervisor; it is not a health/readiness gate
 - use `devflow watch <target> --detach --json` plus `devflow flush <target> --json` when automation needs a detached environment that is proven settled and healthy
 - finite check/test targets with service dependencies should generally use `devflow run <target> --ci --json`
+- `devflow stop --all --json` also stops the instance-managed database container when one is recorded; it does not remove the Docker volume
 
 Implemented `run` flags include:
 - `--json`

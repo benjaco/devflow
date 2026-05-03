@@ -324,18 +324,22 @@ Higher-level workflow helpers now exist on top of those primitives:
 - `GeneratePrismaMigration` for explicit Prisma migration authoring
 - `PostgresDumpSourcePolicy` for cloning a remote development Postgres database into the local runtime
 
+Prisma migration inspection is directory-only. Files under `prisma/migrations`, including `migration_lock.toml`, are not migration points and must not affect prefix counts or snapshot keys.
+
 The important cache invariant is prefix safety. A snapshot can only be reused when its migration list is a valid prefix of the current migration list and the base fingerprint still matches. `EnsureMigratedDatabase` with `ApplyEach` and the default `EnsurePrismaDevDatabase` path snapshot every prefix after applying it, so editing the latest migration can restore the previous prefix snapshot and apply only the changed tail.
 
-Prisma has one additional authoring guard: if `schema.prisma` changes but the migration list has not advanced beyond the restored prefix, the default workflow returns an error telling the adapter to generate a migration first. Migration generation must be modeled as an explicit target/action using `GeneratePrismaMigration`, not hidden inside normal `up`.
+Prisma has two authoring guards: if `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but the migration list has not advanced beyond the restored prefix, the default workflow returns an error telling the adapter to generate a migration first. Migration generation must be modeled as an explicit target/action using `GeneratePrismaMigration`, not hidden inside normal `up`.
 
 Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`. `Migrate` is an all-at-once command and only snapshots the final state; `MigrateEach` preserves the per-prefix cache contract.
+
+`PostgresDumpSourcePolicy` must fail when `pg_dump` fails. It writes through a temporary dump file instead of an unchecked shell pipeline so `psql` cannot mask a failed clone with an empty successful restore.
 
 Managed Postgres target pattern:
 - preserve the Docker volume unless an explicit restore/rebuild path owns the destruction
 - call `EnsureRuntime` before migration/app tasks
 - call `WaitReady` before connecting through the host DSN; it checks Docker readiness and the host-mapped port
 - run migrations against `db.URL`, not a container-local address
-- supervise the final DB container as a service and stop it through Devflow lifecycle commands
+- stop the final DB container through `devflow stop --all`; this preserves the Docker volume
 
 Do not unconditionally remove the DB container in normal startup. Docker port mappings are immutable, so `EnsureRuntime` removes and recreates only stale containers with a wrong published port while preserving the volume.
 
@@ -479,7 +483,7 @@ Service tasks have different command semantics depending on the run mode:
 - `run --detach` starts the detached supervisor and returns after launch. It records the supervisor but does not prove the target closure is healthy.
 - `watch --detach` starts the detached development loop. It is the expected long-running mode for humans and agents that want automatic reruns after file edits.
 - `flush` is the detached watch readiness gate. It proves the watcher observed the post-edit sync sentinel, waits for the selected target closure to settle, and checks service health.
-- `stop --all` is the cleanup surface for detached runs. It reconciles supervisor, child executor, tracked service, and stale status PIDs before clearing persisted runtime process state.
+- `stop --all` is the cleanup surface for detached runs. It reconciles supervisor, child executor, tracked service, stale status PIDs, and the instance-managed database container before clearing persisted runtime process state. Stopping the database container preserves its Docker volume.
 
 The current automation recommendation is intentionally explicit: use detached watch plus `flush` for "background environment is ready" workflows. Do not reinterpret attached `run` as a start-and-return command without adding a separate CLI contract.
 
@@ -521,7 +525,7 @@ Detached ownership is currently implemented by spawning a background `devflow` s
 This is enough for:
 - `run --detach`
 - `watch --detach`
-- `stop --all` against detached runs; it terminates the supervisor process group, child executor process group, tracked service process groups, and PID-bearing status nodes before clearing persisted process state
+- `stop --all` against detached runs; it terminates the supervisor process group, child executor process group, tracked service process groups, PID-bearing status nodes, and the instance-managed database container before clearing persisted process state
 - service `restart` by stopping the detached supervisor and relaunching the last detached target
 
 The operator surface now also reconciles detached state when queried:

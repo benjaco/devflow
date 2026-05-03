@@ -62,6 +62,15 @@ func (m *Manager) EnsurePrismaDevDatabase(ctx context.Context, opts PrismaDevDat
 	if err != nil {
 		return nil, err
 	}
+	if len(state.Migrations) == 0 {
+		hasModels, err := prismaSchemaDeclaresModels(opts.Worktree, opts.SchemaPath)
+		if err != nil {
+			return nil, err
+		}
+		if hasModels {
+			return nil, fmt.Errorf("prisma schema declares models but no migrations exist; generate one with GeneratePrismaMigration before preparing the database")
+		}
+	}
 	base, err := m.PreparePrismaBase(ctx, opts.DB, state, opts.SourcePolicy, opts.Prepare)
 	if err != nil {
 		return nil, err
@@ -282,6 +291,9 @@ func prismaMigrationPrefixNames(root string, prefix int) ([]string, error) {
 	}
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
 		names = append(names, entry.Name())
 	}
 	sortStrings(names)

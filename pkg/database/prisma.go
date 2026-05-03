@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -218,6 +219,9 @@ func collectPrismaMigrations(root string) ([]PrismaMigration, error) {
 	names := make([]string, 0, len(entries))
 	items := make(map[string]string, len(entries))
 	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
 		name := entry.Name()
 		sum, err := hashPath(filepath.Join(root, name))
 		if err != nil {
@@ -232,6 +236,44 @@ func collectPrismaMigrations(root string) ([]PrismaMigration, error) {
 		out = append(out, PrismaMigration{Name: name, Hash: items[name]})
 	}
 	return out, nil
+}
+
+func prismaSchemaDeclaresModels(worktree, schemaPath string) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(worktree, schemaPath))
+	if err != nil {
+		return false, err
+	}
+	return regexp.MustCompile(`(?m)^\s*model\s+[A-Za-z_][A-Za-z0-9_]*\s*\{`).MatchString(stripPrismaComments(string(data))), nil
+}
+
+func stripPrismaComments(input string) string {
+	var out strings.Builder
+	inBlock := false
+	for i := 0; i < len(input); i++ {
+		if inBlock {
+			if i+1 < len(input) && input[i] == '*' && input[i+1] == '/' {
+				inBlock = false
+				i++
+			}
+			continue
+		}
+		if i+1 < len(input) && input[i] == '/' && input[i+1] == '*' {
+			inBlock = true
+			i++
+			continue
+		}
+		if i+1 < len(input) && input[i] == '/' && input[i+1] == '/' {
+			for i < len(input) && input[i] != '\n' {
+				i++
+			}
+			if i < len(input) {
+				out.WriteByte(input[i])
+			}
+			continue
+		}
+		out.WriteByte(input[i])
+	}
+	return out.String()
 }
 
 func migrationPrefix(candidate, current []PrismaMigration) int {

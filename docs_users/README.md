@@ -199,7 +199,7 @@ Use the lifecycle command that matches the job:
 - `devflow run up --detach --json` starts a detached supervisor and returns after launch. It does not prove the whole target is healthy; use `status`, `logs`, or a watch `flush` workflow when readiness matters.
 - `devflow watch up --detach --json` starts the recommended detached dev loop for humans and agents.
 - `devflow flush up --json` is the readiness gate for detached watch mode. It waits for file-change work to settle and checks in-chain services.
-- `devflow stop --all --json` cleans up the detached supervisor, child executor, tracked services, and stale process records for the worktree.
+- `devflow stop --all --json` cleans up the detached supervisor, child executor, tracked services, stale process records, and the managed database container for the worktree. It preserves the database volume.
 
 For finite check/test targets that depend on services such as Postgres or a local app, generally use `devflow run <target> --ci --json` so Devflow starts the services as readiness probes and stops them before returning.
 

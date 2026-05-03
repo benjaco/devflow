@@ -238,7 +238,7 @@ This is the right abstraction for:
 - clone-from-dev scripts today
 - local bootstrap/startup scripts later
 
-For Postgres databases that can be cloned through `pg_dump | psql`, use the built-in remote source policy:
+For Postgres databases that can be cloned through host `pg_dump`/`psql`, use the built-in remote source policy:
 
 ```go
 policy := database.PostgresDumpSourcePolicy{
@@ -246,6 +246,8 @@ policy := database.PostgresDumpSourcePolicy{
     RemoteURL:  os.Getenv("DEV_DATABASE_URL"),
 }
 ```
+
+The policy writes the dump to a temporary file and only invokes `psql` after `pg_dump` succeeds, so a `pg_dump` version mismatch is surfaced as a Devflow task failure instead of being masked by an empty successful restore. The host `pg_dump` still needs to be compatible with the remote server major version.
 
 It is not a "reset DB" operator action. The goal is to reuse the best compatible local state or rebuild a new base automatically.
 
@@ -294,6 +296,7 @@ result, err := mgr.EnsurePrismaDevDatabase(ctx, database.PrismaDevDatabaseOption
 
 This will:
 - inspect the Prisma schema and migration folder
+- ignore non-directory entries in `prisma/migrations`, including Prisma's `migration_lock.toml`
 - restore the nearest compatible cached migration point
 - clone/rebuild a base database when no compatible snapshot exists
 - ensure the host-visible Postgres runtime is ready
@@ -304,7 +307,7 @@ That prefix snapshotting matters during development. If you edit the latest migr
 
 Only override `Migrate` when you intentionally want an all-at-once custom Prisma command; that path snapshots the final state only. Use `MigrateEach` for custom per-prefix behavior.
 
-If `schema.prisma` changes but no new migration appears, `EnsurePrismaDevDatabase` returns an explicit error instead of pretending the database is current.
+If `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but no new migration appears, `EnsurePrismaDevDatabase` returns an explicit error instead of pretending the database is current.
 
 For a plain SQL migration folder, use the generic migration workflow and an apply function:
 
@@ -346,6 +349,8 @@ devflow run test --ci --json
 ```
 
 `run --ci` starts service dependencies as readiness probes and stops them before returning. Plain attached `run` keeps services alive and is better for interactive development.
+
+`devflow stop --all` stops the managed Postgres container recorded on the instance while preserving its Docker volume. Snapshot/restore paths may still rebuild or replace the volume when they explicitly own that work.
 
 ## Interactive Task Policy
 

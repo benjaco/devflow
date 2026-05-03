@@ -19,6 +19,7 @@ import (
 	"github.com/benjaco/devflow/internal/version"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/cache"
+	"github.com/benjaco/devflow/pkg/database"
 	"github.com/benjaco/devflow/pkg/engine"
 	"github.com/benjaco/devflow/pkg/graph"
 	"github.com/benjaco/devflow/pkg/instance"
@@ -804,6 +805,13 @@ func (a *App) stopCmd(args []string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if *all && inst.DB.ContainerName != "" {
+		if err := database.New().StopRuntime(context.Background(), inst.DB); err != nil {
+			return err
+		}
+		stopped = append(stopped, "database")
+		sort.Strings(stopped)
 	}
 	if *all {
 		if err := markAllStoppedNodes(root, id); err != nil {
