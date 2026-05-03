@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-05-02
+Last updated: 2026-05-03
 
 ## Current Status
 
@@ -387,6 +387,13 @@ Last updated: 2026-05-02
   - incompatible base fingerprints miss the old snapshot and rebuild from the source policy
   - stopped containers with the expected host port are restarted instead of recreated
   - Prisma migration generation runs the expected default command
+- Deepened Prisma development-loop tests for normal user cases:
+  - `migration_lock.toml` churn does not change Prisma state hashes or snapshot keys
+  - model-free schemas without migrations prepare and snapshot an empty runtime
+  - adding one or multiple migrations restores the existing prefix and applies only the new tail in order
+  - deleting the latest migration restores the older exact snapshot without applying work
+  - editing an older migration misses incompatible prefix snapshots, rebuilds from the source policy, and replays all migrations
+  - failed Prisma migration apply stops the workflow without writing a misleading snapshot
 - Fixed Prisma/Postgres adoption-test regressions:
   - ignore `migration_lock.toml` and other non-directory entries in Prisma migration inspection
   - `PostgresDumpSourcePolicy` now fails when `pg_dump` fails instead of letting `psql` mask an empty restore
@@ -397,6 +404,20 @@ Last updated: 2026-05-02
 ## In Progress
 
 - None
+
+## Recent Feedback
+
+- Prisma/Postgres clean retry confirmed the prior fixes worked:
+  - fresh model schema with no migrations now fails clearly in `db_prepare`
+  - Prisma migration inspection ignores `migration_lock.toml`
+  - schema changes without a migration fail clearly without noisy sibling cancellation output
+  - prefix snapshot replay works for edited latest migrations
+  - checked remote clone works when host `pg_dump` is compatible with the remote major version
+  - `stop --all` stops the managed DB container
+- Follow-up fix from the clean retry:
+  - `flush` now periodically rewrites the sync sentinel while waiting for an ack to avoid a first-flush startup race after `watch --detach`
+- Remaining accepted improvement:
+  - expose DB snapshot restore/apply/snapshot activity as first-class JSON/events instead of relying on adapter summary logs
 
 ## Next Steps
 

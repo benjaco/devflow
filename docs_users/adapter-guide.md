@@ -247,7 +247,7 @@ policy := database.PostgresDumpSourcePolicy{
 }
 ```
 
-The policy writes the dump to a temporary file and only invokes `psql` after `pg_dump` succeeds, so a `pg_dump` version mismatch is surfaced as a Devflow task failure instead of being masked by an empty successful restore. The host `pg_dump` still needs to be compatible with the remote server major version.
+The policy writes the dump to a temporary file and only invokes `psql` after `pg_dump` succeeds, so a `pg_dump` version mismatch is surfaced as a Devflow task failure instead of being masked by an empty successful restore. In practice, use a host `pg_dump` whose major version matches the remote Postgres server.
 
 It is not a "reset DB" operator action. The goal is to reuse the best compatible local state or rebuild a new base automatically.
 
