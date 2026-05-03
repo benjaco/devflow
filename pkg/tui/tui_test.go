@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gdamore/tcell/v2"
+
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/database"
 	"github.com/benjaco/devflow/pkg/graph"
@@ -184,7 +186,7 @@ func TestRenderDatabasePanelFlagsPrismaMigrationDrift(t *testing.T) {
 	for _, want := range []string{
 		"migration folder/state: needs new migration",
 		"reason=schema_changed",
-		"press m to create a Prisma migration",
+		"press m to create a Prisma migration (F4 also works)",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected database panel to contain %q, got:\n%s", want, joined)
@@ -275,6 +277,58 @@ func TestGeneratePrismaMigrationFromTUIRunsDefaultCreateOnly(t *testing.T) {
 	}
 	if strings.TrimSpace(string(url)) == "" {
 		t.Fatal("expected DATABASE_URL to be supplied to Prisma migration command")
+	}
+}
+
+func TestGeneratePrismaMigrationFromTUIEnsuresManagedDatabase(t *testing.T) {
+	worktree := t.TempDir()
+	mustWriteTUITestFile(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id name String }\n")
+	binDir := filepath.Join(worktree, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTUITestExecutable(t, filepath.Join(binDir, "npx"), "#!/bin/sh\nprintf ok > \"$OUT_FILE\"\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	manager := &recordingTUIDatabaseManager{}
+	previousManager := newDatabaseManagerForTUI
+	newDatabaseManagerForTUI = func() tuiDatabaseManager { return manager }
+	t.Cleanup(func() { newDatabaseManagerForTUI = previousManager })
+
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(worktree, "prisma-command.txt")
+	inst.Env = map[string]string{"OUT_FILE": output}
+	inst.DB = api.DBInstance{
+		Name:          "app",
+		URL:           "postgres://devflow:devflow@127.0.0.1:55432/app?sslmode=disable",
+		Host:          "127.0.0.1",
+		Port:          55432,
+		User:          "devflow",
+		Password:      "devflow",
+		ContainerName: "devflow-pg-test",
+		VolumeName:    "devflow-pgdata-test",
+	}
+	if err := instance.Save(inst); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := generatePrismaMigrationFromTUI(worktree, inst.ID, "add-age"); err != nil {
+		t.Fatal(err)
+	}
+	if !manager.ensureCalled {
+		t.Fatal("expected TUI migration generation to ensure the managed database runtime")
+	}
+	if !manager.waitCalled {
+		t.Fatal("expected TUI migration generation to wait for managed database readiness")
+	}
+	if manager.ensureDB.ContainerName != inst.DB.ContainerName || manager.waitDB.ContainerName != inst.DB.ContainerName {
+		t.Fatalf("expected manager to receive instance database, got ensure=%+v wait=%+v", manager.ensureDB, manager.waitDB)
+	}
+	if _, err := os.ReadFile(output); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -437,9 +491,61 @@ func TestRenderFooterIncludesRetargetKey(t *testing.T) {
 	if !strings.Contains(text, "t retarget") {
 		t.Fatalf("expected footer to advertise retarget key, got %q", text)
 	}
-	if !strings.Contains(text, "d database/prisma") {
+	if !strings.Contains(text, "d db") {
 		t.Fatalf("expected footer to advertise database panel key, got %q", text)
 	}
+	if !strings.Contains(text, "m migration") {
+		t.Fatalf("expected footer to advertise migration key, got %q", text)
+	}
+	if !strings.Contains(text, "j/k/arrows move") {
+		t.Fatalf("expected footer to advertise normal movement keys, got %q", text)
+	}
+}
+
+func TestHandleKeysPassesInputThroughWhenPopupActive(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	d.activeInput = true
+	for _, r := range []rune{'m', 'i', 't', 'd', 'j', 'k', 'q', 'g'} {
+		event := tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone)
+		if got := d.handleKeys(event); got != event {
+			t.Fatalf("expected rune %q to pass through while input is active", r)
+		}
+	}
+}
+
+func TestHandleKeysUsesLetterShortcutsWhenNoInputActive(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	if got := d.handleKeys(tcell.NewEventKey(tcell.KeyRune, 'd', tcell.ModNone)); got != nil {
+		t.Fatalf("expected database shortcut to be handled, got %#v", got)
+	}
+	if !d.showDatabasePanel {
+		t.Fatal("expected d to toggle the database panel")
+	}
+	if got := d.handleKeys(tcell.NewEventKey(tcell.KeyRune, 'l', tcell.ModNone)); got != nil {
+		t.Fatalf("expected log shortcut to be handled, got %#v", got)
+	}
+	if !d.showSupervisorLog || d.showDatabasePanel {
+		t.Fatalf("expected l to toggle supervisor log and hide database panel, got supervisor=%v database=%v", d.showSupervisorLog, d.showDatabasePanel)
+	}
+}
+
+type recordingTUIDatabaseManager struct {
+	ensureCalled bool
+	waitCalled   bool
+	ensureDB     api.DBInstance
+	waitDB       api.DBInstance
+}
+
+func (m *recordingTUIDatabaseManager) EnsureRuntime(_ context.Context, db api.DBInstance) error {
+	m.ensureCalled = true
+	m.ensureDB = db
+	return nil
+}
+
+func (m *recordingTUIDatabaseManager) WaitReady(_ context.Context, db api.DBInstance, _ time.Duration) error {
+	m.waitCalled = true
+	m.waitDB = db
+	return nil
 }
 
 func TestScrollLogsClampsAtTop(t *testing.T) {

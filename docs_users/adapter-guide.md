@@ -305,7 +305,7 @@ This will:
 
 That prefix snapshotting matters during development. If you edit the latest migration, Devflow can restore the previous compatible prefix and apply only the changed tail instead of rebuilding from the remote/base source.
 
-When a detached run is active, `devflow tui` has a `d` database/Prisma panel that shows the managed Postgres identity, recent cached Prisma migration-prefix snapshots, and schema/migration drift. Pressing `m` is an explicit migration-authoring action; normal `up` startup should still avoid hidden migration generation.
+When a detached run is active, `devflow tui` has a `d` database/Prisma panel that shows the managed Postgres identity, recent cached Prisma migration-prefix snapshots, and schema/migration drift. Pressing `m` is an explicit migration-authoring action; normal `up` startup should still avoid hidden migration generation. `F2` and `F4` are backup keys for terminals where letter shortcuts conflict.
 
 Only override `Migrate` when you intentionally want an all-at-once custom Prisma command; that path snapshots the final state only. Use `MigrateEach` for custom per-prefix behavior.
 
@@ -351,7 +351,7 @@ func (myProject) PrismaConfig() project.PrismaConfig {
 }
 ```
 
-Then `devflow tui` can flag schema/migration drift in the `d` database/Prisma panel. Press `m`, enter a migration name, and Devflow runs `GeneratePrismaMigration` from inside the TUI. If no provider is implemented, the TUI tries common layouts such as `prisma/schema.prisma` and `db/schema.prisma`.
+Then `devflow tui` can flag schema/migration drift in the `d` database/Prisma panel. Press `m`, enter a migration name, and Devflow starts/waits for the managed database recorded on the instance before running `GeneratePrismaMigration` from inside the TUI. If no provider is implemented, the TUI tries common layouts such as `prisma/schema.prisma` and `db/schema.prisma`.
 
 Typical graph shape:
 - `postgres`: service task that calls `EnsureRuntime`, `WaitReady`, and supervises database lifetime/logs

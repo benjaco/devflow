@@ -61,6 +61,15 @@ type tuiPrismaConfig struct {
 	Available bool
 }
 
+type tuiDatabaseManager interface {
+	EnsureRuntime(context.Context, api.DBInstance) error
+	WaitReady(context.Context, api.DBInstance, time.Duration) error
+}
+
+var newDatabaseManagerForTUI = func() tuiDatabaseManager {
+	return database.New()
+}
+
 type dashboard struct {
 	root              string
 	instanceID        string
@@ -79,6 +88,7 @@ type dashboard struct {
 	busy              bool
 	eventOffset       int64
 	activePromptID    string
+	activeInput       bool
 }
 
 const (
@@ -234,9 +244,33 @@ func (d *dashboard) eventLoop(ctx context.Context) {
 }
 
 func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
+	if d.activeInput {
+		return event
+	}
 	switch event.Key() {
 	case tcell.KeyEsc:
 		d.app.Stop()
+		return nil
+	case tcell.KeyHome:
+		d.selectIndex(0)
+		return nil
+	case tcell.KeyEnd:
+		d.selectIndex(len(d.currentNodes) - 1)
+		return nil
+	case tcell.KeyF2:
+		d.toggleDatabasePanel()
+		return nil
+	case tcell.KeyF3:
+		d.toggleSupervisorLog()
+		return nil
+	case tcell.KeyF4:
+		d.openPrismaMigrationPrompt()
+		return nil
+	case tcell.KeyF5:
+		d.triggerInvalidateSelected()
+		return nil
+	case tcell.KeyF6:
+		d.triggerRetargetSelected()
 		return nil
 	case tcell.KeyRune:
 		switch event.Rune() {
@@ -256,18 +290,10 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 			d.selectIndex(len(d.currentNodes) - 1)
 			return nil
 		case 'l':
-			d.showSupervisorLog = !d.showSupervisorLog
-			if d.showSupervisorLog {
-				d.showDatabasePanel = false
-			}
-			d.updateLogs()
+			d.toggleSupervisorLog()
 			return nil
 		case 'd':
-			d.showDatabasePanel = !d.showDatabasePanel
-			if d.showDatabasePanel {
-				d.showSupervisorLog = false
-			}
-			d.updateLogs()
+			d.toggleDatabasePanel()
 			return nil
 		case 'm':
 			d.openPrismaMigrationPrompt()
@@ -287,6 +313,22 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	}
 	return event
+}
+
+func (d *dashboard) toggleSupervisorLog() {
+	d.showSupervisorLog = !d.showSupervisorLog
+	if d.showSupervisorLog {
+		d.showDatabasePanel = false
+	}
+	d.updateLogs()
+}
+
+func (d *dashboard) toggleDatabasePanel() {
+	d.showDatabasePanel = !d.showDatabasePanel
+	if d.showDatabasePanel {
+		d.showSupervisorLog = false
+	}
+	d.updateLogs()
 }
 
 func (d *dashboard) moveSelection(delta int) {
@@ -402,7 +444,7 @@ func (d *dashboard) renderFooter() {
 	if status == "" {
 		status = "[green]ready"
 	}
-	d.footer.SetText("q quit  j/k move  g/G top/bottom  l selected/supervisor log  d database/prisma  m new prisma migration  i invalidate+rerun downstream  t retarget\n" + status)
+	d.footer.SetText("q quit  j/k/arrows move  g/G top/bottom  l log  d db  m migration  i rerun  t retarget\n" + status)
 }
 
 func (d *dashboard) openPrismaMigrationPrompt() {
@@ -429,20 +471,36 @@ func (d *dashboard) openPrismaMigrationPrompt() {
 		SetLabel("Migration name ").
 		SetFieldWidth(48).
 		SetDoneFunc(func(key tcell.Key) {
-			if key != tcell.KeyEnter {
+			switch key {
+			case tcell.KeyEscape:
+				d.closePrismaMigrationPrompt()
+				return
+			case tcell.KeyEnter:
+			default:
 				return
 			}
 			name := strings.TrimSpace(input.GetText())
-			d.pages.RemovePage("prisma_migration")
-			d.app.SetFocus(d.logs)
+			if name == "" {
+				d.setStatus("[red]migration name is required")
+				return
+			}
+			d.closePrismaMigrationPrompt()
 			d.triggerGeneratePrismaMigration(name)
 		})
 	frame := tview.NewFrame(input).
 		SetBorders(1, 1, 1, 1, 1, 1).
 		AddText("Create Prisma Migration", true, tview.AlignCenter, tcell.ColorWhite).
+		AddText("Enter creates the migration. Escape cancels.", false, tview.AlignCenter, tcell.ColorGray).
 		AddText(fmt.Sprintf("%s -> %s", cfg.SchemaPath, cfg.MigrationsDir), false, tview.AlignCenter, tcell.ColorGray)
+	d.activeInput = true
 	d.pages.AddPage("prisma_migration", centered(frame, 84, 8), true, true)
 	d.app.SetFocus(input)
+}
+
+func (d *dashboard) closePrismaMigrationPrompt() {
+	d.activeInput = false
+	d.pages.RemovePage("prisma_migration")
+	d.app.SetFocus(d.logs)
 }
 
 func (d *dashboard) triggerGeneratePrismaMigration(name string) {
@@ -741,6 +799,7 @@ func (d *dashboard) openPrompt(evt api.Event) {
 		return
 	}
 	d.activePromptID = evt.PromptID
+	d.activeInput = true
 	switch evt.PromptKind {
 	case string(process.PromptConfirm):
 		modal := tview.NewModal().
@@ -786,6 +845,7 @@ func (d *dashboard) openPrompt(evt api.Event) {
 
 func (d *dashboard) closePrompt() {
 	d.activePromptID = ""
+	d.activeInput = false
 	d.pages.RemovePage("prompt")
 	d.app.SetFocus(d.tasks)
 }
@@ -857,7 +917,7 @@ func renderDatabasePanel(snap snapshot) []string {
 			if snap.prismaDev.Message != "" {
 				lines = append(lines, snap.prismaDev.Message)
 			}
-			lines = append(lines, "press m to create a Prisma migration")
+			lines = append(lines, "press m to create a Prisma migration (F4 also works)")
 		} else if snap.prismaDev != nil {
 			lines = append(lines, formatPrismaDevelopmentStatus(snap.prismaDev))
 		}
@@ -1028,6 +1088,9 @@ func generatePrismaMigrationFromTUI(root, instanceID, name string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	if err := ensureManagedDatabaseForTUI(ctx, inst.DB); err != nil {
+		return err
+	}
 	return database.GeneratePrismaMigration(ctx, database.PrismaMigrationGenerateOptions{
 		Worktree:   root,
 		SchemaPath: cfg.SchemaPath,
@@ -1037,6 +1100,20 @@ func generatePrismaMigrationFromTUI(root, instanceID, name string) error {
 		LogPath:    instance.LogPath(root, instanceID, "prisma_migration"),
 		Command:    cfg.Command,
 	})
+}
+
+func ensureManagedDatabaseForTUI(ctx context.Context, db api.DBInstance) error {
+	if db.ContainerName == "" && db.VolumeName == "" {
+		return nil
+	}
+	manager := newDatabaseManagerForTUI()
+	if err := manager.EnsureRuntime(ctx, db); err != nil {
+		return fmt.Errorf("ensure managed database runtime: %w", err)
+	}
+	if err := manager.WaitReady(ctx, db, 45*time.Second); err != nil {
+		return fmt.Errorf("wait for managed database readiness: %w", err)
+	}
+	return nil
 }
 
 func findSelectedNode(nodes []api.NodeStatus, selectedName string) *api.NodeStatus {

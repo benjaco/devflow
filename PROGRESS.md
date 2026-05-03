@@ -201,10 +201,12 @@ Last updated: 2026-05-03
   - the log pane is now the default focus when the TUI opens
   - mouse-wheel scrolling over the task table now scrolls the log pane instead of the task list
 - Added TUI database/Prisma visibility:
-  - `d` toggles a database/Prisma panel in the log area
+  - `d` toggles a database/Prisma panel in the log area; `F2` remains a backup
   - the panel shows managed Postgres identity without the DB password
   - recent cached Prisma migration-prefix snapshots are loaded from the instance snapshot root and summarized by key, migration count, and latest migration
-  - the panel flags schema/migration drift and `m` asks for a migration name, then runs Prisma migration generation without leaving the TUI
+  - the panel flags schema/migration drift and `m` asks for a migration name, starts/waits for the managed database when the instance has one, then runs Prisma migration generation without leaving the TUI; `F4` remains a backup
+  - global shortcuts are bypassed while text-input popups are focused, so migration-name typing is not intercepted
+  - the footer now presents letter shortcuts as the primary controls while preserving F-key backups internally
 - Distinct task-cancellation handling implemented:
   - tasks interrupted by parent-run cancellation now persist as `canceled` instead of `failed`
   - the TUI now renders `canceled` separately from real failures
