@@ -138,6 +138,159 @@ func TestRunnerStillIgnoresOtherDevflowPathsWithIncludePath(t *testing.T) {
 	}
 }
 
+func TestRunnerIgnoresNodeModulesByDefault(t *testing.T) {
+	root := t.TempDir()
+	moduleDir := filepath.Join(root, "node_modules", "pkg")
+	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(moduleDir, "index.js")
+	if err := os.WriteFile(path, []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runner, err := New(Options{
+		Root:         root,
+		Debounce:     40 * time.Millisecond,
+		PollInterval: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batches, errs, err := runner.Start(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if err := os.WriteFile(path, []byte("b"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errs:
+		if err != nil {
+			t.Fatalf("watch error: %v", err)
+		}
+	case batch := <-batches:
+		t.Fatalf("unexpected node_modules batch: %+v", batch)
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+func TestRunnerCanWatchExplicitPathUnderDefaultIgnoredDir(t *testing.T) {
+	root := t.TempDir()
+	moduleDir := filepath.Join(root, "node_modules", "pkg")
+	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(moduleDir, "index.js")
+	if err := os.WriteFile(path, []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runner, err := New(Options{
+		Root:         root,
+		Debounce:     40 * time.Millisecond,
+		PollInterval: 20 * time.Millisecond,
+		WatchPaths:   []string{"node_modules/pkg"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batches, errs, err := runner.Start(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if err := os.WriteFile(path, []byte("b"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errs:
+		if err != nil {
+			t.Fatalf("watch error: %v", err)
+		}
+	case batch := <-batches:
+		if !containsString(batch.Files, "node_modules/pkg/index.js") {
+			t.Fatalf("unexpected explicit watch-path batch: %+v", batch)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for explicit watch-path batch")
+	}
+}
+
+func TestRunnerRestrictsPollingToWatchPaths(t *testing.T) {
+	root := t.TempDir()
+	srcDir := filepath.Join(root, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srcPath := filepath.Join(srcDir, "input.txt")
+	otherPath := filepath.Join(root, "other.txt")
+	if err := os.WriteFile(srcPath, []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(otherPath, []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runner, err := New(Options{
+		Root:         root,
+		Debounce:     40 * time.Millisecond,
+		PollInterval: 20 * time.Millisecond,
+		WatchPaths:   []string{"src"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batches, errs, err := runner.Start(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if err := os.WriteFile(otherPath, []byte("b"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errs:
+		if err != nil {
+			t.Fatalf("watch error: %v", err)
+		}
+	case batch := <-batches:
+		t.Fatalf("unexpected out-of-scope batch: %+v", batch)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	if err := os.WriteFile(srcPath, []byte("b"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errs:
+		if err != nil {
+			t.Fatalf("watch error: %v", err)
+		}
+	case batch := <-batches:
+		if !containsString(batch.Files, "src/input.txt") {
+			t.Fatalf("unexpected watch-path batch: %+v", batch)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for scoped watch-path batch")
+	}
+}
+
 func containsString(items []string, want string) bool {
 	for _, item := range items {
 		if item == want {

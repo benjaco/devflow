@@ -44,7 +44,7 @@ Devflow uses three testing layers:
 - sequential engine execution with cache hits
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work, plus explicit `migration_needed` task-state classification for database migration authoring guards
 - scheduler error preservation so a canceled sibling does not replace the first actionable task failure with `context canceled`
-- polling watch batching and selective watch reruns
+- polling watch batching, declared-input watch scoping, default `node_modules` ignore behavior, and selective watch reruns
 - graph affected explanations for path, file, directory, glob, ignored, and unmatched paths
 - watch cascade pruning so downstream tasks do not run past warmups or services that are blocked from watch execution, including full watch execution and mixed blocked/allowed branch coverage
 - watch service restart policies, including `RestartAlways` selection and full watch execution behavior

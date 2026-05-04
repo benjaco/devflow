@@ -13,13 +13,20 @@ import (
 
 const (
 	DefaultDebounce     = 300 * time.Millisecond
-	DefaultPollInterval = 100 * time.Millisecond
+	DefaultPollInterval = 500 * time.Millisecond
 )
+
+var defaultIgnorePaths = []string{
+	".devflow",
+	".git",
+	"node_modules",
+}
 
 type Options struct {
 	Root         string
 	Debounce     time.Duration
 	PollInterval time.Duration
+	WatchPaths   []string
 	IgnorePaths  []string
 	IncludePaths []string
 }
@@ -31,11 +38,13 @@ type Batch struct {
 }
 
 type Runner struct {
-	root         string
-	debounce     time.Duration
-	pollInterval time.Duration
-	ignorePaths  []string
-	includePaths []string
+	root          string
+	debounce      time.Duration
+	pollInterval  time.Duration
+	watchPaths    []string
+	ignorePaths   []string
+	includePaths  []string
+	explicitPaths []string
 }
 
 func New(opts Options) (*Runner, error) {
@@ -51,14 +60,19 @@ func New(opts Options) (*Runner, error) {
 	if pollInterval <= 0 {
 		pollInterval = DefaultPollInterval
 	}
-	ignorePaths := append([]string{".devflow", ".git"}, opts.IgnorePaths...)
+	ignorePaths := append([]string{}, defaultIgnorePaths...)
+	ignorePaths = append(ignorePaths, opts.IgnorePaths...)
+	watchPaths := normalizeIncludePaths(root, opts.WatchPaths)
 	includePaths := normalizeIncludePaths(root, opts.IncludePaths)
+	explicitPaths := append(append([]string{}, includePaths...), watchPaths...)
 	return &Runner{
-		root:         root,
-		debounce:     debounce,
-		pollInterval: pollInterval,
-		ignorePaths:  ignorePaths,
-		includePaths: includePaths,
+		root:          root,
+		debounce:      debounce,
+		pollInterval:  pollInterval,
+		watchPaths:    watchPaths,
+		ignorePaths:   ignorePaths,
+		includePaths:  includePaths,
+		explicitPaths: explicitPaths,
 	}, nil
 }
 
@@ -74,7 +88,7 @@ func (r *Runner) Start(ctx context.Context) (<-chan Batch, <-chan error, error) 
 		if rel == "." {
 			return nil
 		}
-		if pathIncluded(rel, r.includePaths) {
+		if pathIncluded(rel, r.explicitPaths) {
 			return nil
 		}
 		for _, ignore := range r.ignorePaths {
@@ -85,15 +99,22 @@ func (r *Runner) Start(ctx context.Context) (<-chan Batch, <-chan error, error) 
 		}
 		return nil
 	})
-	if err := w.AddRecursive(r.root); err != nil {
-		return nil, nil, err
-	}
-	for _, include := range r.includePaths {
-		full := filepath.Join(r.root, filepath.FromSlash(include))
-		if err := os.MkdirAll(full, 0o755); err != nil {
+	if len(r.watchPaths) == 0 {
+		if err := w.AddRecursive(r.root); err != nil {
 			return nil, nil, err
 		}
-		if err := w.AddRecursive(full); err != nil {
+	} else {
+		for _, watchPath := range r.watchPaths {
+			if err := addWatchPath(w, r.root, watchPath); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+	for _, include := range r.includePaths {
+		if err := os.MkdirAll(filepath.Join(r.root, filepath.FromSlash(include)), 0o755); err != nil {
+			return nil, nil, err
+		}
+		if err := addWatchPath(w, r.root, include); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -149,7 +170,10 @@ func (r *Runner) Start(ctx context.Context) (<-chan Batch, <-chan error, error) 
 			select {
 			case <-ctx.Done():
 				return
-			case err := <-w.Error:
+			case err, ok := <-w.Error:
+				if !ok {
+					return
+				}
 				if err == nil {
 					continue
 				}
@@ -157,7 +181,10 @@ func (r *Runner) Start(ctx context.Context) (<-chan Batch, <-chan error, error) 
 				case errs <- err:
 				default:
 				}
-			case evt := <-w.Event:
+			case evt, ok := <-w.Event:
+				if !ok {
+					return
+				}
 				rel, err := filepath.Rel(r.root, evt.Path)
 				if err != nil {
 					select {
@@ -195,6 +222,33 @@ func (r *Runner) Start(ctx context.Context) (<-chan Batch, <-chan error, error) 
 	return batches, errs, nil
 }
 
+func addWatchPath(w *filewatcher.Watcher, root, rel string) error {
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	info, err := os.Stat(full)
+	if err == nil {
+		if info.IsDir() {
+			return w.AddRecursive(full)
+		}
+		return w.Add(full)
+	}
+	if !os.IsNotExist(err) {
+		return err
+	}
+	parent := filepath.Dir(full)
+	for {
+		info, statErr := os.Stat(parent)
+		if statErr == nil && info.IsDir() {
+			return w.AddRecursive(parent)
+		}
+		next := filepath.Dir(parent)
+		relToRoot, relErr := filepath.Rel(root, next)
+		if next == parent || relErr != nil || strings.HasPrefix(filepath.ToSlash(relToRoot), "../") || relToRoot == ".." {
+			return w.AddRecursive(root)
+		}
+		parent = next
+	}
+}
+
 func normalizeIncludePaths(root string, paths []string) []string {
 	out := make([]string, 0, len(paths))
 	seen := map[string]bool{}
@@ -220,12 +274,22 @@ func normalizeIncludePaths(root string, paths []string) []string {
 		out = append(out, path)
 	}
 	sort.Strings(out)
-	return out
+	compacted := make([]string, 0, len(out))
+	for _, path := range out {
+		if pathIncluded(path, compacted) {
+			continue
+		}
+		compacted = append(compacted, path)
+	}
+	return compacted
 }
 
 func pathIncluded(rel string, includes []string) bool {
 	rel = filepath.ToSlash(filepath.Clean(rel))
 	for _, include := range includes {
+		if include == "." {
+			return true
+		}
 		if rel == include || strings.HasPrefix(rel, include+"/") {
 			return true
 		}

@@ -427,6 +427,8 @@ Rules:
 - keep outputs outside the input directories you fingerprint, or ignore them explicitly
 - use task `Inputs(...)` to describe what should invalidate the build
 
+Watch mode uses these declared inputs to decide which project paths to poll. Keep inputs narrow enough to cover real source changes without pulling in dependency trees such as `node_modules`.
+
 For generated files, prefer narrow source globs. For example, `project.Glob("internal/storage/**/*.sql")` lets sqlc depend on query files without making `internal/storage/sqlc/*.go` upstream inputs.
 
 Use this command when tuning watch inputs:

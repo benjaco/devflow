@@ -736,6 +736,45 @@ func TestWatchRerunsOnlyAffectedSlice(t *testing.T) {
 	}
 }
 
+func TestWatchInputPathsUseTargetClosureDeclaredInputs(t *testing.T) {
+	g, err := graph.New([]project.Task{
+		{
+			Name:   "client",
+			Kind:   project.KindOnce,
+			Inputs: project.Inputs{Paths: []string{"package.json"}, Globs: []string{"src/**/*.ts"}},
+		},
+		{
+			Name:   "migrations",
+			Kind:   project.KindOnce,
+			Inputs: project.Inputs{Dirs: []string{"prisma/migrations"}, Files: []string{"prisma/schema.prisma"}},
+		},
+		{
+			Name:   "app",
+			Kind:   project.KindService,
+			Deps:   []string{"client", "migrations"},
+			Inputs: project.Inputs{Files: []string{"src/server.ts"}},
+		},
+		{
+			Name:   "unrelated",
+			Kind:   project.KindOnce,
+			Inputs: project.Inputs{Paths: []string{"node_modules"}},
+		},
+	}, []project.Target{{Name: "up", RootTasks: []string{"app"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	order, err := g.TargetClosure("up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := &Engine{graph: g}
+	got := eng.watchInputPaths(order)
+	want := []string{"package.json", "prisma/migrations", "prisma/schema.prisma", "src"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("unexpected watch paths: got %v want %v", got, want)
+	}
+}
+
 func TestWatchCycleEventsReportChangedFilesAndAffectedTasks(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

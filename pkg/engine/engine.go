@@ -137,6 +137,7 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 	}
 	runner, err := watch.New(watch.Options{
 		Root:         req.Worktree,
+		WatchPaths:   e.watchInputPaths(order),
 		IncludePaths: []string{flushSyncDir},
 	})
 	if err != nil {
@@ -174,7 +175,11 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 				FinishedAt: time.Now().UTC().Format(time.RFC3339),
 			}, req.Worktree, "")
 			return nil
-		case err := <-errs:
+		case err, ok := <-errs:
+			if !ok {
+				e.stopAllServices(req, inst, state)
+				return nil
+			}
 			if err == nil {
 				continue
 			}
@@ -1276,6 +1281,85 @@ func (e *Engine) affectedWatchOrder(target string, files []string) ([]string, []
 		filtered = append(filtered, name)
 	}
 	return filtered, filteredDirect
+}
+
+func (e *Engine) watchInputPaths(order []string) []string {
+	seen := map[string]bool{}
+	for _, name := range order {
+		task, ok := e.graph.Tasks[name]
+		if !ok {
+			continue
+		}
+		for _, path := range task.Inputs.Paths {
+			addWatchInputPath(seen, path)
+		}
+		for _, path := range task.Inputs.Files {
+			addWatchInputPath(seen, path)
+		}
+		for _, path := range task.Inputs.Dirs {
+			addWatchInputPath(seen, path)
+		}
+		for _, pattern := range task.Inputs.Globs {
+			addWatchInputPath(seen, globWatchBase(pattern))
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for path := range seen {
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return compactWatchInputPaths(out)
+}
+
+func addWatchInputPath(seen map[string]bool, path string) {
+	path = filepath.ToSlash(filepath.Clean(path))
+	if path == "" {
+		return
+	}
+	if path == "." {
+		seen[path] = true
+		return
+	}
+	if filepath.IsAbs(path) || strings.HasPrefix(path, "../") || path == ".." {
+		return
+	}
+	seen[path] = true
+}
+
+func globWatchBase(pattern string) string {
+	pattern = filepath.ToSlash(filepath.Clean(pattern))
+	if pattern == "." || pattern == "" {
+		return "."
+	}
+	parts := strings.Split(pattern, "/")
+	base := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.ContainsAny(part, "*?[") {
+			break
+		}
+		base = append(base, part)
+	}
+	if len(base) == 0 {
+		return "."
+	}
+	return strings.Join(base, "/")
+}
+
+func compactWatchInputPaths(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		covered := false
+		for _, existing := range out {
+			if existing == "." || path == existing || strings.HasPrefix(path, existing+"/") {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, path)
+		}
+	}
+	return out
 }
 
 func (e *Engine) watchDownstream(names []string) []string {

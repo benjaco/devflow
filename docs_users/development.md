@@ -72,6 +72,8 @@ The database/Prisma panel shows managed Postgres identity, cached migration-pref
 
 Watch mode maps changed files to task inputs, then reruns the affected downstream slice.
 
+Devflow watches the declared input paths for the selected target closure, not the whole project tree. This keeps folders such as `node_modules` out of the idle watch loop. If edits are not being picked up, add the missing source path to the relevant task inputs and check it with `graph affected --explain`.
+
 Run:
 
 ```bash

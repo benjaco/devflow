@@ -248,7 +248,8 @@ func (d *dashboard) eventLoop(ctx context.Context) {
 	runner, err := watch.New(watch.Options{
 		Root:         dir,
 		Debounce:     40 * time.Millisecond,
-		PollInterval: 40 * time.Millisecond,
+		PollInterval: 500 * time.Millisecond,
+		WatchPaths:   []string{"events.jsonl"},
 	})
 	if err != nil {
 		return
@@ -261,7 +262,10 @@ func (d *dashboard) eventLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-errs:
+		case _, ok := <-errs:
+			if !ok {
+				return
+			}
 		case batch, ok := <-batches:
 			if !ok {
 				return

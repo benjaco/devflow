@@ -503,7 +503,9 @@ Finite check/test targets with service dependencies should generally use `run --
 
 ## Watch Mode
 
-Watch mode now uses a polling watcher with debounced batches. On each batch:
+Watch mode uses a polling watcher with debounced batches. The engine scopes the watcher to the selected target closure's declared file inputs plus the flush sync directory. It does not intentionally poll the whole worktree when the closure has concrete `Inputs(...)`, `Files`, `Dirs`, or `Globs`; common heavyweight folders such as `node_modules` are ignored by default unless explicitly watched by an input path.
+
+On each batch:
 - changed files are mapped to task inputs
 - the affected downstream slice inside the target closure is computed
 - impacted running services are stopped first

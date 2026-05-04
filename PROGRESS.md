@@ -10,7 +10,7 @@ Last updated: 2026-05-04
 
 ## In Progress
 
-- No active implementation task after the TUI-owned daemon shutdown work.
+- No active implementation task after the watch idle CPU reduction work.
 
 ## Completed
 
@@ -436,6 +436,13 @@ Last updated: 2026-05-04
 
 ## Latest Work
 
+- Reduced idle CPU for daemon-backed watch/TUI sessions:
+  - watch mode now scopes polling to the selected target closure's declared file inputs plus the flush sync directory instead of recursively polling the whole worktree when concrete inputs exist
+  - `node_modules` is ignored by default for root-level watcher fallback, while explicitly declared watch paths can still opt into ignored directories
+  - default watch polling moved from 100ms to 500ms, and the TUI persisted-event fallback watcher moved from 40ms to 500ms while the daemon socket subscription remains the instant update path
+  - fixed watcher/error channel reads so closed error channels cannot spin a select loop
+  - added coverage for declared-input watch paths, default `node_modules` ignore behavior, explicit ignored-directory watch paths, and scoped watch polling
+  - verified with `go test ./pkg/watch ./pkg/engine ./pkg/tui`, `go test ./internal/cli`, `go test ./...`, `go build -o /tmp/devflow-build-check ./cmd/devflow`, and `git diff --check`
 - Added TUI-owned daemon shutdown semantics:
   - bare `devflow` now passes daemon ownership into the TUI when it had to start the daemon for the session
   - `devflow tui` also treats a daemon it starts itself as session-owned

@@ -60,6 +60,7 @@ Use this memory together with the subsystem docs. When a change affects one of t
 - Prefer narrow, semantic fingerprints over hashing the whole repo.
 - Optimize cache storage only after correctness and contract coverage exist.
 - Watch reruns must preserve graph dependency barriers. If an intermediate task is blocked from running in watch mode, downstream tasks in that cascade must not run against stale intermediate outputs.
+- Idle watch daemons should not poll the whole worktree when the selected target closure has declared file inputs. Watch scoping should stay based on task inputs plus flush sync sentinels, with heavyweight dependency folders such as `node_modules` ignored by default unless explicitly declared.
 - Watch service restart policies should stay explicit: default to affected-slice restarts, use `RestartNever` to block watch restarts, and reserve `RestartAlways` for services that must bounce on every target-affecting watch cycle.
 - Treat `devflow flush --json` as the AI readiness gate for detached watch/dev workflows: edit files, flush the selected target closure, then run tests only when flush reports success.
 
@@ -82,7 +83,7 @@ Service lifecycle contract: bare `devflow` is the day-to-day operator entry and 
 
 Flush startup contract: a newly detached watcher can write `watch.ready` before its first polling scan has fully settled, so `flush` must keep rewriting the sync sentinel while waiting for the ack. Do not remove that retry unless the watcher startup protocol is made stronger.
 
-Watch/input debugging contract: `Inputs.Ignore` is shared by fingerprinting and watch matching. Patterns are slash-normalized, checked root-relative, and for directory inputs also checked relative to the input dir. Builder `Inputs("path")` maps to path inputs and `project.Glob("...")` maps to glob inputs with `**` support. `devflow graph affected --files <path> --explain --json` is the first tool to use when generated files cause surprising watch cascades.
+Watch/input debugging contract: `Inputs.Ignore` is shared by fingerprinting and watch matching. Patterns are slash-normalized, checked root-relative, and for directory inputs also checked relative to the input dir. Builder `Inputs("path")` maps to path inputs and `project.Glob("...")` maps to glob inputs with `**` support. Watch polling is scoped from those same target-closure inputs, so missing inputs can mean both missed invalidation and missed file pickup. `devflow graph affected --files <path> --explain --json` is the first tool to use when generated files cause surprising watch cascades.
 
 Required CLI contract: `RequiredCLIs()` is the project catalog. `RequiredCLIs` on tasks and targets selects the subset needed for a target closure. `devflow doctor --target <target> --json` and `devflow clis status/install --target <target>` must not report unrelated catalog entries. The older `Dependencies()` provider remains only as a compatibility path.
 
