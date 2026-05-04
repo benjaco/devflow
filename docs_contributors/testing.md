@@ -18,7 +18,8 @@ Devflow uses three testing layers:
 - interactive prompt detection and answer forwarding with a real prompt CLI fixture
 - service lifecycle management
 - CI-mode service targets act as readiness probes and stop services before returning
-- detached stop cleanup for supervisor, child executor, tracked service, and stale status process groups
+- daemon lifecycle coverage for per-worktree daemon startup locking, CLI connection, daemon event persistence/fanout, and preserving legacy supervisor/executor PIDs for later cleanup
+- stop cleanup for daemon-owned work, legacy supervisor/executor refs, tracked service, and stale status process groups
 - `stop --all` cleanup for the instance-managed database container while preserving the volume
 - service readiness success and timeout behavior
 - built-binary helper build/run/start coverage and cache-restore coverage
@@ -37,7 +38,7 @@ Devflow uses three testing layers:
 - global cache coverage for the single OS user cache root and project cache namespaces
 - required CLI detection, target-scoped required CLI selection, and platform-script install coverage in `pkg/project` and `internal/cli`
 - engine-level interactive prompt event plus answer-file integration coverage
-- TUI database/Prisma panel rendering, drift warning, Prisma snapshot-summary loading, migration target execution, detached-target relaunch, and progress/footer status coverage
+- TUI database/Prisma panel rendering, drift warning, Prisma snapshot-summary loading, daemon-backed migration target action, detached-target relaunch, and progress/footer status coverage
 - sequential engine execution with cache hits
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work, plus explicit `migration_needed` task-state classification for database migration authoring guards
 - scheduler error preservation so a canceled sibling does not replace the first actionable task failure with `context canceled`
@@ -45,7 +46,7 @@ Devflow uses three testing layers:
 - graph affected explanations for path, file, directory, glob, ignored, and unmatched paths
 - watch cascade pruning so downstream tasks do not run past warmups or services that are blocked from watch execution, including full watch execution and mixed blocked/allowed branch coverage
 - watch service restart policies, including `RestartAlways` selection and full watch execution behavior
-- flush coordination coverage for request/ack path generation, watcher inclusion of the flush sync directory under `.devflow`, engine ack timing after reruns and sync-only batches, failed-task ack issues, service readiness health issues, CLI supervisor/timeout behavior, and sync-sentinel retouch while waiting for an ack
+- flush coordination coverage for request/ack path generation, watcher inclusion of the flush sync directory under `.devflow`, engine ack timing after reruns and sync-only batches, failed-task ack issues, service readiness health issues, CLI daemon/timeout behavior, and sync-sentinel retouch while waiting for an ack
 - opt-in real Docker-backed database runtime snapshot/restore coverage in `pkg/database`
 - opt-in real Docker-backed Prisma snapshot metadata + restore coverage in `pkg/database`
 
@@ -55,7 +56,7 @@ The bundled example adapters are now deterministic smoke targets. Current smoke 
 - repeated runs with cache hits
 - watch-mode selective reruns
 - watch-mode file pickup verification that starts watch mode, edits a real file, and asserts the watch cycle event plus the affected rerun
-- flush readiness verification that starts watch mode on the `go-next-monorepo` example, edits a real file, runs `flush --json`, and asserts success only arrives after the affected service reruns
+- daemon-backed flush readiness verification that starts watch mode on the `go-next-monorepo` example, edits a real file, runs `flush --json`, and asserts success only arrives after the affected service reruns
 - service readiness via ready-file probes on the example backend/frontend services
 - DB snapshot reuse and dedicated postgres port isolation in the fake-DB example path
 - multi-worktree DB and port isolation

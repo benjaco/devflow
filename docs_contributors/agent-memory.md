@@ -48,6 +48,9 @@ Use this memory together with the subsystem docs. When a change affects one of t
 - `devflow upgrade` should keep the normal Go proxy path for ordinary user updates. `devflow upgrade --direct` exists for testing freshly pushed commits before the public Go proxy catches up. Upgrade only updates the binary written by `go install`; if a repo-local launcher or another `devflow` command shadows `$(go env GOPATH)/bin/devflow` earlier on `PATH`, the shell will keep running the shadowing command, so text-mode upgrade should warn about that.
 - Keep instance env explicit, layered, and persisted.
 - Services are supervised, not cached.
+- Mutable dev/watch/operator work is owned by one daemon per worktree. CLI and TUI commands should connect to that daemon for `run` (non-CI), `watch`, `flush`, `restart`, `stop`, retarget, invalidate/rerun, and Prisma migration authoring. `run --ci` is the deliberate exception: it remains direct and finite so CI-style checks never depend on a long-lived daemon.
+- Daemon startup is protected by a per-instance file lock under worktree state. Do not bypass `daemon.Ensure` for user-facing mutable commands, or concurrent CLI/TUI invocations can violate the one-daemon-per-worktree invariant.
+- The old hidden `__internal_exec` and `__internal_supervise` launcher routes are removed from the CLI path. Keep only compatibility cleanup for persisted supervisor/executor PIDs from older state.
 - User-facing adapters should use the builder/component API rather than hand-assembling low-level `project.Task` slices. The low-level structs remain the engine representation, but docs and new examples should teach `project.Define`, `project.Builder`, `database.Postgres`, and `database.Prisma`.
 - Finite builder tasks become cacheable when they declare project output paths. Do not ask adapter authors to call `Cache()` for normal generated artifacts. Use `NoCache()` for finite output-producing actions that should never restore from cache, such as migration authoring.
 - Keep task cache storage in one OS user cache folder (`<os.UserCacheDir()>/devflow/cache`) and namespace entries by project. Per-worktree logs/state stay in the worktree `.devflow/`.
@@ -59,7 +62,7 @@ Use this memory together with the subsystem docs. When a change affects one of t
 
 ## Current Shape
 
-Devflow is now beyond the initial bootstrap. The core includes graph validation, fingerprinting, snapshot caching, process supervision, instance and port state, bounded parallel engine scheduling, typed events, polling watch mode, flush readiness coordination, required CLI checks/installers, interactive prompt plumbing, a TUI, and Docker-backed Postgres runtime helpers.
+Devflow is now beyond the initial bootstrap. The core includes graph validation, fingerprinting, snapshot caching, process supervision, instance and port state, bounded parallel engine scheduling, typed events, a per-worktree daemon, polling watch mode, flush readiness coordination, required CLI checks/installers, interactive prompt plumbing, a TUI, and Docker-backed Postgres runtime helpers.
 
 Runtime adapters are project-local:
 - installed `devflow` or the repo-level source launcher builds/uses the bootstrap binary
@@ -72,7 +75,7 @@ Runtime adapters are project-local:
 
 The first real BikeCoach integration showed that adoption hardening is now more important than expanding operator features in the abstract. After localbuild locking, reliable detached cleanup, explicit service lifecycle contracts, graph affected explanations, target-scoped required CLI checks, and managed Postgres host-port hardening, the highest-value issues are complete user examples for script convergence, fixed ports, and managed Postgres.
 
-Service lifecycle contract: attached `run` is foreground and blocks while services live; `run --ci` may start services as readiness probes but stops them before returning; `run --detach` only proves supervisor launch; `watch --detach` plus `flush` is the readiness-gated background workflow for humans and agents.
+Service lifecycle contract: bare `devflow` is the day-to-day operator entry and should ensure the default target is running in daemon-owned watch mode before opening the TUI. Non-CI `run`, `watch`, `flush`, `restart`, `stop`, and TUI actions are daemon-backed through one daemon per worktree. Attached non-CI `run` is foreground from the client perspective and blocks while daemon-owned services live. `run --ci` bypasses the daemon, may start services as readiness probes, and stops them before returning. `run --detach` only proves daemon launch of the target; `watch --detach` plus `flush` is the readiness-gated background workflow for humans and agents.
 
 Flush startup contract: a newly detached watcher can write `watch.ready` before its first polling scan has fully settled, so `flush` must keep rewriting the sync sentinel while waiting for the ack. Do not remove that retry unless the watcher startup protocol is made stronger.
 
@@ -84,7 +87,7 @@ Managed Postgres contract: app code connects through the host-mapped port, so da
 
 Prisma workflow contract: normal DB preparation applies migrations with `prisma migrate deploy` and snapshots prefixes; migration authoring is separate. Prisma migration inspection ignores non-directory entries such as `migration_lock.toml`. If `schema.prisma` declares models but no migrations exist, or changes without a new migration, the default Prisma workflow should return an explicit migration-needed error. The engine records errors implementing `MigrationNeeded() bool`, plus known Prisma migration-needed messages, as `migration_needed`, not generic `failed`, and downstream work must remain pending until the migration is authored. `prisma.NewMigration(b)` must reconcile the managed DB through the authoring-prep path before invoking Prisma migration generation, so edited latest migrations restore the previous prefix and reapply the changed tail instead of hitting Prisma's modified-applied migration reset prompt.
 
-TUI database/Prisma contract: the TUI may expose managed database identity and cached Prisma migration-prefix snapshot metadata for operator visibility. Its explicit `m` action asks for a migration name, resolves the project migration target such as `new-migration`, runs that target through the normal engine with `DEVFLOW_MIGRATION_NAME`, streams task/log progress to the footer status, and relaunches the previously detached target after success so services restart through the graph. It must not hand-run Prisma on a detached side path or turn normal boot/watch flows into implicit Prisma migration authoring or reset flows; those stay explicit adapter targets/actions. The common component task names are `prisma_client`, `prisma_migrations`, and `prisma_new_migration`; avoid teaching opaque names such as `migration_new`.
+TUI database/Prisma contract: the TUI may expose managed database identity and cached Prisma migration-prefix snapshot metadata for operator visibility. Its explicit `m` action asks for a migration name, sends a daemon action for the project migration target such as `new-migration`, runs that target through the daemon-owned engine with `DEVFLOW_MIGRATION_NAME`, streams daemon task/log progress to the footer status immediately, and relaunches the previously detached target after success so services restart through the graph. It must not hand-run Prisma on a detached side path or turn normal boot/watch flows into implicit Prisma migration authoring or reset flows; those stay explicit adapter targets/actions. The common component task names are `prisma_client`, `prisma_migrations`, and `prisma_new_migration`; avoid teaching opaque names such as `migration_new`.
 
 Remote clone contract: `PostgresDumpSourcePolicy` must not use an unchecked shell pipeline. A failed `pg_dump`, including host/client version mismatch, must fail the Devflow task before `psql` can report success on empty input.
 
@@ -93,6 +96,7 @@ Runtime env and secrets: instance env is persisted under `.devflow/state`. Adapt
 State is split deliberately:
 - per-worktree logs and instance snapshots live under the worktree `.devflow/`
 - all projects share one physical task cache under the OS user cache dir, with entries namespaced by project
+- daemon sockets live under a short per-user temp path such as `/tmp/devflow-daemon-<uid>/` to avoid Unix socket path length failures in nested worktrees
 - sibling git worktrees share port allocation through the Git common dir
 - non-git temp/test flows fall back to local/global safe defaults
 - `status --json` may retain the desired managed DB identity after `stop --all`; container liveness is not implied by the presence of `db` metadata

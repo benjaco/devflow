@@ -13,10 +13,11 @@ The current implementation provides the generic engine layers first:
 - snapshot-based local cache
 - process supervision
 - instance and port management
+- one daemon per worktree for mutable dev/watch/operator workflows
 - a dedicated Postgres runtime module for per-worktree container isolation
 - JSON CLI contracts
 
-Current milestones focus on making the existing TUI, detached supervisor controls, watch restart policies, JSON contracts, and project-local adapter loading more complete.
+Current milestones focus on making the TUI, daemon-backed operator controls, watch restart policies, JSON contracts, and project-local adapter loading more complete.
 
 Current bundled adapters cover three distinct validation shapes:
 - `go-next-monorepo`: deterministic in-repo example for repeatable tests

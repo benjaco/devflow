@@ -1,0 +1,1598 @@
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/benjaco/devflow/internal/fsutil"
+	"github.com/benjaco/devflow/internal/lock"
+	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/cache"
+	"github.com/benjaco/devflow/pkg/database"
+	"github.com/benjaco/devflow/pkg/engine"
+	"github.com/benjaco/devflow/pkg/graph"
+	"github.com/benjaco/devflow/pkg/instance"
+	"github.com/benjaco/devflow/pkg/process"
+	"github.com/benjaco/devflow/pkg/project"
+)
+
+type Action string
+
+const (
+	ActionPing            Action = "ping"
+	ActionRun             Action = "run"
+	ActionWatch           Action = "watch"
+	ActionFlush           Action = "flush"
+	ActionStop            Action = "stop"
+	ActionStatus          Action = "status"
+	ActionSubscribe       Action = "subscribe"
+	ActionRestart         Action = "restart"
+	ActionInvalidate      Action = "invalidate"
+	ActionRetarget        Action = "retarget"
+	ActionPrismaMigration Action = "prisma_migration"
+)
+
+type Request struct {
+	ID           string            `json:"id,omitempty"`
+	Action       Action            `json:"action"`
+	Project      string            `json:"project,omitempty"`
+	Target       string            `json:"target,omitempty"`
+	Mode         api.RunMode       `json:"mode,omitempty"`
+	MaxParallel  int               `json:"maxParallel,omitempty"`
+	Detach       bool              `json:"detach,omitempty"`
+	StreamEvents bool              `json:"streamEvents,omitempty"`
+	TimeoutMs    int64             `json:"timeoutMs,omitempty"`
+	Task         string            `json:"task,omitempty"`
+	All          bool              `json:"all,omitempty"`
+	Upstream     bool              `json:"upstream,omitempty"`
+	Downstream   bool              `json:"downstream,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+}
+
+type Response struct {
+	ID      string            `json:"id,omitempty"`
+	OK      bool              `json:"ok"`
+	Error   string            `json:"error,omitempty"`
+	Started *StartResult      `json:"started,omitempty"`
+	Run     *api.RunResult    `json:"run,omitempty"`
+	Flush   *api.FlushResult  `json:"flush,omitempty"`
+	Stop    *StopResult       `json:"stop,omitempty"`
+	Status  *api.StatusResult `json:"status,omitempty"`
+}
+
+type StartResult struct {
+	InstanceID string      `json:"instanceId"`
+	Target     string      `json:"target"`
+	Mode       api.RunMode `json:"mode"`
+	DaemonPID  int         `json:"daemonPid"`
+	LogPath    string      `json:"logPath"`
+}
+
+type StopResult struct {
+	InstanceID string   `json:"instanceId"`
+	Stopped    []string `json:"stopped"`
+}
+
+type frame struct {
+	Type     string     `json:"type"`
+	ID       string     `json:"id,omitempty"`
+	Event    *api.Event `json:"event,omitempty"`
+	Response *Response  `json:"response,omitempty"`
+}
+
+type Options struct {
+	Worktree string
+	Project  string
+	LogPath  string
+}
+
+type Server struct {
+	worktree    string
+	instanceID  string
+	projectName string
+	logPath     string
+	socketPath  string
+
+	mu          sync.Mutex
+	active      *activeRun
+	subscribers map[chan api.Event]bool
+	eventMu     sync.Mutex
+}
+
+type activeRun struct {
+	projectName string
+	target      string
+	mode        api.RunMode
+	maxParallel int
+	cancel      context.CancelFunc
+	done        chan struct{}
+	result      *api.RunResult
+	err         error
+	startedAt   time.Time
+}
+
+type Client struct {
+	worktree   string
+	instanceID string
+	socketPath string
+}
+
+var startDaemonForEnsure = startDaemonProcess
+
+func SetStartDaemonFuncForTest(fn func(worktree, instanceID, projectName string) error) func() {
+	previous := startDaemonForEnsure
+	if fn == nil {
+		startDaemonForEnsure = startDaemonProcess
+	} else {
+		startDaemonForEnsure = fn
+	}
+	return func() {
+		startDaemonForEnsure = previous
+	}
+}
+
+func Serve(ctx context.Context, opts Options) error {
+	root, id, err := resolveWorktreeAndID(opts.Worktree)
+	if err != nil {
+		return err
+	}
+	socketPath, err := instance.DaemonSocketPath(id)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o755); err != nil {
+		return err
+	}
+	logPath := opts.LogPath
+	if logPath == "" {
+		logPath = filepath.Join(root, ".devflow", "logs", id, "daemon.log")
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return err
+	}
+	inst, err := instance.Resolve(root, filepath.Base(root))
+	if err != nil {
+		return err
+	}
+	if err := preserveLegacyProcessRefs(root, id, inst, os.Getpid()); err != nil {
+		return err
+	}
+	if err := instance.RecordDaemon(inst, os.Getpid(), logPath); err != nil {
+		return err
+	}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	defer os.Remove(socketPath)
+
+	s := &Server{
+		worktree:    root,
+		instanceID:  id,
+		projectName: strings.TrimSpace(opts.Project),
+		logPath:     logPath,
+		socketPath:  socketPath,
+		subscribers: map[chan api.Event]bool{},
+	}
+	s.writeDaemonLog("daemon started pid=%d worktree=%s project=%s socket=%s", os.Getpid(), root, s.projectName, socketPath)
+
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				s.stopActive(5 * time.Second)
+				return nil
+			}
+			if errors.Is(err, net.ErrClosed) {
+				s.stopActive(5 * time.Second)
+				return nil
+			}
+			continue
+		}
+		go s.handleConn(ctx, conn)
+	}
+}
+
+func Ensure(ctx context.Context, worktree, projectName string) (*Client, bool, error) {
+	root, id, err := resolveWorktreeAndID(worktree)
+	if err != nil {
+		return nil, false, err
+	}
+	socketPath, err := instance.DaemonSocketPath(id)
+	if err != nil {
+		return nil, false, err
+	}
+	client := &Client{worktree: root, instanceID: id, socketPath: socketPath}
+	if err := client.Ping(ctx); err == nil {
+		return client, false, nil
+	}
+	startLock, err := lock.Acquire(daemonLockPath(root, id))
+	if err != nil {
+		return nil, false, err
+	}
+	defer startLock.Release()
+	if err := client.Ping(ctx); err == nil {
+		return client, false, nil
+	}
+	if err := startDaemonForEnsure(root, id, projectName); err != nil {
+		return nil, false, err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := client.Ping(ctx); err == nil {
+			return client, true, nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return nil, false, fmt.Errorf("timed out waiting for devflow daemon for %s", root)
+}
+
+func Dial(worktree string) (*Client, error) {
+	root, id, err := resolveWorktreeAndID(worktree)
+	if err != nil {
+		return nil, err
+	}
+	socketPath, err := instance.DaemonSocketPath(id)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{worktree: root, instanceID: id, socketPath: socketPath}, nil
+}
+
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.Call(ctx, Request{Action: ActionPing})
+	return err
+}
+
+func (c *Client) Call(ctx context.Context, req Request, onEvent ...func(api.Event)) (Response, error) {
+	if req.ID == "" {
+		req.ID = requestID()
+	}
+	dialer := net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "unix", c.socketPath)
+	if err != nil {
+		return Response{}, err
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	enc := json.NewEncoder(conn)
+	dec := json.NewDecoder(conn)
+	if err := enc.Encode(req); err != nil {
+		return Response{}, err
+	}
+	for {
+		var fr frame
+		if err := dec.Decode(&fr); err != nil {
+			return Response{}, err
+		}
+		if fr.Type == "event" && fr.Event != nil {
+			for _, fn := range onEvent {
+				if fn != nil {
+					fn(*fr.Event)
+				}
+			}
+			continue
+		}
+		if fr.Type != "response" || fr.Response == nil {
+			continue
+		}
+		if !fr.Response.OK {
+			if fr.Response.Error == "" {
+				fr.Response.Error = "daemon request failed"
+			}
+			return *fr.Response, fmt.Errorf("%s", fr.Response.Error)
+		}
+		return *fr.Response, nil
+	}
+}
+
+func (c *Client) Subscribe(ctx context.Context, onEvent func(api.Event)) error {
+	req := Request{ID: requestID(), Action: ActionSubscribe}
+	dialer := net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "unix", c.socketPath)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return err
+	}
+	dec := json.NewDecoder(conn)
+	for {
+		var fr frame
+		if err := dec.Decode(&fr); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		if fr.Type == "event" && fr.Event != nil && onEvent != nil {
+			onEvent(*fr.Event)
+		}
+	}
+}
+
+func startDaemonProcess(worktree, instanceID, projectName string) error {
+	inst, err := instance.Resolve(worktree, filepath.Base(worktree))
+	if err != nil {
+		return err
+	}
+	if err := preserveLegacyProcessRefs(worktree, instanceID, inst, os.Getpid()); err != nil {
+		return err
+	}
+	executable, err := daemonExecutable(worktree)
+	if err != nil {
+		return err
+	}
+	logPath := filepath.Join(worktree, ".devflow", "logs", instanceID, "daemon.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+	cmd := exec.Command(executable, "__internal_daemon", "--worktree", worktree, "--project", projectName, "--log-path", logPath)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Dir = worktree
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return instance.RecordDaemon(inst, cmd.Process.Pid, logPath)
+}
+
+func preserveLegacyProcessRefs(worktree, instanceID string, inst *api.Instance, currentPID int) error {
+	_ = instanceID
+	if inst == nil || inst.Supervisor.PID <= 0 || inst.Supervisor.PID == currentPID || !instance.ProcessAlive(inst.Supervisor.PID) {
+		return nil
+	}
+	if inst.Processes == nil {
+		inst.Processes = map[string]api.ProcessRef{}
+	}
+	inst.Processes["supervisor"] = api.ProcessRef{PID: inst.Supervisor.PID, StartedAt: inst.Supervisor.StartedAt}
+	if inst.Supervisor.ExecPID > 0 {
+		inst.Processes["executor"] = api.ProcessRef{PID: inst.Supervisor.ExecPID, StartedAt: inst.Supervisor.StartedAt}
+	} else if pid := supervisorChildPIDFromLog(inst.Supervisor.LogPath); pid > 0 {
+		inst.Processes["executor"] = api.ProcessRef{PID: pid, StartedAt: inst.Supervisor.StartedAt}
+	} else {
+		logPath := inst.Supervisor.LogPath
+		if logPath == "" {
+			logPath = filepath.Join(worktree, ".devflow", "logs", inst.ID, "supervisor.log")
+		}
+		if pid := supervisorChildPIDFromLog(logPath); pid > 0 {
+			inst.Processes["executor"] = api.ProcessRef{PID: pid, StartedAt: inst.Supervisor.StartedAt}
+		}
+	}
+	return instance.Save(inst)
+}
+
+func daemonExecutable(worktree string) (string, error) {
+	current, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	target := filepath.Join(worktree, ".devflow", "bin", "devflow-daemon")
+	if err := fsutil.CopyFile(current, target); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(target, 0o755); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+func resolveWorktreeAndID(worktree string) (string, string, error) {
+	root := strings.TrimSpace(worktree)
+	var err error
+	if root == "" {
+		root, err = os.Getwd()
+	} else {
+		root, err = filepath.Abs(root)
+	}
+	if err != nil {
+		return "", "", err
+	}
+	id, real, err := instance.IDForWorktree(root)
+	if err != nil {
+		return "", "", err
+	}
+	return real, id, nil
+}
+
+func requestID() string {
+	return fmt.Sprintf("daemon-%d-%d", time.Now().UTC().UnixNano(), os.Getpid())
+}
+
+func daemonLockPath(worktree, instanceID string) string {
+	return filepath.Join(worktree, ".devflow", "state", "instances", instanceID, "daemon.lock")
+}
+
+func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
+	defer conn.Close()
+	dec := json.NewDecoder(conn)
+	enc := json.NewEncoder(conn)
+	var writeMu sync.Mutex
+	writeFrame := func(fr frame) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return enc.Encode(fr)
+	}
+	var req Request
+	if err := dec.Decode(&req); err != nil {
+		return
+	}
+	if req.ID == "" {
+		req.ID = requestID()
+	}
+	if req.Action == ActionSubscribe {
+		ch := s.addSubscriber()
+		defer s.removeSubscriber(ch)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case evt := <-ch:
+				if err := writeFrame(frame{Type: "event", ID: req.ID, Event: &evt}); err != nil {
+					return
+				}
+			}
+		}
+	}
+	var eventCh chan api.Event
+	if req.StreamEvents {
+		eventCh = s.addSubscriber()
+		defer s.removeSubscriber(eventCh)
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			for {
+				select {
+				case <-done:
+					return
+				case evt := <-eventCh:
+					if err := writeFrame(frame{Type: "event", ID: req.ID, Event: &evt}); err != nil {
+						return
+					}
+				}
+			}
+		}()
+	}
+	resp := s.handleRequest(ctx, req)
+	_ = writeFrame(frame{Type: "response", ID: req.ID, Response: &resp})
+}
+
+func (s *Server) handleRequest(ctx context.Context, req Request) Response {
+	resp := Response{ID: req.ID, OK: true}
+	switch req.Action {
+	case ActionPing:
+		return resp
+	case ActionStatus:
+		status, err := s.statusResult()
+		if err != nil {
+			return errorResponse(req.ID, err)
+		}
+		resp.Status = status
+		return resp
+	case ActionRun:
+		if req.Detach {
+			started, err := s.startActive(ctx, req.Project, req.Target, normalizeMode(req.Mode, api.ModeDev), req.MaxParallel)
+			if err != nil {
+				return errorResponse(req.ID, err)
+			}
+			resp.Started = started
+			return resp
+		}
+		result, err := s.runAttached(ctx, req.Project, req.Target, normalizeMode(req.Mode, api.ModeDev), req.MaxParallel, nil)
+		if result != nil {
+			resp.Run = result
+		}
+		if err != nil {
+			return responseWithError(resp, err)
+		}
+		return resp
+	case ActionWatch:
+		started, err := s.startActive(ctx, req.Project, req.Target, api.ModeWatch, req.MaxParallel)
+		if err != nil {
+			return errorResponse(req.ID, err)
+		}
+		resp.Started = started
+		return resp
+	case ActionFlush:
+		timeout := time.Duration(req.TimeoutMs) * time.Millisecond
+		if timeout <= 0 {
+			timeout = 60 * time.Second
+		}
+		result, err := s.flush(ctx, req.Project, req.Target, timeout, req.MaxParallel)
+		resp.Flush = &result
+		if err != nil {
+			return responseWithError(resp, err)
+		}
+		return resp
+	case ActionStop:
+		result, err := s.stopWork(ctx, req.All, req.Task)
+		if result != nil {
+			resp.Stop = result
+		}
+		if err != nil {
+			return responseWithError(resp, err)
+		}
+		return resp
+	case ActionRestart:
+		result, err := s.restart(ctx, req.Project, req.Task, req.Upstream, req.Downstream, req.MaxParallel)
+		if result != nil {
+			resp.Run = result
+		}
+		if err != nil {
+			return responseWithError(resp, err)
+		}
+		return resp
+	case ActionInvalidate:
+		if err := s.invalidateAndRelaunch(ctx, req.Task); err != nil {
+			return errorResponse(req.ID, err)
+		}
+		return resp
+	case ActionRetarget:
+		if err := s.retarget(ctx, req.Target); err != nil {
+			return errorResponse(req.ID, err)
+		}
+		return resp
+	case ActionPrismaMigration:
+		if err := s.createPrismaMigration(ctx, req.Project, req.Target, req.Env); err != nil {
+			return errorResponse(req.ID, err)
+		}
+		return resp
+	default:
+		return errorResponse(req.ID, fmt.Errorf("unknown daemon action %q", req.Action))
+	}
+}
+
+func errorResponse(id string, err error) Response {
+	return Response{ID: id, OK: false, Error: err.Error()}
+}
+
+func responseWithError(resp Response, err error) Response {
+	resp.OK = false
+	resp.Error = err.Error()
+	return resp
+}
+
+func normalizeMode(got, fallback api.RunMode) api.RunMode {
+	if got == "" {
+		return fallback
+	}
+	return got
+}
+
+func (s *Server) addSubscriber() chan api.Event {
+	ch := make(chan api.Event, 128)
+	s.mu.Lock()
+	s.subscribers[ch] = true
+	s.mu.Unlock()
+	return ch
+}
+
+func (s *Server) removeSubscriber(ch chan api.Event) {
+	s.mu.Lock()
+	delete(s.subscribers, ch)
+	close(ch)
+	s.mu.Unlock()
+}
+
+func (s *Server) publish(evt api.Event) {
+	s.persistEvent(evt)
+	s.mu.Lock()
+	for ch := range s.subscribers {
+		select {
+		case ch <- evt:
+		default:
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *Server) publishStatus(format string, args ...any) {
+	line := fmt.Sprintf(format, args...)
+	s.publish(api.Event{
+		TS:         process.NowRFC3339Nano(),
+		Type:       api.EventLogLine,
+		InstanceID: s.instanceID,
+		Worktree:   s.worktree,
+		Task:       "daemon",
+		Stream:     "status",
+		Line:       line,
+	})
+}
+
+func (s *Server) persistEvent(evt api.Event) {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	path := instance.EventsPath(s.worktree, s.instanceID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_ = json.NewEncoder(file).Encode(evt)
+}
+
+func (s *Server) writeDaemonLog(format string, args ...any) {
+	if s.logPath == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.logPath), 0o755); err != nil {
+		return
+	}
+	file, err := os.OpenFile(s.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_, _ = fmt.Fprintf(file, "%s %s\n", time.Now().UTC().Format(time.RFC3339), fmt.Sprintf(format, args...))
+}
+
+func (s *Server) resolveProject(projectName string) (string, project.Project, error) {
+	name := strings.TrimSpace(projectName)
+	if name == "" {
+		name = strings.TrimSpace(s.projectName)
+	}
+	if name != "" {
+		p, err := project.Lookup(name)
+		if err != nil {
+			return "", nil, err
+		}
+		return p.Name(), p, nil
+	}
+	names := project.Names()
+	if len(names) == 1 {
+		p, err := project.Lookup(names[0])
+		if err != nil {
+			return "", nil, err
+		}
+		return p.Name(), p, nil
+	}
+	p, err := project.Detect(s.worktree)
+	if err == nil {
+		return p.Name(), p, nil
+	}
+	if len(names) == 0 {
+		return "", nil, fmt.Errorf("no project is registered")
+	}
+	return "", nil, fmt.Errorf("multiple projects are registered; pass --project explicitly")
+}
+
+func (s *Server) resolveTarget(p project.Project, target string) (project.Project, string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		target = project.PreferredTarget(p)
+	}
+	if target == "" {
+		return nil, "", fmt.Errorf("no target was provided and project %q does not define a preferred target", p.Name())
+	}
+	return project.ResolveExecutionProject(p, target)
+}
+
+func (s *Server) startActive(ctx context.Context, projectName, target string, mode api.RunMode, maxParallel int) (*StartResult, error) {
+	projectName, p, err := s.resolveProject(projectName)
+	if err != nil {
+		return nil, err
+	}
+	execProject, resolvedTarget, err := s.resolveTarget(p, target)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	active := s.active
+	if active != nil && active.projectName == projectName && active.target == resolvedTarget && active.mode == mode {
+		s.mu.Unlock()
+		return &StartResult{
+			InstanceID: s.instanceID,
+			Target:     resolvedTarget,
+			Mode:       mode,
+			DaemonPID:  os.Getpid(),
+			LogPath:    s.logPath,
+		}, nil
+	}
+	s.mu.Unlock()
+	s.stopActive(5 * time.Second)
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	newActive := &activeRun{
+		projectName: projectName,
+		target:      resolvedTarget,
+		mode:        mode,
+		maxParallel: maxParallel,
+		cancel:      cancel,
+		done:        make(chan struct{}),
+		startedAt:   time.Now().UTC(),
+	}
+	s.mu.Lock()
+	s.active = newActive
+	s.mu.Unlock()
+	if err := s.recordRun(projectName, resolvedTarget, mode, maxParallel, true); err != nil {
+		cancel()
+		return nil, err
+	}
+	go s.runEngine(runCtx, execProject, resolvedTarget, mode, maxParallel, newActive)
+	return &StartResult{
+		InstanceID: s.instanceID,
+		Target:     resolvedTarget,
+		Mode:       mode,
+		DaemonPID:  os.Getpid(),
+		LogPath:    s.logPath,
+	}, nil
+}
+
+func (s *Server) runAttached(ctx context.Context, projectName, target string, mode api.RunMode, maxParallel int, env map[string]string) (*api.RunResult, error) {
+	projectName, p, err := s.resolveProject(projectName)
+	if err != nil {
+		return nil, err
+	}
+	return s.runAttachedProject(ctx, projectName, p, target, mode, maxParallel, env)
+}
+
+func (s *Server) runAttachedProject(ctx context.Context, projectName string, p project.Project, target string, mode api.RunMode, maxParallel int, env map[string]string) (*api.RunResult, error) {
+	execProject, resolvedTarget, err := s.resolveTarget(p, target)
+	if err != nil {
+		return nil, err
+	}
+	s.stopActive(5 * time.Second)
+	if err := s.recordRun(projectName, resolvedTarget, mode, maxParallel, false); err != nil {
+		return nil, err
+	}
+	runFn := func() (*api.RunResult, error) {
+		runCtx, cancel := context.WithCancel(ctx)
+		active := &activeRun{
+			projectName: projectName,
+			target:      resolvedTarget,
+			mode:        mode,
+			maxParallel: maxParallel,
+			cancel:      cancel,
+			done:        make(chan struct{}),
+			startedAt:   time.Now().UTC(),
+		}
+		s.mu.Lock()
+		s.active = active
+		s.mu.Unlock()
+		s.runEngine(runCtx, execProject, resolvedTarget, mode, maxParallel, active)
+		return active.result, active.err
+	}
+	if len(env) == 0 {
+		return runFn()
+	}
+	var result *api.RunResult
+	err = withTemporaryInstanceEnv(s.worktree, s.instanceID, env, func() error {
+		var runErr error
+		result, runErr = runFn()
+		return runErr
+	})
+	return result, err
+}
+
+func (s *Server) runEngine(ctx context.Context, p project.Project, target string, mode api.RunMode, maxParallel int, active *activeRun) {
+	defer close(active.done)
+	eng, err := engine.New(p, s.worktree)
+	if err != nil {
+		active.err = err
+		return
+	}
+	events := eng.SubscribeEvents()
+	stopEvents := make(chan struct{})
+	doneEvents := make(chan struct{})
+	go func() {
+		defer close(doneEvents)
+		for {
+			select {
+			case evt := <-events:
+				s.publish(evt)
+			case <-stopEvents:
+				for {
+					select {
+					case evt := <-events:
+						s.publish(evt)
+					default:
+						return
+					}
+				}
+			}
+		}
+	}()
+	req := engine.Request{Target: target, Worktree: s.worktree, Mode: mode, MaxParallel: maxParallel}
+	switch mode {
+	case api.ModeWatch:
+		active.err = eng.Watch(ctx, req)
+	default:
+		outcome, runErr := eng.Run(ctx, req)
+		if outcome != nil {
+			active.result = &outcome.Result
+		}
+		active.err = runErr
+	}
+	close(stopEvents)
+	<-doneEvents
+	s.mu.Lock()
+	if s.active == active {
+		s.active = nil
+	}
+	s.mu.Unlock()
+}
+
+func (s *Server) stopActive(timeout time.Duration) {
+	s.mu.Lock()
+	active := s.active
+	s.mu.Unlock()
+	if active == nil {
+		return
+	}
+	active.cancel()
+	if timeout <= 0 {
+		<-active.done
+		return
+	}
+	select {
+	case <-active.done:
+	case <-time.After(timeout):
+	}
+}
+
+func (s *Server) recordRun(projectName, target string, mode api.RunMode, maxParallel int, detached bool) error {
+	inst, err := instance.Resolve(s.worktree, filepath.Base(s.worktree))
+	if err != nil {
+		return err
+	}
+	inst.LastRun = api.RunConfig{
+		Project:     projectName,
+		Target:      target,
+		Mode:        mode,
+		MaxParallel: maxParallel,
+		Detached:    detached,
+	}
+	inst.Supervisor = api.SupervisorRef{
+		PID:       os.Getpid(),
+		StartedAt: time.Now().UTC(),
+		LogPath:   s.logPath,
+	}
+	return instance.Save(inst)
+}
+
+func (s *Server) flush(ctx context.Context, projectName, target string, timeout time.Duration, maxParallel int) (api.FlushResult, error) {
+	startedAt := time.Now().UTC()
+	requestID := fmt.Sprintf("flush-%d-%d", startedAt.UnixNano(), os.Getpid())
+	requestedTarget := strings.TrimSpace(target) != ""
+	inst, instErr := instance.Load(s.worktree, s.instanceID)
+	if strings.TrimSpace(projectName) == "" && instErr == nil && inst.LastRun.Project != "" {
+		projectName = inst.LastRun.Project
+	}
+	projectName, p, err := s.resolveProject(projectName)
+	if err != nil {
+		result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, target, startedAt)
+		result.Issues = append(result.Issues, api.FlushIssue{Kind: "project_error", Message: err.Error()})
+		return result, fmt.Errorf("flush failed")
+	}
+	s.mu.Lock()
+	active := s.active
+	s.mu.Unlock()
+	if strings.TrimSpace(target) == "" {
+		if active != nil && active.mode == api.ModeWatch {
+			target = active.target
+		} else if instErr == nil && inst.LastRun.Target != "" {
+			target = inst.LastRun.Target
+		} else {
+			target = project.PreferredTarget(p)
+		}
+	}
+	_, resolvedTarget, err := s.resolveTarget(p, target)
+	if err != nil {
+		result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, target, startedAt)
+		result.Issues = append(result.Issues, api.FlushIssue{Kind: "target_error", Message: err.Error()})
+		return result, fmt.Errorf("flush failed")
+	}
+	startedWatch := false
+	if active != nil {
+		if active.mode != api.ModeWatch {
+			result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, resolvedTarget, startedAt)
+			result.Issues = append(result.Issues, api.FlushIssue{
+				Kind:    "non_watch_supervisor",
+				Message: fmt.Sprintf("live daemon work is running mode %q, want %q", active.mode, api.ModeWatch),
+				LogPath: s.logPath,
+			})
+			return result, fmt.Errorf("flush failed")
+		}
+		if active.target != resolvedTarget {
+			result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, resolvedTarget, startedAt)
+			result.Issues = append(result.Issues, api.FlushIssue{
+				Kind:    "target_mismatch",
+				Message: fmt.Sprintf("live watch target is %q, requested %q", active.target, resolvedTarget),
+				LogPath: s.logPath,
+			})
+			return result, fmt.Errorf("flush failed")
+		}
+	} else {
+		if requestedTarget && instErr == nil && inst.LastRun.Detached && inst.LastRun.Target != "" && instance.ProcessAlive(inst.Supervisor.PID) {
+			if inst.LastRun.Mode != api.ModeWatch {
+				result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, resolvedTarget, startedAt)
+				result.Issues = append(result.Issues, api.FlushIssue{
+					Kind:    "non_watch_supervisor",
+					Message: fmt.Sprintf("live daemon work is running mode %q, want %q", inst.LastRun.Mode, api.ModeWatch),
+					LogPath: s.logPath,
+				})
+				return result, fmt.Errorf("flush failed")
+			}
+			if inst.LastRun.Target != resolvedTarget {
+				result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, resolvedTarget, startedAt)
+				result.Issues = append(result.Issues, api.FlushIssue{
+					Kind:    "target_mismatch",
+					Message: fmt.Sprintf("live watch target is %q, requested %q", inst.LastRun.Target, resolvedTarget),
+					LogPath: s.logPath,
+				})
+				return result, fmt.Errorf("flush failed")
+			}
+		}
+		watchStartedAt := time.Now().UTC()
+		if _, err := s.startActive(ctx, projectName, resolvedTarget, api.ModeWatch, maxParallel); err != nil {
+			return api.FlushResult{}, err
+		}
+		startedWatch = true
+		if !waitForWatchReady(s.worktree, s.instanceID, watchStartedAt, time.Until(startedAt.Add(timeout))) {
+			result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, resolvedTarget, startedAt)
+			result.Started = true
+			result.TimedOut = true
+			result.Issues = append(result.Issues, api.FlushIssue{Kind: "timeout", Message: "timed out waiting for detached watch daemon to become ready"})
+			return result, fmt.Errorf("flush failed")
+		}
+	}
+	req := api.FlushRequest{
+		ID:        requestID,
+		CreatedAt: startedAt,
+		SyncPath:  instance.FlushSyncPath(s.worktree, s.instanceID, requestID),
+	}
+	if err := instance.WriteFlushRequest(s.worktree, s.instanceID, req); err != nil {
+		return api.FlushResult{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(req.SyncPath), 0o755); err != nil {
+		return api.FlushResult{}, err
+	}
+	if err := os.WriteFile(req.SyncPath, []byte(requestID+"\n"), 0o644); err != nil {
+		return api.FlushResult{}, err
+	}
+	result, ok, err := waitForFlushAck(s.worktree, s.instanceID, requestID, req.SyncPath, time.Until(startedAt.Add(timeout)))
+	if err != nil {
+		return api.FlushResult{}, err
+	}
+	if !ok {
+		result = newFlushResult(requestID, s.worktree, s.instanceID, projectName, resolvedTarget, startedAt)
+		result.Started = startedWatch
+		result.TimedOut = true
+		result.Issues = append(result.Issues, api.FlushIssue{Kind: "timeout", Message: "timed out waiting for flush acknowledgement"})
+		return result, fmt.Errorf("flush failed")
+	}
+	result.Started = startedWatch
+	if result.Project == "" {
+		result.Project = projectName
+	}
+	if !result.Success {
+		return result, fmt.Errorf("flush failed")
+	}
+	return result, nil
+}
+
+func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResult, error) {
+	s.stopActive(5 * time.Second)
+	inst, err := instance.Load(s.worktree, s.instanceID)
+	if err != nil {
+		return nil, err
+	}
+	stopped := []string{}
+	if all {
+		stopped, err = instance.StopDaemonWork(inst, stopAllExtraProcessRefs(s.worktree, s.instanceID, inst), os.Getpid())
+	} else {
+		if strings.TrimSpace(task) == "" {
+			return nil, fmt.Errorf("usage: devflow stop --task <name> | --all")
+		}
+		stopped, err = instance.StopProcesses(inst, task)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if all && inst.DB.ContainerName != "" {
+		if err := database.New().StopRuntime(ctx, inst.DB); err != nil {
+			return nil, err
+		}
+		stopped = append(stopped, "database")
+		sort.Strings(stopped)
+	}
+	if all {
+		_ = markAllStoppedNodes(s.worktree, s.instanceID)
+	} else {
+		_ = markStoppedNodes(s.worktree, s.instanceID, stopped)
+	}
+	return &StopResult{InstanceID: s.instanceID, Stopped: stopped}, nil
+}
+
+func (s *Server) statusResult() (*api.StatusResult, error) {
+	inst, err := instance.Load(s.worktree, s.instanceID)
+	if err != nil {
+		return nil, err
+	}
+	state, err := instance.LoadStatus(s.worktree, s.instanceID)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+		state = &instance.State{Target: inst.LastRun.Target, Mode: inst.LastRun.Mode, Nodes: map[string]api.NodeStatus{}}
+	}
+	nodes := make([]api.NodeStatus, 0, len(state.Nodes))
+	for _, node := range state.Nodes {
+		nodes = append(nodes, node)
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+	return &api.StatusResult{
+		InstanceID: s.instanceID,
+		Worktree:   s.worktree,
+		Target:     state.Target,
+		Mode:       state.Mode,
+		UpdatedAt:  state.UpdatedAt,
+		Ports:      inst.Ports,
+		DB:         instance.DisplayDB(inst.DB),
+		URLs:       InstanceURLs(inst),
+		Supervisor: SupervisorStatus(inst),
+		Nodes:      nodes,
+	}, nil
+}
+
+func newFlushResult(requestID, worktree, instanceID, projectName, target string, startedAt time.Time) api.FlushResult {
+	now := time.Now().UTC()
+	return api.FlushResult{
+		RequestID:  requestID,
+		InstanceID: instanceID,
+		Worktree:   worktree,
+		Project:    projectName,
+		Target:     target,
+		Mode:       api.ModeWatch,
+		Success:    false,
+		DurationMs: now.Sub(startedAt).Milliseconds(),
+		UpdatedAt:  now,
+	}
+}
+
+func waitForFlushAck(worktree, instanceID, requestID, syncPath string, timeout time.Duration) (api.FlushResult, bool, error) {
+	if timeout <= 0 {
+		return api.FlushResult{}, false, nil
+	}
+	deadline := time.Now().Add(timeout)
+	nextTouch := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		result, err := instance.LoadFlushAck(worktree, instanceID, requestID)
+		if err == nil {
+			return result, true, nil
+		}
+		if !os.IsNotExist(err) {
+			return api.FlushResult{}, false, err
+		}
+		if syncPath != "" && !time.Now().Before(nextTouch) {
+			_ = os.WriteFile(syncPath, []byte(requestID+"\n"+time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o644)
+			nextTouch = time.Now().Add(250 * time.Millisecond)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return api.FlushResult{}, false, nil
+}
+
+func waitForWatchReady(worktree, instanceID string, after time.Time, timeout time.Duration) bool {
+	if timeout <= 0 {
+		return false
+	}
+	deadline := time.Now().Add(timeout)
+	path := instance.FlushWatchReadyPath(worktree, instanceID)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			readyAt, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+			if parseErr == nil && !readyAt.Before(after) {
+				return true
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+func (s *Server) invalidateAndRelaunch(ctx context.Context, task string) error {
+	task = strings.TrimSpace(task)
+	if task == "" {
+		return fmt.Errorf("no task selected")
+	}
+	inst, err := instance.Load(s.worktree, s.instanceID)
+	if err != nil {
+		return err
+	}
+	projectName, p, err := s.resolveProject(inst.LastRun.Project)
+	if err != nil {
+		return err
+	}
+	if inst.LastRun.Target == "" {
+		return fmt.Errorf("instance has no recorded project/target to relaunch")
+	}
+	g, resolvedTarget, err := executionGraphForProject(p, inst.LastRun.Target)
+	if err != nil {
+		return err
+	}
+	toInvalidate, err := downstreamInvalidateTasks(g, resolvedTarget, task)
+	if err != nil {
+		return err
+	}
+	if err := writeInvalidateTransition(s.worktree, s.instanceID, resolvedTarget, g, toInvalidate); err != nil {
+		return err
+	}
+	s.publishStatus("invalidated downstream from %s, relaunching %s", task, inst.LastRun.Target)
+	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p))
+	for _, name := range toInvalidate {
+		if err := store.Invalidate(name); err != nil {
+			return err
+		}
+	}
+	_, err = s.startActive(ctx, projectName, inst.LastRun.Target, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+	return err
+}
+
+func (s *Server) restart(ctx context.Context, projectName, task string, upstream, downstream bool, maxParallel int) (*api.RunResult, error) {
+	task = strings.TrimSpace(task)
+	if task == "" {
+		return nil, fmt.Errorf("usage: devflow restart <task>")
+	}
+	projectName, p, err := s.resolveProject(projectName)
+	if err != nil {
+		return nil, err
+	}
+	g, err := graph.New(p.Tasks(), p.Targets())
+	if err != nil {
+		return nil, err
+	}
+	selected, err := restartClosure(g, task, upstream, downstream)
+	if err != nil {
+		return nil, err
+	}
+	taskDef, ok := g.Tasks[task]
+	if !ok {
+		return nil, fmt.Errorf("unknown task %q", task)
+	}
+	inst, err := instance.Load(s.worktree, s.instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if taskDef.Kind == project.KindService {
+		if inst.LastRun.Target == "" {
+			return nil, fmt.Errorf("service restart requires a previously detached run for this instance")
+		}
+		_, err := s.startActive(ctx, projectName, inst.LastRun.Target, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+		return nil, err
+	}
+	targetName := "__restart_" + task
+	wrapped := restartProject{base: p, target: project.Target{Name: targetName, RootTasks: selected}}
+	return s.runAttachedProject(ctx, projectName, wrapped, targetName, api.ModeDev, maxParallel, nil)
+}
+
+func (s *Server) retarget(ctx context.Context, target string) error {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return fmt.Errorf("no target selected")
+	}
+	inst, err := instance.Load(s.worktree, s.instanceID)
+	if err != nil {
+		return err
+	}
+	projectName, p, err := s.resolveProject(inst.LastRun.Project)
+	if err != nil {
+		return err
+	}
+	if _, _, err := project.ResolveExecutionProject(p, target); err != nil {
+		return err
+	}
+	_, err = s.startActive(ctx, projectName, target, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+	return err
+}
+
+func (s *Server) createPrismaMigration(ctx context.Context, projectName, explicitTarget string, env map[string]string) error {
+	name := strings.TrimSpace(env["DEVFLOW_MIGRATION_NAME"])
+	if name == "" {
+		return fmt.Errorf("migration name is required")
+	}
+	projectName, p, err := s.resolveProject(projectName)
+	if err != nil {
+		return err
+	}
+	target := strings.TrimSpace(explicitTarget)
+	if target == "" {
+		target, err = resolvePrismaMigrationTarget(p)
+		if err != nil {
+			return err
+		}
+	}
+	inst, err := instance.Load(s.worktree, s.instanceID)
+	if err != nil {
+		return err
+	}
+	relaunchTarget := strings.TrimSpace(inst.LastRun.Target)
+	relaunchMode := inst.LastRun.Mode
+	relaunchMaxParallel := inst.LastRun.MaxParallel
+	shouldRelaunch := inst.LastRun.Detached && relaunchTarget != "" && relaunchTarget != target
+	s.publishStatus("creating Prisma migration %q through target %s", name, target)
+	result, err := s.runAttached(ctx, projectName, target, api.ModeCI, 0, map[string]string{"DEVFLOW_MIGRATION_NAME": name})
+	if err != nil {
+		return err
+	}
+	if result == nil || !result.Success {
+		return fmt.Errorf("migration target %q did not finish successfully", target)
+	}
+	if shouldRelaunch {
+		s.publishStatus("relaunching detached target %s", relaunchTarget)
+		if _, err := s.startActive(ctx, projectName, relaunchTarget, relaunchMode, relaunchMaxParallel); err != nil {
+			return err
+		}
+		s.publishStatus("detached target %s relaunched", relaunchTarget)
+	}
+	return nil
+}
+
+func resolvePrismaMigrationTarget(p project.Project) (string, error) {
+	for _, candidate := range []string{"new-migration", "migration_new", "prisma_new_migration"} {
+		if _, _, err := project.ResolveExecutionProject(p, candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	taskNames := map[string]bool{}
+	for _, task := range p.Tasks() {
+		if strings.HasSuffix(task.Name, "_new_migration") || task.Name == "prisma_new_migration" {
+			taskNames[task.Name] = true
+		}
+	}
+	targets := make([]string, 0, 1)
+	for _, target := range p.Targets() {
+		for _, root := range target.RootTasks {
+			if taskNames[root] {
+				targets = append(targets, target.Name)
+				break
+			}
+		}
+	}
+	sort.Strings(targets)
+	if len(targets) == 1 {
+		return targets[0], nil
+	}
+	if len(targets) > 1 {
+		return "", fmt.Errorf("multiple Prisma migration targets found: %s", strings.Join(targets, ", "))
+	}
+	tasks := make([]string, 0, len(taskNames))
+	for name := range taskNames {
+		tasks = append(tasks, name)
+	}
+	sort.Strings(tasks)
+	if len(tasks) == 1 {
+		return tasks[0], nil
+	}
+	return "", fmt.Errorf("no Prisma migration target found; add b.Target(\"new-migration\", prisma.NewMigration(b))")
+}
+
+func executionGraphForProject(p project.Project, target string) (*graph.Graph, string, error) {
+	execProject, resolvedTarget, err := project.ResolveExecutionProject(p, target)
+	if err != nil {
+		return nil, "", err
+	}
+	g, err := graph.New(execProject.Tasks(), execProject.Targets())
+	if err != nil {
+		return nil, "", err
+	}
+	return g, resolvedTarget, nil
+}
+
+type restartProject struct {
+	base   project.Project
+	target project.Target
+}
+
+func (p restartProject) Name() string          { return p.base.Name() }
+func (p restartProject) Tasks() []project.Task { return p.base.Tasks() }
+func (p restartProject) Targets() []project.Target {
+	targets := append([]project.Target(nil), p.base.Targets()...)
+	targets = append(targets, p.target)
+	return targets
+}
+func (p restartProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	return p.base.ConfigureInstance(ctx, worktree)
+}
+
+func restartClosure(g *graph.Graph, task string, upstream, downstream bool) ([]string, error) {
+	if _, ok := g.Tasks[task]; !ok {
+		return nil, fmt.Errorf("unknown task %q", task)
+	}
+	names := []string{task}
+	if upstream && downstream {
+		up := g.Upstream([]string{task})
+		down := g.Downstream(up)
+		return g.TopoSort(down)
+	}
+	if downstream {
+		names = g.Downstream([]string{task})
+		return g.TopoSort(names)
+	}
+	if upstream {
+		names = g.Upstream([]string{task})
+		return g.TopoSort(names)
+	}
+	return g.TopoSort(names)
+}
+
+func downstreamInvalidateTasks(g *graph.Graph, target, selected string) ([]string, error) {
+	closure, err := g.TargetClosure(target)
+	if err != nil {
+		return nil, err
+	}
+	inClosure := map[string]bool{}
+	for _, name := range closure {
+		inClosure[name] = true
+	}
+	selectedTask, ok := g.Tasks[selected]
+	if !ok {
+		return nil, fmt.Errorf("unknown task %q", selected)
+	}
+	candidates := []string{}
+	if selectedTask.Kind == project.KindGroup {
+		candidates = g.Upstream([]string{selected})
+	} else {
+		candidates = g.Downstream([]string{selected})
+	}
+	out := collectInvalidateTasks(g, inClosure, candidates)
+	sort.Strings(out)
+	return out, nil
+}
+
+func collectInvalidateTasks(g *graph.Graph, inClosure map[string]bool, names []string) []string {
+	out := make([]string, 0, len(names))
+	seen := map[string]bool{}
+	for _, name := range names {
+		if !inClosure[name] || seen[name] {
+			continue
+		}
+		task := g.Tasks[name]
+		if task.Kind == project.KindOnce && task.Cache {
+			out = append(out, name)
+			seen[name] = true
+		}
+	}
+	return out
+}
+
+func writeInvalidateTransition(root, instanceID, target string, g *graph.Graph, invalidated []string) error {
+	state, err := instance.LoadStatus(root, instanceID)
+	if err != nil {
+		return err
+	}
+	impacted, err := impactedRerunTasks(g, target, invalidated)
+	if err != nil {
+		return err
+	}
+	invalidatedSet := make(map[string]bool, len(invalidated))
+	for _, name := range invalidated {
+		invalidatedSet[name] = true
+	}
+	impactedSet := make(map[string]bool, len(impacted))
+	for _, name := range impacted {
+		impactedSet[name] = true
+	}
+	for name, node := range state.Nodes {
+		if invalidatedSet[name] {
+			node.State = api.StateDirty
+			node.LastRunKey = ""
+			node.LastError = ""
+			node.PID = 0
+			state.Nodes[name] = node
+			continue
+		}
+		if !impactedSet[name] {
+			continue
+		}
+		node.LastError = ""
+		node.PID = 0
+		switch node.Kind {
+		case string(project.KindService):
+			node.State = api.StatePending
+		case string(project.KindGroup), string(project.KindWarmup), string(project.KindOnce):
+			if node.State != api.StateDirty {
+				node.State = api.StatePending
+			}
+		}
+		state.Nodes[name] = node
+	}
+	return instance.SaveStatus(root, instanceID, state.Target, state.Mode, state.Nodes)
+}
+
+func impactedRerunTasks(g *graph.Graph, target string, invalidated []string) ([]string, error) {
+	closure, err := g.TargetClosure(target)
+	if err != nil {
+		return nil, err
+	}
+	inClosure := make(map[string]bool, len(closure))
+	for _, name := range closure {
+		inClosure[name] = true
+	}
+	downstream := g.Downstream(invalidated)
+	out := make([]string, 0, len(downstream))
+	seen := make(map[string]bool, len(downstream))
+	for _, name := range downstream {
+		if !inClosure[name] || seen[name] {
+			continue
+		}
+		out = append(out, name)
+		seen[name] = true
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func withTemporaryInstanceEnv(root, instanceID string, env map[string]string, fn func() error) error {
+	inst, err := instance.Load(root, instanceID)
+	if err != nil {
+		return err
+	}
+	previous := map[string]string{}
+	had := map[string]bool{}
+	if inst.Env == nil {
+		inst.Env = map[string]string{}
+	}
+	for key, value := range env {
+		previous[key], had[key] = inst.Env[key]
+		inst.Env[key] = value
+	}
+	if err := instance.Save(inst); err != nil {
+		return err
+	}
+	defer func() {
+		current, err := instance.Load(root, instanceID)
+		if err != nil {
+			return
+		}
+		if current.Env == nil {
+			current.Env = map[string]string{}
+		}
+		for key := range env {
+			if had[key] {
+				current.Env[key] = previous[key]
+			} else {
+				delete(current.Env, key)
+			}
+		}
+		_ = instance.Save(current)
+	}()
+	return fn()
+}
+
+func markStoppedNodes(worktree, instanceID string, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	state, err := instance.LoadStatus(worktree, instanceID)
+	if err != nil {
+		return nil
+	}
+	for _, name := range names {
+		node, ok := state.Nodes[name]
+		if !ok {
+			continue
+		}
+		node.State = api.StateStopped
+		node.PID = 0
+		state.Nodes[name] = node
+	}
+	return instance.SaveStatus(worktree, instanceID, state.Target, state.Mode, state.Nodes)
+}
+
+func markAllStoppedNodes(worktree, instanceID string) error {
+	state, err := instance.LoadStatus(worktree, instanceID)
+	if err != nil {
+		return nil
+	}
+	for name, node := range state.Nodes {
+		switch node.State {
+		case api.StatePending, api.StateReady, api.StateRunning, api.StateDirty:
+			node.State = api.StateStopped
+			node.PID = 0
+			state.Nodes[name] = node
+		}
+	}
+	return instance.SaveStatus(worktree, instanceID, state.Target, state.Mode, state.Nodes)
+}
+
+func stopAllExtraProcessRefs(worktree, instanceID string, inst *api.Instance) map[string]int {
+	refs := map[string]int{}
+	if inst != nil && inst.Supervisor.ExecPID <= 0 {
+		logPath := inst.Supervisor.LogPath
+		if logPath == "" {
+			logPath = filepath.Join(worktree, ".devflow", "logs", instanceID, "supervisor.log")
+		}
+		if pid := supervisorChildPIDFromLog(logPath); pid > 0 {
+			refs["executor"] = pid
+		}
+	}
+	if state, err := instance.LoadStatus(worktree, instanceID); err == nil {
+		for name, node := range state.Nodes {
+			if node.PID > 0 {
+				refs[name] = node.PID
+			}
+		}
+	}
+	return refs
+}
+
+func supervisorChildPIDFromLog(path string) int {
+	if path == "" {
+		return 0
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	pid := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		idx := strings.LastIndex(line, "child pid=")
+		if idx < 0 {
+			continue
+		}
+		var candidate int
+		if _, err := fmt.Sscanf(line[idx:], "child pid=%d", &candidate); err == nil && candidate > 0 {
+			pid = candidate
+		}
+	}
+	return pid
+}
+
+func SupervisorStatus(inst *api.Instance) *api.SupervisorStatus {
+	if inst == nil || inst.Supervisor.PID <= 0 {
+		return nil
+	}
+	return &api.SupervisorStatus{
+		PID:       inst.Supervisor.PID,
+		ExecPID:   inst.Supervisor.ExecPID,
+		Alive:     instance.ProcessAlive(inst.Supervisor.PID),
+		StartedAt: inst.Supervisor.StartedAt,
+		LogPath:   inst.Supervisor.LogPath,
+	}
+}
+
+func InstanceURLs(inst *api.Instance) map[string]string {
+	if inst == nil {
+		return nil
+	}
+	urls := map[string]string{}
+	for _, name := range []string{"backend", "frontend", "app"} {
+		if port := inst.Ports[name]; port > 0 {
+			urls[name] = fmt.Sprintf("http://127.0.0.1:%d", port)
+		}
+	}
+	return urls
+}

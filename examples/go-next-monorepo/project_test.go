@@ -13,6 +13,7 @@ import (
 
 	"github.com/benjaco/devflow/internal/cli"
 	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/daemon"
 	"github.com/benjaco/devflow/pkg/engine"
 	"github.com/benjaco/devflow/pkg/instance"
 	"github.com/benjaco/devflow/pkg/project"
@@ -199,37 +200,30 @@ func TestExampleProjectFlushSettlesWatchChange(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("DEVFLOW_EXAMPLE_FAKE_DB", "1")
 	worktree := seededWorktree(t)
-	eng, err := engine.New(exampleProject{}, worktree)
-	if err != nil {
-		t.Fatal(err)
-	}
+	daemonCtx, cancelDaemon := context.WithCancel(context.Background())
+	restoreDaemonStart := daemon.SetStartDaemonFuncForTest(func(worktree, instanceID, projectName string) error {
+		logPath := filepath.Join(worktree, ".devflow", "logs", instanceID, "daemon.log")
+		go func() {
+			_ = daemon.Serve(daemonCtx, daemon.Options{Worktree: worktree, Project: projectName, LogPath: logPath})
+		}()
+		return nil
+	})
+	t.Cleanup(func() {
+		cancelDaemon()
+		restoreDaemonStart()
+	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- eng.Watch(ctx, engine.Request{
-			Target:      "fullstack",
-			Worktree:    worktree,
-			Mode:        api.ModeWatch,
-			MaxParallel: 4,
-		})
-	}()
-
-	instanceID := waitForExampleWatchReady(t, worktree)
-	inst, err := instance.Load(worktree, instanceID)
-	if err != nil {
-		t.Fatal(err)
+	startOut := &bytes.Buffer{}
+	app := &cli.App{Stdout: startOut, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"watch", "fullstack", "--detach", "--json", "--project", "go-next-monorepo", "--worktree", worktree, "--max-parallel", "4"}); err != nil {
+		t.Fatalf("watch start failed: %v\n%s", err, startOut.String())
 	}
-	if err := instance.RecordDetachedRun(inst, api.RunConfig{
-		Project:     "go-next-monorepo",
-		Target:      "fullstack",
-		Mode:        api.ModeWatch,
-		MaxParallel: 4,
-		Detached:    true,
-	}, os.Getpid(), filepath.Join(worktree, ".devflow", "logs", instanceID, "supervisor.log")); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() {
+		stopOut := &bytes.Buffer{}
+		stopApp := &cli.App{Stdout: stopOut, Stderr: &bytes.Buffer{}}
+		_ = stopApp.Run([]string{"stop", "--all", "--json", "--worktree", worktree})
+	})
+	waitForExampleWatchReady(t, worktree)
 	if !waitForStableTraceCounts(8*time.Second, 500*time.Millisecond, worktree, map[string]int{
 		"postgres":         1,
 		"backend_dev":      1,
@@ -241,7 +235,7 @@ func TestExampleProjectFlushSettlesWatchChange(t *testing.T) {
 
 	rewriteFile(t, filepath.Join(worktree, "frontend/src/page.tsx"), "export default function Page(){ return 'flush changed'; }\n")
 	stdout := &bytes.Buffer{}
-	app := &cli.App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	app = &cli.App{Stdout: stdout, Stderr: &bytes.Buffer{}}
 	if err := app.Run([]string{"flush", "fullstack", "--json", "--project", "go-next-monorepo", "--worktree", worktree, "--timeout", "8s"}); err != nil {
 		t.Fatalf("flush failed: %v\n%s", err, stdout.String())
 	}
@@ -263,16 +257,6 @@ func TestExampleProjectFlushSettlesWatchChange(t *testing.T) {
 	}
 	if got := traceCount(worktree, "backend_dev"); got != 1 {
 		t.Fatalf("unexpected backend_dev rerun for frontend-only change: %d", got)
-	}
-
-	cancel()
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("watch returned error: %v", err)
-		}
-	case <-time.After(4 * time.Second):
-		t.Fatal("timed out waiting for watch shutdown")
 	}
 }
 

@@ -34,12 +34,13 @@ If `flush` fails, inspect `issues`, `nodes`, `services`, and referenced log path
 
 Use the lifecycle command that matches the job:
 
-- `devflow run up` is foreground/attached. It starts the target closure, waits for service readiness, then keeps the terminal attached while services run. Interrupt it from that terminal when you are done.
-- `devflow run up --ci --json` is a readiness probe for CI-style validation. If the target contains services, Devflow starts them, waits for readiness, stops them, and returns a finite result. It is not a background dev environment.
-- `devflow run up --detach --json` starts a detached supervisor and returns after launch. It does not prove the whole target is healthy; use `status`, `logs`, or a watch `flush` workflow when readiness matters.
-- `devflow watch up --detach --json` starts the recommended detached dev loop for humans and agents.
-- `devflow flush up --json` is the readiness gate for detached watch mode. It waits for file-change work to settle and checks in-chain services.
-- `devflow stop --all --json` cleans up the detached supervisor, child executor, tracked services, stale process records, and the managed database container for the worktree. It preserves the database volume.
+- Dev/watch/operator commands use one daemon per worktree. The daemon owns file watching, services, status, and live TUI updates. Sibling worktrees get separate daemons but still share the global task cache.
+- `devflow run up` is foreground/attached through that daemon. It starts the target closure, waits for service readiness, then keeps the terminal attached while services run. Interrupt it from that terminal when you are done.
+- `devflow run up --ci --json` is a readiness probe for CI-style validation and does not use the daemon. If the target contains services, Devflow starts them, waits for readiness, stops them, and returns a finite result. It is not a background dev environment.
+- `devflow run up --detach --json` asks the daemon to start the target and returns after launch. It does not prove the whole target is healthy; use `status`, `logs`, or a watch `flush` workflow when readiness matters.
+- `devflow watch up --detach --json` asks the daemon to start the recommended dev loop for humans and agents.
+- `devflow flush up --json` is the readiness gate for daemon-owned watch mode. It waits for file-change work to settle and checks in-chain services.
+- `devflow stop --all --json` stops daemon-owned work, stale process records, and the managed database container for the worktree. It preserves the database volume. The daemon itself may remain alive so future commands and the TUI can reconnect instantly.
 
 After `stop --all`, `status --json` may still include a `db` object. That object is the desired managed database identity and connection metadata for the instance, not proof that the container is currently running.
 
@@ -49,7 +50,7 @@ For AI-assisted development, prefer `watch --detach` plus `flush` over an attach
 
 ## TUI
 
-Run `devflow` with no args in a project worktree to start or reconnect to the default detached target and open the TUI.
+Run `devflow` with no args in a project worktree to start or reconnect to the worktree daemon, ensure the default target is running in watch mode, and open the TUI. This is the normal day-to-day entry point when you want edits to cascade automatically.
 
 Useful TUI keys:
 - `q`: quit
@@ -61,7 +62,7 @@ Useful TUI keys:
 - `i`: invalidate selected task and rerun downstream
 - `t`: retarget to the selected task
 
-The database/Prisma panel shows managed Postgres identity, cached migration-prefix snapshots, and schema/migration drift. Migration authoring is explicit; normal startup does not secretly generate migrations. When you create a migration from the TUI, Devflow runs the project migration target such as `new-migration` through the normal engine, streams task progress in the footer, and then relaunches the previously detached target so services come back through the graph.
+The database/Prisma panel shows managed Postgres identity, cached migration-prefix snapshots, and schema/migration drift. Migration authoring is explicit; normal startup does not secretly generate migrations. When you create a migration from the TUI, Devflow sends a daemon action that runs the project migration target such as `new-migration`, streams task progress in the footer immediately, and then relaunches the previously detached target so services come back through the graph.
 
 ## Watch Mode
 

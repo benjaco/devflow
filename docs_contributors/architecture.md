@@ -14,6 +14,7 @@
 - `pkg/instance`: worktree-scoped instance identity and persisted state
 - `pkg/ports`: shared port registry with lock-safe allocation
 - `pkg/engine`: bounded parallel ready-queue execution engine and status persistence
+- `pkg/daemon`: per-worktree daemon, JSON-line socket protocol, action queue, and event fanout for mutable dev/watch/operator work
 - `pkg/event`: typed event bus used by the engine for run, task-state, cache, process, instance, and log events
 - `pkg/watch`: polling-based file watching and debounced change batching built on `github.com/radovskyb/watcher`
 
@@ -62,11 +63,11 @@ Per-worktree state lives under `.devflow/`:
 - `.devflow/state/instances/<instance-id>/`
 - `.devflow/state/instances/<instance-id>/flush/`
 
-Detached supervisor state is also per worktree. The instance snapshot records:
-- the supervisor PID
-- the child `__internal_exec` PID when the supervisor has started it
+Daemon/supervisor state is also per worktree. The instance snapshot records:
+- the per-worktree daemon PID as the supervisor PID
+- legacy child executor PIDs when old supervisor state is being reconciled
 - service task PIDs
-- the supervisor log path, which also contains a `child pid=<pid>` line as a fallback for older state
+- the daemon log path
 
 Task cache storage is global for the user:
 - `<os.UserCacheDir()>/devflow/cache`
@@ -85,7 +86,9 @@ Current shared paths:
 Global coordination state that is not repo-specific still lives under the user cache directory:
 - `devflow/state/instance-index.json`
 
-This split keeps runtime logs and instance state local to the worktree, keeps task cache globally reusable, and keeps port allocation coordinated for sibling git worktrees.
+The daemon Unix socket lives in a short per-user temp directory such as `/tmp/devflow-daemon-<uid>/<instance-id>.sock`. It is intentionally not stored under deeply nested worktree paths because Unix socket path length limits are easy to hit on macOS.
+
+This split keeps runtime logs and instance state local to the worktree, keeps task cache globally reusable, keeps port allocation coordinated for sibling git worktrees, and keeps socket paths short enough for real terminals and test worktrees.
 
 Flush coordination is per instance:
 - `flush/requests/<request-id>.json` records the requested sync point
@@ -437,16 +440,16 @@ The engine now emits a typed in-process event stream for live consumers. Event c
 - process exited
 - interaction requested / answered / cancelled
 
-This is exposed through engine subscription rather than a dedicated CLI command for now. The goal is to keep the event envelope stable before adding TUI and MCP-facing stream surfaces.
+The daemon subscribes to engine events, persists them, and fans them out over its JSON-line socket to live consumers such as the TUI. Direct `run --ci` still uses the engine in-process and writes only the command result unless a future CI event surface is added.
 
 For watch cycles specifically:
 - `files` now carries the raw changed worktree-relative file paths from the watcher batch
 - `affectedTasks` carries the directly affected task names derived from those file changes
 
-Detached runs now also persist the engine event stream to:
+Daemon-owned runs also persist the engine event stream to:
 - `.devflow/state/instances/<instance-id>/events.jsonl`
 
-The TUI uses that persisted event stream as its primary live-update signal.
+The TUI uses the daemon socket subscription as its primary live-update signal and the persisted event stream as a fallback/recovery source.
 
 ## Service Readiness
 
@@ -487,12 +490,12 @@ This keeps the core generic while letting adapters define the right readiness si
 ## Service Lifecycle Contract
 
 Service tasks have different command semantics depending on the run mode:
-- attached `run` is a foreground operator command. It starts services, waits for readiness, and then blocks while those services run. A service exit ends the attached run; an external stop may surface as a service-exited error.
-- `run --ci` is finite. Services are allowed as readiness probes: Devflow starts them, waits for readiness, stops them, clears persisted service PIDs, and records the service nodes as `stopped` before returning success.
-- `run --detach` starts the detached supervisor and returns after launch. It records the supervisor but does not prove the target closure is healthy.
-- `watch --detach` starts the detached development loop. It is the expected long-running mode for humans and agents that want automatic reruns after file edits.
-- `flush` is the detached watch readiness gate. It proves the watcher observed the post-edit sync sentinel, waits for the selected target closure to settle, and checks service health.
-- `stop --all` is the cleanup surface for detached runs. It reconciles supervisor, child executor, tracked service, stale status PIDs, and the instance-managed database container before clearing persisted runtime process state. Stopping the database container preserves its Docker volume.
+- attached non-CI `run` is a foreground operator command backed by the per-worktree daemon. It starts services, waits for readiness, and then blocks while those services run. A service exit ends the attached run; an external stop may surface as a service-exited error.
+- `run --ci` is deliberately direct and finite, not daemon-backed. Services are allowed as readiness probes: Devflow starts them, waits for readiness, stops them, clears persisted service PIDs, and records the service nodes as `stopped` before returning success.
+- `run --detach` asks the per-worktree daemon to start the target in the background and returns after launch. It does not prove the target closure is healthy.
+- `watch --detach` asks the daemon to start the development loop. It is the expected long-running mode for humans and agents that want automatic reruns after file edits.
+- `flush` is the daemon-backed watch readiness gate. It proves the watcher observed the post-edit sync sentinel, waits for the selected target closure to settle, and checks service health.
+- `stop --all` asks the daemon to stop active work. It reconciles legacy supervisors, child executors, tracked services, stale status PIDs, and the instance-managed database container. Stopping the database container preserves its Docker volume. The daemon itself may remain alive as the worktree control plane.
 
 The current automation recommendation is intentionally explicit: use detached watch plus `flush` for "background environment is ready" workflows. Do not reinterpret attached `run` as a start-and-return command without adding a separate CLI contract.
 
@@ -513,46 +516,57 @@ Watch propagation now treats service-to-service dependency edges specially:
 
 This prevents backend-service bounces from needlessly forcing frontend-service restarts, while still allowing explicit infrastructure-style dependencies such as `postgres -> backend`.
 
-The current implementation is local and in-process. It intentionally prioritizes correctness and selective reruns over elaborate optimization.
+The watch engine still runs in-process relative to its owner, but for user-facing dev/watch/operator workflows that owner is the per-worktree daemon. This keeps one mutable source of truth for service lifecycle, status, file watching, and event streaming.
 
 ## Operator Controls
 
 The current operator surface now includes:
 - PID-based `stop` for tracked service tasks
-- detached supervisor launch for service-bearing runs
+- daemon-backed background launch for service-bearing runs
 - cache inspection and invalidation
 - cache garbage collection
 - limited non-service `restart`
-- detached service `restart` by restarting the last detached target
+- detached service `restart` by restarting the last daemon target
 
-Detached ownership is currently implemented by spawning a background `devflow` supervisor process and persisting:
-- supervisor PID
-- child `__internal_exec` PID
-- supervisor log path
-- last detached run config
+Mutable ownership is implemented by one daemon per worktree. CLI and TUI operations connect to that daemon over a JSON-line Unix socket. The daemon owns:
+- active engine run/watch context
+- service process handles
+- status writes
+- event persistence and live event fanout
+- flush sync/ack coordination
+- TUI actions such as invalidate/rerun, retarget, and Prisma migration authoring
+
+Daemon startup is serialized by a per-instance file lock under worktree state so concurrent CLI/TUI commands cannot start competing daemons for the same worktree.
+
+The older hidden `__internal_exec` and `__internal_supervise` launcher paths are no longer user-facing execution routes. Their persisted supervisor/executor state can still be reconciled during `stop --all` so existing stale processes are not orphaned.
+
+The daemon persists:
+- daemon PID as the supervisor PID
+- daemon log path
+- last run config
+- legacy supervisor/executor PIDs as process refs when replacing old state
 
 This is enough for:
 - `run --detach`
 - `watch --detach`
-- `stop --all` against detached runs; it terminates the supervisor process group, child executor process group, tracked service process groups, PID-bearing status nodes, and the instance-managed database container before clearing persisted process state
-- service `restart` by stopping the detached supervisor and relaunching the last detached target
+- `stop --all` against daemon-owned work; it terminates legacy supervisor/executor process groups, tracked service process groups, PID-bearing status nodes, and the instance-managed database container before clearing persisted process state
+- service `restart` by asking the daemon to relaunch the last active target
 
 The operator surface now also reconciles detached state when queried:
-- `status` includes supervisor PID/liveness plus sanitized instance metadata such as ports, URLs, and DB identity
-- if the persisted detached supervisor PID is no longer alive, `status` clears the supervisor record and marks nonterminal nodes as `stopped`
-- `logs supervisor` reads the persisted supervisor log directly
+- `status` connects to the daemon and includes daemon PID/liveness plus sanitized instance metadata such as ports, URLs, and DB identity
+- `logs supervisor` reads the daemon/supervisor log directly
 
-The first usable TUI slice is now implemented as a local terminal console over persisted instance state. It currently provides:
-- live polling refresh
+The first usable TUI slice is now implemented as a local terminal console connected to the per-worktree daemon, with persisted state as fallback. It currently provides:
+- live daemon event subscription plus fallback persisted-event refresh
 - task selection
 - selected-task details
 - task log tail
-- supervisor log toggle
+- daemon/supervisor log toggle
 - database/Prisma panel showing managed Postgres identity and recent Prisma migration-prefix snapshots
-- explicit Prisma migration generation from inside the TUI by asking for a migration name, running the project migration target through the normal engine, and relaunching the previously detached target after success
+- explicit Prisma migration generation from inside the TUI by asking for a migration name, sending a daemon action, running the project migration target through the daemon-owned engine, and relaunching the previously detached target after success
 - instance/worktree/runtime header
 - stable terminal rendering via a real TUI library instead of manual ANSI frame painting
-- invalidate-and-rerun from the selected task by invalidating the selected downstream cacheable once-task slice and relaunching the current target
-- prompt popups for interactive confirm and text questions emitted by the running supervisor
+- invalidate-and-rerun from the selected task by sending a daemon action that invalidates the selected downstream cacheable once-task slice and relaunches the current target
+- prompt popups for interactive confirm and text questions emitted by daemon-owned work
 
 What is still missing is fine-grained detached control of a single service inside a multi-service detached target.

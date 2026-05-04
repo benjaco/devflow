@@ -12,8 +12,8 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/daemon"
 	"github.com/benjaco/devflow/pkg/database"
-	"github.com/benjaco/devflow/pkg/graph"
 	"github.com/benjaco/devflow/pkg/instance"
 	"github.com/benjaco/devflow/pkg/project"
 )
@@ -299,57 +299,28 @@ func TestLoadPrismaSnapshotSummariesSortsAndSkipsNonPrismaSnapshots(t *testing.T
 
 func TestGeneratePrismaMigrationFromTUIRunsProjectTargetAndRelaunches(t *testing.T) {
 	worktree := t.TempDir()
-	mustWriteTUITestFile(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id name String }\n")
-	output := filepath.Join(worktree, "migration-name.txt")
-	projectName := "tui-prisma-migration-target"
-	project.Register(testProject{
-		name: projectName,
-		tasks: []project.Task{
-			{
-				Name: "prisma_new_migration",
-				Kind: project.KindOnce,
-				Run: func(ctx context.Context, rt *project.Runtime) error {
-					_ = ctx
-					name := rt.Env["DEVFLOW_MIGRATION_NAME"]
-					rt.EmitLogLine("stdout", "created migration "+name)
-					return os.WriteFile(output, []byte(name), 0o644)
-				},
-			},
-			{Name: "app", Kind: project.KindOnce},
-		},
-		targets: []project.Target{
-			{Name: "new-migration", RootTasks: []string{"prisma_new_migration"}},
-			{Name: "up", RootTasks: []string{"app"}},
-		},
-	})
-
 	inst, err := instance.Resolve(worktree, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	inst.LastRun = api.RunConfig{
-		Project:     projectName,
-		Target:      "up",
-		Mode:        api.ModeWatch,
-		MaxParallel: 3,
-		Detached:    true,
+	var gotRoot string
+	var gotReq daemon.Request
+	previousCall := callDaemonForTUI
+	callDaemonForTUI = func(ctx context.Context, root string, req daemon.Request, onEvent func(api.Event)) (daemon.Response, error) {
+		_ = ctx
+		gotRoot = root
+		gotReq = req
+		if onEvent != nil {
+			onEvent(api.Event{Type: api.EventRunStarted, Target: "new-migration"})
+			onEvent(api.Event{Type: api.EventTaskState, Task: "prisma_new_migration", State: api.StateRunning})
+			onEvent(api.Event{Type: api.EventLogLine, Task: "prisma_new_migration", Stream: "stdout", Line: "created migration add-age"})
+			onEvent(api.Event{Type: api.EventLogLine, Task: "daemon", Stream: "status", Line: "detached target up relaunched"})
+			success := true
+			onEvent(api.Event{Type: api.EventRunFinished, Target: "new-migration", Success: &success})
+		}
+		return daemon.Response{OK: true}, nil
 	}
-	if err := instance.Save(inst); err != nil {
-		t.Fatal(err)
-	}
-
-	var launchedTarget, launchedProject string
-	var launchedMode api.RunMode
-	var launchedMaxParallel int
-	previousLaunch := launchDetachedForTUI
-	launchDetachedForTUI = func(root string, inst *api.Instance, target, projectName string, mode api.RunMode, maxParallel int) (int, error) {
-		launchedTarget = target
-		launchedProject = projectName
-		launchedMode = mode
-		launchedMaxParallel = maxParallel
-		return 12345, nil
-	}
-	t.Cleanup(func() { launchDetachedForTUI = previousLaunch })
+	t.Cleanup(func() { callDaemonForTUI = previousCall })
 
 	var progress []string
 	if err := generatePrismaMigrationFromTUI(worktree, inst.ID, "add-age", func(message string) {
@@ -357,118 +328,23 @@ func TestGeneratePrismaMigrationFromTUIRunsProjectTargetAndRelaunches(t *testing
 	}); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(output)
-	if err != nil {
-		t.Fatal(err)
+	if gotRoot != worktree {
+		t.Fatalf("unexpected daemon root: got %q want %q", gotRoot, worktree)
 	}
-	if strings.TrimSpace(string(data)) != "add-age" {
-		t.Fatalf("expected project migration target to receive migration name, got %q", string(data))
-	}
-	if launchedTarget != "up" || launchedProject != projectName || launchedMode != api.ModeWatch || launchedMaxParallel != 3 {
-		t.Fatalf("unexpected relaunch: target=%q project=%q mode=%q max=%d", launchedTarget, launchedProject, launchedMode, launchedMaxParallel)
+	if gotReq.Action != daemon.ActionPrismaMigration || !gotReq.StreamEvents || gotReq.Env["DEVFLOW_MIGRATION_NAME"] != "add-age" {
+		t.Fatalf("unexpected daemon request: %+v", gotReq)
 	}
 	for _, want := range []string{
-		"loading Prisma migration target",
-		"running project migration target",
+		"connecting to daemon",
+		"run started: new-migration",
 		"prisma_new_migration: running",
 		"prisma_new_migration stdout: created migration add-age",
-		"relaunching detached target",
-		"detached target \"up\" relaunched",
+		"detached target up relaunched",
+		"run finished: new-migration",
 	} {
 		if !tuiProgressContains(progress, want) {
 			t.Fatalf("expected progress to contain %q, got %+v", want, progress)
 		}
-	}
-}
-
-func TestResolvePrismaMigrationTargetUsesComponentTaskFallback(t *testing.T) {
-	p := testProject{
-		name: "tui-prisma-task-fallback",
-		tasks: []project.Task{
-			{Name: "custom_new_migration", Kind: project.KindOnce},
-		},
-	}
-	target, err := resolvePrismaMigrationTarget(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if target != "custom_new_migration" {
-		t.Fatalf("unexpected fallback target %q", target)
-	}
-}
-
-func TestDownstreamInvalidateTasksOnlyReturnsCacheableOnceTasksInTargetClosure(t *testing.T) {
-	g, err := graph.New([]project.Task{
-		{Name: "a", Kind: project.KindOnce, Cache: true},
-		{Name: "b", Kind: project.KindOnce, Cache: true, Deps: []string{"a"}},
-		{Name: "c", Kind: project.KindService, Deps: []string{"b"}},
-		{Name: "d", Kind: project.KindOnce, Cache: false, Deps: []string{"b"}},
-		{Name: "e", Kind: project.KindOnce, Cache: true, Deps: []string{"d"}},
-	}, []project.Target{
-		{Name: "main", RootTasks: []string{"c", "e"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	names, err := downstreamInvalidateTasks(g, "main", "b")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := strings.Join(names, ",")
-	want := "b,e"
-	if got != want {
-		t.Fatalf("unexpected invalidate tasks: got %q want %q", got, want)
-	}
-}
-
-func TestDownstreamInvalidateTasksForGroupReturnsItsCacheableInputs(t *testing.T) {
-	g, err := graph.New([]project.Task{
-		{Name: "build_a", Kind: project.KindOnce, Cache: true},
-		{Name: "build_b", Kind: project.KindOnce, Cache: true},
-		{Name: "aggregate", Kind: project.KindGroup, Deps: []string{"build_a", "build_b"}},
-		{Name: "serve", Kind: project.KindService, Deps: []string{"aggregate"}},
-	}, []project.Target{
-		{Name: "main", RootTasks: []string{"serve"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	names, err := downstreamInvalidateTasks(g, "main", "aggregate")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := strings.Join(names, ",")
-	want := "build_a,build_b"
-	if got != want {
-		t.Fatalf("unexpected invalidate tasks for group: got %q want %q", got, want)
-	}
-}
-
-func TestExecutionGraphResolvesTaskTargets(t *testing.T) {
-	const name = "tui-execution-graph"
-	project.Register(testProject{
-		name: name,
-		tasks: []project.Task{
-			{Name: "build", Kind: project.KindOnce, Cache: true},
-			{Name: "serve", Kind: project.KindService, Deps: []string{"build"}},
-		},
-		targets: []project.Target{
-			{Name: "fullstack", RootTasks: []string{"serve"}},
-		},
-	})
-	g, target, err := executionGraph(name, "build")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if target != "build" {
-		t.Fatalf("expected resolved synthetic target to be build, got %q", target)
-	}
-	closure, err := g.TargetClosure(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Join(closure, ","); got != "build" {
-		t.Fatalf("unexpected synthetic target closure: %q", got)
 	}
 }
 
@@ -507,48 +383,6 @@ func TestResolveRelaunchProjectFallsBackToDetectedProject(t *testing.T) {
 	}
 }
 
-func TestWriteInvalidateTransitionMarksDirtyAndPendingNodes(t *testing.T) {
-	worktree := t.TempDir()
-	inst, err := instance.Resolve(worktree, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	nodes := map[string]api.NodeStatus{
-		"build_a":   {Name: "build_a", Kind: "once", State: api.StateCached, LastRunKey: "a"},
-		"build_b":   {Name: "build_b", Kind: "once", State: api.StateCached, LastRunKey: "b"},
-		"aggregate": {Name: "aggregate", Kind: "group", State: api.StateDone},
-		"serve":     {Name: "serve", Kind: "service", State: api.StateRunning, PID: 123},
-	}
-	if err := instance.SaveStatus(worktree, inst.ID, "main", api.ModeDev, nodes); err != nil {
-		t.Fatal(err)
-	}
-	g, err := graph.New([]project.Task{
-		{Name: "build_a", Kind: project.KindOnce, Cache: true},
-		{Name: "build_b", Kind: project.KindOnce, Cache: true},
-		{Name: "aggregate", Kind: project.KindGroup, Deps: []string{"build_a", "build_b"}},
-		{Name: "serve", Kind: project.KindService, Deps: []string{"aggregate"}},
-	}, []project.Target{{Name: "main", RootTasks: []string{"serve"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := writeInvalidateTransition(worktree, inst.ID, "main", g, []string{"build_a", "build_b"}); err != nil {
-		t.Fatal(err)
-	}
-	state, err := instance.LoadStatus(worktree, inst.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.Nodes["build_a"].State != api.StateDirty || state.Nodes["build_a"].LastRunKey != "" {
-		t.Fatalf("expected build_a to become dirty without key, got %+v", state.Nodes["build_a"])
-	}
-	if state.Nodes["aggregate"].State != api.StatePending {
-		t.Fatalf("expected aggregate to become pending, got %+v", state.Nodes["aggregate"])
-	}
-	if state.Nodes["serve"].State != api.StatePending || state.Nodes["serve"].PID != 0 {
-		t.Fatalf("expected serve to become pending without pid, got %+v", state.Nodes["serve"])
-	}
-}
-
 func TestRenderFooterIncludesRetargetKey(t *testing.T) {
 	d := newDashboard(t.TempDir(), "abc123")
 	d.setStatus("[green]ready")
@@ -576,6 +410,26 @@ func TestRenderFooterShowsPrismaMigrationProgressStatus(t *testing.T) {
 	}
 	if !strings.Contains(text, `running Prisma migration generation for "add-age"`) {
 		t.Fatalf("expected footer to render Prisma migration progress, got %q", text)
+	}
+}
+
+func TestUpdateLogsKeepsPreviousLinesDuringTransientEmptyRead(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	logPath := filepath.Join(t.TempDir(), "task.log")
+	d.updateLogsFromSnapshot(snapshot{
+		logTitle: "task log",
+		logPath:  logPath,
+		logLines: []string{"stdout: first line"},
+		nodes:    []api.NodeStatus{{Name: "task", State: api.StateRunning}},
+	})
+	d.updateLogsFromSnapshot(snapshot{
+		logTitle: "task log",
+		logPath:  logPath,
+		nodes:    []api.NodeStatus{{Name: "task", State: api.StateRunning}},
+	})
+	text := d.logs.GetText(false)
+	if !strings.Contains(text, "stdout: first line") {
+		t.Fatalf("expected previous log content to remain visible, got %q", text)
 	}
 }
 

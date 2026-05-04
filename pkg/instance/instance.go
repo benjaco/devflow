@@ -163,6 +163,18 @@ func EventsPath(worktree, instanceID string) string {
 	return filepath.Join(instancePath(worktree, instanceID), "events.jsonl")
 }
 
+func DaemonSocketPath(instanceID string) (string, error) {
+	base := os.TempDir()
+	if info, err := os.Stat("/tmp"); err == nil && info.IsDir() {
+		base = "/tmp"
+	}
+	path := filepath.Join(base, fmt.Sprintf("devflow-daemon-%d", os.Getuid()))
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return "", err
+	}
+	return filepath.Join(path, instanceID+".sock"), nil
+}
+
 func FlushRoot(worktree, instanceID string) string {
 	return filepath.Join(instancePath(worktree, instanceID), "flush")
 }
@@ -379,6 +391,18 @@ func RecordDetachedRun(inst *api.Instance, cfg api.RunConfig, supervisorPID int,
 	return Save(inst)
 }
 
+func RecordDaemon(inst *api.Instance, pid int, logPath string) error {
+	if loaded, err := Load(inst.Worktree, inst.ID); err == nil {
+		inst = loaded
+	}
+	inst.Supervisor = api.SupervisorRef{
+		PID:       pid,
+		StartedAt: time.Now().UTC(),
+		LogPath:   logPath,
+	}
+	return Save(inst)
+}
+
 func RecordSupervisorExec(worktree string, pid int) error {
 	if pid <= 0 {
 		return nil
@@ -409,6 +433,31 @@ func ClearSupervisor(inst *api.Instance) error {
 func StopSupervisor(inst *api.Instance) error {
 	_, err := StopAll(inst, nil)
 	return err
+}
+
+func StopDaemonWork(inst *api.Instance, extra map[string]int, daemonPID int) ([]string, error) {
+	refs := map[string]int{}
+	if inst.Supervisor.PID > 0 && inst.Supervisor.PID != daemonPID {
+		addStopRef(refs, "supervisor", inst.Supervisor.PID)
+	}
+	addStopRef(refs, "executor", inst.Supervisor.ExecPID)
+	for name, ref := range inst.Processes {
+		addStopRef(refs, name, ref.PID)
+	}
+	for name, pid := range extra {
+		addStopRef(refs, name, pid)
+	}
+	stopped, err := stopNamedProcessGroups(refs, 3*time.Second)
+	if err != nil {
+		return stopped, err
+	}
+	if inst.Supervisor.PID != daemonPID {
+		inst.Supervisor = api.SupervisorRef{}
+	} else {
+		inst.Supervisor.ExecPID = 0
+	}
+	inst.Processes = map[string]api.ProcessRef{}
+	return stopped, Save(inst)
 }
 
 func ProcessAlive(pid int) bool {

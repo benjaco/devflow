@@ -6,22 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	"github.com/benjaco/devflow/internal/fsutil"
 	"github.com/benjaco/devflow/pkg/api"
-	"github.com/benjaco/devflow/pkg/cache"
+	"github.com/benjaco/devflow/pkg/daemon"
 	"github.com/benjaco/devflow/pkg/database"
-	"github.com/benjaco/devflow/pkg/engine"
-	"github.com/benjaco/devflow/pkg/graph"
 	"github.com/benjaco/devflow/pkg/instance"
 	"github.com/benjaco/devflow/pkg/process"
 	"github.com/benjaco/devflow/pkg/project"
@@ -40,6 +35,7 @@ type snapshot struct {
 	supervisor   *api.SupervisorStatus
 	urls         map[string]string
 	logTitle     string
+	logPath      string
 	logLines     []string
 	prisma       []prismaSnapshotSummary
 	prismaErr    string
@@ -81,6 +77,8 @@ type dashboard struct {
 	eventOffset       int64
 	activePromptID    string
 	activeInput       bool
+	lastLogPath       string
+	lastLogLines      []string
 }
 
 const (
@@ -89,10 +87,20 @@ const (
 	supervisorLogTitle      = "supervisor log"
 )
 
-var launchDetachedForTUI = launchDetached
+var callDaemonForTUI = func(ctx context.Context, root string, req daemon.Request, onEvent func(api.Event)) (daemon.Response, error) {
+	client, _, err := daemon.Ensure(ctx, root, "")
+	if err != nil {
+		return daemon.Response{}, err
+	}
+	return client.Call(ctx, req, onEvent)
+}
 
 func Run(opts Options) error {
 	root, id, err := resolveInstance(opts.Worktree, opts.InstanceID)
+	if err != nil {
+		return err
+	}
+	client, _, err := daemon.Ensure(context.Background(), root, "")
 	if err != nil {
 		return err
 	}
@@ -102,6 +110,7 @@ func Run(opts Options) error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	go d.daemonEventLoop(ctx, client)
 	go d.eventLoop(ctx)
 	go d.fallbackRefreshLoop(ctx)
 	return d.app.Run()
@@ -235,6 +244,18 @@ func (d *dashboard) eventLoop(ctx context.Context) {
 			})
 		}
 	}
+}
+
+func (d *dashboard) daemonEventLoop(ctx context.Context, client *daemon.Client) {
+	if client == nil {
+		return
+	}
+	_ = client.Subscribe(ctx, func(evt api.Event) {
+		d.app.QueueUpdateDraw(func() {
+			d.applyEvents([]api.Event{evt})
+			_ = d.refresh()
+		})
+	})
 }
 
 func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
@@ -411,9 +432,36 @@ func (d *dashboard) updateLogs() {
 }
 
 func (d *dashboard) updateLogsFromSnapshot(snap snapshot) {
+	if snap.logPath != "" {
+		if len(snap.logLines) > 0 {
+			d.lastLogPath = snap.logPath
+			d.lastLogLines = append([]string(nil), snap.logLines...)
+		} else if snap.logPath == d.lastLogPath && len(d.lastLogLines) > 0 && transientEmptyLogAllowed(snap, d.selectedName) {
+			snap.logLines = append([]string(nil), d.lastLogLines...)
+		}
+	} else {
+		d.lastLogPath = ""
+		d.lastLogLines = nil
+	}
 	d.logs.SetTitle(" " + snap.logTitle + " ")
 	lines := renderLogPanel(snap, d.selectedName)
 	d.logs.SetText(strings.Join(lines, "\n"))
+}
+
+func transientEmptyLogAllowed(snap snapshot, selectedName string) bool {
+	if snap.logTitle == supervisorLogTitle || snap.logTitle == databasePanelTitle {
+		return false
+	}
+	node := findSelectedNode(snap.nodes, selectedName)
+	if node == nil {
+		return false
+	}
+	switch node.State {
+	case api.StatePending, api.StateReady, api.StateRunning, api.StateDirty:
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *dashboard) scrollLogs(delta int) {
@@ -681,6 +729,7 @@ func loadSnapshot(root, instanceID string, showSupervisor bool, showDatabase boo
 		supervisor:   supervisor,
 		urls:         instanceURLs(inst),
 		logTitle:     logTitle,
+		logPath:      logPath,
 		logLines:     logLines,
 		prisma:       prisma,
 		prismaErr:    prismaErr,
@@ -1091,217 +1140,43 @@ func generatePrismaMigrationFromTUI(root, instanceID, name string, progressFns .
 	if name == "" {
 		return fmt.Errorf("migration name is required")
 	}
-	reportTUIProgress(progress, "loading Prisma migration target...")
-	inst, err := instance.Load(root, instanceID)
-	if err != nil {
-		return err
-	}
-	cfg, err := resolvePrismaConfig(root, inst)
-	if err != nil {
-		return err
-	}
-	if !cfg.Available {
-		return fmt.Errorf("no Prisma schema detected or configured")
-	}
+	_ = instanceID
+	reportTUIProgress(progress, "connecting to daemon...")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	if err := runPrismaMigrationTargetFromTUI(ctx, root, inst, name, progress); err != nil {
-		return err
-	}
-	return nil
+	_, err := callDaemonForTUI(ctx, root, daemon.Request{
+		Action:       daemon.ActionPrismaMigration,
+		StreamEvents: true,
+		Env: map[string]string{
+			"DEVFLOW_MIGRATION_NAME": name,
+		},
+	}, func(evt api.Event) {
+		reportDaemonEventForTUI(evt, progress)
+	})
+	return err
 }
 
-func runPrismaMigrationTargetFromTUI(ctx context.Context, root string, inst *api.Instance, name string, progress func(string)) error {
-	projectName, p, err := resolveRelaunchProject(root, inst)
-	if err != nil {
-		return err
-	}
-	target, err := resolvePrismaMigrationTarget(p)
-	if err != nil {
-		return err
-	}
-	relaunchTarget := strings.TrimSpace(inst.LastRun.Target)
-	relaunchMode := inst.LastRun.Mode
-	relaunchMaxParallel := inst.LastRun.MaxParallel
-	shouldRelaunch := inst.LastRun.Detached && relaunchTarget != "" && relaunchTarget != target
-
-	if inst.Supervisor.PID > 0 {
-		reportTUIProgress(progress, "pausing detached target %q before migration...", relaunchTarget)
-		supervisorPID := inst.Supervisor.PID
-		if err := instance.StopSupervisor(inst); err != nil {
-			return fmt.Errorf("pause detached target: %w", err)
-		}
-		waitForPIDExit(supervisorPID, 5*time.Second)
-	}
-
-	reportTUIProgress(progress, "running project migration target %q...", target)
-	if err := runProjectTargetOnceWithEnv(ctx, root, inst.ID, p, target, map[string]string{
-		"DEVFLOW_MIGRATION_NAME": name,
-	}, progress); err != nil {
-		return err
-	}
-	if shouldRelaunch {
-		reportTUIProgress(progress, "relaunching detached target %q...", relaunchTarget)
-		latest, err := instance.Load(root, inst.ID)
-		if err != nil {
-			return err
-		}
-		if _, err := launchDetachedForTUI(root, latest, relaunchTarget, projectName, relaunchMode, relaunchMaxParallel); err != nil {
-			return fmt.Errorf("relaunch detached target: %w", err)
-		}
-		reportTUIProgress(progress, "detached target %q relaunched", relaunchTarget)
-	}
-	return nil
-}
-
-func resolvePrismaMigrationTarget(p project.Project) (string, error) {
-	for _, candidate := range []string{"new-migration", "migration_new", "prisma_new_migration"} {
-		if _, _, err := project.ResolveExecutionProject(p, candidate); err == nil {
-			return candidate, nil
-		}
-	}
-	taskNames := map[string]bool{}
-	for _, task := range p.Tasks() {
-		if strings.HasSuffix(task.Name, "_new_migration") || task.Name == "prisma_new_migration" {
-			taskNames[task.Name] = true
-		}
-	}
-	targets := make([]string, 0, 1)
-	for _, target := range p.Targets() {
-		for _, root := range target.RootTasks {
-			if taskNames[root] {
-				targets = append(targets, target.Name)
-				break
-			}
-		}
-	}
-	sort.Strings(targets)
-	if len(targets) == 1 {
-		return targets[0], nil
-	}
-	if len(targets) > 1 {
-		return "", fmt.Errorf("multiple Prisma migration targets found: %s", strings.Join(targets, ", "))
-	}
-	tasks := make([]string, 0, len(taskNames))
-	for name := range taskNames {
-		tasks = append(tasks, name)
-	}
-	sort.Strings(tasks)
-	if len(tasks) == 1 {
-		return tasks[0], nil
-	}
-	return "", fmt.Errorf("no Prisma migration target found; add b.Target(\"new-migration\", prisma.NewMigration(b))")
-}
-
-func runProjectTargetOnceWithEnv(ctx context.Context, root, instanceID string, p project.Project, target string, env map[string]string, progress func(string)) error {
-	execProject, resolvedTarget, err := project.ResolveExecutionProject(p, target)
-	if err != nil {
-		return err
-	}
-	if err := withTemporaryInstanceEnv(root, instanceID, env, func() error {
-		eng, err := engine.New(execProject, root)
-		if err != nil {
-			return err
-		}
-		eventCtx, cancel := context.WithCancel(ctx)
-		events := eng.SubscribeEvents()
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			reportEngineEventsForTUI(eventCtx, events, progress)
-		}()
-		outcome, runErr := eng.Run(ctx, engine.Request{
-			Target:   resolvedTarget,
-			Worktree: root,
-			Mode:     api.ModeCI,
-		})
-		cancel()
-		<-done
-		if runErr != nil {
-			return runErr
-		}
-		if outcome == nil || !outcome.Result.Success {
-			return fmt.Errorf("migration target %q did not finish successfully", target)
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	return nil
-}
-
-func withTemporaryInstanceEnv(root, instanceID string, env map[string]string, fn func() error) error {
-	inst, err := instance.Load(root, instanceID)
-	if err != nil {
-		return err
-	}
-	previous := map[string]string{}
-	had := map[string]bool{}
-	if inst.Env == nil {
-		inst.Env = map[string]string{}
-	}
-	for key, value := range env {
-		previous[key], had[key] = inst.Env[key]
-		inst.Env[key] = value
-	}
-	if err := instance.Save(inst); err != nil {
-		return err
-	}
-	defer func() {
-		current, err := instance.Load(root, instanceID)
-		if err != nil {
+func reportDaemonEventForTUI(evt api.Event, progress func(string)) {
+	switch evt.Type {
+	case api.EventLogLine:
+		if evt.Task == "daemon" && evt.Line != "" {
+			reportTUIProgress(progress, compactTUIStatus(evt.Line, 120))
 			return
 		}
-		if current.Env == nil {
-			current.Env = map[string]string{}
+		if evt.Task != "" && evt.Line != "" {
+			reportTUIProgress(progress, "%s %s: %s", evt.Task, evt.Stream, compactTUIStatus(evt.Line, 120))
 		}
-		for key := range env {
-			if had[key] {
-				current.Env[key] = previous[key]
-			} else {
-				delete(current.Env, key)
-			}
+	case api.EventRunStarted:
+		reportTUIProgress(progress, "run started: %s", evt.Target)
+	case api.EventRunFinished:
+		if evt.Success != nil && *evt.Success {
+			reportTUIProgress(progress, "run finished: %s", evt.Target)
+		} else if evt.Error != "" {
+			reportTUIProgress(progress, "run failed: %s", compactTUIStatus(evt.Error, 120))
 		}
-		_ = instance.Save(current)
-	}()
-	return fn()
-}
-
-func reportEngineEventsForTUI(ctx context.Context, events <-chan api.Event, progress func(string)) {
-	report := func(evt api.Event) {
-		switch evt.Type {
-		case api.EventRunStarted:
-			reportTUIProgress(progress, "migration run started: %s", evt.Target)
-		case api.EventTaskState:
-			if evt.Task != "" && evt.State != "" {
-				reportTUIProgress(progress, "%s: %s", evt.Task, evt.State)
-			}
-		case api.EventLogLine:
-			line := strings.TrimSpace(evt.Line)
-			if evt.Task != "" && line != "" {
-				reportTUIProgress(progress, "%s %s: %s", evt.Task, evt.Stream, compactTUIStatus(line, 120))
-			}
-		case api.EventRunFinished:
-			if evt.Success != nil && *evt.Success {
-				reportTUIProgress(progress, "migration run finished: %s", evt.Target)
-			} else if strings.TrimSpace(evt.Error) != "" {
-				reportTUIProgress(progress, "migration run failed: %s", compactTUIStatus(evt.Error, 120))
-			}
-		}
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			for {
-				select {
-				case evt := <-events:
-					report(evt)
-				default:
-					return
-				}
-			}
-		case evt := <-events:
-			report(evt)
+	case api.EventTaskState:
+		if evt.Task != "" && evt.State != "" {
+			reportTUIProgress(progress, "%s: %s", evt.Task, evt.State)
 		}
 	}
 }
@@ -1459,196 +1334,18 @@ func markAllStoppedNodes(worktree, instanceID string) error {
 }
 
 func invalidateAndRerunDownstream(root, instanceID, task string, onTransition func()) error {
-	inst, err := instance.Load(root, instanceID)
-	if err != nil {
-		return err
-	}
-	projectName, p, err := resolveRelaunchProject(root, inst)
-	if err != nil {
-		return err
-	}
-	if inst.LastRun.Target == "" {
-		return fmt.Errorf("instance has no recorded project/target to relaunch")
-	}
-	g, resolvedTarget, err := executionGraphForProject(p, inst.LastRun.Target)
-	if err != nil {
-		return err
-	}
-	toInvalidate, err := downstreamInvalidateTasks(g, resolvedTarget, task)
-	if err != nil {
-		return err
-	}
-	if err := writeInvalidateTransition(root, instanceID, resolvedTarget, g, toInvalidate); err != nil {
-		return err
-	}
+	_ = instanceID
 	if onTransition != nil {
 		onTransition()
 	}
-	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p))
-	for _, name := range toInvalidate {
-		if err := store.Invalidate(name); err != nil {
-			return err
-		}
-	}
-	if inst.Supervisor.PID > 0 {
-		supervisorPID := inst.Supervisor.PID
-		if err := instance.StopSupervisor(inst); err != nil {
-			return err
-		}
-		waitForPIDExit(supervisorPID, 5*time.Second)
-	}
-	_, err = launchDetached(root, inst, inst.LastRun.Target, projectName, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+	_, err := callDaemonForTUI(context.Background(), root, daemon.Request{Action: daemon.ActionInvalidate, Task: task}, nil)
 	return err
 }
 
 func retargetAndRelaunch(root, instanceID, task string) error {
-	inst, err := instance.Load(root, instanceID)
-	if err != nil {
-		return err
-	}
-	projectName, p, err := resolveRelaunchProject(root, inst)
-	if err != nil {
-		return err
-	}
-	if _, _, err := project.ResolveExecutionProject(p, task); err != nil {
-		return err
-	}
-	if inst.Supervisor.PID > 0 {
-		supervisorPID := inst.Supervisor.PID
-		if err := instance.StopSupervisor(inst); err != nil {
-			return err
-		}
-		waitForPIDExit(supervisorPID, 5*time.Second)
-	}
-	_, err = launchDetached(root, inst, task, projectName, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+	_ = instanceID
+	_, err := callDaemonForTUI(context.Background(), root, daemon.Request{Action: daemon.ActionRetarget, Target: task}, nil)
 	return err
-}
-
-func downstreamInvalidateTasks(g *graph.Graph, target, selected string) ([]string, error) {
-	closure, err := g.TargetClosure(target)
-	if err != nil {
-		return nil, err
-	}
-	inClosure := map[string]bool{}
-	for _, name := range closure {
-		inClosure[name] = true
-	}
-	selectedTask, ok := g.Tasks[selected]
-	if !ok {
-		return nil, fmt.Errorf("unknown task %q", selected)
-	}
-	candidates := []string{}
-	if selectedTask.Kind == project.KindGroup {
-		candidates = g.Upstream([]string{selected})
-	} else {
-		candidates = g.Downstream([]string{selected})
-	}
-	out := collectInvalidateTasks(g, inClosure, candidates)
-	sort.Strings(out)
-	return out, nil
-}
-
-func collectInvalidateTasks(g *graph.Graph, inClosure map[string]bool, names []string) []string {
-	out := make([]string, 0, len(names))
-	seen := map[string]bool{}
-	for _, name := range names {
-		if !inClosure[name] || seen[name] {
-			continue
-		}
-		task := g.Tasks[name]
-		if task.Kind == project.KindOnce && task.Cache {
-			out = append(out, name)
-			seen[name] = true
-		}
-	}
-	return out
-}
-
-func writeInvalidateTransition(root, instanceID, target string, g *graph.Graph, invalidated []string) error {
-	state, err := instance.LoadStatus(root, instanceID)
-	if err != nil {
-		return err
-	}
-	impacted, err := impactedRerunTasks(g, target, invalidated)
-	if err != nil {
-		return err
-	}
-	invalidatedSet := make(map[string]bool, len(invalidated))
-	for _, name := range invalidated {
-		invalidatedSet[name] = true
-	}
-	impactedSet := make(map[string]bool, len(impacted))
-	for _, name := range impacted {
-		impactedSet[name] = true
-	}
-	for name, node := range state.Nodes {
-		if invalidatedSet[name] {
-			node.State = api.StateDirty
-			node.LastRunKey = ""
-			node.LastError = ""
-			node.PID = 0
-			state.Nodes[name] = node
-			continue
-		}
-		if !impactedSet[name] {
-			continue
-		}
-		node.LastError = ""
-		node.PID = 0
-		switch node.Kind {
-		case string(project.KindService):
-			node.State = api.StatePending
-		case string(project.KindGroup), string(project.KindWarmup), string(project.KindOnce):
-			if node.State != api.StateDirty {
-				node.State = api.StatePending
-			}
-		}
-		state.Nodes[name] = node
-	}
-	return instance.SaveStatus(root, instanceID, state.Target, state.Mode, state.Nodes)
-}
-
-func impactedRerunTasks(g *graph.Graph, target string, invalidated []string) ([]string, error) {
-	closure, err := g.TargetClosure(target)
-	if err != nil {
-		return nil, err
-	}
-	inClosure := make(map[string]bool, len(closure))
-	for _, name := range closure {
-		inClosure[name] = true
-	}
-	downstream := g.Downstream(invalidated)
-	out := make([]string, 0, len(downstream))
-	seen := make(map[string]bool, len(downstream))
-	for _, name := range downstream {
-		if !inClosure[name] || seen[name] {
-			continue
-		}
-		out = append(out, name)
-		seen[name] = true
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
-func executionGraph(projectName, target string) (*graph.Graph, string, error) {
-	p, err := project.Lookup(projectName)
-	if err != nil {
-		return nil, "", err
-	}
-	return executionGraphForProject(p, target)
-}
-
-func executionGraphForProject(p project.Project, target string) (*graph.Graph, string, error) {
-	execProject, resolvedTarget, err := project.ResolveExecutionProject(p, target)
-	if err != nil {
-		return nil, "", err
-	}
-	g, err := graph.New(execProject.Tasks(), execProject.Targets())
-	if err != nil {
-		return nil, "", err
-	}
-	return g, resolvedTarget, nil
 }
 
 func resolveRelaunchProject(worktree string, inst *api.Instance) (string, project.Project, error) {
@@ -1678,79 +1375,6 @@ func resolveRelaunchProject(worktree string, inst *api.Instance) (string, projec
 		return "", nil, fmt.Errorf("instance recorded project %q is no longer registered", inst.LastRun.Project)
 	}
 	return "", nil, fmt.Errorf("unable to resolve project for relaunch")
-}
-
-func launchDetached(root string, inst *api.Instance, target, projectName string, mode api.RunMode, maxParallel int) (int, error) {
-	executable, err := detachedExecutable(root)
-	if err != nil {
-		return 0, err
-	}
-	logPath := filepath.Join(root, ".devflow", "logs", inst.ID, "supervisor.log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		return 0, err
-	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return 0, err
-	}
-	defer logFile.Close()
-
-	cmd := exec.Command(executable,
-		"__internal_supervise",
-		"--target", target,
-		"--project", projectName,
-		"--worktree", root,
-		"--mode", string(mode),
-		"--log-path", logPath,
-	)
-	if maxParallel > 0 {
-		cmd.Args = append(cmd.Args, "--max-parallel", fmt.Sprintf("%d", maxParallel))
-	}
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.Dir = root
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		return 0, err
-	}
-	if err := instance.RecordDetachedRun(inst, api.RunConfig{
-		Project:     projectName,
-		Target:      target,
-		Mode:        mode,
-		MaxParallel: maxParallel,
-		Detached:    true,
-	}, cmd.Process.Pid, logPath); err != nil {
-		return 0, err
-	}
-	return cmd.Process.Pid, nil
-}
-
-func detachedExecutable(worktree string) (string, error) {
-	current, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	target := filepath.Join(worktree, ".devflow", "bin", "devflow-launcher")
-	if err := fsutil.CopyFile(current, target); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(target, 0o755); err != nil {
-		return "", err
-	}
-	return target, nil
-}
-
-func waitForPIDExit(pid int, timeout time.Duration) {
-	if pid <= 0 || timeout <= 0 {
-		return
-	}
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); err != nil {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
 }
 
 func stateBadge(state api.NodeState) string {

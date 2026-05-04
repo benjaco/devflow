@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -9,17 +8,17 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/benjaco/devflow/internal/fsutil"
 	"github.com/benjaco/devflow/internal/version"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/cache"
-	"github.com/benjaco/devflow/pkg/database"
+	"github.com/benjaco/devflow/pkg/daemon"
 	"github.com/benjaco/devflow/pkg/engine"
 	"github.com/benjaco/devflow/pkg/graph"
 	"github.com/benjaco/devflow/pkg/instance"
@@ -46,10 +45,8 @@ func (a *App) Run(args []string) error {
 	switch args[0] {
 	case "run", "up":
 		return a.runCmd(args[1:])
-	case "__internal_exec":
-		return a.internalExecCmd(args[1:])
-	case "__internal_supervise":
-		return a.internalSuperviseCmd(args[1:])
+	case "__internal_daemon":
+		return a.internalDaemonCmd(args[1:])
 	case "restart":
 		return a.restartCmd(args[1:])
 	case "stop":
@@ -94,12 +91,19 @@ func (a *App) defaultEntry() error {
 	if err != nil {
 		return err
 	}
-	if plan.startDetached {
-		if err := a.executeDetached(plan.target, plan.projectName, root, api.ModeDev, 0, false); err != nil {
-			return err
-		}
-		waitForInitialStatus(root, plan.instanceID, 3*time.Second)
+	client, _, err := daemon.Ensure(context.Background(), root, plan.projectName)
+	if err != nil {
+		return err
 	}
+	if _, err := client.Call(context.Background(), daemon.Request{
+		Action:  daemon.ActionWatch,
+		Project: plan.projectName,
+		Target:  plan.target,
+		Detach:  true,
+	}); err != nil {
+		return err
+	}
+	waitForInitialStatus(root, plan.instanceID, 3*time.Second)
 	return tui.Run(tui.Options{Worktree: root, InstanceID: plan.instanceID})
 }
 
@@ -136,7 +140,7 @@ func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
 		}
 		return launchPlan{}, err
 	}
-	if !instance.ProcessAlive(inst.Supervisor.PID) {
+	if !instance.ProcessAlive(inst.Supervisor.PID) || inst.LastRun.Mode != api.ModeWatch || inst.LastRun.Target != target {
 		plan.startDetached = true
 	}
 	return plan, nil
@@ -174,30 +178,27 @@ func (a *App) runCmd(args []string) error {
 	if target == "" {
 		return fmt.Errorf("usage: devflow run <target>")
 	}
-	if *detach {
-		mode := api.ModeDev
-		if *ciMode {
-			mode = api.ModeCI
-		} else if *modeWatch {
-			mode = api.ModeWatch
+	if *ciMode {
+		if *detach {
+			return fmt.Errorf("run --ci is finite and does not support --detach")
 		}
-		return a.executeDetached(target, *projectName, *worktree, mode, *maxParallel, *jsonOut)
+		if *modeWatch {
+			return fmt.Errorf("run --ci is finite and does not support --watch")
+		}
+		return a.runDirect(target, *jsonOut, *worktree, *projectName, api.ModeCI, *maxParallel)
 	}
 	if *modeWatch {
-		return a.executeWatch(target, *jsonOut, *worktree, *projectName, *maxParallel)
+		return a.watchViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel)
 	}
-	root, err := resolveWorktree(*worktree)
+	return a.runViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel)
+}
+
+func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName string, mode api.RunMode, maxParallel int) error {
+	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
 		return err
 	}
-	mode := api.ModeDev
-	if *ciMode {
-		mode = api.ModeCI
-	} else if *modeWatch {
-		mode = api.ModeWatch
-	}
-
-	p, err := project.Lookup(*projectName)
+	p, err := project.Lookup(projectName)
 	if err != nil {
 		return err
 	}
@@ -213,10 +214,10 @@ func (a *App) runCmd(args []string) error {
 		Target:      resolvedTarget,
 		Worktree:    root,
 		Mode:        mode,
-		MaxParallel: *maxParallel,
+		MaxParallel: maxParallel,
 	})
 	if outcome != nil {
-		if *jsonOut {
+		if jsonOut {
 			if err := writeJSON(a.Stdout, outcome.Result); err != nil {
 				return err
 			}
@@ -225,6 +226,52 @@ func (a *App) runCmd(args []string) error {
 		_, _ = fmt.Fprintf(a.Stdout, "target=%s instance=%s success=%v cache_hits=%d\n", outcome.Result.Target, outcome.Result.InstanceID, outcome.Result.Success, len(outcome.Result.CacheHits))
 	}
 	return runErr
+}
+
+func (a *App) runViaDaemon(target string, jsonOut bool, worktreeFlag, projectName string, detach bool, maxParallel int) error {
+	root, err := resolveWorktree(worktreeFlag)
+	if err != nil {
+		return err
+	}
+	client, _, err := daemon.Ensure(context.Background(), root, projectName)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Call(context.Background(), daemon.Request{
+		Action:      daemon.ActionRun,
+		Project:     projectName,
+		Target:      target,
+		Mode:        api.ModeDev,
+		MaxParallel: maxParallel,
+		Detach:      detach,
+	})
+	if detach {
+		if resp.Started != nil {
+			payload := map[string]any{
+				"instanceId": resp.Started.InstanceID,
+				"target":     resp.Started.Target,
+				"mode":       resp.Started.Mode,
+				"detached":   true,
+				"pid":        resp.Started.DaemonPID,
+				"logPath":    resp.Started.LogPath,
+			}
+			if jsonOut {
+				return writeJSON(a.Stdout, payload)
+			}
+			_, _ = fmt.Fprintf(a.Stdout, "daemon instance=%s pid=%d target=%s\n", resp.Started.InstanceID, resp.Started.DaemonPID, resp.Started.Target)
+		}
+		return err
+	}
+	if resp.Run != nil {
+		if jsonOut {
+			if writeErr := writeJSON(a.Stdout, resp.Run); writeErr != nil {
+				return writeErr
+			}
+			return err
+		}
+		_, _ = fmt.Fprintf(a.Stdout, "target=%s instance=%s success=%v cache_hits=%d\n", resp.Run.Target, resp.Run.InstanceID, resp.Run.Success, len(resp.Run.CacheHits))
+	}
+	return err
 }
 
 func (a *App) watchCmd(args []string) error {
@@ -252,42 +299,57 @@ func (a *App) watchCmd(args []string) error {
 	if target == "" {
 		return fmt.Errorf("usage: devflow watch <target>")
 	}
-	if *detach {
-		return a.executeDetached(target, *projectName, *worktree, api.ModeWatch, *maxParallel, *jsonOut)
-	}
-	return a.executeWatch(target, *jsonOut, *worktree, *projectName, *maxParallel)
+	return a.watchViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel)
 }
 
-func (a *App) executeWatch(target string, jsonOut bool, worktreeFlag, projectName string, maxParallel int) error {
+func (a *App) watchViaDaemon(target string, jsonOut bool, worktreeFlag, projectName string, detach bool, maxParallel int) error {
 	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
 		return err
 	}
-	p, err := project.Lookup(projectName)
+	client, _, err := daemon.Ensure(context.Background(), root, projectName)
 	if err != nil {
 		return err
 	}
-	execProject, resolvedTarget, err := project.ResolveExecutionProject(p, target)
+	resp, err := client.Call(context.Background(), daemon.Request{
+		Action:      daemon.ActionWatch,
+		Project:     projectName,
+		Target:      target,
+		MaxParallel: maxParallel,
+	})
 	if err != nil {
 		return err
 	}
-	eng, err := engine.New(execProject, root)
-	if err != nil {
-		return err
+	if resp.Started == nil {
+		return fmt.Errorf("daemon did not return watch start metadata")
+	}
+	payload := map[string]any{
+		"instanceId": resp.Started.InstanceID,
+		"target":     resp.Started.Target,
+		"mode":       resp.Started.Mode,
+		"detached":   true,
+		"pid":        resp.Started.DaemonPID,
+		"logPath":    resp.Started.LogPath,
+	}
+	if detach {
+		if jsonOut {
+			return writeJSON(a.Stdout, payload)
+		}
+		_, _ = fmt.Fprintf(a.Stdout, "daemon instance=%s pid=%d target=%s\n", resp.Started.InstanceID, resp.Started.DaemonPID, resp.Started.Target)
+		return nil
 	}
 	if jsonOut {
-		events := eng.SubscribeEvents()
-		go func() {
-			for evt := range events {
-				_ = writeJSONLine(a.Stdout, evt)
-			}
-		}()
+		if err := writeJSON(a.Stdout, payload); err != nil {
+			return err
+		}
 	}
-	return eng.Watch(context.Background(), engine.Request{
-		Target:      resolvedTarget,
-		Worktree:    root,
-		Mode:        api.ModeWatch,
-		MaxParallel: maxParallel,
+	_, _ = fmt.Fprintf(a.Stdout, "watching target=%s instance=%s through daemon pid=%d\n", resp.Started.Target, resp.Started.InstanceID, resp.Started.DaemonPID)
+	subCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return client.Subscribe(subCtx, func(evt api.Event) {
+		if jsonOut {
+			_ = writeJSONLine(a.Stdout, evt)
+		}
 	})
 }
 
@@ -318,379 +380,50 @@ func (a *App) flushCmd(args []string) error {
 		return fmt.Errorf("--timeout must be positive")
 	}
 
-	startedAt := time.Now().UTC()
-	requestID := newFlushRequestID()
 	root, id, err := resolveInstance(*worktree, *instanceID)
 	if err != nil {
 		return err
 	}
-	inst, instErr := instance.Load(root, id)
-	if instErr != nil && !os.IsNotExist(instErr) {
-		return instErr
-	}
-	resolvedProjectName := *projectName
-	if strings.TrimSpace(resolvedProjectName) == "" && instErr == nil && inst.LastRun.Project != "" {
-		resolvedProjectName = inst.LastRun.Project
-	}
-	p, err := resolvedProject(resolvedProjectName, root)
+	_ = id
+	client, _, err := daemon.Ensure(context.Background(), root, *projectName)
 	if err != nil {
 		return err
 	}
-
-	supervisorLive := instErr == nil && instance.ProcessAlive(inst.Supervisor.PID)
-	if target == "" {
-		if supervisorLive {
-			target = inst.LastRun.Target
-		} else if instErr == nil && inst.LastRun.Target != "" {
-			target = inst.LastRun.Target
-		} else {
-			target = project.PreferredTarget(p)
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout+5*time.Second)
+	defer cancel()
+	resp, callErr := client.Call(ctx, daemon.Request{
+		Action:      daemon.ActionFlush,
+		Project:     *projectName,
+		Target:      target,
+		TimeoutMs:   timeout.Milliseconds(),
+		MaxParallel: *maxParallel,
+	})
+	if resp.Flush != nil {
+		return a.finishFlush(*resp.Flush, *jsonOut)
 	}
-	if target == "" {
-		result := newFlushResult(requestID, root, id, p.Name(), "", startedAt)
-		result.Issues = append(result.Issues, api.FlushIssue{
-			Kind:    "target_required",
-			Message: "no target was provided and the project does not define a preferred target",
-		})
-		return a.finishFlush(result, *jsonOut)
-	}
-	_, resolvedTarget, err := project.ResolveExecutionProject(p, target)
-	if err != nil {
-		result := newFlushResult(requestID, root, id, p.Name(), target, startedAt)
-		result.Issues = append(result.Issues, api.FlushIssue{
-			Kind:    "target_error",
-			Message: err.Error(),
-		})
-		return a.finishFlush(result, *jsonOut)
-	}
-
-	startedSupervisor := false
-	if supervisorLive {
-		if !inst.LastRun.Detached || inst.LastRun.Mode != api.ModeWatch {
-			result := newFlushResult(requestID, root, id, p.Name(), resolvedTarget, startedAt)
-			result.Issues = append(result.Issues, api.FlushIssue{
-				Kind:    "non_watch_supervisor",
-				Message: fmt.Sprintf("live detached supervisor is running mode %q, want %q", inst.LastRun.Mode, api.ModeWatch),
-				LogPath: inst.Supervisor.LogPath,
-			})
-			return a.finishFlush(result, *jsonOut)
-		}
-		if inst.LastRun.Target != resolvedTarget {
-			result := newFlushResult(requestID, root, id, p.Name(), resolvedTarget, startedAt)
-			result.Issues = append(result.Issues, api.FlushIssue{
-				Kind:    "target_mismatch",
-				Message: fmt.Sprintf("live watch supervisor target is %q, requested %q", inst.LastRun.Target, resolvedTarget),
-				LogPath: inst.Supervisor.LogPath,
-			})
-			return a.finishFlush(result, *jsonOut)
-		}
-	} else {
-		supervisorStartedAt := time.Now().UTC()
-		if _, _, _, err := a.startDetached(resolvedTarget, p.Name(), root, api.ModeWatch, *maxParallel); err != nil {
-			return err
-		}
-		startedSupervisor = true
-		if !waitForWatchReady(root, id, supervisorStartedAt, time.Until(startedAt.Add(*timeout))) {
-			result := newFlushResult(requestID, root, id, p.Name(), resolvedTarget, startedAt)
-			result.Started = true
-			result.TimedOut = true
-			result.Issues = append(result.Issues, api.FlushIssue{
-				Kind:    "timeout",
-				Message: "timed out waiting for detached watch supervisor to become ready",
-			})
-			return a.finishFlush(result, *jsonOut)
-		}
-	}
-
-	req := api.FlushRequest{
-		ID:        requestID,
-		CreatedAt: startedAt,
-		SyncPath:  instance.FlushSyncPath(root, id, requestID),
-	}
-	if err := instance.WriteFlushRequest(root, id, req); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(req.SyncPath), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(req.SyncPath, []byte(requestID+"\n"), 0o644); err != nil {
-		return err
-	}
-
-	result, ok, err := waitForFlushAck(root, id, requestID, req.SyncPath, time.Until(startedAt.Add(*timeout)))
-	if err != nil {
-		return err
-	}
-	if !ok {
-		result = newFlushResult(requestID, root, id, p.Name(), resolvedTarget, startedAt)
-		result.Started = startedSupervisor
-		result.TimedOut = true
-		result.Issues = append(result.Issues, api.FlushIssue{
-			Kind:    "timeout",
-			Message: "timed out waiting for flush acknowledgement",
-		})
-		return a.finishFlush(result, *jsonOut)
-	}
-	result.Started = startedSupervisor
-	if result.Project == "" {
-		result.Project = p.Name()
-	}
-	return a.finishFlush(result, *jsonOut)
+	return callErr
 }
 
-func (a *App) internalExecCmd(args []string) error {
-	req, err := parseInternalExecArgs(args, a.Stderr)
-	if err != nil {
-		return err
-	}
-	root, err := resolveWorktree(req.worktree)
-	if err != nil {
-		return err
-	}
-	p, err := project.Lookup(req.projectName)
-	if err != nil {
-		return err
-	}
-	execProject, resolvedTarget, err := project.ResolveExecutionProject(p, req.target)
-	if err != nil {
-		return err
-	}
-	eng, err := engine.New(execProject, root)
-	if err != nil {
-		return err
-	}
-	instanceID, _, err := instance.IDForWorktree(root)
-	if err != nil {
-		return err
-	}
-	stopEvents, err := a.startEventCapture(root, instanceID, eng.SubscribeEvents())
-	if err != nil {
-		return err
-	}
-	defer stopEvents()
-	runReq := engine.Request{
-		Target:      resolvedTarget,
-		Worktree:    root,
-		Mode:        api.RunMode(req.mode),
-		MaxParallel: req.maxParallel,
-	}
-	switch runReq.Mode {
-	case api.ModeWatch:
-		return eng.Watch(context.Background(), runReq)
-	default:
-		_, err := eng.Run(context.Background(), runReq)
-		return err
-	}
-}
-
-func (a *App) startEventCapture(worktree, instanceID string, events <-chan api.Event) (func(), error) {
-	path := instance.EventsPath(worktree, instanceID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		defer file.Close()
-		for {
-			select {
-			case evt := <-events:
-				_ = writeJSONLine(file, evt)
-			case <-stop:
-				for {
-					select {
-					case evt := <-events:
-						_ = writeJSONLine(file, evt)
-					default:
-						return
-					}
-				}
-			}
-		}
-	}()
-	return func() {
-		close(stop)
-		<-done
-	}, nil
-}
-
-func (a *App) internalSuperviseCmd(args []string) error {
-	fs := flag.NewFlagSet("__internal_exec", flag.ContinueOnError)
+func (a *App) internalDaemonCmd(args []string) error {
+	fs := flag.NewFlagSet("__internal_daemon", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
-	target := fs.String("target", "", "")
 	projectName := fs.String("project", "", "")
 	worktree := fs.String("worktree", "", "")
-	mode := fs.String("mode", string(api.ModeDev), "")
-	maxParallel := fs.Int("max-parallel", 0, "")
 	logPath := fs.String("log-path", "", "")
 	if err := fs.Parse(args); err != nil {
 		return err
-	}
-	if *logPath == "" {
-		return fmt.Errorf("missing --log-path for __internal_supervise")
 	}
 	root, err := resolveWorktree(*worktree)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(*logPath), 0o755); err != nil {
-		return err
-	}
-	logFile, err := os.OpenFile(*logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer logFile.Close()
-	writeSupervisorLine(logFile, "supervisor started target=%s mode=%s project=%s worktree=%s", *target, *mode, *projectName, root)
-
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(executable,
-		"__internal_exec",
-		"--target", *target,
-		"--project", *projectName,
-		"--worktree", root,
-		"--mode", *mode,
-		"--max-parallel", fmt.Sprintf("%d", *maxParallel),
-	)
-	cmd.Dir = root
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-	if err := cmd.Start(); err != nil {
-		writeSupervisorLine(logFile, "supervisor failed to start child: %v", err)
-		return err
-	}
-	writeSupervisorLine(logFile, "child pid=%d", cmd.Process.Pid)
-
-	done := make(chan struct{}, 2)
-	go copySupervisorStream(logFile, "stdout", stdout, done)
-	go copySupervisorStream(logFile, "stderr", stderr, done)
-	recordSupervisorExecPID(root, cmd.Process.Pid, logFile)
-	<-done
-	<-done
-	err = cmd.Wait()
-	if err != nil {
-		writeSupervisorLine(logFile, "supervisor finished with error: %v", err)
-		return err
-	}
-	writeSupervisorLine(logFile, "supervisor finished successfully")
-	return nil
-}
-
-type internalExecRequest struct {
-	target      string
-	projectName string
-	worktree    string
-	mode        string
-	maxParallel int
-}
-
-func parseInternalExecArgs(args []string, stderr io.Writer) (internalExecRequest, error) {
-	fs := flag.NewFlagSet("__internal_exec", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	target := fs.String("target", "", "")
-	projectName := fs.String("project", "", "")
-	worktree := fs.String("worktree", "", "")
-	mode := fs.String("mode", string(api.ModeDev), "")
-	maxParallel := fs.Int("max-parallel", 0, "")
-	if err := fs.Parse(args); err != nil {
-		return internalExecRequest{}, err
-	}
-	return internalExecRequest{
-		target:      *target,
-		projectName: *projectName,
-		worktree:    *worktree,
-		mode:        *mode,
-		maxParallel: *maxParallel,
-	}, nil
-}
-
-func (a *App) executeDetached(target, projectName, worktreeFlag string, mode api.RunMode, maxParallel int, jsonOut bool) error {
-	inst, logPath, pid, err := a.startDetached(target, projectName, worktreeFlag, mode, maxParallel)
-	if err != nil {
-		return err
-	}
-	payload := map[string]any{
-		"instanceId": inst.ID,
-		"target":     target,
-		"mode":       mode,
-		"detached":   true,
-		"pid":        pid,
-		"logPath":    logPath,
-	}
-	if jsonOut {
-		return writeJSON(a.Stdout, payload)
-	}
-	_, _ = fmt.Fprintf(a.Stdout, "detached instance=%s pid=%d target=%s\n", inst.ID, pid, target)
-	return nil
-}
-
-func (a *App) startDetached(target, projectName, worktreeFlag string, mode api.RunMode, maxParallel int) (*api.Instance, string, int, error) {
-	root, err := resolveWorktree(worktreeFlag)
-	if err != nil {
-		return nil, "", 0, err
-	}
-	inst, err := instance.Resolve(root, filepath.Base(root))
-	if err != nil {
-		return nil, "", 0, err
-	}
-	executable, err := detachedExecutable(root)
-	if err != nil {
-		return nil, "", 0, err
-	}
-	logPath := filepath.Join(root, ".devflow", "logs", inst.ID, "supervisor.log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		return nil, "", 0, err
-	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return nil, "", 0, err
-	}
-	defer logFile.Close()
-
-	cmd := exec.Command(executable,
-		"__internal_supervise",
-		"--target", target,
-		"--project", projectName,
-		"--worktree", root,
-		"--mode", string(mode),
-		"--log-path", logPath,
-	)
-	if maxParallel > 0 {
-		cmd.Args = append(cmd.Args, "--max-parallel", fmt.Sprintf("%d", maxParallel))
-	}
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.Dir = root
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		return nil, "", 0, err
-	}
-	if err := instance.RecordDetachedRun(inst, api.RunConfig{
-		Project:     projectName,
-		Target:      target,
-		Mode:        mode,
-		MaxParallel: maxParallel,
-		Detached:    true,
-	}, cmd.Process.Pid, logPath); err != nil {
-		return nil, "", 0, err
-	}
-	return inst, logPath, cmd.Process.Pid, nil
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return daemon.Serve(ctx, daemon.Options{
+		Worktree: root,
+		Project:  *projectName,
+		LogPath:  *logPath,
+	})
 }
 
 func (a *App) restartCmd(args []string) error {
@@ -721,52 +454,32 @@ func (a *App) restartCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	p, err := project.Lookup(*projectName)
+	_ = id
+	client, _, err := daemon.Ensure(context.Background(), root, *projectName)
 	if err != nil {
 		return err
 	}
-	g, err := graph.New(p.Tasks(), p.Targets())
-	if err != nil {
-		return err
-	}
-	selected, err := restartClosure(g, task, *upstream, *downstream)
-	if err != nil {
-		return err
-	}
-	taskDef, ok := g.Tasks[task]
-	if !ok {
-		return fmt.Errorf("unknown task %q", task)
-	}
-	if taskDef.Kind == project.KindService {
-		inst, err := instance.Load(root, id)
-		if err != nil {
-			return err
-		}
-		if !inst.LastRun.Detached || inst.LastRun.Target == "" || inst.LastRun.Project == "" {
-			return fmt.Errorf("service restart requires a previously detached run for this instance")
-		}
-		if err := instance.StopSupervisor(inst); err != nil {
-			return err
-		}
-		return a.executeDetached(inst.LastRun.Target, inst.LastRun.Project, root, inst.LastRun.Mode, inst.LastRun.MaxParallel, *jsonOut)
-	}
-	targetName := "__restart_" + task
-	wrapped := restartProject{base: p, target: project.Target{Name: targetName, RootTasks: selected}}
-	eng, err := engine.New(wrapped, root)
-	if err != nil {
-		return err
-	}
-	outcome, runErr := eng.Run(context.Background(), engine.Request{
-		Target:      targetName,
-		Worktree:    root,
-		Mode:        api.ModeDev,
+	resp, runErr := client.Call(context.Background(), daemon.Request{
+		Action:      daemon.ActionRestart,
+		Project:     *projectName,
+		Task:        task,
+		Upstream:    *upstream,
+		Downstream:  *downstream,
 		MaxParallel: *maxParallel,
 	})
-	if outcome != nil {
+	if resp.Run != nil {
 		if *jsonOut {
-			return writeJSON(a.Stdout, outcome.Result)
+			if err := writeJSON(a.Stdout, resp.Run); err != nil {
+				return err
+			}
+			return runErr
 		}
-		_, _ = fmt.Fprintf(a.Stdout, "restarted=%s success=%v cache_hits=%d\n", task, outcome.Result.Success, len(outcome.Result.CacheHits))
+		_, _ = fmt.Fprintf(a.Stdout, "restarted=%s success=%v cache_hits=%d\n", task, resp.Run.Success, len(resp.Run.CacheHits))
+	} else if runErr == nil {
+		if *jsonOut {
+			return writeJSON(a.Stdout, map[string]any{"restarted": task, "success": true})
+		}
+		_, _ = fmt.Fprintf(a.Stdout, "restarted=%s\n", task)
 	}
 	return runErr
 }
@@ -789,38 +502,18 @@ func (a *App) stopCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	inst, err := instance.Load(root, id)
+	_ = id
+	client, _, err := daemon.Ensure(context.Background(), root, "")
 	if err != nil {
 		return err
 	}
-	taskName := ""
-	if !*all {
-		taskName = *task
-	}
-	var stopped []string
-	if *all {
-		stopped, err = instance.StopAll(inst, stopAllExtraProcessRefs(root, id, inst))
-	} else {
-		stopped, err = instance.StopProcesses(inst, taskName)
-	}
+	resp, err := client.Call(context.Background(), daemon.Request{Action: daemon.ActionStop, All: *all, Task: *task})
 	if err != nil {
 		return err
 	}
-	if *all && inst.DB.ContainerName != "" {
-		if err := database.New().StopRuntime(context.Background(), inst.DB); err != nil {
-			return err
-		}
-		stopped = append(stopped, "database")
-		sort.Strings(stopped)
-	}
-	if *all {
-		if err := markAllStoppedNodes(root, id); err != nil {
-			return err
-		}
-	} else {
-		if err := markStoppedNodes(root, id, stopped); err != nil {
-			return err
-		}
+	stopped := []string{}
+	if resp.Stop != nil {
+		stopped = resp.Stop.Stopped
 	}
 	payload := map[string]any{
 		"instanceId": id,
@@ -831,22 +524,6 @@ func (a *App) stopCmd(args []string) error {
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "stopped: %s\n", strings.Join(stopped, ", "))
 	return nil
-}
-
-func recordSupervisorExecPID(worktree string, pid int, logFile *os.File) {
-	deadline := time.Now().Add(2 * time.Second)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		err := instance.RecordSupervisorExec(worktree, pid)
-		if err == nil {
-			return
-		}
-		lastErr = err
-		time.Sleep(50 * time.Millisecond)
-	}
-	if lastErr != nil {
-		writeSupervisorLine(logFile, "failed to record child pid=%d: %v", pid, lastErr)
-	}
 }
 
 func (a *App) cacheCmd(args []string) error {
@@ -982,49 +659,19 @@ func (a *App) statusCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	inst, err := instance.Load(root, id)
+	_ = id
+	client, _, err := daemon.Ensure(context.Background(), root, "")
 	if err != nil {
 		return err
 	}
-	state, err := instance.LoadStatus(root, id)
+	resp, err := client.Call(context.Background(), daemon.Request{Action: daemon.ActionStatus})
 	if err != nil {
 		return err
 	}
-	supervisor := supervisorStatus(inst)
-	if supervisor != nil && !supervisor.Alive {
-		if err := instance.ClearSupervisor(inst); err != nil {
-			return err
-		}
-		if err := markAllStoppedNodes(root, id); err != nil {
-			return err
-		}
-		inst, err = instance.Load(root, id)
-		if err != nil {
-			return err
-		}
-		state, err = instance.LoadStatus(root, id)
-		if err != nil {
-			return err
-		}
-		supervisor = supervisorStatus(inst)
+	if resp.Status == nil {
+		return fmt.Errorf("daemon did not return status")
 	}
-	nodes := make([]api.NodeStatus, 0, len(state.Nodes))
-	for _, node := range state.Nodes {
-		nodes = append(nodes, node)
-	}
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
-	out := api.StatusResult{
-		InstanceID: id,
-		Worktree:   root,
-		Target:     state.Target,
-		Mode:       state.Mode,
-		UpdatedAt:  state.UpdatedAt,
-		Ports:      inst.Ports,
-		DB:         instance.DisplayDB(inst.DB),
-		URLs:       instanceURLs(inst),
-		Supervisor: supervisor,
-		Nodes:      nodes,
-	}
+	out := *resp.Status
 	if *jsonOut {
 		return writeJSON(a.Stdout, out)
 	}
@@ -1053,7 +700,7 @@ func (a *App) statusCmd(args []string) error {
 		_, _ = fmt.Fprintf(a.Stdout, "supervisor: %s pid=%d log=%s\n", state, out.Supervisor.PID, out.Supervisor.LogPath)
 	}
 	_, _ = fmt.Fprintln(a.Stdout)
-	for _, node := range nodes {
+	for _, node := range out.Nodes {
 		_, _ = fmt.Fprintf(a.Stdout, "%-20s %-10s %s\n", node.Name, node.Kind, node.State)
 	}
 	return nil
@@ -1881,40 +1528,6 @@ func writeJSON(w io.Writer, v any) error {
 	data = append(data, '\n')
 	_, err = w.Write(data)
 	return err
-}
-
-func detachedExecutable(worktree string) (string, error) {
-	current, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	target := filepath.Join(worktree, ".devflow", "bin", "devflow-launcher")
-	if err := fsutil.CopyFile(current, target); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(target, 0o755); err != nil {
-		return "", err
-	}
-	return target, nil
-}
-
-func copySupervisorStream(logFile *os.File, stream string, input io.Reader, done chan<- struct{}) {
-	defer func() { done <- struct{}{} }()
-	scanner := bufio.NewScanner(input)
-	for scanner.Scan() {
-		writeSupervisorLine(logFile, "%s: %s", stream, scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
-		writeSupervisorLine(logFile, "%s scan error: %v", stream, err)
-	}
-}
-
-func writeSupervisorLine(logFile *os.File, format string, args ...any) {
-	if logFile == nil {
-		return
-	}
-	line := fmt.Sprintf(format, args...)
-	_, _ = fmt.Fprintf(logFile, "%s %s\n", time.Now().UTC().Format(time.RFC3339), line)
 }
 
 func waitForPIDExit(pid int, timeout time.Duration) {

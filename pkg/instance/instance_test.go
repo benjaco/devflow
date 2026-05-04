@@ -192,6 +192,19 @@ func TestFlushRequestAndAckRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDaemonSocketPathUsesShortTempDirectory(t *testing.T) {
+	path, err := DaemonSocketPath("abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(path, "devflow-daemon") || !strings.HasSuffix(path, "abc123.sock") {
+		t.Fatalf("unexpected daemon socket path %q", path)
+	}
+	if strings.Contains(path, ".devflow") {
+		t.Fatalf("daemon socket path should not live under worktree state: %q", path)
+	}
+}
+
 func TestCacheRootUsesSingleUserCacheAcrossWorktrees(t *testing.T) {
 	mainRepo, sibling := setupGitWorktrees(t)
 	first := CacheRoot()

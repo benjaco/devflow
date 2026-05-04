@@ -35,7 +35,8 @@ Running bare `devflow` now acts as the default operator entry path:
 - compiles a worktree-local binary into `<worktree>/.devflow/bin/devflow-local` when the project file or Devflow version/source inputs are newer
 - `exec`s into that worktree-local binary for all normal commands
 - chooses the project's preferred default target (`up`, `fullstack`, or the adapter-defined default)
-- if no detached supervisor is live for the current worktree, starts that target detached
+- ensures the per-worktree daemon is running
+- if no daemon-owned watch loop is active for that target, starts the default target in daemon-owned watch mode
 - opens the TUI for the current worktree
 
 There is currently no built-in adapter fallback. Missing `devflow.project.go` is a hard error.
@@ -43,10 +44,10 @@ There is currently no built-in adapter fallback. Missing `devflow.project.go` is
 `run` provisions an instance, executes the target closure, and restores cacheable one-shot tasks when possible.
 
 Service lifecycle contract:
-- attached `devflow run <target>` waits for service readiness and then keeps supervised services alive until interrupted or until a service exits
+- attached non-CI `devflow run <target>` connects to the per-worktree daemon, waits for service readiness, and then keeps supervised services alive until interrupted or until a service exits
 - if a service exits during attached `run`, the command returns a service-exited error
-- `devflow run <target> --ci --json` is finite; service tasks are started, readiness is checked, services are stopped, and status records those services as `stopped`
-- `devflow run <target> --detach --json` returns after launching the detached supervisor; it is not a health/readiness gate
+- `devflow run <target> --ci --json` is finite and deliberately bypasses the daemon; service tasks are started, readiness is checked, services are stopped, and status records those services as `stopped`
+- `devflow run <target> --detach --json` returns after asking the daemon to launch the target; it is not a health/readiness gate
 - use `devflow watch <target> --detach --json` plus `devflow flush <target> --json` when automation needs a detached environment that is proven settled and healthy
 - finite check/test targets with service dependencies should generally use `devflow run <target> --ci --json`
 - `devflow stop --all --json` also stops the instance-managed database container when one is recorded; it does not remove the Docker volume
@@ -60,7 +61,7 @@ Implemented `run` flags include:
 - `--project`
 - `--max-parallel`
 
-`watch` runs an initial watch-mode cycle, then keeps polling for changes and reruns only the affected downstream slice. In JSON mode it emits the typed event stream line-by-line.
+`watch` connects to the per-worktree daemon, runs an initial watch-mode cycle, then keeps polling for changes and reruns only the affected downstream slice. In attached JSON mode it emits the typed event stream line-by-line.
 
 Watch file matching is driven by adapter task inputs. Changed files directly affect tasks whose `Inputs.Files` or `Inputs.Dirs` match the changed paths, then the engine cascades through downstream tasks that are eligible to rerun in watch mode.
 
@@ -82,7 +83,7 @@ For watch-cycle events:
 
 `watch` also supports `--detach`.
 
-`flush` is the AI readiness gate for detached watch workflows. It makes sure a detached `watch` supervisor is running for the selected target, writes a flush request plus a sync sentinel, waits until the watcher acknowledges that sentinel after the current watch batch settles, and then returns the target-closure health result.
+`flush` is the AI readiness gate for detached watch workflows. It makes sure the per-worktree daemon is running a `watch` loop for the selected target, writes a flush request plus a sync sentinel, waits until the watcher acknowledges that sentinel after the current watch batch settles, and then returns the target-closure health result.
 
 Usage:
 
@@ -98,17 +99,17 @@ devflow flush [target] --max-parallel <n>
 
 Target resolution:
 - a positional `target` wins
-- without a positional target, a live detached watch supervisor reuses `inst.LastRun.Target`
-- without a live supervisor, `inst.LastRun.Target` is reused when present
+- without a positional target, a live daemon watch loop reuses `inst.LastRun.Target`
+- without a live watch loop, `inst.LastRun.Target` is reused when present
 - otherwise the project preferred target is used
 
-Supervisor behavior:
-- no detached supervisor: starts `devflow watch <target> --detach`
-- live detached watch supervisor for the same target: reused
-- live detached watch supervisor for a different target: fails with `target_mismatch`
-- live detached non-watch supervisor: fails with `non_watch_supervisor`
+Daemon behavior:
+- no daemon-owned watch loop: starts `devflow watch <target> --detach` through the daemon
+- live daemon watch loop for the same target: reused
+- live daemon watch loop for a different target: fails with `target_mismatch`
+- live daemon non-watch work: fails with `non_watch_supervisor`
 
-`flush --json` returns `FlushResult` with the request ID, instance ID, worktree, project, target, mode, whether a supervisor was started, sync/health success, node states, service health, and structured issues. The command exits non-zero when `success=false`, including timeout and health-check failures.
+`flush --json` returns `FlushResult` with the request ID, instance ID, worktree, project, target, mode, whether a daemon watch loop was started, sync/health success, node states, service health, and structured issues. The command exits non-zero when `success=false`, including timeout and health-check failures.
 
 `version` prints the installed Devflow version. `version --json` returns:
 
@@ -134,9 +135,9 @@ go install github.com/benjaco/devflow/cmd/devflow@latest
 
 Bare `docs` is intentionally a usage error so agents and users do not accidentally pull both context lanes into one prompt. The docs commands are projectless, have no flags, have no JSON mode, and do not print contributor docs.
 
-`restart` supports rerunning non-service task slices from the CLI. For service tasks, if the instance was started with a detached run, `restart` stops the detached supervisor and relaunches the last detached target.
+`restart` connects to the daemon. It supports rerunning non-service task slices from the CLI. For service tasks, if the instance has a recorded run target, `restart` asks the daemon to relaunch that target.
 
-`stop` terminates persisted service PIDs for a selected task. With `--all`, it reconciles all known detached runtime process groups for the instance: supervisor, child `__internal_exec`, tracked service tasks, and PID-bearing status nodes. It then clears persisted supervisor/process refs and updates nonterminal node state to `stopped`.
+`stop` connects to the daemon. It terminates persisted service PIDs for a selected task. With `--all`, it reconciles all known runtime process groups for the instance: legacy supervisor/executor PIDs, tracked service tasks, and PID-bearing status nodes. It then clears persisted process refs and updates nonterminal node state to `stopped`. The daemon process itself can remain alive as the worktree control plane.
 
 `doctor` supports `--target <target>`. Without a target it checks the full adapter required CLI catalog. With a target it resolves the target or task name and checks only required CLIs attached through `RequiredCLIs` to that target and its task closure. JSON includes `project`, `target`, and `cliScope`.
 
@@ -150,32 +151,32 @@ Bare `docs` is intentionally a usage error so agents and users do not accidental
 - assigned ports
 - sanitized DB details
 - derived local URLs such as `backend`
-- detached supervisor PID, child executor PID, liveness, and log path when present
+- daemon/supervisor PID, liveness, and log path when present
 
 Task states now distinguish:
 - `failed`: the task itself failed
 - `migration_needed`: the task intentionally blocked because a database migration must be authored before downstream work can run
 - `canceled`: the task was interrupted because another task failed or the run was canceled
 
-`logs` supports task logs as before and also accepts `supervisor` to read the detached supervisor log directly.
+`logs` supports task logs as before and also accepts `supervisor` to read the daemon/supervisor log directly.
 
 Task log files now represent the current run attempt for that task. They are truncated when a task starts again, so older successful output does not stay mixed into a newer failed or canceled attempt.
 
-`tui` now opens a live operator console for an existing instance. The first slice includes:
+`tui` now opens a live operator console connected to the per-worktree daemon. The first slice includes:
 - instance/runtime header
 - live task list with selection
 - selected-task metadata
 - live tail of the selected task log
-- toggle to the detached supervisor log
+- toggle to the daemon/supervisor log
 - `d` toggles a database/Prisma panel with managed Postgres identity and recent cached Prisma migration-prefix snapshots; `F2` is a backup key
-- the database/Prisma panel flags schema/migration drift and `m` asks for a migration name, then runs the project migration target such as `new-migration` through the normal engine and relaunches the previously detached target; `F4` is a backup key
+- the database/Prisma panel flags schema/migration drift and `m` asks for a migration name, then sends a daemon action that runs the project migration target such as `new-migration` through the daemon-owned engine and relaunches the previously detached target; `F4` is a backup key
 - while the TUI creates a Prisma migration, the footer status reports target/task state and the latest task output line
 - global shortcuts are disabled while text-input popups are focused, so migration names can contain normal letters
 - running tasks pinned first and pending work directly below them
 - `i` on the selected task invalidates the selected downstream cacheable slice and relaunches the current target
 - `t` on the selected task updates the detached run target to that task and relaunches the instance on the selected task closure
 - popup confirm and text prompts for interactive tasks that emit `interaction_requested` events
-- primary live refresh from the persisted detached event stream at `.devflow/state/instances/<instance-id>/events.jsonl`
+- primary live refresh from the daemon event subscription, with the persisted event stream at `.devflow/state/instances/<instance-id>/events.jsonl` as fallback
 
 Interactive prompt answers are written back through the instance interaction directory, so detached runs can still receive operator input from the TUI.
 

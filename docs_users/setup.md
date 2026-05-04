@@ -192,7 +192,7 @@ Recommended precedence:
 
 With the builder API, use `b.DotEnv(".env")` and `b.Env(...)` instead of hand-rolling env parsing.
 
-Runtime env is persisted under `.devflow/state` for detached runs, status, and relaunches. Keep `.devflow/` ignored, avoid storing long-lived production secrets in runtime env, and override service-specific values such as `PORT` for test commands when needed.
+Runtime env is persisted under `.devflow/state` for daemon-owned runs, status, and relaunches. Keep `.devflow/` ignored, avoid storing long-lived production secrets in runtime env, and override service-specific values such as `PORT` for test commands when needed.
 
 ## Required CLIs
 

@@ -18,6 +18,7 @@ import (
 	gonextmonorepo "github.com/benjaco/devflow/examples/go-next-monorepo"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/cache"
+	"github.com/benjaco/devflow/pkg/daemon"
 	"github.com/benjaco/devflow/pkg/instance"
 	"github.com/benjaco/devflow/pkg/process"
 	"github.com/benjaco/devflow/pkg/project"
@@ -187,6 +188,13 @@ func (graphExplainCLIProject) Targets() []project.Target {
 }
 
 func init() {
+	daemon.SetStartDaemonFuncForTest(func(worktree, instanceID, projectName string) error {
+		logPath := filepath.Join(worktree, ".devflow", "logs", instanceID, "daemon.log")
+		go func() {
+			_ = daemon.Serve(context.Background(), daemon.Options{Worktree: worktree, Project: projectName, LogPath: logPath})
+		}()
+		return nil
+	})
 	project.Register(failCLIProject{})
 	project.Register(taskTargetCLIProject{})
 	project.Register(depsCLIProject{})
@@ -874,7 +882,7 @@ func TestDefaultLaunchPlanStartsDetachedForFreshDetectedWorktree(t *testing.T) {
 	}
 }
 
-func TestDefaultLaunchPlanAttachesToExistingDetachedSupervisor(t *testing.T) {
+func TestDefaultLaunchPlanRestartsExistingNonWatchSupervisorAsWatch(t *testing.T) {
 	worktree := t.TempDir()
 	if err := embeddedwebapp.SeedWorktree(worktree); err != nil {
 		t.Fatal(err)
@@ -903,8 +911,35 @@ func TestDefaultLaunchPlanAttachesToExistingDetachedSupervisor(t *testing.T) {
 	if plan.target != "up" {
 		t.Fatalf("unexpected target %q", plan.target)
 	}
+	if !plan.startDetached {
+		t.Fatal("expected existing live non-watch supervisor to restart as watch")
+	}
+}
+
+func TestDefaultLaunchPlanReusesExistingWatchDaemon(t *testing.T) {
+	worktree := t.TempDir()
+	if err := embeddedwebapp.SeedWorktree(worktree); err != nil {
+		t.Fatal(err)
+	}
+	inst, err := instance.Resolve(worktree, filepath.Base(worktree))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.RecordDetachedRun(inst, api.RunConfig{
+		Project:  "embedded-web-app",
+		Target:   "up",
+		Mode:     api.ModeWatch,
+		Detached: true,
+	}, os.Getpid(), filepath.Join(worktree, ".devflow", "logs", inst.ID, "daemon.log")); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	plan, err := app.defaultLaunchPlan(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if plan.startDetached {
-		t.Fatal("expected existing live supervisor to reuse current instance")
+		t.Fatal("expected existing live watch daemon to be reused")
 	}
 }
 
@@ -1315,43 +1350,6 @@ func (localProject) Targets() []project.Target {
 `, name, target)
 }
 
-func TestStartEventCapturePersistsJSONLines(t *testing.T) {
-	worktree := t.TempDir()
-	instanceID, _, err := instance.IDForWorktree(worktree)
-	if err != nil {
-		t.Fatal(err)
-	}
-	events := make(chan api.Event, 4)
-	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
-	stop, err := app.startEventCapture(worktree, instanceID, events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	events <- api.Event{Type: api.EventRunStarted, InstanceID: instanceID, Target: "fullstack"}
-	events <- api.Event{Type: api.EventWatchCycleStart, InstanceID: instanceID, Files: []string{"frontend/src/page.tsx"}, AffectedTasks: []string{"frontend_dev"}}
-	stop()
-
-	data, err := os.ReadFile(instance.EventsPath(worktree, instanceID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 persisted event lines, got %d", len(lines))
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(lines[1], &payload); err != nil {
-		t.Fatal(err)
-	}
-	if got := payload["type"]; got != string(api.EventWatchCycleStart) {
-		t.Fatalf("unexpected event type %v", got)
-	}
-	affected, ok := payload["affectedTasks"].([]any)
-	if !ok || len(affected) != 1 || affected[0] != "frontend_dev" {
-		t.Fatalf("unexpected affectedTasks payload: %v", payload["affectedTasks"])
-	}
-}
-
 func TestCacheStatusJSON(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1492,8 +1490,11 @@ func TestStopAllStopsDetachedSupervisorExecutorAndStaleStatusProcesses(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Supervisor.PID != 0 || loaded.Supervisor.ExecPID != 0 {
-		t.Fatalf("expected supervisor refs to be cleared, got %+v", loaded.Supervisor)
+	if loaded.Supervisor.PID <= 0 || !instance.ProcessAlive(loaded.Supervisor.PID) {
+		t.Fatalf("expected daemon supervisor to remain alive, got %+v", loaded.Supervisor)
+	}
+	if loaded.Supervisor.ExecPID != 0 {
+		t.Fatalf("expected executor ref to be cleared, got %+v", loaded.Supervisor)
 	}
 	if len(loaded.Processes) != 0 {
 		t.Fatalf("expected process refs to be cleared, got %+v", loaded.Processes)

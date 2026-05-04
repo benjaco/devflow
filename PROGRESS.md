@@ -5,8 +5,12 @@ Last updated: 2026-05-03
 ## Current Status
 
 - Phase: post-bootstrap core implementation
-- State: Go-first release/install flow, installed project bootstrap, `version`/`upgrade`, a single global task cache, split contributor/user docs, scoped `devflow docs setup` and `devflow docs development`, per-worktree localbuild locking, reliable detached cleanup, explicit service lifecycle contracts, graph affected explanations, target-scoped required CLI checks, managed Postgres host-port hardening, higher-level managed database workflows, and the first builder/component adapter API reshape are implemented; BikeCoach real-project integration feedback is integrated into the roadmap
+- State: per-worktree daemon control plane is implemented for mutable dev/watch/operator workflows while `run --ci` remains direct and finite; task cache remains global and shared
 - Confidence: core parallel/watch/operator/readiness/bootstrap/database paths are working; the BikeCoach integration exposed remaining adoption-hardening gaps around full adoption examples and fixed-port guidance
+
+## In Progress
+
+- No active implementation task after the daemon port; next work should be selected from the remaining adoption/documentation hardening priorities.
 
 ## Completed
 
@@ -32,6 +36,7 @@ Last updated: 2026-05-03
   - `pkg/ports`
   - `pkg/event`
   - `pkg/engine`
+  - `pkg/daemon`
 - Bounded parallel ready-queue scheduling implemented in `pkg/engine`
 - Typed engine event stream implemented for run/task/cache/process/log events
 - Polling watch mode implemented with debounced batches and selective reruns via `github.com/radovskyb/watcher`
@@ -238,6 +243,16 @@ Last updated: 2026-05-03
   - relaunch heals old detached instance state on the next invalidate or retarget action
 - Fixed the clean-run startup race after deleting `.devflow`:
   - bare `devflow` now waits briefly for the first detached `status.json`
+- Per-worktree daemon control plane implemented:
+  - one daemon per worktree owns mutable non-CI `run`, `watch`, `flush`, `restart`, `stop`, retarget, invalidate/rerun, Prisma migration authoring, status, and event fanout
+  - `run --ci` deliberately stays direct and finite rather than daemon-backed
+  - TUI subscribes to daemon events for immediate updates and uses daemon actions for mutable operations
+  - bare `devflow` now ensures the preferred target is running in daemon-owned watch mode before opening the TUI
+  - TUI keeps the previous non-empty log lines visible during transient empty log reads while a task restarts/truncates its log
+  - daemon sockets use a short per-user temp path to avoid Unix socket path length failures
+  - daemon startup is serialized by a per-instance file lock to preserve one daemon per worktree under concurrent CLI/TUI calls
+  - legacy detached supervisor/executor PIDs are preserved as process refs so `stop --all` can reconcile stale state
+  - old hidden `__internal_exec` / `__internal_supervise` execution routes were removed after the daemon port
   - the TUI now tolerates a missing initial `status.json` and shows a placeholder instance state until the first status snapshot arrives
 - Hardened the project-local bootstrap path:
   - local `devflow.project.go` rebuild decisions now use a content build key instead of mtimes
