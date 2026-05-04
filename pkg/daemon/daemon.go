@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -108,6 +110,8 @@ type Server struct {
 	active      *activeRun
 	subscribers map[chan api.Event]bool
 	eventMu     sync.Mutex
+	shutdown    chan struct{}
+	shutdownMu  sync.Once
 }
 
 type activeRun struct {
@@ -128,17 +132,25 @@ type Client struct {
 	socketPath string
 }
 
-var startDaemonForEnsure = startDaemonProcess
+var (
+	startDaemonForEnsure         = startDaemonProcess
+	skipDaemonBinaryCheckForTest bool
+	listProcessesForLegacy       = listSystemProcessesForLegacy
+)
 
 func SetStartDaemonFuncForTest(fn func(worktree, instanceID, projectName string) error) func() {
 	previous := startDaemonForEnsure
+	previousSkip := skipDaemonBinaryCheckForTest
 	if fn == nil {
 		startDaemonForEnsure = startDaemonProcess
+		skipDaemonBinaryCheckForTest = false
 	} else {
 		startDaemonForEnsure = fn
+		skipDaemonBinaryCheckForTest = true
 	}
 	return func() {
 		startDaemonForEnsure = previous
+		skipDaemonBinaryCheckForTest = previousSkip
 	}
 }
 
@@ -188,11 +200,15 @@ func Serve(ctx context.Context, opts Options) error {
 		logPath:     logPath,
 		socketPath:  socketPath,
 		subscribers: map[chan api.Event]bool{},
+		shutdown:    make(chan struct{}),
 	}
 	s.writeDaemonLog("daemon started pid=%d worktree=%s project=%s socket=%s", os.Getpid(), root, s.projectName, socketPath)
 
 	go func() {
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-s.shutdown:
+		}
 		_ = listener.Close()
 	}()
 	for {
@@ -222,7 +238,8 @@ func Ensure(ctx context.Context, worktree, projectName string) (*Client, bool, e
 		return nil, false, err
 	}
 	client := &Client{worktree: root, instanceID: id, socketPath: socketPath}
-	if err := client.Ping(ctx); err == nil {
+	if err := client.Ping(ctx); err == nil && !daemonNeedsRestart(root, id) {
+		_ = ensureDaemonLog(root, id)
 		return client, false, nil
 	}
 	startLock, err := lock.Acquire(daemonLockPath(root, id))
@@ -231,7 +248,11 @@ func Ensure(ctx context.Context, worktree, projectName string) (*Client, bool, e
 	}
 	defer startLock.Release()
 	if err := client.Ping(ctx); err == nil {
-		return client, false, nil
+		if !daemonNeedsRestart(root, id) {
+			_ = ensureDaemonLog(root, id)
+			return client, false, nil
+		}
+		_ = stopExistingDaemon(ctx, root, id, client)
 	}
 	if err := startDaemonForEnsure(root, id, projectName); err != nil {
 		return nil, false, err
@@ -244,6 +265,29 @@ func Ensure(ctx context.Context, worktree, projectName string) (*Client, bool, e
 		time.Sleep(50 * time.Millisecond)
 	}
 	return nil, false, fmt.Errorf("timed out waiting for devflow daemon for %s", root)
+}
+
+func stopExistingDaemon(ctx context.Context, worktree, instanceID string, client *Client) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	_, _ = client.Call(callCtx, Request{Action: ActionStop, All: true})
+	inst, err := instance.Load(worktree, instanceID)
+	if err == nil {
+		_, _ = instance.StopAll(inst, stopAllExtraProcessRefs(worktree, instanceID, inst))
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		pingCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		err := client.Ping(pingCtx)
+		cancel()
+		if err != nil {
+			_ = os.Remove(client.socketPath)
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = os.Remove(client.socketPath)
+	return nil
 }
 
 func Dial(worktree string) (*Client, error) {
@@ -395,7 +439,7 @@ func daemonExecutable(worktree string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	target := filepath.Join(worktree, ".devflow", "bin", "devflow-daemon")
+	target := daemonExecutablePath(worktree)
 	if err := fsutil.CopyFile(current, target); err != nil {
 		return "", err
 	}
@@ -403,6 +447,69 @@ func daemonExecutable(worktree string) (string, error) {
 		return "", err
 	}
 	return target, nil
+}
+
+func daemonExecutablePath(worktree string) string {
+	return filepath.Join(worktree, ".devflow", "bin", "devflow-daemon")
+}
+
+func daemonNeedsRestart(worktree, instanceID string) bool {
+	if skipDaemonBinaryCheckForTest {
+		return false
+	}
+	_ = instanceID
+	current, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	target := daemonExecutablePath(worktree)
+	return !sameFileContents(current, target)
+}
+
+func sameFileContents(left, right string) bool {
+	leftInfo, err := os.Stat(left)
+	if err != nil {
+		return false
+	}
+	rightInfo, err := os.Stat(right)
+	if err != nil {
+		return false
+	}
+	if leftInfo.Size() != rightInfo.Size() {
+		return false
+	}
+	leftData, err := os.ReadFile(left)
+	if err != nil {
+		return false
+	}
+	rightData, err := os.ReadFile(right)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(leftData, rightData)
+}
+
+func ensureDaemonLog(worktree, instanceID string) error {
+	inst, err := instance.Load(worktree, instanceID)
+	if err != nil {
+		return err
+	}
+	logPath := inst.Supervisor.LogPath
+	if logPath == "" {
+		logPath = filepath.Join(worktree, ".devflow", "logs", instanceID, "daemon.log")
+		inst.Supervisor.LogPath = logPath
+		if err := instance.Save(inst); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	return file.Close()
 }
 
 func resolveWorktreeAndID(worktree string) (string, string, error) {
@@ -483,6 +590,9 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	}
 	resp := s.handleRequest(ctx, req)
 	_ = writeFrame(frame{Type: "response", ID: req.ID, Response: &resp})
+	if req.Action == ActionStop && req.All && resp.OK {
+		s.requestShutdown()
+	}
 }
 
 func (s *Server) handleRequest(ctx context.Context, req Request) Response {
@@ -655,6 +765,13 @@ func (s *Server) writeDaemonLog(format string, args ...any) {
 	}
 	defer file.Close()
 	_, _ = fmt.Fprintf(file, "%s %s\n", time.Now().UTC().Format(time.RFC3339), fmt.Sprintf(format, args...))
+}
+
+func (s *Server) requestShutdown() {
+	s.shutdownMu.Do(func() {
+		s.writeDaemonLog("daemon shutdown requested")
+		close(s.shutdown)
+	})
 }
 
 func (s *Server) resolveProject(projectName string) (string, project.Project, error) {
@@ -1025,7 +1142,13 @@ func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResu
 			return nil, err
 		}
 		stopped = append(stopped, "database")
-		sort.Strings(stopped)
+	}
+	if all {
+		stopped = append(stopped, "daemon")
+		inst.Supervisor = api.SupervisorRef{}
+		inst.Processes = map[string]api.ProcessRef{}
+		_ = instance.Save(inst)
+		stopped = uniqueSortedStrings(stopped)
 	}
 	if all {
 		_ = markAllStoppedNodes(s.worktree, s.instanceID)
@@ -1033,6 +1156,20 @@ func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResu
 		_ = markStoppedNodes(s.worktree, s.instanceID, stopped)
 	}
 	return &StopResult{InstanceID: s.instanceID, Stopped: stopped}, nil
+}
+
+func uniqueSortedStrings(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (s *Server) statusResult() (*api.StatusResult, error) {
@@ -1147,6 +1284,7 @@ func (s *Server) invalidateAndRelaunch(ctx context.Context, task string) error {
 	if err != nil {
 		return err
 	}
+	s.stopActive(5 * time.Second)
 	if err := writeInvalidateTransition(s.worktree, s.instanceID, resolvedTarget, g, toInvalidate); err != nil {
 		return err
 	}
@@ -1546,7 +1684,91 @@ func stopAllExtraProcessRefs(worktree, instanceID string, inst *api.Instance) ma
 			}
 		}
 	}
+	for name, pid := range legacyDevflowProcessRefs(worktree) {
+		refs[name] = pid
+	}
 	return refs
+}
+
+func legacyDevflowProcessRefs(worktree string) map[string]int {
+	refs := map[string]int{}
+	if strings.TrimSpace(worktree) == "" {
+		return refs
+	}
+	processes := listProcessesForLegacy()
+	legacyPIDs := map[int]bool{}
+	for _, proc := range processes {
+		if proc.pid <= 0 || proc.pid == os.Getpid() || !strings.Contains(proc.command, worktree) {
+			continue
+		}
+		if !isLegacyDevflowCommand(proc.command) {
+			continue
+		}
+		legacyPIDs[proc.pid] = true
+		refs[fmt.Sprintf("legacy-%d", proc.pid)] = proc.pid
+	}
+	for {
+		changed := false
+		for _, proc := range processes {
+			if proc.pid <= 0 || proc.pid == os.Getpid() || legacyPIDs[proc.pid] || !legacyPIDs[proc.ppid] {
+				continue
+			}
+			legacyPIDs[proc.pid] = true
+			refs[fmt.Sprintf("legacy-child-%d", proc.pid)] = proc.pid
+			changed = true
+		}
+		if !changed {
+			break
+		}
+	}
+	return refs
+}
+
+func isLegacyDevflowCommand(command string) bool {
+	return strings.Contains(command, "devflow-launcher") ||
+		strings.Contains(command, "__internal_exec") ||
+		strings.Contains(command, "__internal_supervise") ||
+		strings.Contains(command, "devflow-daemon")
+}
+
+type legacyProcess struct {
+	pid     int
+	ppid    int
+	command string
+}
+
+func listSystemProcessesForLegacy() []legacyProcess {
+	out, err := exec.Command("ps", "-axo", "pid=,ppid=,command=").Output()
+	if err != nil {
+		return nil
+	}
+	return parseLegacyProcesses(string(out))
+}
+
+func parseLegacyProcesses(out string) []legacyProcess {
+	var processes []legacyProcess
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+		ppid, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+		withoutPID := strings.TrimSpace(strings.TrimPrefix(line, fields[0]))
+		command := strings.TrimSpace(strings.TrimPrefix(withoutPID, fields[1]))
+		processes = append(processes, legacyProcess{pid: pid, ppid: ppid, command: command})
+	}
+	return processes
 }
 
 func supervisorChildPIDFromLog(path string) int {

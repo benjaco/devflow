@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-05-03
+Last updated: 2026-05-04
 
 ## Current Status
 
@@ -10,7 +10,7 @@ Last updated: 2026-05-03
 
 ## In Progress
 
-- No active implementation task after the daemon port; next work should be selected from the remaining adoption/documentation hardening priorities.
+- No active implementation task after the TUI-owned daemon shutdown work.
 
 ## Completed
 
@@ -436,6 +436,31 @@ Last updated: 2026-05-03
 
 ## Latest Work
 
+- Added TUI-owned daemon shutdown semantics:
+  - bare `devflow` now passes daemon ownership into the TUI when it had to start the daemon for the session
+  - `devflow tui` also treats a daemon it starts itself as session-owned
+  - exiting a session-owned TUI sends the normal daemon `stop --all` request so services, managed databases, and the daemon shut down together
+  - reconnecting the TUI to an already-running daemon leaves that daemon alive when the UI exits
+  - documented the ownership rule in contributor and user docs, and added focused TUI ownership coverage
+  - verified with `go test ./pkg/tui ./internal/cli ./pkg/daemon`, `go test ./...`, `go build -o /tmp/devflow-build-check ./cmd/devflow`, and `git diff --check`
+- Fixed TUI invalidate/rerun after daemon idempotent start changes:
+  - daemon invalidate now force-stops any matching active target before writing the invalidation transition, clearing cache entries, and relaunching
+  - added regression coverage proving invalidate/rerun does not get swallowed by the "matching active target already running" fast path
+  - recorded the daemon invariant that ensure/start paths may be idempotent, but operator relaunch actions must force-stop matching active work first
+- Fixed TUI log refresh scroll behavior:
+  - same selected log reloads now preserve dashboard-owned desired scroll state after replacing log content
+  - temporary short/truncated log reloads can no longer erase the intended scroll position when the full log content returns
+  - mouse-wheel scrolling over the log pane now uses native `tview` scrolling while recording the desired scroll row for later refresh restores
+  - switching to a different task log, supervisor log, or database panel resets the new view to the top
+  - added regression coverage for preserving scroll on same-log reloads, restoring after short reloads, and resetting scroll when the log identity changes
+  - verified with `go test ./pkg/tui`, `go test ./...`, and `go build -o /tmp/devflow-build-check ./cmd/devflow`
+- Hardened daemon lifecycle after the Prisma daemon retry feedback:
+  - `daemon.Ensure` now replaces a live daemon when the copied daemon executable is missing or stale relative to the current project-local binary
+  - live daemon reuse recreates the recorded daemon log path if it is missing
+  - `stop --all` stops active daemon work, legacy supervisor/executor refs and process-tree descendants, tracked services, stale status PIDs, and the managed database container, then clears process refs and shuts the daemon down
+  - `status` is read-only: it uses a live daemon when present, otherwise reads persisted instance/status files without starting a daemon
+  - added regression coverage for daemon executable refresh, missing daemon log recreation, legacy process-tree cleanup, daemon shutdown in `stop --all`, and read-only status
+  - verified with `go test ./pkg/daemon ./internal/cli`, `go test ./...`, and `go build -o /tmp/devflow-build-check ./cmd/devflow`
 - Fixed the Prisma TUI migration action so it is no longer a detached side path:
   - `m` now resolves the project migration target such as `new-migration`
   - runs that target through the engine with `DEVFLOW_MIGRATION_NAME`

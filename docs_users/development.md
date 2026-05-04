@@ -40,7 +40,7 @@ Use the lifecycle command that matches the job:
 - `devflow run up --detach --json` asks the daemon to start the target and returns after launch. It does not prove the whole target is healthy; use `status`, `logs`, or a watch `flush` workflow when readiness matters.
 - `devflow watch up --detach --json` asks the daemon to start the recommended dev loop for humans and agents.
 - `devflow flush up --json` is the readiness gate for daemon-owned watch mode. It waits for file-change work to settle and checks in-chain services.
-- `devflow stop --all --json` stops daemon-owned work, stale process records, and the managed database container for the worktree. It preserves the database volume. The daemon itself may remain alive so future commands and the TUI can reconnect instantly.
+- `devflow stop --all --json` stops daemon-owned work, stale process records, the managed database container, and the worktree daemon. It preserves the database volume. The next `devflow` or `watch` command starts a fresh daemon.
 
 After `stop --all`, `status --json` may still include a `db` object. That object is the desired managed database identity and connection metadata for the instance, not proof that the container is currently running.
 
@@ -52,6 +52,8 @@ For AI-assisted development, prefer `watch --detach` plus `flush` over an attach
 
 Run `devflow` with no args in a project worktree to start or reconnect to the worktree daemon, ensure the default target is running in watch mode, and open the TUI. This is the normal day-to-day entry point when you want edits to cascade automatically.
 
+If that TUI launch had to start the worktree daemon, quitting the TUI also stops daemon-owned work and exits the daemon. If a daemon was already running before the TUI connected, quitting the TUI only closes the UI and leaves that existing background workflow alive.
+
 Useful TUI keys:
 - `q`: quit
 - `j` / `k` / arrow keys: move selection
@@ -61,6 +63,8 @@ Useful TUI keys:
 - `m`: create a Prisma migration when the database panel reports one is needed
 - `i`: invalidate selected task and rerun downstream
 - `t`: retarget to the selected task
+
+The selected log keeps its current scroll position while it refreshes. Switching to another task, the supervisor log, or the database panel starts that newly selected view from the top.
 
 The database/Prisma panel shows managed Postgres identity, cached migration-prefix snapshots, and schema/migration drift. Migration authoring is explicit; normal startup does not secretly generate migrations. When you create a migration from the TUI, Devflow sends a daemon action that runs the project migration target such as `new-migration`, streams task progress in the footer immediately, and then relaunches the previously detached target so services come back through the graph.
 

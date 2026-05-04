@@ -38,6 +38,7 @@ Running bare `devflow` now acts as the default operator entry path:
 - ensures the per-worktree daemon is running
 - if no daemon-owned watch loop is active for that target, starts the default target in daemon-owned watch mode
 - opens the TUI for the current worktree
+- if this bare TUI launch created the daemon, quitting the TUI stops active daemon-owned work with the normal `stop --all` path and shuts the daemon down; reconnecting to an already-running daemon leaves it alive on quit
 
 There is currently no built-in adapter fallback. Missing `devflow.project.go` is a hard error.
 
@@ -137,7 +138,7 @@ Bare `docs` is intentionally a usage error so agents and users do not accidental
 
 `restart` connects to the daemon. It supports rerunning non-service task slices from the CLI. For service tasks, if the instance has a recorded run target, `restart` asks the daemon to relaunch that target.
 
-`stop` connects to the daemon. It terminates persisted service PIDs for a selected task. With `--all`, it reconciles all known runtime process groups for the instance: legacy supervisor/executor PIDs, tracked service tasks, and PID-bearing status nodes. It then clears persisted process refs and updates nonterminal node state to `stopped`. The daemon process itself can remain alive as the worktree control plane.
+`stop` is daemon-backed; if no daemon is running, it may start a short-lived daemon to reconcile persisted runtime state. It terminates persisted service PIDs for a selected task. With `--all`, it reconciles all known runtime process groups for the instance: active daemon-owned work, legacy supervisor/executor PIDs and their process-tree descendants, tracked service tasks, and PID-bearing status nodes. It then clears persisted process refs, updates nonterminal node state to `stopped`, stops the managed database container, and shuts down the daemon after sending the response.
 
 `doctor` supports `--target <target>`. Without a target it checks the full adapter required CLI catalog. With a target it resolves the target or task name and checks only required CLIs attached through `RequiredCLIs` to that target and its task closure. JSON includes `project`, `target`, and `cliScope`.
 
@@ -145,7 +146,7 @@ Bare `docs` is intentionally a usage error so agents and users do not accidental
 
 `clis install` runs adapter-defined install scripts only for missing required CLIs and then re-checks that each installed command is now available on `PATH`. `clis install --target <target>` installs only CLIs needed for that target closure. `deps status/install` remains available as a compatibility alias.
 
-`status` now reports instance metadata in both text and JSON forms, including:
+`status` is read-only: it uses a live daemon when one is already running, otherwise it reads the persisted instance/status files without starting a daemon. It reports instance metadata in both text and JSON forms, including:
 - worktree
 - target and mode
 - assigned ports
@@ -177,6 +178,8 @@ Task log files now represent the current run attempt for that task. They are tru
 - `t` on the selected task updates the detached run target to that task and relaunches the instance on the selected task closure
 - popup confirm and text prompts for interactive tasks that emit `interaction_requested` events
 - primary live refresh from the daemon event subscription, with the persisted event stream at `.devflow/state/instances/<instance-id>/events.jsonl` as fallback
+
+Daemon ownership is session-scoped. If `devflow tui` or bare `devflow` has to start the daemon for that TUI session, quitting the TUI sends `stop --all` through the daemon so services, managed databases, and the daemon exit together. If the daemon already existed before the TUI connected, quitting the TUI only closes the UI.
 
 Interactive prompt answers are written back through the instance interaction directory, so detached runs can still receive operator input from the TUI.
 

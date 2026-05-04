@@ -91,7 +91,7 @@ func (a *App) defaultEntry() error {
 	if err != nil {
 		return err
 	}
-	client, _, err := daemon.Ensure(context.Background(), root, plan.projectName)
+	client, daemonStarted, err := daemon.Ensure(context.Background(), root, plan.projectName)
 	if err != nil {
 		return err
 	}
@@ -104,7 +104,7 @@ func (a *App) defaultEntry() error {
 		return err
 	}
 	waitForInitialStatus(root, plan.instanceID, 3*time.Second)
-	return tui.Run(tui.Options{Worktree: root, InstanceID: plan.instanceID})
+	return tui.Run(tui.Options{Worktree: root, InstanceID: plan.instanceID, StopDaemonOnExit: daemonStarted})
 }
 
 type launchPlan struct {
@@ -659,19 +659,10 @@ func (a *App) statusCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	_ = id
-	client, _, err := daemon.Ensure(context.Background(), root, "")
+	out, err := statusResult(root, id)
 	if err != nil {
 		return err
 	}
-	resp, err := client.Call(context.Background(), daemon.Request{Action: daemon.ActionStatus})
-	if err != nil {
-		return err
-	}
-	if resp.Status == nil {
-		return fmt.Errorf("daemon did not return status")
-	}
-	out := *resp.Status
 	if *jsonOut {
 		return writeJSON(a.Stdout, out)
 	}
@@ -704,6 +695,45 @@ func (a *App) statusCmd(args []string) error {
 		_, _ = fmt.Fprintf(a.Stdout, "%-20s %-10s %s\n", node.Name, node.Kind, node.State)
 	}
 	return nil
+}
+
+func statusResult(root, instanceID string) (api.StatusResult, error) {
+	if client, err := daemon.Dial(root); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		resp, callErr := client.Call(ctx, daemon.Request{Action: daemon.ActionStatus})
+		if callErr == nil && resp.Status != nil {
+			return *resp.Status, nil
+		}
+	}
+	inst, err := instance.Load(root, instanceID)
+	if err != nil {
+		return api.StatusResult{}, err
+	}
+	state, err := instance.LoadStatus(root, instanceID)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return api.StatusResult{}, err
+		}
+		state = &instance.State{Target: inst.LastRun.Target, Mode: inst.LastRun.Mode, Nodes: map[string]api.NodeStatus{}}
+	}
+	nodes := make([]api.NodeStatus, 0, len(state.Nodes))
+	for _, node := range state.Nodes {
+		nodes = append(nodes, node)
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+	return api.StatusResult{
+		InstanceID: instanceID,
+		Worktree:   root,
+		Target:     state.Target,
+		Mode:       state.Mode,
+		UpdatedAt:  state.UpdatedAt,
+		Ports:      inst.Ports,
+		DB:         instance.DisplayDB(inst.DB),
+		URLs:       daemon.InstanceURLs(inst),
+		Supervisor: daemon.SupervisorStatus(inst),
+		Nodes:      nodes,
+	}, nil
 }
 
 func (a *App) logsCmd(args []string) error {

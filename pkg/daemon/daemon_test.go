@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,57 @@ func TestEnsureSerializesDaemonStartup(t *testing.T) {
 	}
 }
 
+func TestEnsureCreatesMissingDaemonLogForLiveDaemon(t *testing.T) {
+	worktree := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var starts atomic.Int32
+	restore := SetStartDaemonFuncForTest(func(worktree, instanceID, projectName string) error {
+		starts.Add(1)
+		go func() {
+			_ = Serve(ctx, Options{
+				Worktree: worktree,
+				Project:  projectName,
+				LogPath:  filepath.Join(worktree, ".devflow", "logs", instanceID, "daemon.log"),
+			})
+		}()
+		return nil
+	})
+	defer restore()
+
+	callCtx, cancelCall := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelCall()
+	client, _, err := Ensure(callCtx, worktree, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Ping(callCtx); err != nil {
+		t.Fatal(err)
+	}
+	id, realWorktree, err := instance.IDForWorktree(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(realWorktree, ".devflow", "logs", id, "daemon.log")
+	if err := os.Remove(logPath); err != nil {
+		t.Fatal(err)
+	}
+
+	client, _, err = Ensure(callCtx, worktree, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Ping(callCtx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("expected Ensure to recreate missing daemon log: %v", err)
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("expected existing daemon to be reused, got %d starts", got)
+	}
+}
+
 func TestStartActiveReusesExistingMatchingWatch(t *testing.T) {
 	name := "daemon-idempotent-watch"
 	project.Register(daemonTestProject{
@@ -150,6 +202,77 @@ func TestStartActiveReusesExistingMatchingWatch(t *testing.T) {
 	}
 	if s.active != active {
 		t.Fatal("expected matching active watch to be reused")
+	}
+}
+
+func TestDaemonNeedsRestartWhenCopiedExecutableIsMissingOrStale(t *testing.T) {
+	worktree := t.TempDir()
+	if !daemonNeedsRestart(worktree, "abc123") {
+		t.Fatal("expected restart when daemon executable is missing")
+	}
+	if err := os.MkdirAll(filepath.Dir(daemonExecutablePath(worktree)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(daemonExecutablePath(worktree), []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !daemonNeedsRestart(worktree, "abc123") {
+		t.Fatal("expected restart when daemon executable is stale")
+	}
+	current, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFileForDaemonTest(current, daemonExecutablePath(worktree)); err != nil {
+		t.Fatal(err)
+	}
+	if daemonNeedsRestart(worktree, "abc123") {
+		t.Fatal("did not expect restart when daemon executable matches current executable")
+	}
+}
+
+func TestLegacyDevflowProcessRefsIncludesDescendants(t *testing.T) {
+	worktree := t.TempDir()
+	previous := listProcessesForLegacy
+	listProcessesForLegacy = func() []legacyProcess {
+		return []legacyProcess{
+			{pid: 100, ppid: 1, command: filepath.Join(worktree, ".devflow", "bin", "devflow-launcher") + " __internal_supervise"},
+			{pid: 101, ppid: 100, command: "/bin/sh -c npx tsx src/server.ts"},
+			{pid: 102, ppid: 101, command: "node src/server.ts"},
+			{pid: 200, ppid: 1, command: "/bin/sh -c npx tsx src/server.ts"},
+			{pid: 300, ppid: 1, command: filepath.Join(t.TempDir(), ".devflow", "bin", "devflow-launcher") + " __internal_supervise"},
+		}
+	}
+	defer func() { listProcessesForLegacy = previous }()
+
+	refs := legacyDevflowProcessRefs(worktree)
+	for name, pid := range map[string]int{
+		"legacy-100":       100,
+		"legacy-child-101": 101,
+		"legacy-child-102": 102,
+	} {
+		if refs[name] != pid {
+			t.Fatalf("expected %s=%d in refs, got %v", name, pid, refs)
+		}
+	}
+	if refs["legacy-child-200"] != 0 {
+		t.Fatalf("did not expect unrelated process in refs: %v", refs)
+	}
+	if refs["legacy-300"] != 0 {
+		t.Fatalf("did not expect other worktree process in refs: %v", refs)
+	}
+}
+
+func TestParseLegacyProcesses(t *testing.T) {
+	processes := parseLegacyProcesses("  10     1 /bin/sh -c npx tsx src/server.ts\nbad\n  11 10 node src/server.ts\n")
+	if len(processes) != 2 {
+		t.Fatalf("expected 2 parsed processes, got %+v", processes)
+	}
+	if processes[0].pid != 10 || processes[0].ppid != 1 || processes[0].command != "/bin/sh -c npx tsx src/server.ts" {
+		t.Fatalf("unexpected first process: %+v", processes[0])
+	}
+	if processes[1].pid != 11 || processes[1].ppid != 10 || processes[1].command != "node src/server.ts" {
+		t.Fatalf("unexpected second process: %+v", processes[1])
 	}
 }
 
@@ -285,6 +408,73 @@ func TestWriteInvalidateTransitionMarksDirtyAndPendingNodes(t *testing.T) {
 	}
 }
 
+func TestInvalidateAndRelaunchForcesMatchingActiveRunToRestart(t *testing.T) {
+	name := "daemon-invalidate-force-restart"
+	project.Register(daemonTestProject{
+		name: name,
+		tasks: []project.Task{
+			{Name: "build", Kind: project.KindOnce, Cache: true},
+		},
+		targets: []project.Target{{Name: "main", RootTasks: []string{"build"}}},
+	})
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.LastRun = api.RunConfig{
+		Project:     name,
+		Target:      "main",
+		Mode:        api.ModeDev,
+		MaxParallel: 1,
+		Detached:    true,
+	}
+	if err := instance.Save(inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.SaveStatus(worktree, inst.ID, "main", api.ModeDev, map[string]api.NodeStatus{
+		"build": {Name: "build", Kind: "once", State: api.StateCached, LastRunKey: "cached"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldCtx, cancelOld := context.WithCancel(context.Background())
+	oldDone := make(chan struct{})
+	go func() {
+		<-oldCtx.Done()
+		close(oldDone)
+	}()
+	s := &Server{
+		worktree:    worktree,
+		instanceID:  inst.ID,
+		projectName: name,
+		logPath:     filepath.Join(worktree, ".devflow", "logs", inst.ID, "daemon.log"),
+		active: &activeRun{
+			projectName: name,
+			target:      "main",
+			mode:        api.ModeDev,
+			maxParallel: 1,
+			cancel:      cancelOld,
+			done:        oldDone,
+		},
+	}
+
+	if err := s.invalidateAndRelaunch(context.Background(), "build"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-oldDone:
+	case <-time.After(time.Second):
+		t.Fatal("expected invalidate relaunch to stop the existing matching active run")
+	}
+	state, err := instance.LoadStatus(worktree, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Nodes["build"].State != api.StateDirty && state.Nodes["build"].State != api.StateDone && state.Nodes["build"].State != api.StateCached {
+		t.Fatalf("expected build to be invalidated or already rerun, got %+v", state.Nodes["build"])
+	}
+}
+
 type daemonTestProject struct {
 	name    string
 	tasks   []project.Task
@@ -302,4 +492,22 @@ func (p daemonTestProject) ConfigureInstance(ctx context.Context, worktree strin
 	_ = ctx
 	_ = worktree
 	return project.InstanceConfig{Label: p.name}, nil
+}
+
+func copyFileForDaemonTest(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }

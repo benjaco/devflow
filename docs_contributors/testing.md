@@ -18,8 +18,9 @@ Devflow uses three testing layers:
 - interactive prompt detection and answer forwarding with a real prompt CLI fixture
 - service lifecycle management
 - CI-mode service targets act as readiness probes and stop services before returning
-- daemon lifecycle coverage for per-worktree daemon startup locking, CLI connection, daemon event persistence/fanout, and preserving legacy supervisor/executor PIDs for later cleanup
-- stop cleanup for daemon-owned work, legacy supervisor/executor refs, tracked service, and stale status process groups
+- daemon lifecycle coverage for per-worktree daemon startup locking, CLI connection, daemon event persistence/fanout, daemon executable refresh after source/local binary changes, daemon log path creation, and preserving legacy supervisor/executor PIDs for later cleanup
+- stop cleanup for daemon-owned work, daemon shutdown after `stop --all`, legacy supervisor/executor refs and descendants, tracked service, and stale status process groups
+- read-only `status` coverage proving stopped-state inspection does not start a daemon
 - `stop --all` cleanup for the instance-managed database container while preserving the volume
 - service readiness success and timeout behavior
 - built-binary helper build/run/start coverage and cache-restore coverage
@@ -38,7 +39,8 @@ Devflow uses three testing layers:
 - global cache coverage for the single OS user cache root and project cache namespaces
 - required CLI detection, target-scoped required CLI selection, and platform-script install coverage in `pkg/project` and `internal/cli`
 - engine-level interactive prompt event plus answer-file integration coverage
-- TUI database/Prisma panel rendering, drift warning, Prisma snapshot-summary loading, daemon-backed migration target action, detached-target relaunch, and progress/footer status coverage
+- TUI database/Prisma panel rendering, drift warning, Prisma snapshot-summary loading, daemon-backed migration target action, detached-target relaunch, selected-task invalidate/rerun forced relaunch behavior, log scroll preservation across same-log reloads, and progress/footer status coverage
+- TUI daemon ownership coverage proving a daemon created for the TUI session is stopped on exit while an already-running daemon is left alone
 - sequential engine execution with cache hits
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work, plus explicit `migration_needed` task-state classification for database migration authoring guards
 - scheduler error preservation so a canceled sibling does not replace the first actionable task failure with `context canceled`

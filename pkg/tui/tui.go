@@ -24,8 +24,9 @@ import (
 )
 
 type Options struct {
-	Worktree   string
-	InstanceID string
+	Worktree         string
+	InstanceID       string
+	StopDaemonOnExit bool
 }
 
 type snapshot struct {
@@ -79,6 +80,10 @@ type dashboard struct {
 	activeInput       bool
 	lastLogPath       string
 	lastLogLines      []string
+	renderedLogKey    string
+	logScrollKey      string
+	logScrollRow      int
+	logScrollCol      int
 }
 
 const (
@@ -95,25 +100,46 @@ var callDaemonForTUI = func(ctx context.Context, root string, req daemon.Request
 	return client.Call(ctx, req, onEvent)
 }
 
+var stopDaemonForTUI = func(ctx context.Context, client *daemon.Client) error {
+	if client == nil {
+		return nil
+	}
+	_, err := client.Call(ctx, daemon.Request{Action: daemon.ActionStop, All: true})
+	return err
+}
+
 func Run(opts Options) error {
 	root, id, err := resolveInstance(opts.Worktree, opts.InstanceID)
 	if err != nil {
 		return err
 	}
-	client, _, err := daemon.Ensure(context.Background(), root, "")
+	client, started, err := daemon.Ensure(context.Background(), root, "")
 	if err != nil {
 		return err
 	}
+	stopDaemonOnExit := opts.StopDaemonOnExit || started
 	d := newDashboard(root, id)
 	if err := d.refresh(); err != nil {
+		_ = maybeStopDaemonForTUI(client, stopDaemonOnExit)
 		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	go d.daemonEventLoop(ctx, client)
 	go d.eventLoop(ctx)
 	go d.fallbackRefreshLoop(ctx)
-	return d.app.Run()
+	runErr := d.app.Run()
+	cancel()
+	_ = maybeStopDaemonForTUI(client, stopDaemonOnExit)
+	return runErr
+}
+
+func maybeStopDaemonForTUI(client *daemon.Client, enabled bool) error {
+	if !enabled {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return stopDaemonForTUI(ctx, client)
 }
 
 func newDashboard(root, instanceID string) *dashboard {
@@ -169,7 +195,13 @@ func newDashboard(root, instanceID string) *dashboard {
 	})
 	d.logs.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
 		switch action {
-		case tview.MouseScrollUp, tview.MouseScrollDown, tview.MouseLeftClick:
+		case tview.MouseScrollUp:
+			d.app.SetFocus(d.logs)
+			d.rememberLogScrollDelta(-1)
+		case tview.MouseScrollDown:
+			d.app.SetFocus(d.logs)
+			d.rememberLogScrollDelta(1)
+		case tview.MouseLeftClick:
 			d.app.SetFocus(d.logs)
 		}
 		return action, event
@@ -432,6 +464,12 @@ func (d *dashboard) updateLogs() {
 }
 
 func (d *dashboard) updateLogsFromSnapshot(snap snapshot) {
+	nextKey := logViewKey(snap, d.selectedName)
+	prevKey := d.renderedLogKey
+	row, col := 0, 0
+	if nextKey != "" && nextKey == prevKey {
+		row, col = d.desiredLogScroll(nextKey)
+	}
 	if snap.logPath != "" {
 		if len(snap.logLines) > 0 {
 			d.lastLogPath = snap.logPath
@@ -446,6 +484,24 @@ func (d *dashboard) updateLogsFromSnapshot(snap snapshot) {
 	d.logs.SetTitle(" " + snap.logTitle + " ")
 	lines := renderLogPanel(snap, d.selectedName)
 	d.logs.SetText(strings.Join(lines, "\n"))
+	if nextKey != "" && nextKey == prevKey {
+		d.logs.ScrollTo(row, col)
+		d.rememberLogScroll(nextKey, row, col)
+	} else {
+		d.logs.ScrollToBeginning()
+		d.rememberLogScroll(nextKey, 0, 0)
+	}
+	d.renderedLogKey = nextKey
+}
+
+func logViewKey(snap snapshot, selectedName string) string {
+	if snap.logTitle == databasePanelTitle || snap.logTitle == supervisorLogTitle {
+		return snap.logTitle + "\x00" + snap.logPath
+	}
+	if snap.logPath != "" {
+		return snap.logTitle + "\x00" + snap.logPath
+	}
+	return snap.logTitle + "\x00" + selectedName
 }
 
 func transientEmptyLogAllowed(snap snapshot, selectedName string) bool {
@@ -468,12 +524,47 @@ func (d *dashboard) scrollLogs(delta int) {
 	if delta == 0 {
 		return
 	}
-	row, col := d.logs.GetScrollOffset()
+	row, col := d.desiredLogScroll(d.renderedLogKey)
 	nextRow := row + delta
 	if nextRow < 0 {
 		nextRow = 0
 	}
 	d.logs.ScrollTo(nextRow, col)
+	d.rememberLogScroll(d.renderedLogKey, nextRow, col)
+}
+
+func (d *dashboard) rememberLogScrollDelta(delta int) {
+	if delta == 0 {
+		return
+	}
+	row, col := d.desiredLogScroll(d.renderedLogKey)
+	nextRow := row + delta
+	if nextRow < 0 {
+		nextRow = 0
+	}
+	d.rememberLogScroll(d.renderedLogKey, nextRow, col)
+}
+
+func (d *dashboard) desiredLogScroll(key string) (int, int) {
+	if key != "" && d.logScrollKey == key {
+		return d.logScrollRow, d.logScrollCol
+	}
+	return d.logs.GetScrollOffset()
+}
+
+func (d *dashboard) rememberLogScroll(key string, row, col int) {
+	if key == "" {
+		return
+	}
+	if row < 0 {
+		row = 0
+	}
+	if col < 0 {
+		col = 0
+	}
+	d.logScrollKey = key
+	d.logScrollRow = row
+	d.logScrollCol = col
 }
 
 func (d *dashboard) setStatus(msg string) {

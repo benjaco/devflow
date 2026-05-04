@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
 
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/daemon"
@@ -433,6 +435,126 @@ func TestUpdateLogsKeepsPreviousLinesDuringTransientEmptyRead(t *testing.T) {
 	}
 }
 
+func TestUpdateLogsPreservesScrollForSameLogReload(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	logPath := filepath.Join(t.TempDir(), "task.log")
+	lines := make([]string, 40)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("stdout: line %02d", i)
+	}
+	d.selectedName = "task"
+	d.updateLogsFromSnapshot(snapshot{
+		logTitle: "task log",
+		logPath:  logPath,
+		logLines: lines,
+		nodes:    []api.NodeStatus{{Name: "task", State: api.StateRunning}},
+	})
+	d.scrollLogs(12)
+
+	lines = append(lines, "stdout: new line")
+	d.updateLogsFromSnapshot(snapshot{
+		logTitle: "task log",
+		logPath:  logPath,
+		logLines: lines,
+		nodes:    []api.NodeStatus{{Name: "task", State: api.StateRunning}},
+	})
+
+	row, col := d.logs.GetScrollOffset()
+	if row != 12 || col != 0 {
+		t.Fatalf("expected scroll offset to survive same-log reload, got row=%d col=%d", row, col)
+	}
+}
+
+func TestUpdateLogsRestoresDesiredScrollAfterTemporaryShortReload(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	logPath := filepath.Join(t.TempDir(), "task.log")
+	lines := make([]string, 40)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("stdout: line %02d", i)
+	}
+	d.selectedName = "task"
+	snap := snapshot{
+		logTitle: "task log",
+		logPath:  logPath,
+		logLines: lines,
+		nodes:    []api.NodeStatus{{Name: "task", State: api.StateRunning}},
+	}
+	d.updateLogsFromSnapshot(snap)
+	d.scrollLogs(12)
+
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer screen.Fini()
+	d.logs.SetRect(0, 0, 80, 8)
+
+	snap.logLines = []string{"stdout: restarting"}
+	d.updateLogsFromSnapshot(snap)
+	d.logs.Draw(screen)
+	if row, _ := d.logs.GetScrollOffset(); row != 0 {
+		t.Fatalf("expected tview to clamp the visible short-log offset, got row %d", row)
+	}
+
+	snap.logLines = lines
+	d.updateLogsFromSnapshot(snap)
+	row, col := d.logs.GetScrollOffset()
+	if row != 12 || col != 0 {
+		t.Fatalf("expected desired scroll to be restored after full log reload, got row=%d col=%d", row, col)
+	}
+}
+
+func TestLogMouseCaptureForwardsNativeScrollAndRecordsDesiredOffset(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	logPath := filepath.Join(t.TempDir(), "task.log")
+	d.selectedName = "task"
+	d.updateLogsFromSnapshot(snapshot{
+		logTitle: "task log",
+		logPath:  logPath,
+		logLines: []string{"stdout: first", "stdout: second"},
+		nodes:    []api.NodeStatus{{Name: "task", State: api.StateRunning}},
+	})
+
+	capture := d.logs.GetMouseCapture()
+	if capture == nil {
+		t.Fatal("expected log mouse capture to be installed")
+	}
+	action, event := capture(tview.MouseScrollDown, tcell.NewEventMouse(0, 0, tcell.WheelDown, 0))
+	if action != tview.MouseScrollDown || event == nil {
+		t.Fatalf("expected native scroll event to be forwarded, got action=%v event=%v", action, event)
+	}
+	if d.logScrollRow != 1 {
+		t.Fatalf("expected desired scroll row to be recorded, got %d", d.logScrollRow)
+	}
+}
+
+func TestUpdateLogsResetsScrollWhenLogChanges(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	firstLog := filepath.Join(t.TempDir(), "first.log")
+	secondLog := filepath.Join(t.TempDir(), "second.log")
+	d.selectedName = "first"
+	d.updateLogsFromSnapshot(snapshot{
+		logTitle: "first log",
+		logPath:  firstLog,
+		logLines: []string{"stdout: first"},
+		nodes:    []api.NodeStatus{{Name: "first", State: api.StateRunning}},
+	})
+	d.logs.ScrollTo(9, 0)
+
+	d.selectedName = "second"
+	d.updateLogsFromSnapshot(snapshot{
+		logTitle: "second log",
+		logPath:  secondLog,
+		logLines: []string{"stdout: second"},
+		nodes:    []api.NodeStatus{{Name: "second", State: api.StateRunning}},
+	})
+
+	row, _ := d.logs.GetScrollOffset()
+	if row != 0 {
+		t.Fatalf("expected scroll offset to reset when switching logs, got row %d", row)
+	}
+}
+
 func TestHandleKeysPassesInputThroughWhenPopupActive(t *testing.T) {
 	d := newDashboard(t.TempDir(), "abc123")
 	d.activeInput = true
@@ -457,6 +579,33 @@ func TestHandleKeysUsesLetterShortcutsWhenNoInputActive(t *testing.T) {
 	}
 	if !d.showSupervisorLog || d.showDatabasePanel {
 		t.Fatalf("expected l to toggle supervisor log and hide database panel, got supervisor=%v database=%v", d.showSupervisorLog, d.showDatabasePanel)
+	}
+}
+
+func TestMaybeStopDaemonForTUIOnlyStopsOwnedDaemon(t *testing.T) {
+	previousStop := stopDaemonForTUI
+	calls := 0
+	stopDaemonForTUI = func(ctx context.Context, client *daemon.Client) error {
+		_ = client
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("expected shutdown call to have a deadline")
+		}
+		calls++
+		return nil
+	}
+	t.Cleanup(func() { stopDaemonForTUI = previousStop })
+
+	if err := maybeStopDaemonForTUI(nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("expected unowned daemon to be left running, got %d stop calls", calls)
+	}
+	if err := maybeStopDaemonForTUI(nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected owned daemon to be stopped once, got %d stop calls", calls)
 	}
 }
 

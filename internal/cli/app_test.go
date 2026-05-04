@@ -943,6 +943,44 @@ func TestDefaultLaunchPlanReusesExistingWatchDaemon(t *testing.T) {
 	}
 }
 
+func TestStatusDoesNotStartDaemon(t *testing.T) {
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.SaveStatus(worktree, inst.ID, "up", api.ModeWatch, map[string]api.NodeStatus{
+		"build": {Name: "build", Kind: "once", State: api.StateStopped},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	starts := 0
+	restore := daemon.SetStartDaemonFuncForTest(func(worktree, instanceID, projectName string) error {
+		starts++
+		return fmt.Errorf("status should not start daemon")
+	})
+	defer restore()
+
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"status", "--worktree", worktree, "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if starts != 0 {
+		t.Fatalf("expected no daemon starts, got %d", starts)
+	}
+	var status api.StatusResult
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Supervisor != nil {
+		t.Fatalf("expected no supervisor in direct status, got %+v", status.Supervisor)
+	}
+	if !hasNodeState(status.Nodes, "build", api.StateStopped) {
+		t.Fatalf("expected persisted node state in status: %+v", status.Nodes)
+	}
+}
+
 var (
 	bootstrapBuildOnce sync.Once
 	bootstrapBinary    string
@@ -1475,7 +1513,7 @@ func TestStopAllStopsDetachedSupervisorExecutorAndStaleStatusProcesses(t *testin
 		t.Fatal(err)
 	}
 	stopped := stringSetFromJSONList(t, payload["stopped"])
-	for _, name := range []string{"supervisor", "executor", "svc", "stale"} {
+	for _, name := range []string{"supervisor", "executor", "svc", "stale", "daemon"} {
 		if !stopped[name] {
 			t.Fatalf("expected %q in stopped payload: %v", name, payload["stopped"])
 		}
@@ -1490,8 +1528,8 @@ func TestStopAllStopsDetachedSupervisorExecutorAndStaleStatusProcesses(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Supervisor.PID <= 0 || !instance.ProcessAlive(loaded.Supervisor.PID) {
-		t.Fatalf("expected daemon supervisor to remain alive, got %+v", loaded.Supervisor)
+	if loaded.Supervisor.PID != 0 {
+		t.Fatalf("expected daemon supervisor to be cleared, got %+v", loaded.Supervisor)
 	}
 	if loaded.Supervisor.ExecPID != 0 {
 		t.Fatalf("expected executor ref to be cleared, got %+v", loaded.Supervisor)

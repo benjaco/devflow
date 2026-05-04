@@ -495,7 +495,7 @@ Service tasks have different command semantics depending on the run mode:
 - `run --detach` asks the per-worktree daemon to start the target in the background and returns after launch. It does not prove the target closure is healthy.
 - `watch --detach` asks the daemon to start the development loop. It is the expected long-running mode for humans and agents that want automatic reruns after file edits.
 - `flush` is the daemon-backed watch readiness gate. It proves the watcher observed the post-edit sync sentinel, waits for the selected target closure to settle, and checks service health.
-- `stop --all` asks the daemon to stop active work. It reconciles legacy supervisors, child executors, tracked services, stale status PIDs, and the instance-managed database container. Stopping the database container preserves its Docker volume. The daemon itself may remain alive as the worktree control plane.
+- `stop --all` asks the daemon to stop active work. It reconciles legacy supervisors, child executors and their process trees, tracked services, stale status PIDs, and the instance-managed database container. Stopping the database container preserves its Docker volume. After sending the response, the daemon shuts itself down so stopped state is not reported as a live daemon.
 
 The current automation recommendation is intentionally explicit: use detached watch plus `flush` for "background environment is ready" workflows. Do not reinterpret attached `run` as a start-and-return command without adding a separate CLI contract.
 
@@ -538,7 +538,9 @@ Mutable ownership is implemented by one daemon per worktree. CLI and TUI operati
 
 Daemon startup is serialized by a per-instance file lock under worktree state so concurrent CLI/TUI commands cannot start competing daemons for the same worktree.
 
-The older hidden `__internal_exec` and `__internal_supervise` launcher paths are no longer user-facing execution routes. Their persisted supervisor/executor state can still be reconciled during `stop --all` so existing stale processes are not orphaned.
+TUI daemon ownership is explicit. If bare `devflow` or `devflow tui` creates the daemon for that TUI session, TUI exit sends the normal all-work stop request so active services, managed databases, and the daemon shut down together. If the TUI connects to a daemon that already existed, TUI exit only disconnects the UI.
+
+The older hidden `__internal_exec` and `__internal_supervise` launcher paths are no longer user-facing execution routes. Their persisted supervisor/executor state and process-tree descendants can still be reconciled during `stop --all` so existing stale processes are not orphaned.
 
 The daemon persists:
 - daemon PID as the supervisor PID
@@ -549,11 +551,11 @@ The daemon persists:
 This is enough for:
 - `run --detach`
 - `watch --detach`
-- `stop --all` against daemon-owned work; it terminates legacy supervisor/executor process groups, tracked service process groups, PID-bearing status nodes, and the instance-managed database container before clearing persisted process state
+- `stop --all` against daemon-owned work; it terminates legacy supervisor/executor process groups and descendants, tracked service process groups, PID-bearing status nodes, and the instance-managed database container before clearing persisted process state and shutting the daemon down
 - service `restart` by asking the daemon to relaunch the last active target
 
 The operator surface now also reconciles detached state when queried:
-- `status` connects to the daemon and includes daemon PID/liveness plus sanitized instance metadata such as ports, URLs, and DB identity
+- `status` uses the daemon when one is already running, otherwise reads persisted state without starting a new daemon; it includes daemon PID/liveness plus sanitized instance metadata such as ports, URLs, and DB identity when present
 - `logs supervisor` reads the daemon/supervisor log directly
 
 The first usable TUI slice is now implemented as a local terminal console connected to the per-worktree daemon, with persisted state as fallback. It currently provides:
