@@ -4,7 +4,6 @@ go 1.23
 
 require (
 	github.com/gdamore/tcell/v2 v2.8.1
-	github.com/radovskyb/watcher v1.0.7
 	github.com/rivo/tview v0.42.0
 )
 

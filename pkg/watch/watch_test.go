@@ -2,6 +2,7 @@ package watch
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -288,6 +289,121 @@ func TestRunnerRestrictsPollingToWatchPaths(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for scoped watch-path batch")
+	}
+}
+
+func TestRunnerWatchOnlyCanObserveIncludeWithoutRoot(t *testing.T) {
+	root := t.TempDir()
+	includeDir := filepath.Join(root, ".devflow", "state", "instances", "abc", "flush", "sync")
+	if err := os.MkdirAll(includeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	otherPath := filepath.Join(root, "other.txt")
+	if err := os.WriteFile(otherPath, []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runner, err := New(Options{
+		Root:         root,
+		Debounce:     40 * time.Millisecond,
+		PollInterval: 20 * time.Millisecond,
+		WatchOnly:    true,
+		IncludePaths: []string{includeDir},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batches, errs, err := runner.Start(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if err := os.WriteFile(otherPath, []byte("b"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errs:
+		if err != nil {
+			t.Fatalf("watch error: %v", err)
+		}
+	case batch := <-batches:
+		t.Fatalf("unexpected root batch while WatchOnly is set: %+v", batch)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	if err := os.WriteFile(filepath.Join(includeDir, "flush-1.sync"), []byte("sync"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errs:
+		if err != nil {
+			t.Fatalf("watch error: %v", err)
+		}
+	case batch := <-batches:
+		want := ".devflow/state/instances/abc/flush/sync/flush-1.sync"
+		if !containsString(batch.Files, want) {
+			t.Fatalf("unexpected include-only batch: %+v", batch)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for include-only batch")
+	}
+}
+
+func TestRunnerRepeatedWritesToPendingFileDoNotExtendDebounceForever(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sync", "flush.sync")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("initial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runner, err := New(Options{
+		Root:         root,
+		Debounce:     120 * time.Millisecond,
+		PollInterval: 20 * time.Millisecond,
+		WatchPaths:   []string{"sync"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batches, errs, err := runner.Start(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deadline := time.Now().Add(350 * time.Millisecond)
+		i := 0
+		for time.Now().Before(deadline) {
+			i++
+			_ = os.WriteFile(path, []byte(fmt.Sprintf("retouch-%d", i)), 0o644)
+			time.Sleep(30 * time.Millisecond)
+		}
+	}()
+	defer func() { <-done }()
+
+	select {
+	case err := <-errs:
+		if err != nil {
+			t.Fatalf("watch error: %v", err)
+		}
+	case batch := <-batches:
+		if !containsString(batch.Files, "sync/flush.sync") {
+			t.Fatalf("unexpected repeated-write batch: %+v", batch)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("debounce was extended by repeated writes to the same pending file")
 	}
 }
 

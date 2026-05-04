@@ -248,8 +248,9 @@ func (d *dashboard) eventLoop(ctx context.Context) {
 	runner, err := watch.New(watch.Options{
 		Root:         dir,
 		Debounce:     40 * time.Millisecond,
-		PollInterval: 500 * time.Millisecond,
+		PollInterval: 250 * time.Millisecond,
 		WatchPaths:   []string{"events.jsonl"},
+		WatchOnly:    true,
 	})
 	if err != nil {
 		return

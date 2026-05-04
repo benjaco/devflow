@@ -60,7 +60,7 @@ Use this memory together with the subsystem docs. When a change affects one of t
 - Prefer narrow, semantic fingerprints over hashing the whole repo.
 - Optimize cache storage only after correctness and contract coverage exist.
 - Watch reruns must preserve graph dependency barriers. If an intermediate task is blocked from running in watch mode, downstream tasks in that cascade must not run against stale intermediate outputs.
-- Idle watch daemons should not poll the whole worktree when the selected target closure has declared file inputs. Watch scoping should stay based on task inputs plus flush sync sentinels, with heavyweight dependency folders such as `node_modules` ignored by default unless explicitly declared.
+- Idle watch daemons should not poll the whole worktree when the selected target closure has declared file inputs. Watch scoping should stay based on task inputs plus flush sync sentinels, with heavyweight dependency folders such as `node_modules` ignored by default unless explicitly declared. Repeated writes to an already-pending file, especially flush sync sentinel retouches, must not extend the debounce window forever.
 - Watch service restart policies should stay explicit: default to affected-slice restarts, use `RestartNever` to block watch restarts, and reserve `RestartAlways` for services that must bounce on every target-affecting watch cycle.
 - Treat `devflow flush --json` as the AI readiness gate for detached watch/dev workflows: edit files, flush the selected target closure, then run tests only when flush reports success.
 

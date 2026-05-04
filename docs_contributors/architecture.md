@@ -16,7 +16,7 @@
 - `pkg/engine`: bounded parallel ready-queue execution engine and status persistence
 - `pkg/daemon`: per-worktree daemon, JSON-line socket protocol, action queue, and event fanout for mutable dev/watch/operator work
 - `pkg/event`: typed event bus used by the engine for run, task-state, cache, process, instance, and log events
-- `pkg/watch`: polling-based file watching and debounced change batching built on `github.com/radovskyb/watcher`
+- `pkg/watch`: Devflow-owned polling file scanner and debounced change batching
 
 ## Local Project Bootstrap
 

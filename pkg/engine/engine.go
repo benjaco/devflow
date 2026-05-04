@@ -138,6 +138,7 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 	runner, err := watch.New(watch.Options{
 		Root:         req.Worktree,
 		WatchPaths:   e.watchInputPaths(order),
+		WatchOnly:    true,
 		IncludePaths: []string{flushSyncDir},
 	})
 	if err != nil {
@@ -147,11 +148,15 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 	if err != nil {
 		return err
 	}
+	readyDelay := watch.DefaultPollInterval * 2
+	if readyDelay < 500*time.Millisecond {
+		readyDelay = 500 * time.Millisecond
+	}
 	select {
 	case <-ctx.Done():
 		e.stopAllServices(req, inst, state)
 		return nil
-	case <-time.After(watch.DefaultPollInterval):
+	case <-time.After(readyDelay):
 	}
 	if err := os.WriteFile(instance.FlushWatchReadyPath(req.Worktree, inst.ID), []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o644); err != nil {
 		return err

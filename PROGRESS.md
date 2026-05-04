@@ -10,7 +10,7 @@ Last updated: 2026-05-04
 
 ## In Progress
 
-- No active implementation task after the watch idle CPU reduction work.
+- No active implementation task after the 250ms scoped polling experiment.
 
 ## Completed
 
@@ -39,7 +39,7 @@ Last updated: 2026-05-04
   - `pkg/daemon`
 - Bounded parallel ready-queue scheduling implemented in `pkg/engine`
 - Typed engine event stream implemented for run/task/cache/process/log events
-- Polling watch mode implemented with debounced batches and selective reruns via `github.com/radovskyb/watcher`
+- Polling watch mode implemented with Devflow-owned debounced batches and selective reruns
 - Service readiness hooks implemented for service tasks, with generic ready-file/TCP/HTTP helpers and engine-enforced readiness timeouts
 - Generic built-binary helper implemented in `pkg/project` for cacheable helper-binary builds plus later `Run`/`Start` execution
 - Generic Docker-backed `pkg/database` module implemented for dedicated per-instance Postgres containers, ports, volumes, and snapshot/restore primitives
@@ -439,8 +439,9 @@ Last updated: 2026-05-04
 - Reduced idle CPU for daemon-backed watch/TUI sessions:
   - watch mode now scopes polling to the selected target closure's declared file inputs plus the flush sync directory instead of recursively polling the whole worktree when concrete inputs exist
   - `node_modules` is ignored by default for root-level watcher fallback, while explicitly declared watch paths can still opt into ignored directories
-  - default watch polling moved from 100ms to 500ms, and the TUI persisted-event fallback watcher moved from 40ms to 500ms while the daemon socket subscription remains the instant update path
-  - fixed watcher/error channel reads so closed error channels cannot spin a select loop
+  - default watch polling now runs at 250ms using Devflow's own lightweight scanner, and the TUI persisted-event fallback also polls at 250ms while the daemon socket subscription remains the instant update path
+  - repeated retouches of an already-pending flush sync sentinel no longer extend the debounce window forever
+  - fixed watcher/error channel reads so closed error channels cannot spin a select loop, then removed the third-party watcher dependency when replacing the scanner
   - added coverage for declared-input watch paths, default `node_modules` ignore behavior, explicit ignored-directory watch paths, and scoped watch polling
   - verified with `go test ./pkg/watch ./pkg/engine ./pkg/tui`, `go test ./internal/cli`, `go test ./...`, `go build -o /tmp/devflow-build-check ./cmd/devflow`, and `git diff --check`
 - Added TUI-owned daemon shutdown semantics:

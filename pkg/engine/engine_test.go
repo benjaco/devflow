@@ -841,6 +841,7 @@ func TestWatchCycleEventsReportChangedFilesAndAffectedTasks(t *testing.T) {
 type flushWatchProject struct {
 	runs      atomic.Int32
 	failOnBad bool
+	noInputs  bool
 }
 
 func (p *flushWatchProject) Name() string { return "flush-watch-project" }
@@ -860,7 +861,7 @@ func (p *flushWatchProject) Tasks() []project.Task {
 		{
 			Name:    "gen",
 			Kind:    project.KindOnce,
-			Inputs:  project.Inputs{Files: []string{"input.txt"}},
+			Inputs:  flushWatchInputs(p.noInputs),
 			Outputs: project.Outputs{Files: []string{"out.txt"}},
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				_ = ctx
@@ -876,6 +877,13 @@ func (p *flushWatchProject) Tasks() []project.Task {
 			},
 		},
 	}
+}
+
+func flushWatchInputs(noInputs bool) project.Inputs {
+	if noInputs {
+		return project.Inputs{}
+	}
+	return project.Inputs{Files: []string{"input.txt"}}
 }
 
 func TestWatchFlushAckAfterFileChangeRerun(t *testing.T) {
@@ -951,6 +959,43 @@ func TestWatchFlushAckWithNoUserChanges(t *testing.T) {
 	}
 	if got := p.runs.Load(); got != 1 {
 		t.Fatalf("expected no rerun for sync-only flush, got %d runs", got)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("watch returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for watch shutdown")
+	}
+}
+
+func TestWatchFlushAckWithNoDeclaredInputs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &flushWatchProject{noInputs: true}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Watch(ctx, Request{Target: "dev", Worktree: worktree, Mode: api.ModeWatch})
+	}()
+	instanceID := waitForEngineWatchReady(t, worktree)
+
+	requestID := writeEngineFlushRequest(t, worktree, instanceID)
+	result := waitForEngineFlushAck(t, worktree, instanceID, requestID)
+	if !result.Success || !result.Synced {
+		t.Fatalf("expected successful sync-only flush with no declared inputs, got %+v", result)
 	}
 
 	cancel()

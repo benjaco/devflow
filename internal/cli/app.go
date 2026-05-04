@@ -1647,7 +1647,8 @@ func waitForFlushAck(worktree, instanceID, requestID, syncPath string, timeout t
 		return api.FlushResult{}, false, nil
 	}
 	deadline := time.Now().Add(timeout)
-	nextTouch := time.Now().Add(250 * time.Millisecond)
+	retouchInterval := 100 * time.Millisecond
+	nextTouch := time.Now().Add(retouchInterval)
 	for time.Now().Before(deadline) {
 		result, err := instance.LoadFlushAck(worktree, instanceID, requestID)
 		if err == nil {
@@ -1658,7 +1659,7 @@ func waitForFlushAck(worktree, instanceID, requestID, syncPath string, timeout t
 		}
 		if syncPath != "" && !time.Now().Before(nextTouch) {
 			_ = os.WriteFile(syncPath, []byte(requestID+"\n"+time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o644)
-			nextTouch = time.Now().Add(250 * time.Millisecond)
+			nextTouch = time.Now().Add(retouchInterval)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

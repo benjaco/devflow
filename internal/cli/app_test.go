@@ -1987,6 +1987,15 @@ func recordCLITestSupervisor(t *testing.T, worktree string, run api.RunConfig) s
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		client, err := daemon.Dial(worktree)
+		if err != nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, _ = client.Call(ctx, daemon.Request{Action: daemon.ActionStop, All: true})
+	})
 	logPath := filepath.Join(worktree, ".devflow", "logs", inst.ID, "supervisor.log")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		t.Fatal(err)
