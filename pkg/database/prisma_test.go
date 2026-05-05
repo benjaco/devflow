@@ -1551,12 +1551,7 @@ func TestPrismaMigrateDeployPrefixApplierCopiesOnlyPrefix(t *testing.T) {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	mustWriteExecutable(t, filepath.Join(binDir, "npx"), `#!/bin/sh
-schema="$5"
-migrations="$(dirname "$schema")/migrations"
-find "$migrations" -mindepth 1 -maxdepth 1 -type d | sort | wc -l | tr -d ' ' > "$OUT_FILE"
-printf '%s' "$DATABASE_URL" > "$OUT_FILE.url"
-`)
+	buildFakeNpx(t, worktree, filepath.Join(binDir, "npx"+databaseTestExeSuffix()))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	output := filepath.Join(worktree, "prefix-count.txt")
 	applier := PrismaMigrateDeployPrefixApplier()
@@ -1590,6 +1585,61 @@ printf '%s' "$DATABASE_URL" > "$OUT_FILE.url"
 	if strings.TrimSpace(string(url)) == "" {
 		t.Fatal("expected database env to be forwarded to prisma migrate deploy")
 	}
+}
+
+func buildFakeNpx(t *testing.T, worktree, output string) {
+	t.Helper()
+	source := filepath.Join(worktree, "fake-npx", "main.go")
+	mustWrite(t, source, `package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+func main() {
+	schema := ""
+	for i := 0; i < len(os.Args)-1; i++ {
+		if os.Args[i] == "--schema" {
+			schema = os.Args[i+1]
+			break
+		}
+	}
+	if schema == "" {
+		fmt.Fprintln(os.Stderr, "missing --schema")
+		os.Exit(1)
+	}
+	entries, err := os.ReadDir(filepath.Join(filepath.Dir(schema), "migrations"))
+	if err != nil {
+		panic(err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			count++
+		}
+	}
+	if err := os.WriteFile(os.Getenv("OUT_FILE"), []byte(fmt.Sprintf("%d", count)), 0o644); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(os.Getenv("OUT_FILE")+".url", []byte(os.Getenv("DATABASE_URL")), 0o644); err != nil {
+		panic(err)
+	}
+}
+`)
+	cmd := exec.Command("go", "build", "-o", output, source)
+	cmd.Dir = worktree
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake npx: %v\n%s", err, string(out))
+	}
+}
+
+func databaseTestExeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
 }
 
 func requireGit(t *testing.T) {

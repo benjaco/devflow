@@ -493,16 +493,13 @@ func TestUpgradePathWarningWhenPathShadowsGoInstall(t *testing.T) {
 	if err := os.MkdirAll(shadowDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(installedDir, "devflow"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(installedDir, devflowExecutableName()), []byte("installed"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(shadowDir, "devflow"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(shadowDir, devflowExecutableName()), []byte("shadow"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	fakeGo := filepath.Join(dir, "go")
-	if err := os.WriteFile(fakeGo, []byte("#!/bin/sh\nif [ \"$1\" = env ]; then printf '\\n%s\\n' \"$DEVFLOW_TEST_GOPATH\"; exit 0; fi\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	fakeGo := buildFakeGoCommand(t, dir, "env", 0)
 	t.Setenv("DEVFLOW_TEST_GOPATH", goPath)
 	t.Setenv("PATH", shadowDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -519,13 +516,10 @@ func TestUpgradePathWarningSkipsWhenInstalledBinaryIsOnPath(t *testing.T) {
 	if err := os.MkdirAll(installedDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(installedDir, "devflow"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(installedDir, devflowExecutableName()), []byte("installed"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	fakeGo := filepath.Join(dir, "go")
-	if err := os.WriteFile(fakeGo, []byte("#!/bin/sh\nif [ \"$1\" = env ]; then printf '\\n%s\\n' \"$DEVFLOW_TEST_GOPATH\"; exit 0; fi\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	fakeGo := buildFakeGoCommand(t, dir, "env", 0)
 	t.Setenv("DEVFLOW_TEST_GOPATH", goPath)
 	t.Setenv("PATH", installedDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -1328,16 +1322,7 @@ func installFakeGo(t *testing.T, exitCode int) string {
 	t.Helper()
 	dir := t.TempDir()
 	argsPath := filepath.Join(dir, "args.txt")
-	fakeGo := filepath.Join(dir, "go")
-	script := fmt.Sprintf(`#!/bin/sh
-printf '%%s\n' "$*" > "$DEVFLOW_FAKE_GO_ARGS"
-printf '%%s\n' "${GOPROXY:-}" > "$DEVFLOW_FAKE_GO_ARGS.goproxy"
-echo fake go output
-exit %d
-`, exitCode)
-	if err := os.WriteFile(fakeGo, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	buildFakeGoCommand(t, dir, "upgrade", exitCode)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("DEVFLOW_FAKE_GO_ARGS", argsPath)
 	return argsPath
@@ -1347,35 +1332,106 @@ func installFakeBuildGo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "build.log")
-	fakeGo := filepath.Join(dir, "go")
-	script := `#!/bin/sh
-set -eu
-printf 'start\n' >> "$DEVFLOW_FAKE_GO_BUILD_LOG"
-sleep 0.2
-out=""
-while [ "$#" -gt 0 ]; do
-	case "$1" in
-		-o)
-			shift
-			out="$1"
-			;;
-	esac
-	shift
-done
-if [ -z "$out" ]; then
-	echo "missing -o output" >&2
-	exit 2
-fi
-mkdir -p "$(dirname "$out")"
-printf 'fake local binary\n' > "$out"
-printf 'done\n' >> "$DEVFLOW_FAKE_GO_BUILD_LOG"
-`
-	if err := os.WriteFile(fakeGo, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	buildFakeGoCommand(t, dir, "build", 0)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("DEVFLOW_FAKE_GO_BUILD_LOG", logPath)
 	return logPath
+}
+
+func buildFakeGoCommand(t *testing.T, dir, mode string, exitCode int) string {
+	t.Helper()
+	source := filepath.Join(dir, "fake-go", "main.go")
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code := fmt.Sprintf(`package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+const mode = %q
+const exitCode = %d
+
+func main() {
+	switch mode {
+	case "env":
+		if len(os.Args) > 1 && os.Args[1] == "env" {
+			fmt.Println("")
+			fmt.Println(os.Getenv("DEVFLOW_TEST_GOPATH"))
+		}
+	case "upgrade":
+		argsPath := os.Getenv("DEVFLOW_FAKE_GO_ARGS")
+		mustWrite(argsPath, strings.Join(os.Args[1:], " ")+"\n")
+		mustWrite(argsPath+".goproxy", os.Getenv("GOPROXY")+"\n")
+		fmt.Println("fake go output")
+		os.Exit(exitCode)
+	case "build":
+		logPath := os.Getenv("DEVFLOW_FAKE_GO_BUILD_LOG")
+		appendFile(logPath, "start\n")
+		time.Sleep(200 * time.Millisecond)
+		out := ""
+		for i := 1; i < len(os.Args)-1; i++ {
+			if os.Args[i] == "-o" {
+				out = os.Args[i+1]
+			}
+		}
+		if out == "" {
+			fmt.Fprintln(os.Stderr, "missing -o output")
+			os.Exit(2)
+		}
+		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+			panic(err)
+		}
+		mustWrite(out, "fake local binary\n")
+		appendFile(logPath, "done\n")
+	default:
+		fmt.Fprintf(os.Stderr, "unknown fake go mode %%q\n", mode)
+		os.Exit(2)
+	}
+}
+
+func mustWrite(path, value string) {
+	if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+		panic(err)
+	}
+}
+
+func appendFile(path, value string) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString(value); err != nil {
+		panic(err)
+	}
+}
+`, mode, exitCode)
+	if err := os.WriteFile(source, []byte(code), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "go"+testExeSuffix())
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(realGo, "build", "-o", output, source)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake go: %v\n%s", err, string(out))
+	}
+	return output
+}
+
+func testExeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
 }
 
 func localProjectSource(name, target string) string {
@@ -2028,6 +2084,7 @@ func recordCLITestSupervisor(t *testing.T, worktree string, run api.RunConfig) s
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_, _ = client.Call(ctx, daemon.Request{Action: daemon.ActionStop, All: true})
+		waitForDaemonDisconnect(client, 3*time.Second)
 	})
 	logPath := filepath.Join(worktree, ".devflow", "logs", inst.ID, "supervisor.log")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {

@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -384,21 +385,10 @@ func freeLocalPort(t *testing.T) int {
 }
 
 func jsonWrite(path string, v any) error {
-	data := []byte("{\n")
-	switch m := v.(type) {
-	case SnapshotManifest:
-		data = []byte("{\n" +
-			`  "version": 1,` + "\n" +
-			`  "key": "` + m.Key + `",` + "\n" +
-			`  "createdAt": "0001-01-01T00:00:00Z",` + "\n" +
-			`  "image": "` + m.Image + `",` + "\n" +
-			`  "containerName": "` + m.ContainerName + `",` + "\n" +
-			`  "volumeName": "` + m.VolumeName + `",` + "\n" +
-			`  "database": "` + m.Database + `",` + "\n" +
-			`  "user": "` + m.User + `",` + "\n" +
-			`  "port": 55432,` + "\n" +
-			`  "archivePath": "` + m.ArchivePath + `"` + "\n" +
-			"}\n")
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
 	}
+	data = append(data, '\n')
 	return os.WriteFile(path, data, 0o644)
 }

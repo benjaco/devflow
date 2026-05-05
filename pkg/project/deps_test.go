@@ -45,7 +45,7 @@ func (cliScopeProject) RequiredCLIs() []RequiredCLI {
 
 func TestCheckRequiredCLIsDetectsInstalledAndMissing(t *testing.T) {
 	statuses := CheckRequiredCLIs([]RequiredCLI{
-		{Name: "shell", Command: "sh"},
+		{Name: "go", Command: "go"},
 		{Name: "missing", Command: "definitely-not-installed-command"},
 	})
 	if len(statuses) != 2 {
@@ -104,12 +104,16 @@ func TestInstallMissingRequiredCLIsRunsPlatformScriptOnlyForMissingCommands(t *t
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	existingCommand := "go"
 	fakeCommand := "missing-tool"
+	if runtime.GOOS == "windows" {
+		fakeCommand += ".cmd"
+	}
 	fakePath := filepath.Join(binDir, fakeCommand)
 	clis := []RequiredCLI{
 		{
 			Name:    "shell",
-			Command: "sh",
+			Command: existingCommand,
 			Install: map[string]InstallScript{
 				runtime.GOOS: {Script: "echo should-not-run >> " + shellQuote(marker)},
 			},
@@ -118,14 +122,7 @@ func TestInstallMissingRequiredCLIsRunsPlatformScriptOnlyForMissingCommands(t *t
 			Name:    "missing",
 			Command: fakeCommand,
 			Install: map[string]InstallScript{
-				runtime.GOOS: {Script: strings.Join([]string{
-					"echo installed >> " + shellQuote(marker),
-					"cat > " + shellQuote(fakePath) + " <<'EOF'",
-					"#!/bin/sh",
-					"exit 0",
-					"EOF",
-					"chmod +x " + shellQuote(fakePath),
-				}, "\n")},
+				runtime.GOOS: testInstallScript(marker, fakePath),
 			},
 		},
 	}
@@ -141,7 +138,7 @@ func TestInstallMissingRequiredCLIsRunsPlatformScriptOnlyForMissingCommands(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "installed\n" {
+	if strings.TrimSpace(string(data)) != "installed" {
 		t.Fatalf("unexpected install marker contents %q", string(data))
 	}
 }
@@ -170,6 +167,26 @@ func TestInstallMissingRequiredCLIsFailsIfCommandStillMissing(t *testing.T) {
 
 func shellQuote(value string) string {
 	return "'" + value + "'"
+}
+
+func testInstallScript(marker, fakePath string) InstallScript {
+	if runtime.GOOS == "windows" {
+		return InstallScript{
+			Shell: "powershell",
+			Script: strings.Join([]string{
+				"Add-Content -Path " + shellQuote(marker) + " -Value installed",
+				"Set-Content -Path " + shellQuote(fakePath) + " -Value '@echo off`r`nexit /b 0'",
+			}, "\n"),
+		}
+	}
+	return InstallScript{Script: strings.Join([]string{
+		"echo installed >> " + shellQuote(marker),
+		"cat > " + shellQuote(fakePath) + " <<'EOF'",
+		"#!/bin/sh",
+		"exit 0",
+		"EOF",
+		"chmod +x " + shellQuote(fakePath),
+	}, "\n")}
 }
 
 type cliScopeProjectWithTasks []Task

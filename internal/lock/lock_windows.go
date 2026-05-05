@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build windows
 
 package lock
 
@@ -6,11 +6,12 @@ import (
 	"os"
 	"path/filepath"
 
-	"golang.org/x/sys/unix"
+	"golang.org/x/sys/windows"
 )
 
 type FileLock struct {
-	file *os.File
+	file       *os.File
+	overlapped windows.Overlapped
 }
 
 func Acquire(path string) (*FileLock, error) {
@@ -21,11 +22,19 @@ func Acquire(path string) (*FileLock, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
+	lock := &FileLock{file: file}
+	if err := windows.LockFileEx(
+		windows.Handle(file.Fd()),
+		windows.LOCKFILE_EXCLUSIVE_LOCK,
+		0,
+		1,
+		0,
+		&lock.overlapped,
+	); err != nil {
 		file.Close()
 		return nil, err
 	}
-	return &FileLock{file: file}, nil
+	return lock, nil
 }
 
 func (l *FileLock) Release() error {
@@ -35,7 +44,7 @@ func (l *FileLock) Release() error {
 	defer func() {
 		l.file = nil
 	}()
-	if err := unix.Flock(int(l.file.Fd()), unix.LOCK_UN); err != nil {
+	if err := windows.UnlockFileEx(windows.Handle(l.file.Fd()), 0, 1, 0, &l.overlapped); err != nil {
 		_ = l.file.Close()
 		return err
 	}

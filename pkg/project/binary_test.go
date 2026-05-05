@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -14,10 +15,40 @@ import (
 
 func TestBinaryToolBuildRunAndStart(t *testing.T) {
 	worktree := t.TempDir()
-	source := filepath.Join(worktree, "tool-src.sh")
-	if err := os.WriteFile(source, []byte("#!/bin/sh\nif [ \"$1\" = \"serve\" ]; then\n  echo \"service:$MESSAGE\" >> \"$OUT_FILE\"\n  trap 'exit 0' INT TERM\n  while true; do sleep 1; done\nfi\necho \"run:$1:$MESSAGE\" >> \"$OUT_FILE\"\n"), 0o755); err != nil {
-		t.Fatal(err)
+	source := filepath.Join(worktree, "cmd", "mocktool", "main.go")
+	mustWriteProjectTestFile(t, source, `package main
+
+import (
+	"fmt"
+	"os"
+	"os/signal"
+)
+
+func appendLine(value string) {
+	file, err := os.OpenFile(os.Getenv("OUT_FILE"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		panic(err)
 	}
+	defer file.Close()
+	fmt.Fprintln(file, value)
+}
+
+func main() {
+	message := os.Getenv("MESSAGE")
+	if len(os.Args) > 1 && os.Args[1] == "serve" {
+		appendLine("service:" + message)
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, os.Interrupt)
+		<-ch
+		return
+	}
+	arg := ""
+	if len(os.Args) > 1 {
+		arg = os.Args[1]
+	}
+	appendLine("run:" + arg + ":" + message)
+}
+`)
 
 	rt := &Runtime{
 		Worktree: worktree,
@@ -27,18 +58,19 @@ func TestBinaryToolBuildRunAndStart(t *testing.T) {
 		TaskName: "test",
 		LogPath:  filepath.Join(worktree, "task.log"),
 	}
+	output := ".devflow/tools/mocktool" + projectTestExeSuffix()
 	tool := BinaryTool{
 		TaskName:    "build_mocktool",
 		Description: "Build a mock tool binary",
-		Inputs:      Inputs{Files: []string{"tool-src.sh"}},
-		Output:      ".devflow/tools/mocktool",
-		Build:       processSpec("sh", "-c", "mkdir -p .devflow/tools && cp tool-src.sh .devflow/tools/mocktool && chmod +x .devflow/tools/mocktool"),
+		Inputs:      Inputs{Files: []string{"cmd/mocktool/main.go"}},
+		Output:      output,
+		Build:       process.CommandSpec{Name: "go", Args: []string{"build", "-o", output, "cmd/mocktool/main.go"}},
 	}
 
 	if err := tool.BuildTask().Run(context.Background(), rt); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(rt.Abs(".devflow/tools/mocktool")); err != nil {
+	if _, err := os.Stat(rt.Abs(output)); err != nil {
 		t.Fatalf("expected built binary: %v", err)
 	}
 
@@ -87,6 +119,23 @@ func TestBinaryToolBuildRunAndStart(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(serviceData)); got != "service:up" {
 		t.Fatalf("unexpected service output %q", got)
+	}
+}
+
+func projectTestExeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
+}
+
+func mustWriteProjectTestFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
@@ -514,6 +515,9 @@ func (a *App) stopCmd(args []string) error {
 	resp, err := client.Call(context.Background(), daemon.Request{Action: daemon.ActionStop, All: *all, Task: *task})
 	if err != nil {
 		return err
+	}
+	if *all {
+		waitForDaemonDisconnect(client, 3*time.Second)
 	}
 	stopped := []string{}
 	if resp.Stop != nil {
@@ -1239,7 +1243,14 @@ func goInstalledDevflowPath(goCommand string) (string, error) {
 		}
 		binDir = filepath.Join(strings.TrimSpace(lines[1]), "bin")
 	}
-	return filepath.Join(binDir, "devflow"), nil
+	return filepath.Join(binDir, devflowExecutableName()), nil
+}
+
+func devflowExecutableName() string {
+	if runtime.GOOS == "windows" {
+		return "devflow.exe"
+	}
+	return "devflow"
 }
 
 func sameExecutablePath(a, b string) bool {
@@ -1588,13 +1599,16 @@ func writeJSON(w io.Writer, v any) error {
 	return err
 }
 
-func waitForPIDExit(pid int, timeout time.Duration) {
-	if pid <= 0 || timeout <= 0 {
+func waitForDaemonDisconnect(client *daemon.Client, timeout time.Duration) {
+	if client == nil || timeout <= 0 {
 		return
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		err := client.Ping(ctx)
+		cancel()
+		if err != nil {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)

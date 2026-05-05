@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/benjaco/devflow/internal/fsutil"
@@ -402,7 +401,7 @@ func startDaemonProcess(worktree, instanceID, projectName string) error {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Dir = worktree
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	prepareDaemonCmd(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}

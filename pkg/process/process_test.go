@@ -174,11 +174,18 @@ func projectRoot(t *testing.T) string {
 func buildPromptCLI(t *testing.T) string {
 	t.Helper()
 	root := projectRoot(t)
-	bin := filepath.Join(t.TempDir(), "promptcli")
+	bin := filepath.Join(t.TempDir(), "promptcli"+exeSuffix())
 	cmd := exec.Command("go", "build", "-o", bin, "./internal/testutil/promptcli")
 	cmd.Dir = root
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build prompt cli: %v\n%s", err, string(out))
 	}
 	return bin
+}
+
+func exeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
 }

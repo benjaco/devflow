@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/benjaco/devflow/internal/fsutil"
@@ -517,7 +516,7 @@ func ProcessAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	return syscall.Kill(pid, 0) == nil
+	return processAlive(pid)
 }
 
 func addStopRef(refs map[string]int, name string, pid int) {
@@ -539,7 +538,7 @@ func stopNamedProcessGroups(refs map[string]int, grace time.Duration) ([]string,
 		}
 		names = append(names, name)
 		if !unique[pid] {
-			if err := signalProcessGroup(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+			if err := terminateProcessGroup(pid); err != nil && !isNoProcess(err) {
 				return names, err
 			}
 			unique[pid] = true
@@ -552,18 +551,11 @@ func stopNamedProcessGroups(refs map[string]int, grace time.Duration) ([]string,
 	waitForProcessExit(unique, grace)
 	for pid := range unique {
 		if ProcessAlive(pid) {
-			_ = signalProcessGroup(pid, syscall.SIGKILL)
+			_ = killProcessGroup(pid)
 		}
 	}
 	waitForProcessExit(unique, 500*time.Millisecond)
 	return names, nil
-}
-
-func signalProcessGroup(pid int, signal syscall.Signal) error {
-	if err := syscall.Kill(-pid, signal); err != nil {
-		return syscall.Kill(pid, signal)
-	}
-	return nil
 }
 
 func waitForProcessExit(pids map[int]bool, timeout time.Duration) {
