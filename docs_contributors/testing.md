@@ -14,7 +14,7 @@ Devflow uses three testing layers:
 ## Integration Tests
 
 - subprocess stdout/stderr capture
-- per-task log truncation so logs reflect the current run attempt
+- per-task log truncation at task-attempt start so custom adapter progress and subprocess output both reflect the current run attempt
 - interactive prompt detection and answer forwarding with a real prompt CLI fixture
 - service lifecycle management
 - CI-mode service targets act as readiness probes and stop services before returning
@@ -26,9 +26,10 @@ Devflow uses three testing layers:
 - built-binary helper build/run/start coverage and cache-restore coverage
 - database runtime command planning and snapshot-manifest coverage
 - builder API coverage for command tasks, services, target definitions, automatic cacheability from outputs, port env references, dotenv loading, path inputs, and glob inputs
+- local stamped task coverage for install/setup commands that skip on matching input keys, rerun when declared local outputs are missing, stay isolated per worktree, ignore matching global cache entries, and avoid watch loops when commands touch unchanged input mtimes
 - database component coverage for common Postgres/Prisma task generation, optional snapshot-root defaults, instance DB/env finalization, and explicit non-cacheable migration authoring
-- database runtime host-port readiness and stale published-port reconciliation coverage
-- managed migration workflow coverage for exact snapshot reuse, nearest-prefix restore, incompatible base fingerprint misses, changed-latest tail replay, per-migration prefix snapshots, checked remote Postgres clone policy failures, Prisma directory-only migration inspection, Prisma lock-file churn, model-free schemas without migrations, added/deleted Prisma migrations, changed older Prisma migration rebuilds, failed Prisma migration apply without snapshotting, Prisma prefix deploy snapshots, fresh/no-migration migration-needed errors, schema-without-migration migration-needed errors, Prisma authoring database reconciliation, and Prisma generate helpers
+- database runtime host-port readiness, stale published-port reconciliation, Docker control-command timeout coverage, and process-group cancellation for Docker helper children that keep pipes open
+- managed migration workflow coverage for exact snapshot reuse, nearest-prefix restore, incompatible base fingerprint misses, changed-latest tail replay, per-migration prefix snapshots, checked remote Postgres clone policy failures, Prisma directory-only migration inspection, Prisma lock-file churn, model-free schemas without migrations, added/deleted Prisma migrations, changed older Prisma migration rebuilds, failed Prisma migration apply without snapshotting, Prisma prefix deploy snapshots, fresh/no-migration migration-needed errors, schema-without-migration migration-needed errors, Prisma authoring database reconciliation, database prep progress logs before Docker/Prisma subprocess output, no duplicated runtime subprocess log lines, and Prisma generate helpers
 - Prisma schema/migration inspection and nearest-prefix snapshot planning coverage
 - dotenv parsing and merged runtime-env coverage with devflow-managed DB overrides
 - CLI JSON output shape, including command-level lifecycle coverage for `run`, `status`, `logs`, `instances`, `doctor`, and `stop`
@@ -39,7 +40,7 @@ Devflow uses three testing layers:
 - global cache coverage for the single OS user cache root and project cache namespaces
 - required CLI detection, target-scoped required CLI selection, and platform-script install coverage in `pkg/project` and `internal/cli`
 - engine-level interactive prompt event plus answer-file integration coverage
-- TUI database/Prisma panel rendering, drift warning, Prisma snapshot-summary loading, daemon-backed migration target action, detached-target relaunch, selected-task invalidate/rerun forced relaunch behavior, log scroll preservation across same-log reloads, and progress/footer status coverage
+- TUI database/Prisma panel rendering, drift warning, Prisma snapshot-summary loading, daemon-backed migration target action, detached-target relaunch, selected-task invalidate/rerun forced relaunch behavior, log scroll preservation across same-log reloads, default startup waiting for a matching non-empty status snapshot instead of stale blank state, and progress/footer status coverage
 - TUI daemon ownership coverage proving a daemon created for the TUI session is stopped on exit while an already-running daemon is left alone
 - sequential engine execution with cache hits
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work, plus explicit `migration_needed` task-state classification for database migration authoring guards

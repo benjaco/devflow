@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -152,6 +153,53 @@ func TestEnsureRuntimeRecreatesContainerWithWrongHostPort(t *testing.T) {
 	}
 }
 
+func TestEnsureRuntimeTimesOutStaleContainerRemoval(t *testing.T) {
+	oldTimeout := dockerControlTimeout
+	dockerControlTimeout = 20 * time.Millisecond
+	defer func() { dockerControlTimeout = oldTimeout }()
+
+	runner := &fakeRunner{
+		responses: map[string]response{
+			key("docker", "inspect", "-f", "{{.State.Running}}", "devflow-pg-abc"): {out: []byte("true\n")},
+			portInspectKey("devflow-pg-abc"):                                       {out: []byte("55433\n")},
+			key("docker", "rm", "-f", "devflow-pg-abc"):                            {waitContext: true},
+		},
+	}
+	mgr := NewWithRunner(runner)
+	db := api.DBInstance{
+		Name:          "app_wt_abc",
+		Port:          55432,
+		User:          "devflow",
+		Password:      "secret",
+		Image:         "postgres:16.3",
+		ContainerName: "devflow-pg-abc",
+		VolumeName:    "devflow-pgdata-abc",
+	}
+	err := mgr.EnsureRuntime(context.Background(), db)
+	if err == nil {
+		t.Fatal("expected timeout removing stale container")
+	}
+	if !strings.Contains(err.Error(), "docker rm -f devflow-pg-abc timed out after") {
+		t.Fatalf("expected docker timeout error, got %v", err)
+	}
+}
+
+func TestExecRunnerContextCancelKillsProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell process-group cancellation test is unix-only")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := (execRunner{}).CombinedOutput(ctx, "sh", "-c", "sleep 10 & wait")
+	if err == nil {
+		t.Fatal("expected context cancellation error")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("expected process group cancellation within 1s, took %s", time.Since(start))
+	}
+}
+
 func TestWaitReadyAlsoWaitsForHostPortWhenHostSet(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -285,8 +333,9 @@ func TestCommandErrContainsMatchesWrappedCombinedOutput(t *testing.T) {
 }
 
 type response struct {
-	out []byte
-	err error
+	out         []byte
+	err         error
+	waitContext bool
 }
 
 type fakeRunner struct {
@@ -295,10 +344,13 @@ type fakeRunner struct {
 }
 
 func (f *fakeRunner) CombinedOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
-	_ = ctx
 	call := key(name, args...)
 	f.calls = append(f.calls, call)
 	if res, ok := f.responses[call]; ok {
+		if res.waitContext {
+			<-ctx.Done()
+			return res.out, ctx.Err()
+		}
 		return res.out, res.err
 	}
 	return nil, nil

@@ -279,6 +279,8 @@ The new `pkg/database` package provides the runtime primitives for that model:
 - snapshot and restore the Postgres data volume
 - inspect Prisma schema/migration state and choose the nearest cached migration-prefix snapshot
 
+Docker control-plane commands such as inspect, start, stop, remove, and detached container start are bounded by short command timeouts. Long data-plane sidecar work such as snapshot archive/restore has a separate longer timeout. Docker commands run in their own process group on Unix-like platforms; timeout/cancel kills the group and uses a bounded wait so Docker Desktop helper children cannot keep stdout/stderr pipes open forever. A stuck Docker Desktop or Docker CLI should surface as a database task error rather than leaving a task in `running` forever.
+
 This keeps DB isolation strong and avoids shared-cluster coupling between worktrees.
 
 What this package does not decide:
@@ -340,6 +342,8 @@ The important cache invariant is prefix safety. A snapshot can only be reused wh
 
 Prisma has two authoring guards: if `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but the migration list has not advanced beyond the restored prefix, the default workflow returns a migration-needed error telling the adapter to generate a migration first. The engine writes errors that implement `MigrationNeeded() bool`, plus known Prisma migration-needed messages, as `migration_needed` rather than `failed`, and downstream work remains pending. Migration generation must be modeled as an explicit target/action using `PreparePrismaMigrationAuthoringDatabase` plus `GeneratePrismaMigration`, or as the explicit TUI `m` action, not hidden inside normal `up`.
 
+Prisma database preparation emits progress lines before snapshot planning, runtime recreation, readiness waits, source-policy application, and final runtime start. This is intentionally visible in task logs and the TUI footer because Docker reconciliation can happen before any Prisma subprocess writes output. Progress helpers own writing those component progress lines to the task log and event stream; subprocess output is written to the task log by `pkg/process` and forwarded to live consumers through an event-only callback so Prisma CLI output is not duplicated.
+
 Migration authoring prep intentionally differs from normal DB prep: it restores/rebuilds the managed database to the best compatible prefix, reapplies any missing or edited tail migrations, and does not snapshot the schema-drift state it prepares for Prisma. That lets `prisma migrate dev --create-only` compare the current schema against a compatible database without hitting Prisma's "migration was modified after it was applied" reset prompt after a developer edits the latest migration.
 
 Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`. `Migrate` is an all-at-once command and only snapshots the final state; `MigrateEach` preserves the per-prefix cache contract.
@@ -365,6 +369,18 @@ The default cache key is derived automatically from:
 - selected file and directory hashes
 - selected env values
 - custom fingerprint outputs
+
+## Local Task Stamps
+
+Stamped tasks are finite `KindOnce` tasks that use the normal task key but do not write a global cache entry. On success, the engine writes a tiny per-worktree stamp under:
+
+```text
+<worktree>/.devflow/state/instances/<instance-id>/task-stamps/
+```
+
+On a later run in the same worktree, a matching stamp marks the task done without executing it, provided any declared local outputs still exist. This supports install/setup commands such as `npm install`: the task reruns when `package.json` or `package-lock.json` changes, but Devflow does not copy `node_modules` into `<os.UserCacheDir()>/devflow/cache` or consult the global cache to decide whether the install is already valid. If `node_modules` is declared as an output and is deleted in that worktree, the stamp is ignored and the install task runs again.
+
+Stamped tasks are invalidated together with cacheable tasks in daemon/TUI invalidation flows, but they are not cache hits and should not be reported as restored artifacts.
 
 ### Task-Defined Cache Key Override
 

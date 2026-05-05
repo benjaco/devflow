@@ -943,6 +943,39 @@ func TestDefaultLaunchPlanReusesExistingWatchDaemon(t *testing.T) {
 	}
 }
 
+func TestInitialStatusWaitRequiresMatchingTargetModeAndNodes(t *testing.T) {
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.SaveStatus(worktree, inst.ID, "", "", map[string]api.NodeStatus{}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		waitForInitialStatus(worktree, inst.ID, "up", api.ModeWatch, 2*time.Second)
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("empty stale status should not satisfy initial wait")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	if err := instance.SaveStatus(worktree, inst.ID, "up", api.ModeWatch, map[string]api.NodeStatus{
+		"app": {Name: "app", Kind: string(project.KindService), State: api.StatePending},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("matching non-empty status did not satisfy initial wait")
+	}
+}
+
 func TestStatusDoesNotStartDaemon(t *testing.T) {
 	worktree := t.TempDir()
 	inst, err := instance.Resolve(worktree, "test")

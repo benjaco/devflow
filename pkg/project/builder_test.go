@@ -60,6 +60,30 @@ func TestBuilderDefinesProjectWithCachedOutputTask(t *testing.T) {
 	}
 }
 
+func TestBuilderStampedTaskDoesNotEnableCacheForOutputs(t *testing.T) {
+	p := Define(func(ctx context.Context, b *Builder) error {
+		b.Name("demo")
+		install := b.Task("npm_install").
+			Command("npm", "install").
+			Inputs("package.json", "package-lock.json").
+			Outputs("node_modules").
+			Stamp()
+		b.Target("up", install)
+		return nil
+	})
+
+	install := taskByNameForTest(p.Tasks(), "npm_install")
+	if install.Cache {
+		t.Fatal("stamped task must not become globally cacheable")
+	}
+	if !install.Stamp {
+		t.Fatal("expected stamped task")
+	}
+	if len(install.Outputs.Paths) != 1 || install.Outputs.Paths[0] != "node_modules" {
+		t.Fatalf("unexpected outputs: %+v", install.Outputs)
+	}
+}
+
 func TestBuilderCommandEnvCanUsePortRef(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses sh")

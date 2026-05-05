@@ -43,6 +43,7 @@ type CommandSpec struct {
 	Dir         string
 	Env         map[string]string
 	LogPath     string
+	AppendLog   bool
 	OnLine      func(stream, line string)
 	Grace       time.Duration
 	ReadyWait   time.Duration
@@ -86,7 +87,7 @@ func Run(ctx context.Context, spec CommandSpec) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	writer, closeWriter, err := logWriter(spec.LogPath)
+	writer, closeWriter, err := logWriter(spec.LogPath, spec.AppendLog)
 	if err != nil {
 		return Result{}, err
 	}
@@ -131,7 +132,7 @@ func Start(ctx context.Context, spec CommandSpec) (*Handle, error) {
 	if err != nil {
 		return nil, err
 	}
-	writer, closeWriter, err := logWriter(spec.LogPath)
+	writer, closeWriter, err := logWriter(spec.LogPath, spec.AppendLog)
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +276,7 @@ func startInteractive(ctx context.Context, spec CommandSpec) (*Handle, error) {
 	if err != nil {
 		return nil, err
 	}
-	writer, closeWriter, err := logWriter(spec.LogPath)
+	writer, closeWriter, err := logWriter(spec.LogPath, spec.AppendLog)
 	if err != nil {
 		return nil, err
 	}
@@ -486,14 +487,20 @@ func mergeEnv(overrides map[string]string) []string {
 	return env
 }
 
-func logWriter(path string) (io.Writer, func() error, error) {
+func logWriter(path string, appendLog bool) (io.Writer, func() error, error) {
 	if path == "" {
 		return io.Discard, func() error { return nil }, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, nil, err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	flags := os.O_CREATE | os.O_WRONLY
+	if appendLog {
+		flags |= os.O_APPEND
+	} else {
+		flags |= os.O_TRUNC
+	}
+	file, err := os.OpenFile(path, flags, 0o644)
 	if err != nil {
 		return nil, nil, err
 	}

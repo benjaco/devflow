@@ -50,7 +50,9 @@ For AI-assisted development, prefer `watch --detach` plus `flush` over an attach
 
 ## TUI
 
-Run `devflow` with no args in a project worktree to start or reconnect to the worktree daemon, ensure the default target is running in watch mode, and open the TUI. This is the normal day-to-day entry point when you want edits to cascade automatically.
+Run `devflow` or `devflow tui` with no args in a project worktree to start or reconnect to the worktree daemon, ensure the default target is running in watch mode, and open the TUI. This is the normal day-to-day entry point when you want edits to cascade automatically.
+
+Use `devflow tui --instance <id>` only when you intentionally want to attach to a specific existing instance. In that attach-only mode, Devflow does not start or retarget background work for you.
 
 If that TUI launch had to start the worktree daemon, quitting the TUI also stops daemon-owned work and exits the daemon. If a daemon was already running before the TUI connected, quitting the TUI only closes the UI and leaves that existing background workflow alive.
 

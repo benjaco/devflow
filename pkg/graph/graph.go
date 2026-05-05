@@ -58,6 +58,12 @@ func (g *Graph) Validate() error {
 		if task.Cache && task.Kind != project.KindOnce {
 			return fmt.Errorf("only once tasks may be cacheable: %q", task.Name)
 		}
+		if task.Stamp && task.Kind != project.KindOnce {
+			return fmt.Errorf("only once tasks may be stamped: %q", task.Name)
+		}
+		if task.Cache && task.Stamp {
+			return fmt.Errorf("task %q cannot be both cacheable and stamped", task.Name)
+		}
 		for _, dep := range task.Deps {
 			if _, ok := g.Tasks[dep]; !ok {
 				return fmt.Errorf("task %q references missing dependency %q", task.Name, dep)

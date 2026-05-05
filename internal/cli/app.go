@@ -87,6 +87,10 @@ func (a *App) defaultEntry() error {
 	if err != nil {
 		return err
 	}
+	return a.launchDefaultTUI(root)
+}
+
+func (a *App) launchDefaultTUI(root string) error {
 	plan, err := a.defaultLaunchPlan(root)
 	if err != nil {
 		return err
@@ -103,7 +107,7 @@ func (a *App) defaultEntry() error {
 	}); err != nil {
 		return err
 	}
-	waitForInitialStatus(root, plan.instanceID, 3*time.Second)
+	waitForInitialStatus(root, plan.instanceID, plan.target, api.ModeWatch, 3*time.Second)
 	return tui.Run(tui.Options{Worktree: root, InstanceID: plan.instanceID, StopDaemonOnExit: daemonStarted})
 }
 
@@ -603,6 +607,17 @@ func (a *App) cacheInvalidateCmd(args []string) error {
 	if err := store.Invalidate(*task); err != nil {
 		return err
 	}
+	instanceID, real, err := instance.IDForWorktree(root)
+	if err != nil {
+		return err
+	}
+	if *task == "" {
+		if err := instance.RemoveTaskStamps(real, instanceID); err != nil {
+			return err
+		}
+	} else if err := instance.RemoveTaskStamp(real, instanceID, *task); err != nil {
+		return err
+	}
 	payload := map[string]any{"cacheRoot": instance.CacheRoot(), "namespace": store.Namespace, "project": p.Name(), "task": *task, "invalidated": true}
 	if *jsonOut {
 		return writeJSON(a.Stdout, payload)
@@ -716,6 +731,12 @@ func statusResult(root, instanceID string) (api.StatusResult, error) {
 			return api.StatusResult{}, err
 		}
 		state = &instance.State{Target: inst.LastRun.Target, Mode: inst.LastRun.Mode, Nodes: map[string]api.NodeStatus{}}
+	}
+	if state.Target == "" && inst.LastRun.Target != "" {
+		state.Target = inst.LastRun.Target
+	}
+	if state.Mode == "" && inst.LastRun.Mode != "" {
+		state.Mode = inst.LastRun.Mode
 	}
 	nodes := make([]api.NodeStatus, 0, len(state.Nodes))
 	for _, node := range state.Nodes {
@@ -1067,6 +1088,13 @@ func (a *App) tuiCmd(args []string) error {
 	instanceID := fs.String("instance", "", "")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if strings.TrimSpace(*instanceID) == "" {
+		root, err := resolveWorktree(*worktree)
+		if err != nil {
+			return err
+		}
+		return a.launchDefaultTUI(root)
 	}
 	return tui.Run(tui.Options{
 		Worktree:   *worktree,
@@ -1573,17 +1601,30 @@ func waitForPIDExit(pid int, timeout time.Duration) {
 	}
 }
 
-func waitForInitialStatus(worktree, instanceID string, timeout time.Duration) {
+func waitForInitialStatus(worktree, instanceID, target string, mode api.RunMode, timeout time.Duration) {
 	if timeout <= 0 {
 		return
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if _, err := instance.LoadStatus(worktree, instanceID); err == nil {
+		if state, err := instance.LoadStatus(worktree, instanceID); err == nil && statusMatchesInitialRun(state, target, mode) {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func statusMatchesInitialRun(state *instance.State, target string, mode api.RunMode) bool {
+	if state == nil {
+		return false
+	}
+	if strings.TrimSpace(target) != "" && state.Target != target {
+		return false
+	}
+	if mode != "" && state.Mode != mode {
+		return false
+	}
+	return len(state.Nodes) > 0
 }
 
 func newFlushRequestID() string {

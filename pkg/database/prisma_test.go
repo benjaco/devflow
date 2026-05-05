@@ -102,6 +102,36 @@ func TestPrismaMigrationLockChurnDoesNotChangeState(t *testing.T) {
 	}
 }
 
+func TestPreparePrismaBaseEmitsDatabaseProgress(t *testing.T) {
+	runner := &fakeRunner{
+		responses: map[string]response{
+			key("docker", "rm", "-f", "devflow-pg-abc"):               {err: errors.New("Error: No such container: devflow-pg-abc")},
+			key("docker", "volume", "rm", "-f", "devflow-pgdata-abc"): {err: errors.New("Error: No such volume: devflow-pgdata-abc")},
+		},
+	}
+	mgr := NewWithRunner(runner)
+	var lines []string
+	_, err := mgr.PreparePrismaBase(context.Background(), api.DBInstance{
+		ContainerName: "devflow-pg-abc",
+		VolumeName:    "devflow-pgdata-abc",
+		SnapshotRoot:  t.TempDir(),
+	}, &PrismaState{}, nil, PrepareOptions{
+		OnLine: func(stream, line string) {
+			lines = append(lines, stream+": "+line)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "database: checking cached Prisma migration snapshots") {
+		t.Fatalf("expected snapshot progress line, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "database: no compatible Prisma snapshot; recreating managed Postgres volume") {
+		t.Fatalf("expected recreate progress line, got:\n%s", joined)
+	}
+}
+
 func TestInspectPrismaDevelopmentStatusFlagsSchemaWithoutMigration(t *testing.T) {
 	worktree := t.TempDir()
 	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\nmodel User { id Int @id }\n")

@@ -112,6 +112,7 @@ func (m *Manager) EnsurePrismaDevDatabase(ctx context.Context, opts PrismaDevDat
 	if err != nil {
 		return nil, err
 	}
+	emitPrepareLine(opts.Prepare, "stdout", "database: starting managed Postgres runtime")
 	if err := m.EnsureRuntime(ctx, opts.DB); err != nil {
 		return nil, err
 	}
@@ -119,6 +120,7 @@ func (m *Manager) EnsurePrismaDevDatabase(ctx context.Context, opts PrismaDevDat
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+	emitPrepareLine(opts.Prepare, "stdout", "database: waiting for managed Postgres readiness")
 	if err := m.WaitReady(ctx, opts.DB, timeout); err != nil {
 		return nil, err
 	}
@@ -169,6 +171,7 @@ func (m *Manager) EnsurePrismaDevDatabase(ctx context.Context, opts PrismaDevDat
 		if err := m.EnsureRuntime(ctx, opts.DB); err != nil {
 			return nil, err
 		}
+		emitPrepareLine(opts.Prepare, "stdout", "database: waiting for managed Postgres readiness after snapshot")
 		if err := m.WaitReady(ctx, opts.DB, timeout); err != nil {
 			return nil, err
 		}
@@ -185,6 +188,7 @@ func (m *Manager) PreparePrismaMigrationAuthoringDatabase(ctx context.Context, o
 	if err != nil {
 		return nil, err
 	}
+	emitPrepareLine(opts.Prepare, "stdout", "database: starting managed Postgres runtime")
 	if err := m.EnsureRuntime(ctx, opts.DB); err != nil {
 		return nil, err
 	}
@@ -192,6 +196,7 @@ func (m *Manager) PreparePrismaMigrationAuthoringDatabase(ctx context.Context, o
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+	emitPrepareLine(opts.Prepare, "stdout", "database: waiting for managed Postgres readiness")
 	if err := m.WaitReady(ctx, opts.DB, timeout); err != nil {
 		return nil, err
 	}
@@ -240,6 +245,7 @@ func (m *Manager) PreparePrismaMigrationAuthoringDatabase(ctx context.Context, o
 	if err := m.EnsureRuntime(ctx, opts.DB); err != nil {
 		return nil, err
 	}
+	emitPrepareLine(opts.Prepare, "stdout", "database: waiting for managed Postgres readiness after migration replay")
 	if err := m.WaitReady(ctx, opts.DB, timeout); err != nil {
 		return nil, err
 	}
@@ -277,6 +283,7 @@ func (m *Manager) applyAndSnapshotEachPrismaMigration(ctx context.Context, opts 
 		if err := m.EnsureRuntime(ctx, opts.DB); err != nil {
 			return nil, err
 		}
+		emitPrepareLine(opts.Prepare, "stdout", "database: waiting for managed Postgres readiness after snapshot")
 		if err := m.WaitReady(ctx, opts.DB, timeout); err != nil {
 			return nil, err
 		}
@@ -355,6 +362,7 @@ func GeneratePrismaMigration(ctx context.Context, opts PrismaMigrationGenerateOp
 	}
 	cmd.Env = mergeStringMaps(opts.Env, cmd.Env)
 	cmd.LogPath = opts.LogPath
+	cmd.AppendLog = true
 	cmd.OnLine = opts.OnLine
 	_, err := process.Run(ctx, cmd)
 	return err

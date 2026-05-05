@@ -192,6 +192,44 @@ func TestFlushRequestAndAckRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTaskStampRoundTripAndRemove(t *testing.T) {
+	worktree := t.TempDir()
+	instanceID := "abc123"
+	task := "npm/install"
+	key := "key-1"
+	if err := WriteTaskStamp(worktree, instanceID, task, key); err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok, err := LoadTaskStamp(worktree, instanceID, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected task stamp to exist")
+	}
+	if loaded.Task != task || loaded.Key != key || loaded.UpdatedAt.IsZero() {
+		t.Fatalf("unexpected task stamp: %+v", loaded)
+	}
+	if path := TaskStampPath(worktree, instanceID, task); !strings.HasPrefix(path, filepath.Join(worktree, ".devflow", "state", "instances", instanceID, "task-stamps")) {
+		t.Fatalf("unexpected task stamp path %q", path)
+	}
+	if err := RemoveTaskStamp(worktree, instanceID, task); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := LoadTaskStamp(worktree, instanceID, task); err != nil || ok {
+		t.Fatalf("expected removed task stamp, ok=%v err=%v", ok, err)
+	}
+	if err := WriteTaskStamp(worktree, instanceID, task, key); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveTaskStamps(worktree, instanceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := LoadTaskStamp(worktree, instanceID, task); err != nil || ok {
+		t.Fatalf("expected all task stamps removed, ok=%v err=%v", ok, err)
+	}
+}
+
 func TestDaemonSocketPathUsesShortTempDirectory(t *testing.T) {
 	path, err := DaemonSocketPath("abc123")
 	if err != nil {

@@ -124,6 +124,18 @@ codegen := b.Task("codegen").
 
 Prefer narrow semantic inputs over hashing the whole repository. Use `project.Glob("internal/storage/**/*.sql")` for generated-code inputs such as sqlc query files. Use `NoCache()` for finite commands with outputs that should not be restored from cache, such as explicit migration-authoring commands.
 
+Use `Stamp()` for local install/setup tasks that should run once per input key but should not copy heavyweight mutable folders into the global cache:
+
+```go
+npmInstall := b.Task("npm_install").
+	Command("npm", "install").
+	Inputs("package.json", "package-lock.json").
+	Outputs("node_modules").
+	Stamp()
+```
+
+`Stamp()` records successful completion in the current worktree state using the normal task fingerprint. It never checks or restores from the global task cache when deciding whether to skip. If the same input key is seen again in that worktree and declared local outputs still exist, Devflow marks the task done without running it. If `package-lock.json` changes, or that worktree's `node_modules` is removed, it runs again. This is the right shape for package-manager installs; use `NoCache()` for tests and authoring commands that should execute every time they are scheduled.
+
 Task cache storage is global for the user:
 
 ```text

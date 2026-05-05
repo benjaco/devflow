@@ -757,6 +757,12 @@ func loadSnapshot(root, instanceID string, showSupervisor bool, showDatabase boo
 			Nodes:  map[string]api.NodeStatus{},
 		}
 	}
+	if state.Target == "" && inst.LastRun.Target != "" {
+		state.Target = inst.LastRun.Target
+	}
+	if state.Mode == "" && inst.LastRun.Mode != "" {
+		state.Mode = inst.LastRun.Mode
+	}
 	supervisor := supervisorStatus(inst)
 	if supervisor != nil && !supervisor.Alive {
 		if err := instance.ClearSupervisor(inst); err == nil {

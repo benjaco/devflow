@@ -83,6 +83,10 @@ func (exampleProject) ConfigureInstance(ctx context.Context, worktree string) (p
 				Password:     "devflow",
 				SnapshotRoot: filepath.Join(inst.Worktree, ".devflow", "dbsnapshots"),
 			})
+			if exampleUseFakeDB() {
+				db.ContainerName = ""
+				db.VolumeName = ""
+			}
 			inst.DB = db
 			if inst.Env == nil {
 				inst.Env = map[string]string{}

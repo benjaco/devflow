@@ -118,6 +118,30 @@ func TestRunTruncatesLogPerAttempt(t *testing.T) {
 	}
 }
 
+func TestRunAppendLogKeepsExistingAttemptLines(t *testing.T) {
+	root := t.TempDir()
+	logPath := filepath.Join(root, "task.log")
+	if err := os.WriteFile(logPath, []byte("stdout: before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(context.Background(), CommandSpec{
+		Name:      "sh",
+		Args:      []string{"-c", "printf 'after\\n'"},
+		LogPath:   logPath,
+		AppendLog: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.TrimSpace(string(data))
+	if got != "stdout: before\nstdout: after" {
+		t.Fatalf("expected appended log, got %q", got)
+	}
+}
+
 func TestStartWaitIsCleanAfterIntentionalStop(t *testing.T) {
 	root := t.TempDir()
 	logPath := filepath.Join(root, "service.log")

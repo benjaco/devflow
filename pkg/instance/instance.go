@@ -28,6 +28,12 @@ type State struct {
 	UpdatedAt time.Time                 `json:"updatedAt"`
 }
 
+type TaskStamp struct {
+	Task      string    `json:"task"`
+	Key       string    `json:"key"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
 func Resolve(worktree, label string) (*api.Instance, error) {
 	real, err := fsutil.Realpath(worktree)
 	if err != nil {
@@ -102,6 +108,53 @@ func LoadStatus(worktree, instanceID string) (*State, error) {
 		return nil, err
 	}
 	return &state, nil
+}
+
+func TaskStampPath(worktree, instanceID, task string) string {
+	sum := sha1.Sum([]byte(task))
+	name := hex.EncodeToString(sum[:]) + ".json"
+	return filepath.Join(instancePath(worktree, instanceID), "task-stamps", name)
+}
+
+func WriteTaskStamp(worktree, instanceID, task, key string) error {
+	path := TaskStampPath(worktree, instanceID, task)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return jsonutil.WriteFileAtomic(path, TaskStamp{
+		Task:      task,
+		Key:       key,
+		UpdatedAt: time.Now().UTC(),
+	})
+}
+
+func LoadTaskStamp(worktree, instanceID, task string) (TaskStamp, bool, error) {
+	var stamp TaskStamp
+	if err := jsonutil.ReadFile(TaskStampPath(worktree, instanceID, task), &stamp); err != nil {
+		if os.IsNotExist(err) {
+			return TaskStamp{}, false, nil
+		}
+		return TaskStamp{}, false, err
+	}
+	if stamp.Task != task {
+		return TaskStamp{}, false, nil
+	}
+	return stamp, true, nil
+}
+
+func RemoveTaskStamp(worktree, instanceID, task string) error {
+	if err := os.Remove(TaskStampPath(worktree, instanceID, task)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func RemoveTaskStamps(worktree, instanceID string) error {
+	path := filepath.Join(instancePath(worktree, instanceID), "task-stamps")
+	if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func Load(worktree, instanceID string) (*api.Instance, error) {

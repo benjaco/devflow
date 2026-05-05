@@ -22,6 +22,11 @@ const (
 	DefaultContainerPort = 5432
 )
 
+var (
+	dockerControlTimeout = 15 * time.Second
+	dockerDataTimeout    = 10 * time.Minute
+)
+
 type Config struct {
 	Image           string
 	SidecarImage    string
@@ -127,7 +132,7 @@ func (m *Manager) EnsureRuntime(ctx context.Context, db api.DBInstance) error {
 			return err
 		}
 		if !portOK {
-			if _, err := m.runner.CombinedOutput(ctx, "docker", "rm", "-f", db.ContainerName); err != nil && !containerMissing(err) {
+			if _, err := m.runDocker(ctx, dockerControlTimeout, "rm", "-f", db.ContainerName); err != nil && !containerMissing(err) {
 				return err
 			}
 			running = false
@@ -141,10 +146,10 @@ func (m *Manager) EnsureRuntime(ctx context.Context, db api.DBInstance) error {
 		return err
 	}
 	if exists {
-		_, err := m.runner.CombinedOutput(ctx, "docker", "start", db.ContainerName)
+		_, err := m.runDocker(ctx, dockerControlTimeout, "start", db.ContainerName)
 		return err
 	}
-	_, err = m.runner.CombinedOutput(ctx, "docker", "run", "-d",
+	_, err = m.runDocker(ctx, dockerControlTimeout, "run", "-d",
 		"--name", db.ContainerName,
 		"--label", "devflow.managed=true",
 		"--label", "devflow.database=true",
@@ -164,7 +169,8 @@ func (m *Manager) WaitReady(ctx context.Context, db api.DBInstance, timeout time
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		_, err := m.runner.CombinedOutput(ctx, "docker", "exec", db.ContainerName, "pg_isready", "-U", db.User, "-d", db.Name)
+		commandTimeout := minDuration(dockerControlTimeout, time.Until(deadline))
+		_, err := m.runDocker(ctx, commandTimeout, "exec", db.ContainerName, "pg_isready", "-U", db.User, "-d", db.Name)
 		if err == nil && (strings.TrimSpace(db.Host) == "" || hostPortReady(ctx, db.Host, db.Port, 200*time.Millisecond) == nil) {
 			return nil
 		}
@@ -199,7 +205,7 @@ func (m *Manager) StopRuntime(ctx context.Context, db api.DBInstance) error {
 	if db.ContainerName == "" {
 		return nil
 	}
-	_, err := m.runner.CombinedOutput(ctx, "docker", "stop", "-t", "10", db.ContainerName)
+	_, err := m.runDocker(ctx, dockerControlTimeout, "stop", "-t", "10", db.ContainerName)
 	if containerMissing(err) {
 		return nil
 	}
@@ -208,13 +214,13 @@ func (m *Manager) StopRuntime(ctx context.Context, db api.DBInstance) error {
 
 func (m *Manager) DestroyRuntime(ctx context.Context, db api.DBInstance, removeVolume bool) error {
 	if db.ContainerName != "" {
-		_, err := m.runner.CombinedOutput(ctx, "docker", "rm", "-f", db.ContainerName)
+		_, err := m.runDocker(ctx, dockerControlTimeout, "rm", "-f", db.ContainerName)
 		if err != nil && !containerMissing(err) {
 			return err
 		}
 	}
 	if removeVolume && db.VolumeName != "" {
-		_, err := m.runner.CombinedOutput(ctx, "docker", "volume", "rm", "-f", db.VolumeName)
+		_, err := m.runDocker(ctx, dockerControlTimeout, "volume", "rm", "-f", db.VolumeName)
 		if err != nil && !volumeMissing(err) {
 			return err
 		}
@@ -240,7 +246,7 @@ func (m *Manager) Snapshot(ctx context.Context, db api.DBInstance, key string) (
 		return nil, err
 	}
 	archivePath := filepath.Join(snapshotDir, "volume.tgz")
-	_, err := m.runner.CombinedOutput(ctx, "docker", "run", "--rm",
+	_, err := m.runDocker(ctx, dockerDataTimeout, "run", "--rm",
 		"-v", db.VolumeName+":/from",
 		"-v", snapshotDir+":/to",
 		DefaultSidecarImage,
@@ -285,7 +291,7 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, db api.DBInstance, key st
 	if err := m.ensureVolume(ctx, db.VolumeName); err != nil {
 		return nil, err
 	}
-	_, err = m.runner.CombinedOutput(ctx, "docker", "run", "--rm",
+	_, err = m.runDocker(ctx, dockerDataTimeout, "run", "--rm",
 		"-v", db.VolumeName+":/to",
 		"-v", snapshotDir+":/from",
 		DefaultSidecarImage,
@@ -348,7 +354,7 @@ func normalizeConfig(cfg Config) Config {
 }
 
 func (m *Manager) inspectContainer(ctx context.Context, name string) (running bool, exists bool, err error) {
-	out, inspectErr := m.runner.CombinedOutput(ctx, "docker", "inspect", "-f", "{{.State.Running}}", name)
+	out, inspectErr := m.runDocker(ctx, dockerControlTimeout, "inspect", "-f", "{{.State.Running}}", name)
 	if inspectErr != nil {
 		if containerMissing(inspectErr) {
 			return false, false, nil
@@ -360,7 +366,7 @@ func (m *Manager) inspectContainer(ctx context.Context, name string) (running bo
 
 func (m *Manager) containerPublishesHostPort(ctx context.Context, name string, hostPort int) (bool, error) {
 	format := fmt.Sprintf(`{{range (index .NetworkSettings.Ports "%d/tcp")}}{{.HostPort}}{{"\n"}}{{end}}`, DefaultContainerPort)
-	out, err := m.runner.CombinedOutput(ctx, "docker", "inspect", "-f", format, name)
+	out, err := m.runDocker(ctx, dockerControlTimeout, "inspect", "-f", format, name)
 	if containerMissing(err) {
 		return false, nil
 	}
@@ -377,14 +383,14 @@ func (m *Manager) containerPublishesHostPort(ctx context.Context, name string, h
 }
 
 func (m *Manager) ensureVolume(ctx context.Context, name string) error {
-	_, err := m.runner.CombinedOutput(ctx, "docker", "volume", "inspect", name)
+	_, err := m.runDocker(ctx, dockerControlTimeout, "volume", "inspect", name)
 	if err == nil {
 		return nil
 	}
 	if !volumeMissing(err) {
 		return err
 	}
-	_, err = m.runner.CombinedOutput(ctx, "docker", "volume", "create", name)
+	_, err = m.runDocker(ctx, dockerControlTimeout, "volume", "create", name)
 	return err
 }
 
@@ -445,10 +451,41 @@ func dbHost(db api.DBInstance) string {
 	return "127.0.0.1"
 }
 
+func (m *Manager) runDocker(ctx context.Context, timeout time.Duration, args ...string) ([]byte, error) {
+	if timeout <= 0 {
+		return m.runner.CombinedOutput(ctx, "docker", args...)
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	out, err := m.runner.CombinedOutput(commandCtx, "docker", args...)
+	if err != nil && errors.Is(commandCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+		return out, fmt.Errorf("docker %s timed out after %s", strings.Join(args, " "), timeout)
+	}
+	return out, err
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 {
+		return a
+	}
+	if a < b {
+		return a
+	}
+	return b
+}
+
 type execRunner struct{}
 
 func (execRunner) CombinedOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	prepareRunnerCmd(cmd)
+	cmd.Cancel = func() error {
+		return killRunnerCmd(cmd)
+	}
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return out, &commandOutputError{err: err, output: out}

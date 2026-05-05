@@ -127,6 +127,7 @@ Important details:
 - `sqlc` uses a glob, so generated Go files do not become inputs unless you declare them.
 - `backend_build` depends on `sqlc`, Prisma client generation, and database migration state.
 - `Outputs("bin/coach")` and `Outputs("dist")` make those finite tasks cacheable.
+- Install/setup tasks such as `npm_install` should use `Stamp()` with local outputs like `node_modules` when they must run once per lockfile key without copying dependency folders into Devflow's global cache.
 - `unit.NoCache()` keeps tests as a live check even though they have declared inputs.
 - `database.Postgres("prisma")` defaults the snapshot directory; set `SnapshotRoot(...)` only when the default is wrong.
 
@@ -466,6 +467,28 @@ Rules:
 - a readiness check should describe service usability, not broad system health
 - if a readiness check is configured, the engine will fail the task if it times out or the process exits first
 - tasks without a readiness check are considered ready immediately after process start
+
+## Local Stamps
+
+Use stamped tasks for finite commands that mutate local development state and are expensive or noisy to rerun, but whose outputs should not be stored in the shared task cache.
+
+```go
+npmInstall := b.Task("npm_install").
+    Command("npm", "install").
+    Inputs("package.json", "package-lock.json").
+    Outputs("node_modules").
+    Stamp()
+```
+
+Stamped tasks:
+- use the same input/dependency fingerprint model as cacheable tasks
+- write a small per-worktree completion stamp under `.devflow/state`
+- skip when the key still matches and declared local outputs still exist
+- rerun when inputs change, dependency keys change, the task definition changes, or local outputs are missing
+- never consult `<os.UserCacheDir()>/devflow/cache` to decide whether to skip
+- do not copy or restore outputs from `<os.UserCacheDir()>/devflow/cache`
+
+This is intended for package installs and similar local setup steps. Two worktrees with the same lockfile still need separate local install state, so each worktree gets its own stamp and local outputs. Prefer `NoCache()` for tests, migration authoring, and commands that should always execute when scheduled.
 
 ## Cache Key Overrides
 

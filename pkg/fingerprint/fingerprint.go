@@ -193,6 +193,7 @@ func TaskSignature(task project.Task) (string, error) {
 		Inputs                    project.Inputs        `json:"inputs"`
 		Outputs                   project.Outputs       `json:"outputs"`
 		Cache                     bool                  `json:"cache"`
+		Stamp                     bool                  `json:"stamp"`
 		Restart                   project.RestartPolicy `json:"restart"`
 		WatchRestartOnServiceDeps bool                  `json:"watchRestartOnServiceDeps"`
 		AllowInWatch              bool                  `json:"allowInWatch"`
@@ -207,6 +208,7 @@ func TaskSignature(task project.Task) (string, error) {
 		Inputs:                    task.Inputs,
 		Outputs:                   task.Outputs,
 		Cache:                     task.Cache,
+		Stamp:                     task.Stamp,
 		Restart:                   task.Restart,
 		WatchRestartOnServiceDeps: task.WatchRestartOnServiceDeps,
 		AllowInWatch:              task.AllowInWatch,

@@ -392,8 +392,9 @@ func PostgresMigrationFileApplier(fileName string) MigrationApplyFunc {
 				"DEVFLOW_MIGRATION_PATH":  migrationPath,
 				"DEVFLOW_MIGRATION_INDEX": fmt.Sprintf("%d", opts.Index),
 			})),
-			LogPath: opts.LogPath,
-			OnLine:  opts.OnLine,
+			LogPath:   opts.LogPath,
+			AppendLog: true,
+			OnLine:    opts.OnLine,
 		}
 		_, err := process.Run(ctx, spec)
 		return err
@@ -467,6 +468,7 @@ func runDatabaseCommand(ctx context.Context, spec process.CommandSpec, worktree 
 		spec.Dir = worktree
 	}
 	spec.LogPath = opts.LogPath
+	spec.AppendLog = true
 	spec.OnLine = opts.OnLine
 	spec.Env = mergeStringMaps(opts.Env, mergeStringMaps(databaseEnv(db), spec.Env))
 	_, err := process.Run(ctx, spec)

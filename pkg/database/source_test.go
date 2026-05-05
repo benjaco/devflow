@@ -10,6 +10,7 @@ import (
 
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/process"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 func TestCommandSourcePolicyMergesAdapterAndDatabaseEnv(t *testing.T) {
@@ -142,6 +143,87 @@ func TestPostgresDumpSourcePolicyFailsWhenPgDumpFails(t *testing.T) {
 	}
 	if _, statErr := os.Stat(psqlMarker); !os.IsNotExist(statErr) {
 		t.Fatalf("expected psql not to run after pg_dump failure, stat err=%v", statErr)
+	}
+}
+
+func TestRuntimePrepareProgressLogsOnceAndEmitsEvent(t *testing.T) {
+	worktree := t.TempDir()
+	logPath := filepath.Join(worktree, "db_prepare.log")
+	var events []string
+	rt := &project.Runtime{
+		Worktree: worktree,
+		LogPath:  logPath,
+		Instance: &api.Instance{ID: "abc", Worktree: worktree},
+		TaskName: "db_prepare",
+		EventFn: func(evt api.Event) {
+			if evt.Type == api.EventLogLine {
+				events = append(events, evt.Stream+": "+evt.Line)
+			}
+		},
+	}
+
+	emitPrepareLine(PrepareOptionsFromRuntime(rt), "stdout", "database: checking cached Prisma migration snapshots")
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := "stdout: database: checking cached Prisma migration snapshots"
+	if got := strings.Count(string(data), line); got != 1 {
+		t.Fatalf("expected one progress log line, got %d in:\n%s", got, string(data))
+	}
+	if got := strings.Count(strings.Join(events, "\n"), line); got != 1 {
+		t.Fatalf("expected one progress event, got %d in %#v", got, events)
+	}
+}
+
+func TestCommandSourcePolicyRuntimePrepareOptionsDoNotDuplicateProcessLogs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based test is unix-only")
+	}
+	worktree := t.TempDir()
+	logPath := filepath.Join(worktree, "db_prepare.log")
+	var events []string
+	rt := &project.Runtime{
+		Worktree: worktree,
+		LogPath:  logPath,
+		Instance: &api.Instance{ID: "abc", Worktree: worktree},
+		TaskName: "db_prepare",
+		EventFn: func(evt api.Event) {
+			if evt.Type == api.EventLogLine {
+				events = append(events, evt.Stream+": "+evt.Line)
+			}
+		},
+	}
+	policy := CommandSourcePolicy{
+		PolicyName: "clone-dev",
+		Spec: process.CommandSpec{
+			Name: "sh",
+			Args: []string{"-c", "printf 'hello\\n'"},
+		},
+	}
+
+	err := policy.PrepareBase(context.Background(), api.DBInstance{
+		Name: "app_wt_abc",
+		URL:  "postgres://devflow:secret@127.0.0.1:55432/app_wt_abc?sslmode=disable",
+		Host: "127.0.0.1",
+		Port: 55432,
+		User: "devflow",
+	}, PrepareOptionsFromRuntime(rt))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := "stdout: hello"
+	if got := strings.Count(string(data), line); got != 1 {
+		t.Fatalf("expected one subprocess log line, got %d in:\n%s", got, string(data))
+	}
+	if got := strings.Count(strings.Join(events, "\n"), line); got != 1 {
+		t.Fatalf("expected one subprocess event, got %d in %#v", got, events)
 	}
 }
 

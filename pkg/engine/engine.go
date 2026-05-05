@@ -497,6 +497,40 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 }
 
 func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.Runtime, task project.Task, depKeys []string) taskResult {
+	if task.Stamp {
+		// Stamps are local install/setup markers; never use the global cache to skip or restore them.
+		key, err := e.taskKey(ctx, rt, task, depKeys)
+		if err != nil {
+			state.setErrorState(task.Name, ctx, "", err, 0)
+			return taskResult{name: task.Name, err: err}
+		}
+		state.setLastRunKey(task.Name, key)
+		if stamp, ok, loadErr := instance.LoadTaskStamp(rt.Worktree, state.inst.ID, task.Name); loadErr != nil {
+			state.setErrorState(task.Name, ctx, key, loadErr, 0)
+			return taskResult{name: task.Name, key: key, err: loadErr}
+		} else if ok && stamp.Key == key {
+			outputsExist, outputErr := declaredOutputsExist(rt.Worktree, task.Outputs)
+			if outputErr != nil {
+				state.setErrorState(task.Name, ctx, key, outputErr, 0)
+				return taskResult{name: task.Name, key: key, err: outputErr}
+			}
+			if outputsExist {
+				state.setNodeState(task.Name, api.StateDone, key, "", 0)
+				return taskResult{name: task.Name, key: key}
+			}
+		}
+		if err := runTask(ctx, task, rt); err != nil {
+			state.setErrorState(task.Name, ctx, key, err, 0)
+			return taskResult{name: task.Name, key: key, err: err}
+		}
+		if err := instance.WriteTaskStamp(rt.Worktree, state.inst.ID, task.Name, key); err != nil {
+			state.setErrorState(task.Name, ctx, key, err, 0)
+			return taskResult{name: task.Name, key: key, err: err}
+		}
+		state.setNodeState(task.Name, api.StateDone, key, "", 0)
+		return taskResult{name: task.Name, key: key}
+	}
+
 	if task.Cache {
 		key, err := e.taskKey(ctx, rt, task, depKeys)
 		if err != nil {
@@ -607,7 +641,60 @@ func runTask(ctx context.Context, task project.Task, rt *project.Runtime) error 
 	if task.Run == nil {
 		return nil
 	}
+	if err := truncateTaskLog(rt); err != nil {
+		return err
+	}
 	return task.Run(ctx, rt)
+}
+
+func truncateTaskLog(rt *project.Runtime) error {
+	if rt == nil || rt.LogPath == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(rt.LogPath), 0o755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(rt.LogPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	return file.Close()
+}
+
+func declaredOutputsExist(worktree string, outputs project.Outputs) (bool, error) {
+	for _, rel := range outputs.Paths {
+		if _, err := os.Stat(filepath.Join(worktree, rel)); err != nil {
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			return false, err
+		}
+	}
+	for _, rel := range outputs.Files {
+		info, err := os.Stat(filepath.Join(worktree, rel))
+		if err != nil {
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		if info.IsDir() {
+			return false, nil
+		}
+	}
+	for _, rel := range outputs.Dirs {
+		info, err := os.Stat(filepath.Join(worktree, rel))
+		if err != nil {
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		if !info.IsDir() {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (e *Engine) waitForPromptAnswer(ctx context.Context, req Request, instanceID, task string, prompt process.PromptRequest) (process.PromptResponse, error) {

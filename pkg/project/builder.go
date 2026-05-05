@@ -335,6 +335,13 @@ func (t *TaskBuilder) NoCache() *TaskBuilder {
 	return t
 }
 
+func (t *TaskBuilder) Stamp() *TaskBuilder {
+	t.noCache = true
+	t.task.Cache = false
+	t.task.Stamp = true
+	return t
+}
+
 func (t *TaskBuilder) Env(key string, value any) *TaskBuilder {
 	if key == "" {
 		return t

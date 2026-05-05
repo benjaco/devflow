@@ -666,6 +666,30 @@ func TestLoadSnapshotAllowsMissingInitialStatus(t *testing.T) {
 	}
 }
 
+func TestLoadSnapshotOverlaysLastRunOnEmptyPersistedStatus(t *testing.T) {
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.LastRun.Target = "up"
+	inst.LastRun.Mode = api.ModeWatch
+	if err := instance.Save(inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.SaveStatus(worktree, inst.ID, "", "", map[string]api.NodeStatus{}); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := loadSnapshot(worktree, inst.ID, false, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.state.Target != "up" || snap.state.Mode != api.ModeWatch {
+		t.Fatalf("expected last run target/mode overlay, got target=%q mode=%q", snap.state.Target, snap.state.Mode)
+	}
+}
+
 func TestLoadSnapshotDatabasePanelReadsPrismaSnapshots(t *testing.T) {
 	worktree := t.TempDir()
 	inst, err := instance.Resolve(worktree, "test")

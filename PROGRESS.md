@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-05-04
+Last updated: 2026-05-05
 
 ## Current Status
 
@@ -10,7 +10,7 @@ Last updated: 2026-05-04
 
 ## In Progress
 
-- No active implementation task after the 250ms scoped polling experiment.
+- None
 
 ## Completed
 
@@ -218,6 +218,11 @@ Last updated: 2026-05-04
 - Hardened source/install update ergonomics:
   - the repo-local launcher now rebuilds `.devflow/bin/devflow` from a content build key instead of source mtimes
   - text-mode `devflow upgrade` now warns when `go install` updates a different binary than the `devflow` command currently found on `PATH`
+- Added local stamped task semantics:
+  - builder tasks can call `Stamp()` for finite install/setup commands such as `npm install`
+  - stamped tasks use normal input/dependency keys but persist only a per-worktree completion stamp under `.devflow/state`
+  - stamped tasks skip when the key matches and declared local outputs still exist, rerun when inputs change or outputs are missing, and do not store heavyweight folders such as `node_modules` in the global cache
+  - daemon/TUI invalidation clears stamped task records together with cache entries
   - `devflow upgrade --direct` runs `go install` with `GOPROXY=direct` for testing freshly pushed commits before the public Go proxy catches up
 - Distinct task-cancellation handling implemented:
   - tasks interrupted by parent-run cancellation now persist as `canceled` instead of `failed`
@@ -436,6 +441,48 @@ Last updated: 2026-05-04
 
 ## Latest Work
 
+- Locked down local install stamp semantics:
+  - stamped setup/install tasks now have explicit regression coverage that two worktrees with the same lockfile still run separate local installs
+  - added coverage that a matching global task-cache entry cannot make a stamped task skip or restore `node_modules`
+  - documented that `Stamp()` decisions are per-worktree and never consult `<os.UserCacheDir()>/devflow/cache`
+  - verified with `go test ./pkg/engine ./pkg/instance ./pkg/project`, `go test ./...`, `go build -o /tmp/devflow-build-check ./cmd/devflow`, and `git diff --check`
+- Fixed duplicated database/Prisma subprocess log lines:
+  - runtime database helpers now pass subprocess output through an event-only callback after `pkg/process` writes the task log
+  - manual database progress helpers write one task-log line and emit one live event
+  - added regression coverage for runtime database progress and source-policy subprocess output not double-writing logs
+  - verified with `go test ./pkg/database ./pkg/project ./pkg/process ./pkg/engine ./pkg/tui ./internal/cli`, `go test ./...`, `go build -o /tmp/devflow-build-check ./cmd/devflow`, and `git diff --check`
+- Fixed Docker timeout cancellation for macOS Docker Desktop helper processes:
+  - database command execution now runs external commands in an isolated process group on Unix-like platforms
+  - timeout/cancel kills the whole process group and uses a bounded wait delay so orphaned `com.docker.cli` children cannot keep pipes open forever
+  - added regression coverage that a command with a child process holding stdout exits promptly on context cancellation
+  - manually unblocked the live Prisma test project by terminating orphaned Docker CLI children; the task then transitioned to `failed` with `docker rm -f devflow-pg-90a0b1e7d9f4 timed out after 15s`
+  - verified with targeted database/process tests, `go test ./pkg/database ./pkg/engine ./pkg/process ./pkg/tui ./internal/cli`, `go test ./...`, `go build -o /tmp/devflow-build-check ./cmd/devflow`, and `git diff --check`
+- Fixed task log/state mismatch across attempts:
+  - task logs are now truncated at engine task-attempt start before adapter/component progress helpers can write
+  - subprocess logging appends within that current attempt so command output does not erase earlier component progress lines
+  - custom adapter logs no longer retain stale failed/canceled output while a newer attempt is `running`
+  - added regression coverage for custom task log truncation and process append logging
+  - verified with targeted engine/process/database tests, `go test ./pkg/engine ./pkg/process ./pkg/project ./pkg/database ./pkg/tui ./internal/cli`, `go test ./...`, `go build -o /tmp/devflow-build-check ./cmd/devflow`, and `git diff --check`
+- Hardened managed Postgres/Prisma preparation against silent Docker hangs:
+  - Docker control-plane commands now use bounded timeouts so stuck inspect/start/stop/remove/recreate operations fail instead of leaving database tasks running forever
+  - snapshot archive/restore sidecar operations keep a separate longer timeout for data-plane work
+  - Prisma base preparation now emits database progress lines before snapshot lookup, runtime recreation, source clone, readiness waits, and final runtime start
+  - added regression coverage for stale-container removal timeout and database prep progress logging
+  - verified with `go test ./pkg/database ./pkg/engine ./pkg/tui ./internal/cli`, `go test ./...`, `go build -o /tmp/devflow-build-check ./cmd/devflow`, and `git diff --check`
+- Fixed blank TUI startup from stale empty status snapshots:
+  - no-arg `devflow tui` now follows the same launch/reconnect path as bare `devflow`
+  - `devflow tui --instance <id>` remains the explicit attach-only path
+  - default TUI startup now waits for a matching target/mode status snapshot with graph nodes before rendering
+  - status/TUI snapshot loading overlays empty persisted target/mode fields from the instance last-run metadata
+  - added CLI/TUI regression coverage for stale blank status handling
+  - verified with `go test ./...`, `go build -o /tmp/devflow-build-check ./cmd/devflow`, and `git diff --check`
+- Added local stamped task semantics for setup/install commands:
+  - `Task.Stamp` and builder `.Stamp()` let commands such as `npm install` run once per input key without caching heavyweight mutable local folders
+  - stamped tasks skip only when the input key matches and declared project-local outputs still exist
+  - daemon and CLI cache invalidation now clear matching local task stamps alongside global cache entries
+  - watch coverage verifies commands that touch unchanged inputs do not loop
+  - user docs now recommend `.Stamp()` for local install/setup tasks and reserve `.NoCache()` for actions that must run every time
+  - verified with `go test ./...`, `go build -o /tmp/devflow-build-check ./cmd/devflow`, and `git diff --check`
 - Reduced idle CPU for daemon-backed watch/TUI sessions:
   - watch mode now scopes polling to the selected target closure's declared file inputs plus the flush sync directory instead of recursively polling the whole worktree when concrete inputs exist
   - `node_modules` is ignored by default for root-level watcher fallback, while explicitly declared watch paths can still opt into ignored directories

@@ -19,6 +19,21 @@ func TestValidateDuplicateTaskFails(t *testing.T) {
 	}
 }
 
+func TestValidateStampedTaskRules(t *testing.T) {
+	if _, err := New(
+		[]project.Task{{Name: "serve", Kind: project.KindService, Stamp: true}},
+		[]project.Target{{Name: "up", RootTasks: []string{"serve"}}},
+	); err == nil {
+		t.Fatal("expected service stamp validation error")
+	}
+	if _, err := New(
+		[]project.Task{{Name: "install", Kind: project.KindOnce, Cache: true, Stamp: true}},
+		[]project.Target{{Name: "up", RootTasks: []string{"install"}}},
+	); err == nil {
+		t.Fatal("expected cache and stamp validation error")
+	}
+}
+
 func TestTargetClosureAndClosures(t *testing.T) {
 	g, err := New(
 		[]project.Task{

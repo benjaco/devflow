@@ -163,9 +163,11 @@ Task states now distinguish:
 
 `logs` supports task logs as before and also accepts `supervisor` to read the daemon/supervisor log directly.
 
-Task log files now represent the current run attempt for that task. They are truncated when a task starts again, so older successful output does not stay mixed into a newer failed or canceled attempt.
+Task log files now represent the current run attempt for that task. The engine truncates the log at task-attempt start before adapter code can emit progress, and subprocess output appends within that attempt. Older successful, failed, or canceled output must not stay mixed into a newer running attempt.
 
-`tui` now opens a live operator console connected to the per-worktree daemon. The first slice includes:
+`tui` now opens a live operator console connected to the per-worktree daemon. Without `--instance`, `devflow tui` follows the same default launch path as bare `devflow`: resolve the default target, ensure the per-worktree daemon is running it in watch mode, wait for a matching non-empty status snapshot, then render. With `--instance`, `tui` is attach-only and does not start or retarget work.
+
+The first slice includes:
 - instance/runtime header
 - live task list with selection
 - selected-task metadata

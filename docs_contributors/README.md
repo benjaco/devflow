@@ -80,7 +80,7 @@ Project behavior belongs in:
 
 Every user-facing command must keep stable JSON output.
 
-Services are supervised, not cached. Cacheable tasks must declare outputs.
+Services are supervised, not cached. Cacheable tasks must declare outputs. Stamped finite tasks record local completion by input key without storing outputs in the shared cache; use them for install/setup state such as `node_modules`.
 
 ## Bootstrap Model
 

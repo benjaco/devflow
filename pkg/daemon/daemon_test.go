@@ -292,15 +292,16 @@ func TestResolvePrismaMigrationTargetUsesComponentTaskFallback(t *testing.T) {
 	}
 }
 
-func TestDownstreamInvalidateTasksOnlyReturnsCacheableOnceTasksInTargetClosure(t *testing.T) {
+func TestDownstreamInvalidateTasksReturnsCacheableAndStampedOnceTasksInTargetClosure(t *testing.T) {
 	g, err := graph.New([]project.Task{
 		{Name: "a", Kind: project.KindOnce, Cache: true},
 		{Name: "b", Kind: project.KindOnce, Cache: true, Deps: []string{"a"}},
 		{Name: "c", Kind: project.KindService, Deps: []string{"b"}},
 		{Name: "d", Kind: project.KindOnce, Cache: false, Deps: []string{"b"}},
 		{Name: "e", Kind: project.KindOnce, Cache: true, Deps: []string{"d"}},
+		{Name: "f", Kind: project.KindOnce, Stamp: true, Deps: []string{"b"}},
 	}, []project.Target{
-		{Name: "main", RootTasks: []string{"c", "e"}},
+		{Name: "main", RootTasks: []string{"c", "e", "f"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -310,7 +311,7 @@ func TestDownstreamInvalidateTasksOnlyReturnsCacheableOnceTasksInTargetClosure(t
 		t.Fatal(err)
 	}
 	got := strings.Join(names, ",")
-	want := "b,e"
+	want := "b,e,f"
 	if got != want {
 		t.Fatalf("unexpected invalidate tasks: got %q want %q", got, want)
 	}

@@ -1295,6 +1295,9 @@ func (s *Server) invalidateAndRelaunch(ctx context.Context, task string) error {
 		if err := store.Invalidate(name); err != nil {
 			return err
 		}
+		if err := instance.RemoveTaskStamp(s.worktree, s.instanceID, name); err != nil {
+			return err
+		}
 	}
 	_, err = s.startActive(ctx, projectName, inst.LastRun.Target, inst.LastRun.Mode, inst.LastRun.MaxParallel)
 	return err
@@ -1519,7 +1522,7 @@ func collectInvalidateTasks(g *graph.Graph, inClosure map[string]bool, names []s
 			continue
 		}
 		task := g.Tasks[name]
-		if task.Kind == project.KindOnce && task.Cache {
+		if task.Kind == project.KindOnce && (task.Cache || task.Stamp) {
 			out = append(out, name)
 			seen[name] = true
 		}

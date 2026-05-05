@@ -48,7 +48,7 @@ func PrepareOptionsFromRuntime(rt *project.Runtime) PrepareOptions {
 		Worktree: rt.Worktree,
 		Env:      rt.CloneEnv(),
 		LogPath:  rt.LogPath,
-		OnLine:   rt.LineEmitter(),
+		OnLine:   rt.EventLineEmitter(),
 	}
 }
 
@@ -94,7 +94,7 @@ func GeneratePrismaMigrationForRuntime(ctx context.Context, rt *project.Runtime,
 			opts.LogPath = rt.LogPath
 		}
 		if opts.OnLine == nil {
-			opts.OnLine = rt.LineEmitter()
+			opts.OnLine = rt.EventLineEmitter()
 		}
 	}
 	return GeneratePrismaMigration(ctx, opts)

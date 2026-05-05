@@ -65,6 +65,7 @@ type Task struct {
 	Ready                     ReadyFunc
 	ReadyTimeout              time.Duration
 	Cache                     bool
+	Stamp                     bool
 	Restart                   RestartPolicy
 	WatchRestartOnServiceDeps bool
 	AllowInWatch              bool
@@ -160,6 +161,12 @@ func (rt *Runtime) LineEmitter() func(string, string) {
 	}
 }
 
+func (rt *Runtime) EventLineEmitter() func(string, string) {
+	return func(stream, line string) {
+		rt.emitProcessLine(stream, line)
+	}
+}
+
 func (rt *Runtime) EmitJSONLine(label string, value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -220,6 +227,7 @@ func (rt *Runtime) RunCmdSpec(ctx context.Context, spec process.CommandSpec) err
 		spec.Env = rt.Env
 	}
 	spec.LogPath = rt.LogPath
+	spec.AppendLog = true
 	spec.OnLine = func(stream, line string) {
 		rt.emitProcessLine(stream, line)
 	}
@@ -250,6 +258,7 @@ func (rt *Runtime) StartServiceSpec(ctx context.Context, spec process.CommandSpe
 		spec.Env = rt.Env
 	}
 	spec.LogPath = rt.LogPath
+	spec.AppendLog = true
 	spec.OnLine = func(stream, line string) {
 		rt.emitProcessLine(stream, line)
 	}

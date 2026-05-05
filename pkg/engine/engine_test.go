@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/cache"
+	"github.com/benjaco/devflow/pkg/fingerprint"
 	"github.com/benjaco/devflow/pkg/graph"
 	"github.com/benjaco/devflow/pkg/instance"
 	"github.com/benjaco/devflow/pkg/process"
@@ -79,6 +81,73 @@ func TestRunUsesCacheOnSecondExecution(t *testing.T) {
 	}
 	if len(second.Result.CacheHits) != 1 || second.Result.CacheHits[0] != "gen" {
 		t.Fatalf("unexpected cache hits on second run: %v", second.Result.CacheHits)
+	}
+}
+
+type taskLogAttemptProject struct {
+	attempt atomic.Int32
+}
+
+func (p *taskLogAttemptProject) Name() string { return "task-log-attempt-project" }
+
+func (p *taskLogAttemptProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "task-log-attempt"}, nil
+}
+
+func (p *taskLogAttemptProject) Tasks() []project.Task {
+	return []project.Task{{
+		Name: "prepare",
+		Kind: project.KindOnce,
+		Run: func(ctx context.Context, rt *project.Runtime) error {
+			_ = ctx
+			if p.attempt.Add(1) == 1 {
+				rt.EmitLogLine("stderr", "first attempt failed")
+				return fmt.Errorf("first attempt failed")
+			}
+			rt.EmitLogLine("stdout", "second attempt running")
+			return nil
+		},
+	}}
+}
+
+func (p *taskLogAttemptProject) Targets() []project.Target {
+	return []project.Target{{Name: "build", RootTasks: []string{"prepare"}}}
+}
+
+func TestTaskLogTruncatedBeforeCustomRunAttempt(t *testing.T) {
+	worktree := t.TempDir()
+	p := &taskLogAttemptProject{}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI})
+	if err == nil {
+		t.Fatal("expected first run to fail")
+	}
+	logPath := instance.LogPath(worktree, first.Instance.ID, "prepare")
+	firstLog, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(firstLog), "first attempt failed") {
+		t.Fatalf("expected first attempt log, got %q", firstLog)
+	}
+
+	if _, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI}); err != nil {
+		t.Fatal(err)
+	}
+	secondLog, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(secondLog), "first attempt failed") {
+		t.Fatalf("expected second attempt log to drop old failure, got %q", secondLog)
+	}
+	if !strings.Contains(string(secondLog), "second attempt running") {
+		t.Fatalf("expected current attempt output, got %q", secondLog)
 	}
 }
 
@@ -2031,6 +2100,240 @@ func TestCacheKeyOverrideBypassesAutomaticInputsAndRestores(t *testing.T) {
 	if got, err := os.ReadFile(filepath.Join(worktree, "out.txt")); err != nil || string(got) != "override-payload" {
 		t.Fatalf("expected cached override output to be restored, got %q err=%v", string(got), err)
 	}
+}
+
+type stampedInstallProject struct {
+	runs       atomic.Int32
+	touchInput bool
+}
+
+func (p *stampedInstallProject) Name() string { return "stamped-install-project" }
+
+func (p *stampedInstallProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "stamped"}, nil
+}
+
+func (p *stampedInstallProject) Targets() []project.Target {
+	return []project.Target{{Name: "up", RootTasks: []string{"npm_install"}}}
+}
+
+func (p *stampedInstallProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name:    "npm_install",
+			Kind:    project.KindOnce,
+			Stamp:   true,
+			Inputs:  project.Inputs{Files: []string{"package-lock.json"}},
+			Outputs: project.Outputs{Dirs: []string{"node_modules"}},
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				p.runs.Add(1)
+				if err := os.MkdirAll(filepath.Join(rt.Worktree, "node_modules"), 0o755); err != nil {
+					return err
+				}
+				if err := os.WriteFile(filepath.Join(rt.Worktree, "node_modules", ".installed"), []byte("ok"), 0o644); err != nil {
+					return err
+				}
+				if p.touchInput {
+					path := filepath.Join(rt.Worktree, "package-lock.json")
+					now := time.Now().Add(2 * time.Second)
+					if err := os.Chtimes(path, now, now); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+		},
+	}
+}
+
+func TestStampedTaskSkipsWhenInputKeyAndLocalOutputsMatch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "package-lock.json"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &stampedInstallProject{}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Run(context.Background(), Request{Target: "up", Worktree: worktree, Mode: api.ModeCI}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.runs.Load(); got != 1 {
+		t.Fatalf("runs after first execution = %d, want 1", got)
+	}
+	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p))
+	if entries, err := store.List(); err != nil || len(entries) != 0 {
+		t.Fatalf("stamped task should not create global cache entries, entries=%v err=%v", entries, err)
+	}
+	if _, err := eng.Run(context.Background(), Request{Target: "up", Worktree: worktree, Mode: api.ModeCI}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.runs.Load(); got != 1 {
+		t.Fatalf("runs after matching stamp = %d, want 1", got)
+	}
+	if err := os.RemoveAll(filepath.Join(worktree, "node_modules")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Run(context.Background(), Request{Target: "up", Worktree: worktree, Mode: api.ModeCI}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.runs.Load(); got != 2 {
+		t.Fatalf("runs after local output removal = %d, want 2", got)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "package-lock.json"), []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Run(context.Background(), Request{Target: "up", Worktree: worktree, Mode: api.ModeCI}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.runs.Load(); got != 3 {
+		t.Fatalf("runs after input change = %d, want 3", got)
+	}
+}
+
+func TestStampedTaskIsLocalPerWorktree(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	firstWorktree := t.TempDir()
+	secondWorktree := t.TempDir()
+	for _, worktree := range []string{firstWorktree, secondWorktree} {
+		if err := os.WriteFile(filepath.Join(worktree, "package-lock.json"), []byte("same-lockfile"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := &stampedInstallProject{}
+	firstEngine, err := New(p, firstWorktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := firstEngine.Run(context.Background(), Request{Target: "up", Worktree: firstWorktree, Mode: api.ModeCI}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.runs.Load(); got != 1 {
+		t.Fatalf("runs after first worktree = %d, want 1", got)
+	}
+	if _, err := os.Stat(filepath.Join(secondWorktree, "node_modules")); !os.IsNotExist(err) {
+		t.Fatalf("second worktree should not receive local install output from first worktree, stat err=%v", err)
+	}
+
+	secondEngine, err := New(p, secondWorktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secondEngine.Run(context.Background(), Request{Target: "up", Worktree: secondWorktree, Mode: api.ModeCI}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.runs.Load(); got != 2 {
+		t.Fatalf("runs after second worktree = %d, want 2", got)
+	}
+	if _, err := os.Stat(filepath.Join(secondWorktree, "node_modules", ".installed")); err != nil {
+		t.Fatalf("second worktree should perform its own local install: %v", err)
+	}
+}
+
+func TestStampedTaskDoesNotUseGlobalCacheToSkipOrRestore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cacheSource := t.TempDir()
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "package-lock.json"), []byte("same-lockfile"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &stampedInstallProject{}
+	task := p.Tasks()[0]
+	rt := &project.Runtime{Worktree: worktree, Env: map[string]string{}}
+	inputHashes, envValues, custom, err := fingerprint.CollectTaskInputs(context.Background(), worktree, task, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := fingerprint.TaskKey(fingerprint.TaskKeyInput{
+		Task:               task,
+		InputHashes:        inputHashes,
+		EnvValues:          envValues,
+		CustomFingerprints: custom,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cacheSource, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheSource, "node_modules", ".installed"), []byte("from-global-cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p))
+	if _, err := store.Snapshot(cacheSource, task, key); err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Run(context.Background(), Request{Target: "up", Worktree: worktree, Mode: api.ModeCI}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.runs.Load(); got != 1 {
+		t.Fatalf("stamped task should execute locally despite matching global cache entry; runs=%d", got)
+	}
+	data, err := os.ReadFile(filepath.Join(worktree, "node_modules", ".installed"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) == "from-global-cache" {
+		t.Fatal("stamped task restored node_modules from global cache")
+	}
+}
+
+func TestWatchStampedTaskDoesNotLoopWhenCommandTouchesInputMtime(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "package-lock.json"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &stampedInstallProject{touchInput: true}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Watch(ctx, Request{Target: "up", Worktree: worktree, Mode: api.ModeWatch})
+	}()
+	waitForEngineWatchReady(t, worktree)
+	if got := p.runs.Load(); got != 1 {
+		t.Fatalf("initial watch runs = %d, want 1", got)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "package-lock.json"), []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		return p.runs.Load() == 2
+	})
+	if !waitForBool(2*time.Second, func() bool {
+		return p.runs.Load() > 2
+	}) {
+		cancel()
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("watch did not stop")
+		}
+		return
+	}
+	t.Fatalf("stamped task reran after touching its own unchanged input; runs=%d", p.runs.Load())
 }
 
 func waitFor(t *testing.T, timeout time.Duration, fn func() bool) {
