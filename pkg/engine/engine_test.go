@@ -549,13 +549,20 @@ func repoRoot() string {
 }
 
 func buildPromptCLIForEngine(root string) string {
-	bin := filepath.Join(os.TempDir(), "devflow-promptcli-test")
+	bin := filepath.Join(os.TempDir(), "devflow-promptcli-test"+engineTestExeSuffix())
 	cmd := exec.Command("go", "build", "-o", bin, "./internal/testutil/promptcli")
 	cmd.Dir = root
 	if out, err := cmd.CombinedOutput(); err != nil {
 		panic("build prompt cli: " + err.Error() + "\n" + string(out))
 	}
 	return bin
+}
+
+func engineTestExeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
 }
 
 func tRepoRoot() string {
@@ -1977,19 +1984,40 @@ func TestBinaryToolBuildTaskCachesAndRestoresArtifact(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	worktree := t.TempDir()
-	if err := os.WriteFile(filepath.Join(worktree, "tool-src.sh"), []byte("#!/bin/sh\necho \"$1\" > \"$OUT_FILE\"\n"), 0o755); err != nil {
+	source := filepath.Join(worktree, "cmd", "mocktool", "main.go")
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(source, []byte(`package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	arg := ""
+	if len(os.Args) > 1 {
+		arg = os.Args[1]
+	}
+	if err := os.WriteFile(os.Getenv("OUT_FILE"), []byte(fmt.Sprintln(arg)), 0o644); err != nil {
+		panic(err)
+	}
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := ".devflow/tools/mocktool" + engineTestExeSuffix()
 
 	p := &binaryToolProject{
 		tool: project.BinaryTool{
 			TaskName:    "build_mocktool",
 			Description: "Build mock helper binary",
-			Inputs:      project.Inputs{Files: []string{"tool-src.sh"}},
-			Output:      ".devflow/tools/mocktool",
+			Inputs:      project.Inputs{Files: []string{"cmd/mocktool/main.go"}},
+			Output:      output,
 			Build: process.CommandSpec{
-				Name: "sh",
-				Args: []string{"-c", "mkdir -p .devflow/tools && cp tool-src.sh .devflow/tools/mocktool && chmod +x .devflow/tools/mocktool"},
+				Name: "go",
+				Args: []string{"build", "-o", output, "cmd/mocktool/main.go"},
 			},
 		},
 	}
@@ -2005,7 +2033,7 @@ func TestBinaryToolBuildTaskCachesAndRestoresArtifact(t *testing.T) {
 	if len(first.Result.CacheHits) != 0 {
 		t.Fatalf("unexpected first-run cache hits: %v", first.Result.CacheHits)
 	}
-	if err := os.Remove(filepath.Join(worktree, ".devflow", "tools", "mocktool")); err != nil {
+	if err := os.Remove(filepath.Join(worktree, output)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2016,7 +2044,7 @@ func TestBinaryToolBuildTaskCachesAndRestoresArtifact(t *testing.T) {
 	if len(second.Result.CacheHits) != 1 || second.Result.CacheHits[0] != "build_mocktool" {
 		t.Fatalf("unexpected second-run cache hits: %v", second.Result.CacheHits)
 	}
-	if _, err := os.Stat(filepath.Join(worktree, ".devflow", "tools", "mocktool")); err != nil {
+	if _, err := os.Stat(filepath.Join(worktree, output)); err != nil {
 		t.Fatalf("expected cached binary to be restored: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(worktree, "result.txt"))

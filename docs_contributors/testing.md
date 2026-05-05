@@ -4,7 +4,7 @@ Devflow uses three testing layers:
 
 GitHub Actions runs the default `go test ./...` and `go build ./cmd/devflow` validation on Linux, macOS, and Windows for pushes, pull requests, and release tags.
 
-Cross-platform tests should avoid Unix-only assumptions unless the test is guarded by build tags or an explicit platform skip. Prefer generated Go helper binaries over shell-script fake tools, add `.exe` to built helper paths on Windows, and use Go encoders for JSON fixtures so Windows paths are escaped correctly.
+Cross-platform tests should avoid Unix-only assumptions unless the test is guarded by build tags or an explicit platform skip. Prefer generated Go helper binaries over shell-script fake tools, add `.exe` to built helper paths on Windows, and use Go encoders for JSON fixtures so Windows paths are escaped correctly. Long-running process tests should verify process-tree cleanup on Windows because orphaned children can keep task log files locked after the parent exits.
 
 ## Unit Tests
 

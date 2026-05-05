@@ -4,6 +4,8 @@ package instance
 
 import (
 	"errors"
+	"os/exec"
+	"strconv"
 
 	"golang.org/x/sys/windows"
 )
@@ -36,6 +38,9 @@ func isNoProcess(err error) bool {
 }
 
 func terminateProcess(pid int) error {
+	if err := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid)).Run(); err == nil {
+		return nil
+	}
 	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))
 	if err != nil {
 		return err

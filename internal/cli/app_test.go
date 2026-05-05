@@ -107,23 +107,41 @@ func (depsCLIProject) Targets() []project.Target {
 
 func (depsCLIProject) RequiredCLIs() []project.RequiredCLI {
 	marker := filepath.Join(os.TempDir(), "devflow-cli-deps-installed.txt")
-	bin := filepath.Join(os.TempDir(), "devflow-cli-missing-tool")
-	installer := strings.Join([]string{
+	command := cliMissingToolCommand()
+	bin := filepath.Join(os.TempDir(), command)
+	installer := project.InstallScript{Script: strings.Join([]string{
 		"echo installed > " + shellQuote(marker),
 		"cat > " + shellQuote(bin) + " <<'EOF'",
 		"#!/bin/sh",
 		"exit 0",
 		"EOF",
 		"chmod +x " + shellQuote(bin),
-	}, "\n")
+	}, "\n")}
+	if runtime.GOOS == "windows" {
+		bin = filepath.Join(os.TempDir(), command)
+		installer = project.InstallScript{
+			Shell: "powershell",
+			Script: strings.Join([]string{
+				"Set-Content -Path " + shellQuote(marker) + " -Value installed",
+				"Set-Content -Path " + shellQuote(bin) + " -Value '@echo off`r`nexit /b 0'",
+			}, "\n"),
+		}
+	}
 	return []project.RequiredCLI{
-		{Name: "shell", Command: "sh"},
+		{Name: "shell", Command: "go"},
 		{
 			Name:    "missing-tool",
-			Command: "devflow-cli-missing-tool",
-			Install: map[string]project.InstallScript{runtime.GOOS: {Script: installer}},
+			Command: command,
+			Install: map[string]project.InstallScript{runtime.GOOS: installer},
 		},
 	}
+}
+
+func cliMissingToolCommand() string {
+	if runtime.GOOS == "windows" {
+		return "devflow-cli-missing-tool.cmd"
+	}
+	return "devflow-cli-missing-tool"
 }
 
 func (targetDepsCLIProject) Name() string { return "cli-target-deps-project" }
@@ -540,6 +558,7 @@ func TestRunAcceptsTaskNameAsSyntheticTarget(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "LocalAppData"))
 	worktree := t.TempDir()
 	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
 	if err := app.Run([]string{"run", "gen", "--json", "--ci", "--project", "cli-task-target-project", "--worktree", worktree}); err != nil {
@@ -733,7 +752,7 @@ func TestWaitForFlushAckRetouchesSyncSentinel(t *testing.T) {
 func TestDepsStatusAndInstallJSON(t *testing.T) {
 	marker := filepath.Join(os.TempDir(), "devflow-cli-deps-installed.txt")
 	_ = os.Remove(marker)
-	bin := filepath.Join(os.TempDir(), "devflow-cli-missing-tool")
+	bin := filepath.Join(os.TempDir(), cliMissingToolCommand())
 	_ = os.Remove(bin)
 	t.Setenv("PATH", os.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -764,7 +783,7 @@ func TestDepsStatusAndInstallJSON(t *testing.T) {
 func TestDepsInstallTargetInstallsOnlyMissingRequiredCLIs(t *testing.T) {
 	marker := filepath.Join(os.TempDir(), "devflow-cli-deps-installed.txt")
 	_ = os.Remove(marker)
-	bin := filepath.Join(os.TempDir(), "devflow-cli-missing-tool")
+	bin := filepath.Join(os.TempDir(), cliMissingToolCommand())
 	_ = os.Remove(bin)
 	t.Setenv("PATH", os.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -1273,7 +1292,7 @@ func buildBootstrapBinary(t *testing.T) string {
 			bootstrapBuildErr = err
 			return
 		}
-		path := filepath.Join(dir, "devflow-test-bootstrap")
+		path := filepath.Join(dir, "devflow-test-bootstrap"+testExeSuffix())
 		cmd := exec.Command("go", "build", "-o", path, "./cmd/devflow")
 		cmd.Dir = repoRoot
 		output, err := cmd.CombinedOutput()
@@ -1521,8 +1540,7 @@ func TestStopCommandStopsTrackedProcess(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	handle, err := process.Start(ctx, process.CommandSpec{
-		Name: "sh",
-		Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
+		Name: cliLoopBinary(t, worktree),
 		Dir:  worktree,
 	})
 	if err != nil {
@@ -1865,11 +1883,7 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 	}
 	supervisorCtx, supervisorCancel := context.WithCancel(context.Background())
 	defer supervisorCancel()
-	supervisorHandle, err := process.Start(supervisorCtx, process.CommandSpec{
-		Name: "sh",
-		Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
-		Dir:  worktree,
-	})
+	supervisorHandle, err := process.Start(supervisorCtx, process.CommandSpec{Name: cliLoopBinary(t, worktree), Dir: worktree})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2009,8 +2023,7 @@ func waitForProcessExit(t *testing.T, handle *process.Handle) {
 func startCLILoopProcess(t *testing.T, worktree string) *process.Handle {
 	t.Helper()
 	handle, err := process.Start(context.Background(), process.CommandSpec{
-		Name: "sh",
-		Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
+		Name: cliLoopBinary(t, worktree),
 		Dir:  worktree,
 	})
 	if err != nil {
@@ -2021,6 +2034,37 @@ func startCLILoopProcess(t *testing.T, worktree string) *process.Handle {
 		_ = handle.Wait()
 	})
 	return handle
+}
+
+func cliLoopBinary(t *testing.T, worktree string) string {
+	t.Helper()
+	dir := filepath.Join(worktree, ".devflow", "testhelpers")
+	source := filepath.Join(dir, "loop.go")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte(`package main
+
+import "time"
+
+func main() {
+	for {
+		time.Sleep(time.Hour)
+	}
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "loop"+testExeSuffix())
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(realGo, "build", "-o", output, source)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build loop helper: %v\n%s", err, string(out))
+	}
+	return output
 }
 
 func stringSetFromJSONList(t *testing.T, value any) map[string]bool {

@@ -443,11 +443,14 @@ Last updated: 2026-05-05
 
 - Fixed cross-platform CI failures from the Linux/macOS/Windows matrix:
   - split file locking and process liveness/termination into platform-specific implementations so Windows builds do not depend on Unix-only syscalls
+  - Windows process stopping now terminates full process trees with `taskkill /T /F`, preventing `go run`/service children from holding task log files open after tests stop the parent
   - moved daemon process-group setup behind build tags and made `stop --all`/test cleanup wait for daemon socket shutdown instead of PID liveness
   - replaced Unix shell-script test helpers with generated Go helper binaries and Windows `.exe` outputs where needed
+  - made CLI/engine/bootstrap helper binaries and installer tests portable on Windows, including `devflow.exe` and `.cmd` command names
+  - cache-status tests now isolate the Windows user cache root through `LOCALAPPDATA`
   - fixed JSON fixture writing in database tests so Windows paths are escaped correctly
-  - documented cross-platform test hygiene in contributor testing docs and agent memory
-  - verified with `go test ./...`, `go build -v -o /tmp/devflow-build-check ./cmd/devflow`, Windows cross-compiles for `cmd/devflow` and affected test packages, Linux cross-build for `cmd/devflow`, and `git diff --check`
+  - documented cross-platform test hygiene and Windows process-tree cleanup in contributor testing docs and agent memory
+  - verified with targeted CLI/engine/example tests, `go test ./...`, `go build -v -o /tmp/devflow-build-check ./cmd/devflow`, Windows cross-compiles for `cmd/devflow` and affected test packages, Linux cross-build for `cmd/devflow`, and `git diff --check`
 - Scoped default Prisma partial snapshots to uncommitted migration folders:
   - default `EnsurePrismaDevDatabase` now treats committed migration history as stable and applies it as one tail before the final snapshot
   - intermediate prefix snapshots are created only around migration folders reported by Git as uncommitted, so edited local migrations still have useful restore points
