@@ -29,6 +29,8 @@ Flow:
 - stale checks and rebuilds are guarded by a per-worktree lock at `<worktree>/.devflow/localbuild.lock`; commands that waited for another builder re-check the build key before compiling
 - execution is then transferred into that compiled local binary for all normal commands
 
+The worktree does not have to live under the Devflow source checkout. Source-local bootstrap hashes repo sources relative to the checkout when possible, and hashes external project files with stable external labels so Windows temp worktrees on another drive still build.
+
 Current local binary location:
 - `<worktree>/.devflow/bin/devflow-local`
 

@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-05-05
+Last updated: 2026-05-06
 
 ## Current Status
 
@@ -218,6 +218,10 @@ Last updated: 2026-05-05
 - Hardened source/install update ergonomics:
   - the repo-local launcher now rebuilds `.devflow/bin/devflow` from a content build key instead of source mtimes
   - text-mode `devflow upgrade` now warns when `go install` updates a different binary than the `devflow` command currently found on `PATH`
+- Fixed cross-platform CI regressions:
+  - local project bootstrap hashing now supports project files outside the Devflow source checkout, including Windows worktrees on another drive
+  - cache-sensitive watch/example tests now isolate `HOME`, `XDG_CACHE_HOME`, and `LOCALAPPDATA`
+  - counter-based engine watch tests use unique cache namespaces so global cache state cannot skip the initial run
 - Added local stamped task semantics:
   - builder tasks can call `Stamp()` for finite install/setup commands such as `npm install`
   - stamped tasks use normal input/dependency keys but persist only a per-worktree completion stamp under `.devflow/state`

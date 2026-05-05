@@ -17,6 +17,14 @@ import (
 	"github.com/benjaco/devflow/pkg/project"
 )
 
+func isolateWorkspaceUserCache(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "LocalAppData"))
+}
+
 func TestWorkspaceProjectRegistered(t *testing.T) {
 	p, err := project.Lookup("web-worker-workspace")
 	if err != nil {
@@ -74,8 +82,7 @@ func TestWorkspaceGraphValidates(t *testing.T) {
 }
 
 func TestWorkspaceProjectCachesOnSecondRun(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateWorkspaceUserCache(t)
 	t.Setenv("DEVFLOW_WEBWORKER_FAKE_DB", "1")
 	worktree := seededWorktree(t)
 
@@ -116,8 +123,7 @@ func TestWorkspaceProjectCachesOnSecondRun(t *testing.T) {
 }
 
 func TestWorkspaceProjectIsolatesTwoWorktrees(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateWorkspaceUserCache(t)
 	t.Setenv("DEVFLOW_WEBWORKER_FAKE_DB", "1")
 	worktreeA := seededWorktree(t)
 	worktreeB := seededWorktree(t)
@@ -163,8 +169,7 @@ func TestWorkspaceProjectIsolatesTwoWorktrees(t *testing.T) {
 }
 
 func TestWorkspaceWatchSelectiveReruns(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateWorkspaceUserCache(t)
 	t.Setenv("DEVFLOW_WEBWORKER_FAKE_DB", "1")
 	worktree := seededWorktree(t)
 	eng, err := engine.New(workspaceProject{}, worktree)

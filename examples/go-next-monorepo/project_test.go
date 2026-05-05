@@ -19,9 +19,16 @@ import (
 	"github.com/benjaco/devflow/pkg/project"
 )
 
-func TestExampleProjectCachesOnSecondRun(t *testing.T) {
+func isolateExampleUserCache(t *testing.T) {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "LocalAppData"))
+}
+
+func TestExampleProjectCachesOnSecondRun(t *testing.T) {
+	isolateExampleUserCache(t)
 	t.Setenv("DEVFLOW_EXAMPLE_FAKE_DB", "1")
 	worktree := seededWorktree(t)
 
@@ -77,8 +84,7 @@ func TestExampleProjectDetectionAndDefaultTarget(t *testing.T) {
 }
 
 func TestExampleProjectIsolatesTwoWorktrees(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateExampleUserCache(t)
 	t.Setenv("DEVFLOW_EXAMPLE_FAKE_DB", "1")
 	worktreeA := seededWorktree(t)
 	worktreeB := seededWorktree(t)
@@ -128,8 +134,7 @@ func TestExampleProjectIsolatesTwoWorktrees(t *testing.T) {
 }
 
 func TestExampleProjectWatchSelectiveReruns(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateExampleUserCache(t)
 	t.Setenv("DEVFLOW_EXAMPLE_FAKE_DB", "1")
 	worktree := seededWorktree(t)
 	eng, err := engine.New(exampleProject{}, worktree)
@@ -196,8 +201,7 @@ func TestExampleProjectWatchSelectiveReruns(t *testing.T) {
 }
 
 func TestExampleProjectFlushSettlesWatchChange(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateExampleUserCache(t)
 	t.Setenv("DEVFLOW_EXAMPLE_FAKE_DB", "1")
 	worktree := seededWorktree(t)
 	daemonCtx, cancelDaemon := context.WithCancel(context.Background())

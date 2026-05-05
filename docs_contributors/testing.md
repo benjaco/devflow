@@ -6,6 +6,8 @@ GitHub Actions runs the default `go test ./...` and `go build ./cmd/devflow` val
 
 Cross-platform tests should avoid Unix-only assumptions unless the test is guarded by build tags or an explicit platform skip. Prefer generated Go helper binaries over shell-script fake tools, add `.exe` to built helper paths on Windows, and use Go encoders for JSON fixtures so Windows paths are escaped correctly. Long-running process tests should verify process-tree cleanup on Windows because orphaned children can keep task log files locked after the parent exits.
 
+Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS user cache root. Set `HOME`, `XDG_CACHE_HOME`, and `LOCALAPPDATA`; Windows uses `LOCALAPPDATA` for `os.UserCacheDir()`, so `HOME` alone is not enough.
+
 ## Unit Tests
 
 - graph validation and closures

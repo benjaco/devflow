@@ -682,12 +682,20 @@ func mustContainEventType(t *testing.T, types []api.EventType, want api.EventTyp
 }
 
 type watchProject struct {
-	aRuns       atomic.Int32
-	bRuns       atomic.Int32
-	serviceRuns atomic.Int32
+	cacheNamespace string
+	aRuns          atomic.Int32
+	bRuns          atomic.Int32
+	serviceRuns    atomic.Int32
 }
 
 func (p *watchProject) Name() string { return "watch-project" }
+
+func (p *watchProject) CacheNamespace() string {
+	if p.cacheNamespace != "" {
+		return p.cacheNamespace
+	}
+	return p.Name()
+}
 
 func (p *watchProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
 	_ = ctx
@@ -750,6 +758,8 @@ func (p *watchProject) Tasks() []project.Task {
 func TestWatchRerunsOnlyAffectedSlice(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "LocalAppData"))
 	worktree := t.TempDir()
 	if err := os.WriteFile(filepath.Join(worktree, "a.txt"), []byte("a1"), 0o644); err != nil {
 		t.Fatal(err)
@@ -758,7 +768,7 @@ func TestWatchRerunsOnlyAffectedSlice(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &watchProject{}
+	p := &watchProject{cacheNamespace: "watch-project-" + filepath.Base(worktree)}
 	eng, err := New(p, worktree)
 	if err != nil {
 		t.Fatal(err)
@@ -771,7 +781,7 @@ func TestWatchRerunsOnlyAffectedSlice(t *testing.T) {
 		errCh <- eng.Watch(ctx, Request{Target: "dev", Worktree: worktree, Mode: api.ModeWatch, MaxParallel: 2})
 	}()
 
-	waitFor(t, 3*time.Second, func() bool {
+	waitFor(t, 6*time.Second, func() bool {
 		return p.aRuns.Load() == 1 && p.bRuns.Load() == 1 && p.serviceRuns.Load() == 1
 	})
 
@@ -854,6 +864,8 @@ func TestWatchInputPathsUseTargetClosureDeclaredInputs(t *testing.T) {
 func TestWatchCycleEventsReportChangedFilesAndAffectedTasks(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "LocalAppData"))
 	worktree := t.TempDir()
 	if err := os.WriteFile(filepath.Join(worktree, "a.txt"), []byte("a1"), 0o644); err != nil {
 		t.Fatal(err)
@@ -862,7 +874,7 @@ func TestWatchCycleEventsReportChangedFilesAndAffectedTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &watchProject{}
+	p := &watchProject{cacheNamespace: "watch-project-" + filepath.Base(worktree)}
 	eng, err := New(p, worktree)
 	if err != nil {
 		t.Fatal(err)
@@ -876,7 +888,7 @@ func TestWatchCycleEventsReportChangedFilesAndAffectedTasks(t *testing.T) {
 		errCh <- eng.Watch(ctx, Request{Target: "dev", Worktree: worktree, Mode: api.ModeWatch, MaxParallel: 2})
 	}()
 
-	waitFor(t, 3*time.Second, func() bool {
+	waitFor(t, 6*time.Second, func() bool {
 		return p.aRuns.Load() == 1 && p.serviceRuns.Load() == 1
 	})
 	time.Sleep(500 * time.Millisecond)

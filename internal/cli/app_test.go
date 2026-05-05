@@ -1113,6 +1113,20 @@ func TestBootstrapFailsWithoutLocalProjectFile(t *testing.T) {
 	}
 }
 
+func TestLocalBuildSourceLabelAllowsProjectOutsideBootstrapRoot(t *testing.T) {
+	repoRoot := filepath.Join("repo", "devflow")
+	repoFile := filepath.Join(repoRoot, "pkg", "engine", "engine.go")
+	if got := localBuildSourceLabel(repoRoot, repoFile); got != "pkg/engine/engine.go" {
+		t.Fatalf("unexpected repo source label %q", got)
+	}
+
+	projectFile := filepath.Join("tmp", "external-project", localProjectFile)
+	got := localBuildSourceLabel(repoRoot, projectFile)
+	if !strings.HasPrefix(got, "external/") || !strings.HasSuffix(got, filepath.ToSlash(projectFile)) {
+		t.Fatalf("unexpected external source label %q", got)
+	}
+}
+
 func TestBootstrapRebuildsWhenLocalProjectChanges(t *testing.T) {
 	worktree := t.TempDir()
 	projectPath := filepath.Join(worktree, localProjectFile)
@@ -1500,6 +1514,7 @@ func TestCacheStatusJSON(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "LocalAppData"))
 	worktree := t.TempDir()
 	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(taskTargetCLIProject{}))
 	if err := os.WriteFile(filepath.Join(worktree, "out.txt"), []byte("v1"), 0o644); err != nil {

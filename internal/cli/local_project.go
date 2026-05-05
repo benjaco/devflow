@@ -211,15 +211,7 @@ func localBuildKey(bootstrapRoot, projectPath string) (string, error) {
 		return "", err
 	}
 	for _, path := range sources {
-		rel := path
-		if bootstrapRoot != "" {
-			var err error
-			rel, err = filepath.Rel(bootstrapRoot, path)
-			if err != nil {
-				return "", err
-			}
-		}
-		if _, err := hash.Write([]byte(filepath.ToSlash(rel))); err != nil {
+		if _, err := hash.Write([]byte(localBuildSourceLabel(bootstrapRoot, path))); err != nil {
 			return "", err
 		}
 		if _, err := hash.Write([]byte{0}); err != nil {
@@ -237,6 +229,17 @@ func localBuildKey(bootstrapRoot, projectPath string) (string, error) {
 		}
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func localBuildSourceLabel(bootstrapRoot, path string) string {
+	if bootstrapRoot == "" {
+		return filepath.ToSlash(path)
+	}
+	rel, err := filepath.Rel(bootstrapRoot, path)
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+		return filepath.ToSlash(rel)
+	}
+	return "external/" + filepath.ToSlash(path)
 }
 
 func buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target, buildKey string) error {
