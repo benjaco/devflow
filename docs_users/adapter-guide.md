@@ -309,9 +309,9 @@ The component task names are derived from the component name: `prisma_client`, `
 - clone/rebuild a base database when no compatible snapshot exists
 - ensure the host-visible Postgres runtime is ready
 - run Prisma migrations through `npx prisma migrate deploy`
-- snapshot each migration prefix by default
+- snapshot the final state by default, plus intermediate prefixes only around migration folders with uncommitted Git changes when Git can identify them
 
-That prefix snapshotting matters during development. If you edit the latest migration, Devflow can restore the previous compatible prefix and apply only the changed tail instead of rebuilding from the remote/base source.
+That prefix snapshotting matters during development. Committed migrations are assumed to be stable and are not given partial cache points by default. If you edit or add an uncommitted migration, Devflow can restore the previous compatible prefix and apply only the changed local tail instead of rebuilding from the remote/base source. If Git is unavailable, the default behavior is final-only snapshotting. Devflow intentionally avoids snapshotting every historical Prisma prefix by default because that requires repeated Prisma deploy runs on cold rebuilds; use a custom `MigrateEach` only if you need exhaustive per-prefix snapshots.
 
 `prisma.NewMigration(b)` uses the same prefix restore model before it invokes Prisma migration generation. It restores or rebuilds the managed database to the best compatible state, reapplies any missing or edited tail migrations, then runs `npx prisma migrate dev --name "$DEVFLOW_MIGRATION_NAME" --create-only`. This avoids Prisma seeing an old live database where an edited migration was already applied with different contents.
 

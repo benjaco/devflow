@@ -338,7 +338,7 @@ Higher-level workflow helpers now exist on top of those primitives:
 
 Prisma migration inspection is directory-only. Files under `prisma/migrations`, including `migration_lock.toml`, are not migration points and must not affect prefix counts or snapshot keys.
 
-The important cache invariant is prefix safety. A snapshot can only be reused when its migration list is a valid prefix of the current migration list and the base fingerprint still matches. `EnsureMigratedDatabase` with `ApplyEach` and the default `EnsurePrismaDevDatabase` path snapshot every prefix after applying it, so editing the latest migration can restore the previous prefix snapshot and apply only the changed tail.
+The important cache invariant is prefix safety. A snapshot can only be reused when its migration list is a valid prefix of the current migration list and the base fingerprint still matches. `EnsureMigratedDatabase` with `ApplyEach` snapshots every prefix after applying it. The default `EnsurePrismaDevDatabase` path is less chatty: committed migration history is treated as stable and applies as one tail before the final snapshot. Intermediate Prisma snapshots are created only at boundaries needed for migration folders with uncommitted Git changes, plus the final state. If Git is unavailable or the worktree is not a Git repository, the default falls back to final-only snapshotting. That preserves local migration editing without running Prisma once per historical committed migration on cold rebuilds. Adapters that need exhaustive Prisma prefix snapshots can still provide `MigrateEach`.
 
 Prisma has two authoring guards: if `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but the migration list has not advanced beyond the restored prefix, the default workflow returns a migration-needed error telling the adapter to generate a migration first. The engine writes errors that implement `MigrationNeeded() bool`, plus known Prisma migration-needed messages, as `migration_needed` rather than `failed`, and downstream work remains pending. Migration generation must be modeled as an explicit target/action using `PreparePrismaMigrationAuthoringDatabase` plus `GeneratePrismaMigration`, or as the explicit TUI `m` action, not hidden inside normal `up`.
 
@@ -346,7 +346,7 @@ Prisma database preparation emits progress lines before snapshot planning, runti
 
 Migration authoring prep intentionally differs from normal DB prep: it restores/rebuilds the managed database to the best compatible prefix, reapplies any missing or edited tail migrations, and does not snapshot the schema-drift state it prepares for Prisma. That lets `prisma migrate dev --create-only` compare the current schema against a compatible database without hitting Prisma's "migration was modified after it was applied" reset prompt after a developer edits the latest migration.
 
-Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`. `Migrate` is an all-at-once command and only snapshots the final state; `MigrateEach` preserves the per-prefix cache contract.
+Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`. `Migrate` is an all-at-once command and only snapshots the final state; `MigrateEach` preserves the exhaustive per-prefix cache contract.
 
 `PostgresDumpSourcePolicy` must fail when `pg_dump` fails. It writes through a temporary dump file instead of an unchecked shell pipeline so `psql` cannot mask a failed clone with an empty successful restore.
 

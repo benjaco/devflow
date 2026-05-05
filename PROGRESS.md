@@ -441,6 +441,13 @@ Last updated: 2026-05-05
 
 ## Latest Work
 
+- Scoped default Prisma partial snapshots to uncommitted migration folders:
+  - default `EnsurePrismaDevDatabase` now treats committed migration history as stable and applies it as one tail before the final snapshot
+  - intermediate prefix snapshots are created only around migration folders reported by Git as uncommitted, so edited local migrations still have useful restore points
+  - custom `MigrateEach` still preserves exhaustive per-prefix snapshots for adapters that explicitly need them
+  - added regression coverage for committed tails snapshotting final-only, uncommitted migration folders creating boundary snapshots, and direct Git-status parsing of modified/untracked migration folders
+  - updated user and contributor docs to describe Git-aware Prisma milestone snapshots and the final-only fallback when Git cannot identify uncommitted migration folders
+  - verified with `go test ./pkg/database`, `go test ./...`, `go build -o /tmp/devflow-build-check ./cmd/devflow`, and `git diff --check`
 - Locked down local install stamp semantics:
   - stamped setup/install tasks now have explicit regression coverage that two worktrees with the same lockfile still run separate local installs
   - added coverage that a matching global task-cache entry cannot make a stamped task skip or restore `node_modules`

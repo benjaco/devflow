@@ -187,7 +187,7 @@ b.Target("up", app)
 b.Target("new-migration", prisma.NewMigration(b))
 ```
 
-`prisma.Migrations(b)` restores the best cached migration-prefix database state, applies only the missing tail, snapshots each prefix, and reports migration-needed states when `schema.prisma` and `prisma/migrations` are out of sync.
+`prisma.Migrations(b)` restores the best cached migration-prefix database state, applies only the missing tail, snapshots the final state, and reports migration-needed states when `schema.prisma` and `prisma/migrations` are out of sync. When the migration folder is in a Git worktree, Devflow only adds intermediate prefix snapshots around migration folders with uncommitted Git changes, including newly added or edited local migrations. If Git is unavailable, Devflow falls back to the final snapshot only. This keeps committed history fast while preserving the local workflow where you edit an in-progress migration and need to restore the previous prefix.
 
 `prisma.NewMigration(b)` is an explicit authoring action. It reads `DEVFLOW_MIGRATION_NAME`, reconciles the managed database to the best compatible migration-prefix state, creates a Prisma migration, and is intentionally not task-cacheable. This keeps edited latest migrations usable: Devflow restores the prior prefix and reapplies the changed tail before Prisma authors the next migration.
 

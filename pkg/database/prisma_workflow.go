@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/benjaco/devflow/pkg/api"
@@ -135,11 +138,13 @@ func (m *Manager) EnsurePrismaDevDatabase(ctx context.Context, opts PrismaDevDat
 			if plan.SnapshotKey != "" && plan.PrefixLength == len(state.Migrations) && plan.Snapshot != nil && plan.Snapshot.SchemaHash != state.SchemaHash {
 				return nil, newMigrationNeededError("schema_changed", "prisma schema changed without a new migration; generate one with GeneratePrismaMigration before preparing the database")
 			}
-			applier := opts.MigrateEach
-			if applier == nil {
-				applier = PrismaMigrateDeployPrefixApplier()
+			var snapshot *PrismaRestoreResult
+			var err error
+			if opts.MigrateEach != nil {
+				snapshot, err = m.applyAndSnapshotEachPrismaMigration(ctx, opts, state, plan.PrefixLength, timeout, opts.MigrateEach)
+			} else {
+				snapshot, err = m.applyAndSnapshotPrismaMigrationMilestones(ctx, opts, state, plan.PrefixLength, timeout, PrismaMigrateDeployPrefixApplier())
 			}
-			snapshot, err := m.applyAndSnapshotEachPrismaMigration(ctx, opts, state, plan.PrefixLength, timeout, applier)
 			if err != nil {
 				return nil, err
 			}
@@ -252,6 +257,49 @@ func (m *Manager) PreparePrismaMigrationAuthoringDatabase(ctx context.Context, o
 	return result, nil
 }
 
+func (m *Manager) applyAndSnapshotPrismaMigrationMilestones(ctx context.Context, opts PrismaDevDatabaseOptions, state *PrismaState, start int, timeout time.Duration, apply PrismaMigrationApplyFunc) (*PrismaRestoreResult, error) {
+	if start < 0 {
+		start = 0
+	}
+	if start > len(state.Migrations) {
+		start = len(state.Migrations)
+	}
+	var snapshot *PrismaRestoreResult
+	current := start
+	uncommitted := prismaUncommittedMigrationIndexes(ctx, opts.Worktree, opts.MigrationsDir, state.Migrations)
+	for _, prefix := range prismaSnapshotMilestones(start, len(state.Migrations), uncommitted) {
+		migration := state.Migrations[prefix-1]
+		emitPrepareLine(opts.Prepare, "stdout", prismaApplyProgressLine(state, current, prefix))
+		if err := apply(ctx, opts.DB, migration, PrismaMigrationApplyOptions{
+			Worktree:      opts.Worktree,
+			SchemaPath:    opts.SchemaPath,
+			MigrationsDir: opts.MigrationsDir,
+			Index:         prefix - 1,
+			LogPath:       opts.Prepare.LogPath,
+			OnLine:        opts.Prepare.OnLine,
+			Env:           opts.Prepare.Env,
+		}); err != nil {
+			return nil, err
+		}
+		prefixState := prismaStatePrefix(state, prefix)
+		key := PrismaSnapshotKey(prefixState)
+		item, err := m.SnapshotPrisma(ctx, opts.DB, key, prefixState)
+		if err != nil {
+			return nil, err
+		}
+		snapshot = item
+		if err := m.EnsureRuntime(ctx, opts.DB); err != nil {
+			return nil, err
+		}
+		emitPrepareLine(opts.Prepare, "stdout", "database: waiting for managed Postgres readiness after snapshot")
+		if err := m.WaitReady(ctx, opts.DB, timeout); err != nil {
+			return nil, err
+		}
+		current = prefix
+	}
+	return snapshot, nil
+}
+
 func (m *Manager) applyAndSnapshotEachPrismaMigration(ctx context.Context, opts PrismaDevDatabaseOptions, state *PrismaState, start int, timeout time.Duration, apply PrismaMigrationApplyFunc) (*PrismaRestoreResult, error) {
 	if start < 0 {
 		start = 0
@@ -289,6 +337,109 @@ func (m *Manager) applyAndSnapshotEachPrismaMigration(ctx context.Context, opts 
 		}
 	}
 	return snapshot, nil
+}
+
+func prismaSnapshotMilestones(start, total int, uncommitted []int) []int {
+	if start < 0 {
+		start = 0
+	}
+	if start >= total {
+		return nil
+	}
+	if len(uncommitted) > 1 {
+		uncommitted = append([]int(nil), uncommitted...)
+		sort.Ints(uncommitted)
+	}
+	out := make([]int, 0, len(uncommitted)+1)
+	seen := map[int]bool{}
+	for _, index := range uncommitted {
+		if index <= start || index <= 0 || index >= total || seen[index] {
+			continue
+		}
+		out = append(out, index)
+		seen[index] = true
+	}
+	if !seen[total] {
+		out = append(out, total)
+	}
+	return out
+}
+
+func prismaUncommittedMigrationIndexes(ctx context.Context, worktree, migrationsDir string, migrations []PrismaMigration) []int {
+	if worktree == "" || migrationsDir == "" || len(migrations) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", filepath.ToSlash(migrationsDir))
+	cmd.Dir = worktree
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return nil
+	}
+
+	byName := make(map[string]int, len(migrations))
+	for i, migration := range migrations {
+		byName[migration.Name] = i
+	}
+	changed := map[int]bool{}
+	for _, raw := range strings.Split(string(out), "\x00") {
+		if len(raw) < 4 || raw[2] != ' ' {
+			continue
+		}
+		rel := filepath.ToSlash(raw[3:])
+		name, ok := migrationNameFromStatusPath(filepath.ToSlash(migrationsDir), rel)
+		if !ok {
+			continue
+		}
+		if index, ok := byName[name]; ok {
+			changed[index] = true
+		}
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	indexes := make([]int, 0, len(changed))
+	for index := range changed {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	return indexes
+}
+
+func migrationNameFromStatusPath(migrationsDir, rel string) (string, bool) {
+	migrationsDir = strings.Trim(filepath.ToSlash(migrationsDir), "/")
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	if migrationsDir == "" || rel == "" {
+		return "", false
+	}
+	if rel == migrationsDir {
+		return "", false
+	}
+	prefix := migrationsDir + "/"
+	if !strings.HasPrefix(rel, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(rel, prefix)
+	name, _, ok := strings.Cut(rest, "/")
+	if !ok {
+		return "", false
+	}
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+func prismaApplyProgressLine(state *PrismaState, start, prefix int) string {
+	if state == nil || prefix <= 0 || prefix > len(state.Migrations) {
+		return "database: applying Prisma migrations"
+	}
+	if prefix == start+1 {
+		return fmt.Sprintf("database: applying Prisma migration %s", state.Migrations[prefix-1].Name)
+	}
+	return fmt.Sprintf("database: applying Prisma migrations %s..%s", state.Migrations[start].Name, state.Migrations[prefix-1].Name)
 }
 
 func PrismaMigrateDeployCommand(schemaPath string) process.CommandSpec {

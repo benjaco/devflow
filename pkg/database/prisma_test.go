@@ -3,12 +3,15 @@ package database
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/process"
@@ -577,6 +580,212 @@ func TestEnsurePrismaDevDatabaseSnapshotsEachPrismaMigrationPrefix(t *testing.T)
 		if _, err := os.Stat(filepath.Join(snapshotRoot, key, "prisma.json")); err != nil {
 			t.Fatalf("expected prisma prefix snapshot %s: %v", key, err)
 		}
+	}
+}
+
+func TestPrismaSnapshotMilestonesUseUncommittedBoundaries(t *testing.T) {
+	cases := []struct {
+		name        string
+		start       int
+		total       int
+		uncommitted []int
+		want        string
+	}{
+		{name: "committed tail final only", start: 2, total: 8, want: "[8]"},
+		{name: "latest uncommitted keeps previous prefix", start: 2, total: 8, uncommitted: []int{7}, want: "[7 8]"},
+		{name: "multiple uncommitted migrations keep their boundaries", start: 2, total: 8, uncommitted: []int{6, 7}, want: "[6 7 8]"},
+		{name: "unsorted uncommitted indexes are normalized", start: 2, total: 8, uncommitted: []int{7, 6}, want: "[6 7 8]"},
+		{name: "restored boundary is not resnapshotted", start: 6, total: 8, uncommitted: []int{6, 7}, want: "[7 8]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fmt.Sprint(prismaSnapshotMilestones(tc.start, tc.total, tc.uncommitted)); got != tc.want {
+				t.Fatalf("unexpected milestones: got %s want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMigrationNameFromStatusPath(t *testing.T) {
+	cases := []struct {
+		name          string
+		migrationsDir string
+		path          string
+		want          string
+		ok            bool
+	}{
+		{name: "migration sql", migrationsDir: "prisma/migrations", path: "prisma/migrations/001_init/migration.sql", want: "001_init", ok: true},
+		{name: "nested file", migrationsDir: "db/prisma/migrations", path: "db/prisma/migrations/002_add_user/steps/001.sql", want: "002_add_user", ok: true},
+		{name: "lock file", migrationsDir: "prisma/migrations", path: "prisma/migrations/migration_lock.toml", ok: false},
+		{name: "other path", migrationsDir: "prisma/migrations", path: "src/server.ts", ok: false},
+		{name: "migration root", migrationsDir: "prisma/migrations", path: "prisma/migrations", ok: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := migrationNameFromStatusPath(tc.migrationsDir, tc.path)
+			if ok != tc.ok || got != tc.want {
+				t.Fatalf("migrationNameFromStatusPath() = %q, %v; want %q, %v", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+func TestPrismaUncommittedMigrationIndexesDetectsModifiedAndUntrackedMigrationDirs(t *testing.T) {
+	requireGit(t)
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "001_init", "migration.sql"), "-- 001\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "002_role", "migration.sql"), "-- 002\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "migration_lock.toml"), "provider = \"postgresql\"\n")
+	initGitRepo(t, worktree)
+	git(t, worktree, "add", ".")
+	git(t, worktree, "-c", "commit.gpgsign=false", "commit", "-m", "committed migrations")
+
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "002_role", "migration.sql"), "-- 002 edited\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "003_age", "migration.sql"), "-- 003\n")
+	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "migration_lock.toml"), "provider = \"postgresql\"\n# churn\n")
+
+	state, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexes := prismaUncommittedMigrationIndexes(context.Background(), worktree, "prisma/migrations", state.Migrations)
+	if got := fmt.Sprint(indexes); got != "[1 2]" {
+		t.Fatalf("expected modified 002 and untracked 003 migration indexes, got %s", got)
+	}
+}
+
+func TestApplyPrismaMilestonesSnapshotsUncommittedBoundariesAndFinal(t *testing.T) {
+	requireGit(t)
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\n")
+	for _, name := range []string{
+		"001_init",
+		"002_role",
+		"003_age",
+		"004_sex",
+		"005_height",
+		"006_l",
+	} {
+		mustWrite(t, filepath.Join(worktree, "prisma", "migrations", name, "migration.sql"), "-- "+name+"\n")
+	}
+	initGitRepo(t, worktree)
+	git(t, worktree, "add", ".")
+	git(t, worktree, "-c", "commit.gpgsign=false", "commit", "-m", "committed migrations")
+	for _, name := range []string{"007_verify", "008_new"} {
+		mustWrite(t, filepath.Join(worktree, "prisma", "migrations", name, "migration.sql"), "-- "+name+"\n")
+	}
+
+	state, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stableBoundaryKey := PrismaSnapshotKey(prismaStatePrefix(state, 6))
+	uncommittedBoundaryKey := PrismaSnapshotKey(prismaStatePrefix(state, 7))
+	finalKey := PrismaSnapshotKey(state)
+	skippedKey := PrismaSnapshotKey(prismaStatePrefix(state, 3))
+	snapshotRoot := t.TempDir()
+	runner := &fakeRunner{responses: prismaRuntimeResponses(snapshotRoot, stableBoundaryKey, uncommittedBoundaryKey, finalKey)}
+	mgr := NewWithRunner(runner)
+	appliedPrefixes := make([]int, 0, 3)
+	lines := make([]string, 0, 4)
+
+	snapshot, err := mgr.applyAndSnapshotPrismaMigrationMilestones(context.Background(), PrismaDevDatabaseOptions{
+		Worktree:      worktree,
+		DB:            migrationTestDB(snapshotRoot),
+		SchemaPath:    "prisma/schema.prisma",
+		MigrationsDir: "prisma/migrations",
+		Prepare: PrepareOptions{
+			Worktree: worktree,
+			OnLine: func(stream, line string) {
+				lines = append(lines, stream+": "+line)
+			},
+		},
+	}, state, 2, time.Second, func(ctx context.Context, db api.DBInstance, migration PrismaMigration, opts PrismaMigrationApplyOptions) error {
+		appliedPrefixes = append(appliedPrefixes, opts.Index+1)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(appliedPrefixes); got != "[6 7 8]" {
+		t.Fatalf("expected milestone prefixes [6 7 8], got %s", got)
+	}
+	if snapshot == nil || snapshot.Plan.SnapshotKey != finalKey || !snapshot.Plan.ExactMatch {
+		t.Fatalf("unexpected final milestone snapshot: %+v", snapshot)
+	}
+	for _, key := range []string{stableBoundaryKey, uncommittedBoundaryKey, finalKey} {
+		if _, err := os.Stat(filepath.Join(snapshotRoot, key, "prisma.json")); err != nil {
+			t.Fatalf("expected milestone snapshot %s: %v", key, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(snapshotRoot, skippedKey, "prisma.json")); !os.IsNotExist(err) {
+		t.Fatalf("did not expect committed-history prefix snapshot %s, stat err=%v", skippedKey, err)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "database: applying Prisma migrations 003_age..006_l") {
+		t.Fatalf("expected committed tail to apply as one batch, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "database: applying Prisma migration 007_verify") ||
+		!strings.Contains(joined, "database: applying Prisma migration 008_new") {
+		t.Fatalf("expected uncommitted migration progress lines, got:\n%s", joined)
+	}
+}
+
+func TestApplyPrismaMilestonesCommittedTailSnapshotsFinalOnly(t *testing.T) {
+	requireGit(t)
+	worktree := t.TempDir()
+	mustWrite(t, filepath.Join(worktree, "prisma", "schema.prisma"), "datasource db {}\n")
+	for _, name := range []string{
+		"001_init",
+		"002_role",
+		"003_age",
+		"004_sex",
+		"005_height",
+		"006_l",
+		"007_verify",
+		"008_new",
+	} {
+		mustWrite(t, filepath.Join(worktree, "prisma", "migrations", name, "migration.sql"), "-- "+name+"\n")
+	}
+	initGitRepo(t, worktree)
+	git(t, worktree, "add", ".")
+	git(t, worktree, "-c", "commit.gpgsign=false", "commit", "-m", "committed migrations")
+
+	state, err := InspectPrismaState(worktree, "prisma/schema.prisma", "prisma/migrations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalKey := PrismaSnapshotKey(state)
+	partialKey := PrismaSnapshotKey(prismaStatePrefix(state, 7))
+	snapshotRoot := t.TempDir()
+	runner := &fakeRunner{responses: prismaRuntimeResponses(snapshotRoot, finalKey)}
+	mgr := NewWithRunner(runner)
+	appliedPrefixes := make([]int, 0, 1)
+
+	snapshot, err := mgr.applyAndSnapshotPrismaMigrationMilestones(context.Background(), PrismaDevDatabaseOptions{
+		Worktree:      worktree,
+		DB:            migrationTestDB(snapshotRoot),
+		SchemaPath:    "prisma/schema.prisma",
+		MigrationsDir: "prisma/migrations",
+	}, state, 2, time.Second, func(ctx context.Context, db api.DBInstance, migration PrismaMigration, opts PrismaMigrationApplyOptions) error {
+		appliedPrefixes = append(appliedPrefixes, opts.Index+1)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(appliedPrefixes); got != "[8]" {
+		t.Fatalf("expected only final committed-tail prefix [8], got %s", got)
+	}
+	if snapshot == nil || snapshot.Plan.SnapshotKey != finalKey || !snapshot.Plan.ExactMatch {
+		t.Fatalf("unexpected final-only snapshot: %+v", snapshot)
+	}
+	if _, err := os.Stat(filepath.Join(snapshotRoot, finalKey, "prisma.json")); err != nil {
+		t.Fatalf("expected final snapshot: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(snapshotRoot, partialKey, "prisma.json")); !os.IsNotExist(err) {
+		t.Fatalf("did not expect partial snapshot for committed migration history, stat err=%v", err)
 	}
 }
 
@@ -1380,6 +1589,30 @@ printf '%s' "$DATABASE_URL" > "$OUT_FILE.url"
 	}
 	if strings.TrimSpace(string(url)) == "" {
 		t.Fatal("expected database env to be forwarded to prisma migrate deploy")
+	}
+}
+
+func requireGit(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+}
+
+func initGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	git(t, dir, "init")
+	git(t, dir, "config", "user.email", "devflow@example.invalid")
+	git(t, dir, "config", "user.name", "Devflow Test")
+}
+
+func git(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, string(out))
 	}
 }
 
