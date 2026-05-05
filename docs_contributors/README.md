@@ -192,4 +192,4 @@ Update:
 devflow upgrade
 ```
 
-Tag validation runs through GitHub Actions. No binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable are part of round 1.
+Push, pull request, and tag validation run the default test/build workflow on Linux, macOS, and Windows through GitHub Actions. No binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable are part of round 1.

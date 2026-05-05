@@ -2,6 +2,8 @@
 
 Devflow uses three testing layers:
 
+GitHub Actions runs the default `go test ./...` and `go build ./cmd/devflow` validation on Linux, macOS, and Windows for pushes, pull requests, and release tags.
+
 ## Unit Tests
 
 - graph validation and closures

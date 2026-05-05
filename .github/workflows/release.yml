@@ -7,7 +7,15 @@ on:
 
 jobs:
   verify-tag:
-    runs-on: ubuntu-latest
+    name: verify tag (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -22,4 +30,4 @@ jobs:
         run: go test ./...
 
       - name: Build devflow
-        run: go build -v -o /tmp/devflow ./cmd/devflow
+        run: go build -v -o "${{ runner.temp }}/devflow" ./cmd/devflow
