@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/benjaco/devflow/internal/testutil"
 )
 
 func TestRunCapturesStdoutAndStderr(t *testing.T) {
@@ -17,9 +19,10 @@ func TestRunCapturesStdoutAndStderr(t *testing.T) {
 	logPath := filepath.Join(root, "task.log")
 	lines := map[string][]string{}
 	var mu sync.Mutex
+	testcmd := testutil.BuildTestCommand(t)
 	_, err := Run(context.Background(), CommandSpec{
-		Name:    "sh",
-		Args:    []string{"-c", "printf 'out\\n'; printf 'err\\n' >&2"},
+		Name:    testcmd,
+		Args:    []string{"emit", "out", "err"},
 		LogPath: logPath,
 		OnLine: func(stream, line string) {
 			mu.Lock()
@@ -95,16 +98,17 @@ func TestRunInteractiveAnswersPrompts(t *testing.T) {
 func TestRunTruncatesLogPerAttempt(t *testing.T) {
 	root := t.TempDir()
 	logPath := filepath.Join(root, "task.log")
+	testcmd := testutil.BuildTestCommand(t)
 	if _, err := Run(context.Background(), CommandSpec{
-		Name:    "sh",
-		Args:    []string{"-c", "printf 'first\\n'"},
+		Name:    testcmd,
+		Args:    []string{"emit", "first"},
 		LogPath: logPath,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Run(context.Background(), CommandSpec{
-		Name:    "sh",
-		Args:    []string{"-c", "printf 'second\\n'"},
+		Name:    testcmd,
+		Args:    []string{"emit", "second"},
 		LogPath: logPath,
 	}); err != nil {
 		t.Fatal(err)
@@ -124,9 +128,10 @@ func TestRunAppendLogKeepsExistingAttemptLines(t *testing.T) {
 	if err := os.WriteFile(logPath, []byte("stdout: before\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	testcmd := testutil.BuildTestCommand(t)
 	if _, err := Run(context.Background(), CommandSpec{
-		Name:      "sh",
-		Args:      []string{"-c", "printf 'after\\n'"},
+		Name:      testcmd,
+		Args:      []string{"emit", "after"},
 		LogPath:   logPath,
 		AppendLog: true,
 	}); err != nil {
@@ -145,9 +150,10 @@ func TestRunAppendLogKeepsExistingAttemptLines(t *testing.T) {
 func TestStartWaitIsCleanAfterIntentionalStop(t *testing.T) {
 	root := t.TempDir()
 	logPath := filepath.Join(root, "service.log")
+	testcmd := testutil.BuildTestCommand(t)
 	handle, err := Start(context.Background(), CommandSpec{
-		Name:    "sh",
-		Args:    []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
+		Name:    testcmd,
+		Args:    []string{"serve"},
 		LogPath: logPath,
 		Grace:   time.Second,
 	})

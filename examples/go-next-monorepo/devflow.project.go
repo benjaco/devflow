@@ -24,6 +24,10 @@ import (
 type exampleProject struct{}
 
 func init() {
+	if os.Getenv("DEVFLOW_EXAMPLE_FAKE_SERVICE") == "1" {
+		runExampleFakeService()
+		os.Exit(0)
+	}
 	project.Register(exampleProject{})
 }
 
@@ -106,25 +110,19 @@ func (exampleProject) ConfigureInstance(ctx context.Context, worktree string) (p
 
 func (exampleProject) Tasks() []project.Task {
 	return []project.Task{
-		project.ShellTask(
+		warmupFileTask(
 			"warmup_node_install",
 			"Warm a local node install cache",
-			project.KindWarmup,
-			nil,
-			false,
-			project.Outputs{},
 			project.Inputs{Files: []string{"frontend/package-lock.json"}},
-			"mkdir -p .devflow/example/warmup && printf 'node install warmup\\n' > .devflow/example/warmup/node-install.txt",
+			".devflow/example/warmup/node-install.txt",
+			"node install warmup\n",
 		),
-		project.ShellTask(
+		warmupFileTask(
 			"warmup_pull_postgres_image",
 			"Warm postgres image metadata",
-			project.KindWarmup,
-			nil,
-			false,
-			project.Outputs{},
 			project.Inputs{Files: []string{"tools/postgres-image.txt"}},
-			"mkdir -p .devflow/example/warmup && printf 'postgres image warmup\\n' > .devflow/example/warmup/postgres-image.txt",
+			".devflow/example/warmup/postgres-image.txt",
+			"postgres image warmup\n",
 		),
 		{
 			Name:        "prepare_db_base",
@@ -325,12 +323,7 @@ func (exampleProject) Tasks() []project.Task {
 				if exampleUseFakeDB() {
 					readyPath := rt.Abs(".devflow/example/runtime/postgres.ready")
 					_ = os.Remove(readyPath)
-					_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-						Name: "sh",
-						Args: []string{"-c", "trap 'rm -f " + shellQuote(readyPath) + "; exit 0' INT TERM; mkdir -p " + shellQuote(filepath.Dir(readyPath)) + "; : > " + shellQuote(readyPath) + "; while true; do echo postgres:$PGPORT:$PGDATABASE; sleep 1; done"},
-						Dir:  rt.Worktree,
-						Env:  cloneEnv(rt.Env),
-					})
+					_, err := startExampleFakeService(ctx, rt, readyPath, "postgres:${PGPORT}:${PGDATABASE}", cloneEnv(rt.Env))
 					return err
 				}
 				manager := database.New()
@@ -340,8 +333,8 @@ func (exampleProject) Tasks() []project.Task {
 				env := cloneEnv(rt.Env)
 				env["DB_CONTAINER"] = rt.Instance.DB.ContainerName
 				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'docker stop -t 10 \"$DB_CONTAINER\" >/dev/null 2>&1 || true; exit 0' INT TERM; docker logs -f \"$DB_CONTAINER\""},
+					Name: "docker",
+					Args: []string{"logs", "-f", env["DB_CONTAINER"]},
 					Dir:  rt.Worktree,
 					Env:  env,
 				})
@@ -574,12 +567,7 @@ func (exampleProject) Tasks() []project.Task {
 				env["DATABASE_URL"] = rt.Instance.DB.URL
 				readyPath := rt.Abs(".devflow/example/runtime/backend.ready")
 				_ = os.Remove(readyPath)
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'rm -f " + shellQuote(readyPath) + "; exit 0' INT TERM; mkdir -p " + shellQuote(filepath.Dir(readyPath)) + "; : > " + shellQuote(readyPath) + "; while true; do echo backend:$BACKEND_PORT:$DATABASE_URL:$EXAMPLE_BACKEND_FLAG; sleep 1; done"},
-					Dir:  rt.Worktree,
-					Env:  env,
-				})
+				_, err := startExampleFakeService(ctx, rt, readyPath, "backend:${BACKEND_PORT}:${DATABASE_URL}:${EXAMPLE_BACKEND_FLAG}", env)
 				return err
 			},
 		},
@@ -600,12 +588,7 @@ func (exampleProject) Tasks() []project.Task {
 				env["BACKEND_PORT"] = strconv.Itoa(rt.Instance.Ports["backend"])
 				readyPath := rt.Abs(".devflow/example/runtime/frontend.ready")
 				_ = os.Remove(readyPath)
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'rm -f " + shellQuote(readyPath) + "; exit 0' INT TERM; mkdir -p " + shellQuote(filepath.Dir(readyPath)) + "; : > " + shellQuote(readyPath) + "; while true; do echo frontend:$FRONTEND_PORT:$BACKEND_PORT:$NEXTAUTH_URL:$EXAMPLE_FRONTEND_FLAG; sleep 1; done"},
-					Dir:  rt.Worktree,
-					Env:  env,
-				})
+				_, err := startExampleFakeService(ctx, rt, readyPath, "frontend:${FRONTEND_PORT}:${BACKEND_PORT}:${NEXTAUTH_URL}:${EXAMPLE_FRONTEND_FLAG}", env)
 				return err
 			},
 		},
@@ -667,6 +650,58 @@ func recordTrace(rt *project.Runtime, task string) {
 	}
 	defer f.Close()
 	_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), rt.Instance.ID)
+}
+
+func warmupFileTask(name, description string, inputs project.Inputs, rel, contents string) project.Task {
+	return project.Task{
+		Name:        name,
+		Kind:        project.KindWarmup,
+		Inputs:      inputs,
+		Description: description,
+		Signature:   rel + ":" + contents,
+		Run: func(ctx context.Context, rt *project.Runtime) error {
+			_ = ctx
+			return project.WriteFile(rt, rel, []byte(contents), 0o644)
+		},
+	}
+}
+
+func startExampleFakeService(ctx context.Context, rt *project.Runtime, readyPath, line string, env map[string]string) (*process.Handle, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	env = mergeStringMaps(env, map[string]string{
+		"DEVFLOW_EXAMPLE_FAKE_SERVICE": "1",
+		"DEVFLOW_EXAMPLE_READY_FILE":   readyPath,
+		"DEVFLOW_EXAMPLE_SERVICE_LINE": line,
+	})
+	return rt.StartServiceSpec(ctx, process.CommandSpec{
+		Name: exe,
+		Dir:  rt.Worktree,
+		Env:  env,
+	})
+}
+
+func runExampleFakeService() {
+	readyPath := os.Getenv("DEVFLOW_EXAMPLE_READY_FILE")
+	if readyPath != "" {
+		if err := os.MkdirAll(filepath.Dir(readyPath), 0o755); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(readyPath, []byte("ready\n"), 0o644); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	line := os.Getenv("DEVFLOW_EXAMPLE_SERVICE_LINE")
+	for {
+		if line != "" {
+			fmt.Println(os.ExpandEnv(line))
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 func writeJSONFile(rt *project.Runtime, rel string, payload map[string]any) error {
@@ -781,16 +816,15 @@ func exampleDBReady(ctx context.Context, rt *project.Runtime) error {
 
 func pipeSQLFile(ctx context.Context, rt *project.Runtime, rel string) error {
 	sqlFile := rt.Abs(rel)
+	sql, err := os.ReadFile(sqlFile)
+	if err != nil {
+		return err
+	}
 	return rt.RunCmdSpec(ctx, process.CommandSpec{
-		Name: "sh",
-		Args: []string{"-c", "cat \"$SQL_FILE\" | docker exec -i \"$DB_CONTAINER\" psql -U \"$PGUSER\" -d \"$PGDATABASE\" -v ON_ERROR_STOP=1"},
+		Name: "docker",
+		Args: []string{"exec", "-i", rt.Instance.DB.ContainerName, "psql", "-U", rt.Instance.DB.User, "-d", rt.Instance.DB.Name, "-v", "ON_ERROR_STOP=1", "-c", string(sql)},
 		Dir:  rt.Worktree,
-		Env: mergeStringMaps(rt.Env, map[string]string{
-			"SQL_FILE":     sqlFile,
-			"DB_CONTAINER": rt.Instance.DB.ContainerName,
-			"PGUSER":       rt.Instance.DB.User,
-			"PGDATABASE":   rt.Instance.DB.Name,
-		}),
+		Env:  cloneEnv(rt.Env),
 	})
 }
 
@@ -892,10 +926,6 @@ func cloneEnv(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
-}
-
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func traceCount(worktree, task string) int {

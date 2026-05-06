@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -449,7 +450,11 @@ func daemonExecutable(worktree string) (string, error) {
 }
 
 func daemonExecutablePath(worktree string) string {
-	return filepath.Join(worktree, ".devflow", "bin", "devflow-daemon")
+	name := "devflow-daemon"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(worktree, ".devflow", "bin", name)
 }
 
 func daemonNeedsRestart(worktree, instanceID string) bool {

@@ -170,7 +170,7 @@ func (targetDepsCLIProject) RequiredCLIs() []project.RequiredCLI {
 	return []project.RequiredCLI{
 		{Name: "cloud", Command: "devflow-cli-definitely-missing-cloud-tool"},
 		{Name: "deploy-tool", Command: "devflow-cli-definitely-missing-deploy-tool"},
-		{Name: "shell", Command: "sh"},
+		{Name: "shell", Command: "go"},
 	}
 }
 
@@ -1049,7 +1049,7 @@ func TestBootstrapExecsLocalProjectBinary(t *testing.T) {
 	if !ok || len(targets) == 0 {
 		t.Fatalf("unexpected targets payload: %+v", payload)
 	}
-	if _, err := os.Stat(filepath.Join(worktree, ".devflow", "bin", "devflow-local")); err != nil {
+	if _, err := os.Stat(localProjectBinaryPathForTest(worktree)); err != nil {
 		t.Fatalf("expected local binary to be built: %v", err)
 	}
 }
@@ -1102,6 +1102,10 @@ func TestLocalBuildModuleSourceInstalledModeUsesVersionWithoutReplace(t *testing
 	}
 }
 
+func localProjectBinaryPathForTest(worktree string) string {
+	return filepath.Join(worktree, ".devflow", "bin", "devflow-local"+localProjectBinarySuffix())
+}
+
 func TestBootstrapFailsWithoutLocalProjectFile(t *testing.T) {
 	worktree := t.TempDir()
 	output, err := runBootstrapCommand(t, worktree, "graph", "list", "--json")
@@ -1135,7 +1139,7 @@ func TestBootstrapRebuildsWhenLocalProjectChanges(t *testing.T) {
 	if _, err := runBootstrapCommand(t, worktree, "graph", "list", "--json"); err != nil {
 		t.Fatalf("initial bootstrap command failed: %v", err)
 	}
-	binaryPath := filepath.Join(worktree, ".devflow", "bin", "devflow-local")
+	binaryPath := localProjectBinaryPathForTest(worktree)
 	before, err := os.Stat(binaryPath)
 	if err != nil {
 		t.Fatal(err)
@@ -1174,7 +1178,7 @@ func TestBootstrapDoesNotRebuildOnTimestampOnlyChange(t *testing.T) {
 	if _, err := runBootstrapCommand(t, worktree, "graph", "list", "--json"); err != nil {
 		t.Fatalf("initial bootstrap command failed: %v", err)
 	}
-	binaryPath := filepath.Join(worktree, ".devflow", "bin", "devflow-local")
+	binaryPath := localProjectBinaryPathForTest(worktree)
 	before, err := os.Stat(binaryPath)
 	if err != nil {
 		t.Fatal(err)
@@ -1209,7 +1213,7 @@ func TestBootstrapFailedRebuildKeepsPreviousBinary(t *testing.T) {
 	if _, err := runBootstrapCommand(t, worktree, "graph", "list", "--json"); err != nil {
 		t.Fatalf("initial bootstrap command failed: %v", err)
 	}
-	binaryPath := filepath.Join(worktree, ".devflow", "bin", "devflow-local")
+	binaryPath := localProjectBinaryPathForTest(worktree)
 	before, err := os.Stat(binaryPath)
 	if err != nil {
 		t.Fatal(err)
@@ -1269,7 +1273,7 @@ func TestEnsureLocalProjectBinarySerializesConcurrentBuilds(t *testing.T) {
 				errs <- err
 				return
 			}
-			want := filepath.Join(worktree, ".devflow", "bin", "devflow-local")
+			want := localProjectBinaryPathForTest(worktree)
 			if path != want {
 				errs <- fmt.Errorf("unexpected local binary path %q, want %q", path, want)
 			}

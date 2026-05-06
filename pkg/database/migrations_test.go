@@ -5,10 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/benjaco/devflow/internal/testutil"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/process"
 )
@@ -196,8 +196,8 @@ func TestEnsureMigratedDatabaseRestoresPrefixAppliesAndSnapshots(t *testing.T) {
 		DB:            db,
 		MigrationsDir: "db/migrations",
 		Apply: process.CommandSpec{
-			Name: "sh",
-			Args: []string{"-c", "printf migrate > " + strconv.Quote(applyMarker)},
+			Name: testutil.BuildTestCommand(t),
+			Args: []string{"write", applyMarker, "migrate"},
 		},
 	})
 	if err != nil {

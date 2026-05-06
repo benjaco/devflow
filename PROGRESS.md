@@ -447,6 +447,12 @@ Last updated: 2026-05-06
 
 ## Latest Work
 
+- Fixed remaining Windows default-test failures:
+  - worktree-local and daemon copied binaries now use `.exe` paths on Windows
+  - example fake services and focused process/database/engine tests use portable Go helper processes instead of `sh`
+  - cache-sensitive engine tests isolate `HOME`, `XDG_CACHE_HOME`, and `LOCALAPPDATA`
+  - watch tests that mutate files after startup wait for the watch-ready sentinel before asserting reruns
+  - verified with targeted failing packages and `go test ./...` on Windows
 - Fixed cross-platform CI failures from the Linux/macOS/Windows matrix:
   - split file locking and process liveness/termination into platform-specific implementations so Windows builds do not depend on Unix-only syscalls
   - Windows process stopping now terminates full process trees with `taskkill /T /F`, preventing `go run`/service children from holding task log files open after tests stop the parent

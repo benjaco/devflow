@@ -230,7 +230,7 @@ func TestExampleProjectFlushSettlesWatchChange(t *testing.T) {
 		_ = stopApp.Run([]string{"stop", "--all", "--json", "--worktree", worktree})
 	})
 	waitForExampleWatchReady(t, worktree)
-	if !waitForStableTraceCounts(8*time.Second, 500*time.Millisecond, worktree, map[string]int{
+	if !waitForMinimumStableTraceCounts(8*time.Second, 500*time.Millisecond, worktree, map[string]int{
 		"postgres":         1,
 		"backend_dev":      1,
 		"frontend_dev":     1,
@@ -238,6 +238,8 @@ func TestExampleProjectFlushSettlesWatchChange(t *testing.T) {
 	}) {
 		t.Fatalf("initial watch run did not settle: %s", traceSnapshot(worktree, "postgres", "backend_dev", "frontend_dev", "frontend_codegen"))
 	}
+	backendBaseline := traceCount(worktree, "backend_dev")
+	frontendBaseline := traceCount(worktree, "frontend_dev")
 
 	rewriteFile(t, filepath.Join(worktree, "frontend/src/page.tsx"), "export default function Page(){ return 'flush changed'; }\n")
 	stdout := &bytes.Buffer{}
@@ -258,11 +260,11 @@ func TestExampleProjectFlushSettlesWatchChange(t *testing.T) {
 	if len(result.Services) < 2 {
 		t.Fatalf("expected service health in flush result, got %+v", result.Services)
 	}
-	if got := traceCount(worktree, "frontend_dev"); got != 2 {
-		t.Fatalf("expected frontend_dev rerun before flush ack, got %d", got)
+	if got := traceCount(worktree, "frontend_dev"); got != frontendBaseline+1 {
+		t.Fatalf("expected frontend_dev rerun before flush ack: got %d baseline %d", got, frontendBaseline)
 	}
-	if got := traceCount(worktree, "backend_dev"); got != 1 {
-		t.Fatalf("unexpected backend_dev rerun for frontend-only change: %d", got)
+	if got := traceCount(worktree, "backend_dev"); got != backendBaseline {
+		t.Fatalf("unexpected backend_dev rerun for frontend-only change: got %d baseline %d", got, backendBaseline)
 	}
 }
 
@@ -298,6 +300,25 @@ func waitForStableTraceCounts(timeout, stableFor time.Duration, worktree string,
 	var stableSince time.Time
 	for time.Now().Before(deadline) {
 		if traceCountsMatch(worktree, expected) {
+			if stableSince.IsZero() {
+				stableSince = time.Now()
+			}
+			if time.Since(stableSince) >= stableFor {
+				return true
+			}
+		} else {
+			stableSince = time.Time{}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return false
+}
+
+func waitForMinimumStableTraceCounts(timeout, stableFor time.Duration, worktree string, expected map[string]int) bool {
+	deadline := time.Now().Add(timeout)
+	var stableSince time.Time
+	for time.Now().Before(deadline) {
+		if traceCountsAtLeast(worktree, expected) {
 			if stableSince.IsZero() {
 				stableSince = time.Now()
 			}
@@ -350,6 +371,15 @@ func waitForExampleLogFilesReleased(t *testing.T, worktree string) {
 func traceCountsMatch(worktree string, expected map[string]int) bool {
 	for task, want := range expected {
 		if traceCount(worktree, task) != want {
+			return false
+		}
+	}
+	return true
+}
+
+func traceCountsAtLeast(worktree string, expected map[string]int) bool {
+	for task, want := range expected {
+		if traceCount(worktree, task) < want {
 			return false
 		}
 	}

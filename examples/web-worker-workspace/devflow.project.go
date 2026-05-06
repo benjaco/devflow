@@ -21,6 +21,10 @@ import (
 type workspaceProject struct{}
 
 func init() {
+	if os.Getenv("DEVFLOW_EXAMPLE_FAKE_SERVICE") == "1" {
+		runExampleFakeService()
+		os.Exit(0)
+	}
 	project.Register(workspaceProject{})
 }
 
@@ -97,25 +101,19 @@ func (workspaceProject) ConfigureInstance(ctx context.Context, worktree string) 
 
 func (workspaceProject) Tasks() []project.Task {
 	return []project.Task{
-		project.ShellTask(
+		warmupFileTask(
 			"warmup_node_install",
 			"Warm frontend package install metadata",
-			project.KindWarmup,
-			nil,
-			false,
-			project.Outputs{},
 			project.Inputs{Files: []string{"frontend/package-lock.json"}},
-			"mkdir -p .devflow/web-worker-workspace/warmup && printf 'node warmup\\n' > .devflow/web-worker-workspace/warmup/node.txt",
+			".devflow/web-worker-workspace/warmup/node.txt",
+			"node warmup\n",
 		),
-		project.ShellTask(
+		warmupFileTask(
 			"warmup_worker_cache",
 			"Warm worker toolchain metadata",
-			project.KindWarmup,
-			nil,
-			false,
-			project.Outputs{},
 			project.Inputs{Files: []string{"worker/config/jobs.json"}},
-			"mkdir -p .devflow/web-worker-workspace/warmup && printf 'worker warmup\\n' > .devflow/web-worker-workspace/warmup/worker.txt",
+			".devflow/web-worker-workspace/warmup/worker.txt",
+			"worker warmup\n",
 		),
 		{
 			Name:        "prepare_db_base",
@@ -314,12 +312,7 @@ func (workspaceProject) Tasks() []project.Task {
 				if useFakeDB() {
 					readyPath := rt.Abs(".devflow/web-worker-workspace/runtime/postgres.ready")
 					_ = os.Remove(readyPath)
-					_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-						Name: "sh",
-						Args: []string{"-c", "trap 'rm -f " + shellQuote(readyPath) + "; exit 0' INT TERM; mkdir -p " + shellQuote(filepath.Dir(readyPath)) + "; : > " + shellQuote(readyPath) + "; while true; do echo postgres:$PGPORT:$PGDATABASE; sleep 1; done"},
-						Dir:  rt.Worktree,
-						Env:  cloneEnv(rt.Env),
-					})
+					_, err := startExampleFakeService(ctx, rt, readyPath, "postgres:${PGPORT}:${PGDATABASE}", cloneEnv(rt.Env))
 					return err
 				}
 				manager := database.New()
@@ -329,8 +322,8 @@ func (workspaceProject) Tasks() []project.Task {
 				env := cloneEnv(rt.Env)
 				env["DB_CONTAINER"] = rt.Instance.DB.ContainerName
 				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'docker stop -t 10 \"$DB_CONTAINER\" >/dev/null 2>&1 || true; exit 0' INT TERM; docker logs -f \"$DB_CONTAINER\""},
+					Name: "docker",
+					Args: []string{"logs", "-f", env["DB_CONTAINER"]},
 					Dir:  rt.Worktree,
 					Env:  env,
 				})
@@ -459,12 +452,7 @@ func (workspaceProject) Tasks() []project.Task {
 				recordTrace(rt, "backend_dev")
 				readyPath := rt.Abs(".devflow/web-worker-workspace/runtime/backend.ready")
 				_ = os.Remove(readyPath)
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'rm -f " + shellQuote(readyPath) + "; exit 0' INT TERM; mkdir -p " + shellQuote(filepath.Dir(readyPath)) + "; : > " + shellQuote(readyPath) + "; while true; do echo backend:$BACKEND_PORT:$DATABASE_URL:$API_PUBLIC_FLAG; sleep 1; done"},
-					Dir:  rt.Worktree,
-					Env:  cloneEnv(rt.Env),
-				})
+				_, err := startExampleFakeService(ctx, rt, readyPath, "backend:${BACKEND_PORT}:${DATABASE_URL}:${API_PUBLIC_FLAG}", cloneEnv(rt.Env))
 				return err
 			},
 		},
@@ -483,12 +471,7 @@ func (workspaceProject) Tasks() []project.Task {
 				recordTrace(rt, "worker_dev")
 				readyPath := rt.Abs(".devflow/web-worker-workspace/runtime/worker.ready")
 				_ = os.Remove(readyPath)
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'rm -f " + shellQuote(readyPath) + "; exit 0' INT TERM; mkdir -p " + shellQuote(filepath.Dir(readyPath)) + "; : > " + shellQuote(readyPath) + "; while true; do echo worker:$WORKER_PORT:$QUEUE_NAME:$DATABASE_URL; sleep 1; done"},
-					Dir:  rt.Worktree,
-					Env:  cloneEnv(rt.Env),
-				})
+				_, err := startExampleFakeService(ctx, rt, readyPath, "worker:${WORKER_PORT}:${QUEUE_NAME}:${DATABASE_URL}", cloneEnv(rt.Env))
 				return err
 			},
 		},
@@ -506,12 +489,7 @@ func (workspaceProject) Tasks() []project.Task {
 				recordTrace(rt, "frontend_dev")
 				readyPath := rt.Abs(".devflow/web-worker-workspace/runtime/frontend.ready")
 				_ = os.Remove(readyPath)
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'rm -f " + shellQuote(readyPath) + "; exit 0' INT TERM; mkdir -p " + shellQuote(filepath.Dir(readyPath)) + "; : > " + shellQuote(readyPath) + "; while true; do echo frontend:$FRONTEND_PORT:$NEXT_PUBLIC_API_BASE_URL:$WEB_UI_THEME; sleep 1; done"},
-					Dir:  rt.Worktree,
-					Env:  cloneEnv(rt.Env),
-				})
+				_, err := startExampleFakeService(ctx, rt, readyPath, "frontend:${FRONTEND_PORT}:${NEXT_PUBLIC_API_BASE_URL}:${WEB_UI_THEME}", cloneEnv(rt.Env))
 				return err
 			},
 		},
@@ -656,6 +634,58 @@ func recordTrace(rt *project.Runtime, task string) {
 	_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), rt.Instance.ID)
 }
 
+func warmupFileTask(name, description string, inputs project.Inputs, rel, contents string) project.Task {
+	return project.Task{
+		Name:        name,
+		Kind:        project.KindWarmup,
+		Inputs:      inputs,
+		Description: description,
+		Signature:   rel + ":" + contents,
+		Run: func(ctx context.Context, rt *project.Runtime) error {
+			_ = ctx
+			return project.WriteFile(rt, rel, []byte(contents), 0o644)
+		},
+	}
+}
+
+func startExampleFakeService(ctx context.Context, rt *project.Runtime, readyPath, line string, env map[string]string) (*process.Handle, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	env = mergeStringMaps(env, map[string]string{
+		"DEVFLOW_EXAMPLE_FAKE_SERVICE": "1",
+		"DEVFLOW_EXAMPLE_READY_FILE":   readyPath,
+		"DEVFLOW_EXAMPLE_SERVICE_LINE": line,
+	})
+	return rt.StartServiceSpec(ctx, process.CommandSpec{
+		Name: exe,
+		Dir:  rt.Worktree,
+		Env:  env,
+	})
+}
+
+func runExampleFakeService() {
+	readyPath := os.Getenv("DEVFLOW_EXAMPLE_READY_FILE")
+	if readyPath != "" {
+		if err := os.MkdirAll(filepath.Dir(readyPath), 0o755); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(readyPath, []byte("ready\n"), 0o644); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	line := os.Getenv("DEVFLOW_EXAMPLE_SERVICE_LINE")
+	for {
+		if line != "" {
+			fmt.Println(os.ExpandEnv(line))
+		}
+		time.Sleep(time.Second)
+	}
+}
+
 func writeJSONFile(rt *project.Runtime, rel string, payload map[string]any) error {
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -693,16 +723,15 @@ func remainingMigrationNames(migrations []database.PrismaMigration, prefixLength
 
 func pipeSQLFile(ctx context.Context, rt *project.Runtime, rel string) error {
 	sqlFile := rt.Abs(rel)
+	sql, err := os.ReadFile(sqlFile)
+	if err != nil {
+		return err
+	}
 	return rt.RunCmdSpec(ctx, process.CommandSpec{
-		Name: "sh",
-		Args: []string{"-c", "cat \"$SQL_FILE\" | docker exec -i \"$DB_CONTAINER\" psql -U \"$PGUSER\" -d \"$PGDATABASE\" -v ON_ERROR_STOP=1"},
+		Name: "docker",
+		Args: []string{"exec", "-i", rt.Instance.DB.ContainerName, "psql", "-U", rt.Instance.DB.User, "-d", rt.Instance.DB.Name, "-v", "ON_ERROR_STOP=1", "-c", string(sql)},
 		Dir:  rt.Worktree,
-		Env: mergeStringMaps(rt.Env, map[string]string{
-			"SQL_FILE":     sqlFile,
-			"DB_CONTAINER": rt.Instance.DB.ContainerName,
-			"PGUSER":       rt.Instance.DB.User,
-			"PGDATABASE":   rt.Instance.DB.Name,
-		}),
+		Env:  cloneEnv(rt.Env),
 	})
 }
 
@@ -804,10 +833,6 @@ func cloneEnv(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
-}
-
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func traceCount(worktree, task string) int {

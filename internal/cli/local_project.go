@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/benjaco/devflow/internal/lock"
@@ -100,7 +101,7 @@ func ensureLocalProjectBinary(bootstrapRoot, worktree string) (string, error) {
 		return "", fmt.Errorf("%s in %s is a directory, expected a Go source file", localProjectFile, worktree)
 	}
 
-	target := filepath.Join(worktree, ".devflow", "bin", "devflow-local")
+	target := filepath.Join(worktree, ".devflow", "bin", "devflow-local"+localProjectBinarySuffix())
 	buildKey, err := localBuildKey(bootstrapRoot, projectPath)
 	if err != nil {
 		return "", err
@@ -382,6 +383,13 @@ func writeBuildKey(target, buildKey string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func localProjectBinarySuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
 }
 
 func isProjectlessCommand(args []string) bool {
