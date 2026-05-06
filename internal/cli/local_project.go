@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/benjaco/devflow/internal/lock"
 	"github.com/benjaco/devflow/internal/version"
@@ -57,7 +56,7 @@ func (a *App) execLocalProject(args []string) error {
 	}
 	env := withEnv(os.Environ(), envLocalExec, "1")
 	env = withEnv(env, envBootstrapRoot, bootstrapRoot)
-	return syscall.Exec(localBinary, append([]string{localBinary}, args...), env)
+	return execLocalBinary(localBinary, append([]string{localBinary}, args...), env)
 }
 
 func bootstrapRoot() string {

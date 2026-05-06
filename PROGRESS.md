@@ -222,6 +222,8 @@ Last updated: 2026-05-06
   - local project bootstrap hashing now supports project files outside the Devflow source checkout, including Windows worktrees on another drive
   - cache-sensitive watch/example tests now isolate `HOME`, `XDG_CACHE_HOME`, and `LOCALAPPDATA`
   - counter-based engine watch tests use unique cache namespaces so global cache state cannot skip the initial run
+  - Windows local-project bootstrap now runs the worktree-local binary as a child process because `syscall.Exec` is unavailable there
+  - Windows example watch tests now wait for service task log handles to be released before temp worktree cleanup
 - Added local stamped task semantics:
   - builder tasks can call `Stamp()` for finite install/setup commands such as `npm install`
   - stamped tasks use normal input/dependency keys but persist only a per-worktree completion stamp under `.devflow/state`

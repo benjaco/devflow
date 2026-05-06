@@ -31,6 +31,8 @@ Flow:
 
 The worktree does not have to live under the Devflow source checkout. Source-local bootstrap hashes repo sources relative to the checkout when possible, and hashes external project files with stable external labels so Windows temp worktrees on another drive still build.
 
+On Unix platforms, transfer into the worktree-local binary uses process replacement. Windows does not support `syscall.Exec`, so the bootstrap process runs the worktree-local binary as a child and exits with the child's status.
+
 Current local binary location:
 - `<worktree>/.devflow/bin/devflow-local`
 

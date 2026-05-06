@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -198,6 +199,7 @@ func TestExampleProjectWatchSelectiveReruns(t *testing.T) {
 	case <-time.After(4 * time.Second):
 		t.Fatal("timed out waiting for watch shutdown")
 	}
+	waitForExampleLogFilesReleased(t, worktree)
 }
 
 func TestExampleProjectFlushSettlesWatchChange(t *testing.T) {
@@ -308,6 +310,41 @@ func waitForStableTraceCounts(timeout, stableFor time.Duration, worktree string,
 		time.Sleep(25 * time.Millisecond)
 	}
 	return false
+}
+
+func waitForExampleLogFilesReleased(t *testing.T, worktree string) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		locked := ""
+		matches, err := filepath.Glob(filepath.Join(worktree, ".devflow", "logs", "*", "*.log"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range matches {
+			probe := path + ".release-probe"
+			if err := os.Rename(path, probe); err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				locked = path
+				break
+			}
+			if err := os.Rename(probe, path); err != nil {
+				t.Fatalf("restore log probe %s: %v", path, err)
+			}
+		}
+		if locked == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for Windows to release service log file %s", locked)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func traceCountsMatch(worktree string, expected map[string]int) bool {
