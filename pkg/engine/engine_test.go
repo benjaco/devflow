@@ -784,6 +784,7 @@ func TestWatchRerunsOnlyAffectedSlice(t *testing.T) {
 	waitFor(t, 6*time.Second, func() bool {
 		return p.aRuns.Load() == 1 && p.bRuns.Load() == 1 && p.serviceRuns.Load() == 1
 	})
+	waitForEngineWatchReady(t, worktree)
 
 	if err := os.WriteFile(filepath.Join(worktree, "b.txt"), []byte("b2"), 0o644); err != nil {
 		t.Fatal(err)
@@ -891,7 +892,7 @@ func TestWatchCycleEventsReportChangedFilesAndAffectedTasks(t *testing.T) {
 	waitFor(t, 6*time.Second, func() bool {
 		return p.aRuns.Load() == 1 && p.serviceRuns.Load() == 1
 	})
-	time.Sleep(500 * time.Millisecond)
+	waitForEngineWatchReady(t, worktree)
 
 	if err := os.WriteFile(filepath.Join(worktree, "a.txt"), []byte("a2"), 0o644); err != nil {
 		t.Fatal(err)
