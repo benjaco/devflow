@@ -8,11 +8,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/benjaco/devflow/internal/testutil"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/process"
 )
@@ -496,8 +496,8 @@ func TestEnsurePrismaDevDatabaseRestoresPrefixDeploysAndSnapshots(t *testing.T) 
 		SchemaPath:    "prisma/schema.prisma",
 		MigrationsDir: "prisma/migrations",
 		Migrate: process.CommandSpec{
-			Name: "sh",
-			Args: []string{"-c", "printf deploy > " + strconv.Quote(applyMarker)},
+			Name: testutil.BuildTestCommand(t),
+			Args: []string{"write", applyMarker, "deploy"},
 		},
 	})
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -58,8 +59,7 @@ func (testProject) Targets() []project.Target {
 }
 
 func TestRunUsesCacheOnSecondExecution(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateEngineUserCache(t)
 	worktree := t.TempDir()
 	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
@@ -321,8 +321,8 @@ func (cancelSiblingProject) Tasks() []project.Task {
 			Kind: project.KindOnce,
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				return rt.RunCmdSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "sleep 5"},
+					Name: testCommandPath(),
+					Args: []string{"serve"},
 					Dir:  rt.Worktree,
 				})
 			},
@@ -548,6 +548,42 @@ func repoRoot() string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
 
+var (
+	engineTestCommandOnce sync.Once
+	engineTestCommandPath string
+)
+
+func testCommandPath() string {
+	engineTestCommandOnce.Do(func() {
+		root := repoRoot()
+		bin := filepath.Join(os.TempDir(), "devflow-testcmd-test"+engineTestExeSuffix())
+		cmd := exec.Command("go", "build", "-o", bin, "./internal/testutil/testcmd")
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			panic("build test command: " + err.Error() + "\n" + string(out))
+		}
+		engineTestCommandPath = bin
+	})
+	return engineTestCommandPath
+}
+
+func testServiceSpec(rt *project.Runtime) process.CommandSpec {
+	return process.CommandSpec{
+		Name: testCommandPath(),
+		Args: []string{"serve"},
+		Dir:  rt.Worktree,
+		Env:  rt.Env,
+	}
+}
+
+func isolateEngineUserCache(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "LocalAppData"))
+}
+
 func buildPromptCLIForEngine(root string) string {
 	bin := filepath.Join(os.TempDir(), "devflow-promptcli-test"+engineTestExeSuffix())
 	cmd := exec.Command("go", "build", "-o", bin, "./internal/testutil/promptcli")
@@ -593,7 +629,7 @@ func (eventProject) Tasks() []project.Task {
 			Outputs:   project.Outputs{Files: []string{"out.txt"}},
 			Signature: "event-gen-v1",
 			Run: func(ctx context.Context, rt *project.Runtime) error {
-				if err := rt.RunCmd(ctx, "sh", "-c", "printf 'hello-event\\n'"); err != nil {
+				if err := rt.RunCmd(ctx, testCommandPath(), "emit", "hello-event"); err != nil {
 					return err
 				}
 				return os.WriteFile(filepath.Join(rt.Worktree, "out.txt"), []byte("done"), 0o644)
@@ -603,8 +639,7 @@ func (eventProject) Tasks() []project.Task {
 }
 
 func TestRunPublishesStructuredEvents(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateEngineUserCache(t)
 	worktree := t.TempDir()
 	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
@@ -628,8 +663,7 @@ func TestRunPublishesStructuredEvents(t *testing.T) {
 }
 
 func TestRunPublishesCacheHitOnSecondExecution(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateEngineUserCache(t)
 	worktree := t.TempDir()
 	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
@@ -743,12 +777,7 @@ func (p *watchProject) Tasks() []project.Task {
 			Signature: "watch-service-v1",
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				p.serviceRuns.Add(1)
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
-					Dir:  rt.Worktree,
-					Env:  rt.Env,
-				})
+				_, err := rt.StartServiceSpec(ctx, testServiceSpec(rt))
 				return err
 			},
 		},
@@ -1167,11 +1196,7 @@ func (flushUnreadyServiceProject) Tasks() []project.Task {
 				return fmt.Errorf("not ready")
 			},
 			Run: func(ctx context.Context, rt *project.Runtime) error {
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
-					Dir:  rt.Worktree,
-				})
+				_, err := rt.StartServiceSpec(ctx, testServiceSpec(rt))
 				return err
 			},
 		},
@@ -1263,12 +1288,7 @@ func (p *watchServiceChainProject) Tasks() []project.Task {
 			Signature: "watch-chain-api-v1",
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				p.apiRuns.Add(1)
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
-					Dir:  rt.Worktree,
-					Env:  rt.Env,
-				})
+				_, err := rt.StartServiceSpec(ctx, testServiceSpec(rt))
 				return err
 			},
 		},
@@ -1280,12 +1300,7 @@ func (p *watchServiceChainProject) Tasks() []project.Task {
 			Signature: "watch-chain-ui-v1",
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				p.uiRuns.Add(1)
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
-					Dir:  rt.Worktree,
-					Env:  rt.Env,
-				})
+				_, err := rt.StartServiceSpec(ctx, testServiceSpec(rt))
 				return err
 			},
 		},
@@ -1293,8 +1308,7 @@ func (p *watchServiceChainProject) Tasks() []project.Task {
 }
 
 func TestWatchDoesNotPropagateAcrossServiceDependencies(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateEngineUserCache(t)
 	worktree := t.TempDir()
 	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("v1"), 0o644); err != nil {
 		t.Fatal(err)
@@ -1316,6 +1330,7 @@ func TestWatchDoesNotPropagateAcrossServiceDependencies(t *testing.T) {
 	waitFor(t, 3*time.Second, func() bool {
 		return p.buildRuns.Load() == 1 && p.apiRuns.Load() == 1 && p.uiRuns.Load() == 1
 	})
+	waitForEngineWatchReady(t, worktree)
 	time.Sleep(500 * time.Millisecond)
 
 	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("v2"), 0o644); err != nil {
@@ -1449,12 +1464,7 @@ func (p *watchBlockedWarmupRuntimeProject) Tasks() []project.Task {
 			Restart: project.RestartOnInputChange,
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				p.serveRuns.Add(1)
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
-					Dir:  rt.Worktree,
-					Env:  rt.Env,
-				})
+				_, err := rt.StartServiceSpec(ctx, testServiceSpec(rt))
 				return err
 			},
 		},
@@ -1667,12 +1677,7 @@ func (p *watchRestartAlwaysProject) Tasks() []project.Task {
 			Restart: project.RestartAlways,
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				p.alwaysRuns.Add(1)
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
-					Dir:  rt.Worktree,
-					Env:  rt.Env,
-				})
+				_, err := rt.StartServiceSpec(ctx, testServiceSpec(rt))
 				return err
 			},
 		},
@@ -1784,12 +1789,7 @@ func (p *watchGeneratedOutputProject) Tasks() []project.Task {
 			Signature: "watch-generated-svc-v1",
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				p.serviceRuns.Add(1)
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
-					Dir:  rt.Worktree,
-					Env:  rt.Env,
-				})
+				_, err := rt.StartServiceSpec(ctx, testServiceSpec(rt))
 				return err
 			},
 		},
@@ -1839,11 +1839,12 @@ func (readinessProject) Tasks() []project.Task {
 				readyPath := rt.Abs(".ready/svc")
 				_ = os.Remove(readyPath)
 				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'rm -f \"$READY_PATH\"; exit 0' INT TERM; sleep 0.2; mkdir -p \"$(dirname \"$READY_PATH\")\"; : > \"$READY_PATH\"; while true; do sleep 1; done"},
+					Name: testCommandPath(),
+					Args: []string{"serve"},
 					Dir:  rt.Worktree,
 					Env: map[string]string{
-						"READY_PATH": readyPath,
+						"TESTCMD_READY_FILE":     readyPath,
+						"TESTCMD_READY_DELAY_MS": "200",
 					},
 				})
 				return err
@@ -1875,11 +1876,7 @@ func (readinessTimeoutProject) Tasks() []project.Task {
 			Ready:        project.ReadyFile(".ready/never"),
 			ReadyTimeout: 250 * time.Millisecond,
 			Run: func(ctx context.Context, rt *project.Runtime) error {
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'exit 0' INT TERM; while true; do sleep 1; done"},
-					Dir:  rt.Worktree,
-				})
+				_, err := rt.StartServiceSpec(ctx, testServiceSpec(rt))
 				return err
 			},
 		},
@@ -1994,8 +1991,7 @@ func (p *binaryToolProject) Tasks() []project.Task {
 }
 
 func TestBinaryToolBuildTaskCachesAndRestoresArtifact(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateEngineUserCache(t)
 	worktree := t.TempDir()
 	source := filepath.Join(worktree, "cmd", "mocktool", "main.go")
 	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
@@ -2110,8 +2106,7 @@ func (overrideCacheProject) Tasks() []project.Task {
 }
 
 func TestCacheKeyOverrideBypassesAutomaticInputsAndRestores(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateEngineUserCache(t)
 	worktree := t.TempDir()
 
 	eng, err := New(overrideCacheProject{}, worktree)
@@ -2191,8 +2186,7 @@ func (p *stampedInstallProject) Tasks() []project.Task {
 }
 
 func TestStampedTaskSkipsWhenInputKeyAndLocalOutputsMatch(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateEngineUserCache(t)
 	worktree := t.TempDir()
 	if err := os.WriteFile(filepath.Join(worktree, "package-lock.json"), []byte("v1"), 0o644); err != nil {
 		t.Fatal(err)
@@ -2239,8 +2233,7 @@ func TestStampedTaskSkipsWhenInputKeyAndLocalOutputsMatch(t *testing.T) {
 }
 
 func TestStampedTaskIsLocalPerWorktree(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateEngineUserCache(t)
 	firstWorktree := t.TempDir()
 	secondWorktree := t.TempDir()
 	for _, worktree := range []string{firstWorktree, secondWorktree} {
@@ -2279,8 +2272,7 @@ func TestStampedTaskIsLocalPerWorktree(t *testing.T) {
 }
 
 func TestStampedTaskDoesNotUseGlobalCacheToSkipOrRestore(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateEngineUserCache(t)
 	cacheSource := t.TempDir()
 	worktree := t.TempDir()
 	if err := os.WriteFile(filepath.Join(worktree, "package-lock.json"), []byte("same-lockfile"), 0o644); err != nil {
