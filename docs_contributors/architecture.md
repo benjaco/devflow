@@ -377,6 +377,8 @@ The default cache key is derived automatically from:
 
 Filtered inputs are generic `project.Inputs.Filtered` entries. The task declares a file, directory, or glob plus a signed content filter. Fingerprinting reads each matching file, runs the filter, and hashes only the filtered bytes; files with empty filtered output do not contribute an input hash. The filter signature is part of the normalized task signature, so changing the filter invalidates prior keys.
 
+Engines own an in-memory filtered-content hash cache for this path. Cache entries are keyed by absolute file path, file size, file modtime, and filter signature. This avoids reparsing unchanged files during daemon/watch/TUI loops, especially for AST-based filters, while keeping changed files re-filtered before deciding whether the task key changed. The cache is deliberately not persisted to `.devflow/` or the global task cache.
+
 The built-in helper filters live in `pkg/project` rather than in any framework package:
 - `LinesStartingWith(...)`
 - `GoCommentLinesStartingWith(...)`

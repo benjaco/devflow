@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/benjaco/devflow/pkg/project"
 )
@@ -383,6 +384,59 @@ type User struct {
 	}
 	if reflect.DeepEqual(docChanged, structChanged) {
 		t.Fatal("expected struct field edit to change filtered input hash")
+	}
+}
+
+func TestCollectTaskInputsWithCacheReusesFilteredFileHash(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "input.go")
+	mustWriteFingerprintTestFile(t, path, "package demo\n")
+	rt := &project.Runtime{Worktree: root, Env: map[string]string{}}
+	calls := 0
+	filter := project.ContentFilter("stable-filter:v1", func(ctx context.Context, rt *project.Runtime, file project.FileContent) ([]byte, error) {
+		_ = ctx
+		_ = rt
+		_ = file
+		calls++
+		return []byte("stable\n"), nil
+	})
+	task := project.Task{
+		Name: "filtered",
+		Kind: project.KindOnce,
+		Inputs: project.Inputs{
+			Filtered: []project.FilteredInput{project.Filtered("input.go", filter)},
+		},
+	}
+	cache := NewFilteredContentCache()
+	first, _, _, err := CollectTaskInputsWithCache(context.Background(), root, task, rt, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, _, err := CollectTaskInputsWithCache(context.Background(), root, task, rt, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected unchanged file to reuse filtered hash, filter calls=%d", calls)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("expected cached filtered inputs to match\nfirst: %v\nsecond: %v", first, second)
+	}
+
+	mustWriteFingerprintTestFile(t, path, "package demo\nfunc changed() {}\n")
+	modTime := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatal(err)
+	}
+	third, _, _, err := CollectTaskInputsWithCache(context.Background(), root, task, rt, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected changed file to be filtered again, filter calls=%d", calls)
+	}
+	if !reflect.DeepEqual(second, third) {
+		t.Fatalf("stable filtered output should keep same hash after raw file edit\nsecond: %v\nthird: %v", second, third)
 	}
 }
 

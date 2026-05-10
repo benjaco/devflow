@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/benjaco/devflow/internal/pathspec"
 	"github.com/benjaco/devflow/pkg/project"
@@ -27,6 +28,27 @@ type TaskKeyInput struct {
 	EnvValues          []string
 	CustomFingerprints []string
 	Override           string
+}
+
+type FilteredContentCache struct {
+	mu      sync.Mutex
+	entries map[filteredContentCacheKey]filteredContentCacheEntry
+}
+
+type filteredContentCacheKey struct {
+	Path      string
+	Size      int64
+	ModTimeNS int64
+	Signature string
+}
+
+type filteredContentCacheEntry struct {
+	Sum   string
+	Empty bool
+}
+
+func NewFilteredContentCache() *FilteredContentCache {
+	return &FilteredContentCache{entries: map[filteredContentCacheKey]filteredContentCacheEntry{}}
 }
 
 func HashFile(path string) (string, error) {
@@ -109,6 +131,10 @@ func HashEnv(env map[string]string, keys []string) []string {
 }
 
 func CollectTaskInputs(ctx context.Context, worktree string, task project.Task, rt *project.Runtime) (hashes []string, envValues []string, custom []string, err error) {
+	return CollectTaskInputsWithCache(ctx, worktree, task, rt, nil)
+}
+
+func CollectTaskInputsWithCache(ctx context.Context, worktree string, task project.Task, rt *project.Runtime, filteredCache *FilteredContentCache) (hashes []string, envValues []string, custom []string, err error) {
 	fileSet := map[string]bool{}
 	for _, inputPath := range task.Inputs.Paths {
 		if ignored(cleanInputPath(inputPath), "", task.Inputs.Ignore) {
@@ -173,7 +199,7 @@ func CollectTaskInputs(ctx context.Context, worktree string, task project.Task, 
 		}
 	}
 	for _, input := range task.Inputs.Filtered {
-		if collectErr := collectFilteredInput(ctx, worktree, input, task.Inputs.Ignore, rt, fileSet); collectErr != nil {
+		if collectErr := collectFilteredInput(ctx, worktree, input, task.Inputs.Ignore, rt, filteredCache, fileSet); collectErr != nil {
 			err = collectErr
 			return
 		}
@@ -307,7 +333,7 @@ func collectPathInput(worktree, rel string, ignore []string, fileSet map[string]
 	return nil
 }
 
-func collectFilteredInput(ctx context.Context, worktree string, input project.FilteredInput, ignore []string, rt *project.Runtime, fileSet map[string]bool) error {
+func collectFilteredInput(ctx context.Context, worktree string, input project.FilteredInput, ignore []string, rt *project.Runtime, filteredCache *FilteredContentCache, fileSet map[string]bool) error {
 	inputPath := cleanInputPath(input.Path)
 	if inputPath == "" || ignored(inputPath, "", ignore) {
 		return nil
@@ -325,7 +351,7 @@ func collectFilteredInput(ctx context.Context, worktree string, input project.Fi
 			if ignored(cleanInputPath(rel), "", ignore) {
 				continue
 			}
-			if err := collectFilteredFile(ctx, worktree, inputPath, rel, signature, input.Filter, rt, fileSet); err != nil {
+			if err := collectFilteredFile(ctx, worktree, inputPath, rel, signature, input.Filter, rt, filteredCache, fileSet); err != nil {
 				return err
 			}
 		}
@@ -341,7 +367,7 @@ func collectFilteredInput(ctx context.Context, worktree string, input project.Fi
 		return err
 	}
 	if !info.IsDir() {
-		return collectFilteredFile(ctx, worktree, inputPath, inputPath, signature, input.Filter, rt, fileSet)
+		return collectFilteredFile(ctx, worktree, inputPath, inputPath, signature, input.Filter, rt, filteredCache, fileSet)
 	}
 	return filepath.WalkDir(full, func(pathValue string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -359,12 +385,24 @@ func collectFilteredInput(ctx context.Context, worktree string, input project.Fi
 		if ignored(dirRel, inputPath, ignore) {
 			return nil
 		}
-		return collectFilteredFile(ctx, worktree, inputPath, rel, signature, input.Filter, rt, fileSet)
+		return collectFilteredFile(ctx, worktree, inputPath, rel, signature, input.Filter, rt, filteredCache, fileSet)
 	})
 }
 
-func collectFilteredFile(ctx context.Context, worktree, inputPath, rel, signature string, filter project.FileContentFilter, rt *project.Runtime, fileSet map[string]bool) error {
-	data, err := os.ReadFile(filepath.Join(worktree, filepath.FromSlash(rel)))
+func collectFilteredFile(ctx context.Context, worktree, inputPath, rel, signature string, filter project.FileContentFilter, rt *project.Runtime, filteredCache *FilteredContentCache, fileSet map[string]bool) error {
+	fullPath := filepath.Join(worktree, filepath.FromSlash(rel))
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		return err
+	}
+	if entry, ok := filteredCache.get(fullPath, info, signature); ok {
+		if entry.Empty {
+			return nil
+		}
+		fileSet["filtered:"+filepath.ToSlash(inputPath)+":"+signature+":"+filepath.ToSlash(rel)+":"+entry.Sum] = true
+		return nil
+	}
+	data, err := os.ReadFile(fullPath)
 	if err != nil {
 		return err
 	}
@@ -372,12 +410,54 @@ func collectFilteredFile(ctx context.Context, worktree, inputPath, rel, signatur
 	if err != nil {
 		return err
 	}
-	if len(strings.TrimSpace(string(filtered))) == 0 {
+	empty := len(strings.TrimSpace(string(filtered))) == 0
+	sum := ""
+	if !empty {
+		sum = HashBytes(filtered)
+	}
+	filteredCache.set(fullPath, info, signature, filteredContentCacheEntry{Sum: sum, Empty: empty})
+	if empty {
 		return nil
 	}
-	sum := HashBytes(filtered)
 	fileSet["filtered:"+filepath.ToSlash(inputPath)+":"+signature+":"+filepath.ToSlash(rel)+":"+sum] = true
 	return nil
+}
+
+func (c *FilteredContentCache) get(path string, info os.FileInfo, signature string) (filteredContentCacheEntry, bool) {
+	if c == nil {
+		return filteredContentCacheEntry{}, false
+	}
+	key := filteredContentCacheKey{
+		Path:      filepath.Clean(path),
+		Size:      info.Size(),
+		ModTimeNS: info.ModTime().UnixNano(),
+		Signature: signature,
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	return entry, ok
+}
+
+func (c *FilteredContentCache) set(path string, info os.FileInfo, signature string, entry filteredContentCacheEntry) {
+	if c == nil {
+		return
+	}
+	clean := filepath.Clean(path)
+	key := filteredContentCacheKey{
+		Path:      clean,
+		Size:      info.Size(),
+		ModTimeNS: info.ModTime().UnixNano(),
+		Signature: signature,
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for existing := range c.entries {
+		if existing.Path == clean && existing.Signature == signature {
+			delete(c.entries, existing)
+		}
+	}
+	c.entries[key] = entry
 }
 
 func ignored(pathValue, inputDir string, ignore []string) bool {

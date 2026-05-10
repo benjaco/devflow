@@ -12,7 +12,7 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 
 - graph validation and closures
 - fingerprint determinism
-- filtered file-content fingerprints, including semantic no-op edits, Go `@` comments, Go struct declarations with doc comments, and engine-level cache behavior where irrelevant edits restore cache while relevant filtered edits rerun the task
+- filtered file-content fingerprints, including semantic no-op edits, Go `@` comments, Go struct declarations with doc comments, in-memory filtered-hash reuse for unchanged files, and engine-level cache behavior where irrelevant edits restore cache while relevant filtered edits rerun the task
 - cache snapshot and restore semantics
 - cache-key override stability and correctness
 - instance identity and env persistence

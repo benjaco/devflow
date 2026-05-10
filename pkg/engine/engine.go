@@ -44,6 +44,7 @@ type Engine struct {
 	cache   *cache.Store
 	ports   *ports.Manager
 	events  event.Bus[api.Event]
+	inputs  *fingerprint.FilteredContentCache
 }
 
 type runState struct {
@@ -85,6 +86,7 @@ func New(p project.Project, worktree string) (*Engine, error) {
 		graph:   g,
 		cache:   cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p)),
 		ports:   pm,
+		inputs:  fingerprint.NewFilteredContentCache(),
 	}, nil
 }
 
@@ -765,7 +767,7 @@ func (e *Engine) taskKey(ctx context.Context, rt *project.Runtime, task project.
 			Override: value,
 		})
 	}
-	inputHashes, envValues, custom, err := fingerprint.CollectTaskInputs(ctx, rt.Worktree, task, rt)
+	inputHashes, envValues, custom, err := fingerprint.CollectTaskInputsWithCache(ctx, rt.Worktree, task, rt, e.inputs)
 	if err != nil {
 		return "", err
 	}

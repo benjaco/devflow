@@ -112,14 +112,19 @@ type User struct {
 `)
 
 	var runs atomic.Int32
+	var filterApplications atomic.Int32
 	p := project.Define(func(ctx context.Context, b *project.Builder) error {
 		_ = ctx
 		b.Name("filtered-input-engine-project")
 		b.CacheNamespace("filtered-input-engine-project-" + filepath.Base(worktree))
-		filter := project.CombineContentFilters(
+		semanticFilter := project.CombineContentFilters(
 			project.GoCommentLinesStartingWith("@"),
 			project.GoStructDeclarations(),
 		)
+		filter := project.ContentFilter("counted:"+semanticFilter.Signature, func(ctx context.Context, rt *project.Runtime, file project.FileContent) ([]byte, error) {
+			filterApplications.Add(1)
+			return semanticFilter.Apply(ctx, rt, file)
+		})
 		swagger := b.Task("swagger").
 			Run(func(ctx context.Context, rt *project.Runtime) error {
 				_ = ctx
@@ -156,6 +161,23 @@ type User struct {
 	if got := runs.Load(); got != 1 {
 		t.Fatalf("compile task runs after first run = %d, want 1", got)
 	}
+	if got := filterApplications.Load(); got != 1 {
+		t.Fatalf("filter applications after first run = %d, want 1", got)
+	}
+
+	unchanged, err := eng.Run(context.Background(), Request{Target: "docs", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unchanged.Result.CacheHits) != 1 || unchanged.Result.CacheHits[0] != "swagger" {
+		t.Fatalf("expected cache hit for unchanged source, got %v", unchanged.Result.CacheHits)
+	}
+	if got := runs.Load(); got != 1 {
+		t.Fatalf("compile task ran for unchanged source: runs=%d", got)
+	}
+	if got := filterApplications.Load(); got != 1 {
+		t.Fatalf("unchanged source should reuse in-memory filtered hash, applications=%d", got)
+	}
 
 	writeSource(`package api
 
@@ -182,6 +204,9 @@ type User struct {
 	if got := runs.Load(); got != 1 {
 		t.Fatalf("compile task ran for irrelevant edit: runs=%d", got)
 	}
+	if got := filterApplications.Load(); got != 2 {
+		t.Fatalf("changed source should be filtered once before cache restore, applications=%d", got)
+	}
 	if _, err := os.Stat(outputPath); err != nil {
 		t.Fatalf("expected cached output to be restored: %v", err)
 	}
@@ -207,6 +232,9 @@ type User struct {
 	}
 	if got := runs.Load(); got != 2 {
 		t.Fatalf("compile task runs after relevant edit = %d, want 2", got)
+	}
+	if got := filterApplications.Load(); got != 3 {
+		t.Fatalf("relevant edit should be filtered before rerun, applications=%d", got)
 	}
 }
 

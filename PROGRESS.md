@@ -41,6 +41,7 @@ Last updated: 2026-05-10
   - `project.Filtered(...)` and `TaskBuilder.FilteredInput(...)`
   - helper filters for line prefixes, Go comment prefixes, Go structs with leading doc comments, and filter composition
   - fingerprint, graph affected, and watch-path support for filtered inputs
+  - engine-owned in-memory filtered-hash cache so unchanged files avoid repeated filter parsing during daemon/watch loops
 - Bounded parallel ready-queue scheduling implemented in `pkg/engine`
 - Typed engine event stream implemented for run/task/cache/process/log events
 - Polling watch mode implemented with Devflow-owned debounced batches and selective reruns
