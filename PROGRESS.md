@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-05-06
+Last updated: 2026-05-10
 
 ## Current Status
 
@@ -37,6 +37,10 @@ Last updated: 2026-05-06
   - `pkg/event`
   - `pkg/engine`
   - `pkg/daemon`
+- Filtered file-content fingerprints implemented for semantically narrow cache keys:
+  - `project.Filtered(...)` and `TaskBuilder.FilteredInput(...)`
+  - helper filters for line prefixes, Go comment prefixes, Go structs with leading doc comments, and filter composition
+  - fingerprint, graph affected, and watch-path support for filtered inputs
 - Bounded parallel ready-queue scheduling implemented in `pkg/engine`
 - Typed engine event stream implemented for run/task/cache/process/log events
 - Polling watch mode implemented with Devflow-owned debounced batches and selective reruns

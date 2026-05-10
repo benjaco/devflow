@@ -1394,6 +1394,13 @@ func (e *Engine) watchInputPaths(order []string) []string {
 		for _, pattern := range task.Inputs.Globs {
 			addWatchInputPath(seen, globWatchBase(pattern))
 		}
+		for _, input := range task.Inputs.Filtered {
+			if strings.ContainsAny(input.Path, "*?[") {
+				addWatchInputPath(seen, globWatchBase(input.Path))
+			} else {
+				addWatchInputPath(seen, input.Path)
+			}
+		}
 	}
 	out := make([]string, 0, len(seen))
 	for path := range seen {

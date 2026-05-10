@@ -84,6 +84,34 @@ func TestBuilderStampedTaskDoesNotEnableCacheForOutputs(t *testing.T) {
 	}
 }
 
+func TestBuilderSupportsFilteredInputs(t *testing.T) {
+	filter := CombineContentFilters(GoCommentLinesStartingWith("@"), GoStructDeclarations())
+	p := Define(func(ctx context.Context, b *Builder) error {
+		b.Name("demo")
+		swagger := b.Task("swagger").
+			Command("swag", "init").
+			Inputs(Filtered(Glob("internal/**/*.go"), filter)).
+			Outputs("docs")
+		b.Target("docs", swagger)
+		return nil
+	})
+
+	task := taskByNameForTest(p.Tasks(), "swagger")
+	if len(task.Inputs.Filtered) != 1 {
+		t.Fatalf("expected one filtered input, got %+v", task.Inputs.Filtered)
+	}
+	input := task.Inputs.Filtered[0]
+	if input.Path != "internal/**/*.go" {
+		t.Fatalf("unexpected filtered input path %q", input.Path)
+	}
+	if input.Filter.Signature == "" {
+		t.Fatal("expected filtered input signature")
+	}
+	if !task.Cache {
+		t.Fatal("filtered input task with outputs should be cacheable")
+	}
+}
+
 func TestBuilderCommandEnvCanUsePortRef(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses sh")

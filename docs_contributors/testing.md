@@ -12,6 +12,7 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 
 - graph validation and closures
 - fingerprint determinism
+- filtered file-content fingerprints, including semantic no-op edits, Go `@` comments, Go struct declarations with doc comments, and engine-level cache behavior where irrelevant edits restore cache while relevant filtered edits rerun the task
 - cache snapshot and restore semantics
 - cache-key override stability and correctness
 - instance identity and env persistence
@@ -31,7 +32,7 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - service readiness success and timeout behavior
 - built-binary helper build/run/start coverage and cache-restore coverage
 - database runtime command planning and snapshot-manifest coverage
-- builder API coverage for command tasks, services, target definitions, automatic cacheability from outputs, port env references, dotenv loading, path inputs, and glob inputs
+- builder API coverage for command tasks, services, target definitions, automatic cacheability from outputs, port env references, dotenv loading, path inputs, glob inputs, and filtered inputs
 - local stamped task coverage for install/setup commands that skip on matching input keys, rerun when declared local outputs are missing, stay isolated per worktree, ignore matching global cache entries, and avoid watch loops when commands touch unchanged input mtimes
 - database component coverage for common Postgres/Prisma task generation, optional snapshot-root defaults, instance DB/env finalization, and explicit non-cacheable migration authoring
 - database runtime host-port readiness, stale published-port reconciliation, Docker control-command timeout coverage, and process-group cancellation for Docker helper children that keep pipes open
@@ -51,8 +52,8 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - sequential engine execution with cache hits
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work, plus explicit `migration_needed` task-state classification for database migration authoring guards
 - scheduler error preservation so a canceled sibling does not replace the first actionable task failure with `context canceled`
-- polling watch batching, declared-input watch scoping, default `node_modules` ignore behavior, repeated flush-sentinel retouch debounce behavior, and selective watch reruns. Tests that edit files after startup should wait for the engine `watch.ready` marker before writing; initial task counters alone do not prove the polling watcher baseline has started.
-- graph affected explanations for path, file, directory, glob, ignored, and unmatched paths
+- polling watch batching, declared-input watch scoping including filtered-input glob bases, default `node_modules` ignore behavior, repeated flush-sentinel retouch debounce behavior, and selective watch reruns. Tests that edit files after startup should wait for the engine `watch.ready` marker before writing; initial task counters alone do not prove the polling watcher baseline has started.
+- graph affected explanations for path, file, directory, glob, filtered, ignored, and unmatched paths
 - watch cascade pruning so downstream tasks do not run past warmups or services that are blocked from watch execution, including full watch execution and mixed blocked/allowed branch coverage
 - watch service restart policies, including `RestartAlways` selection and full watch execution behavior
 - flush coordination coverage for request/ack path generation, watcher inclusion of the flush sync directory under `.devflow`, engine ack timing after reruns and sync-only batches, failed-task ack issues, service readiness health issues, CLI daemon/timeout behavior, and sync-sentinel retouch while waiting for an ack

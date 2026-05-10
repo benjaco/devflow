@@ -64,13 +64,13 @@ Implemented `run` flags include:
 
 `watch` connects to the per-worktree daemon, runs an initial watch-mode cycle, then keeps polling for changes and reruns only the affected downstream slice. In attached JSON mode it emits the typed event stream line-by-line.
 
-Watch file matching is driven by adapter task inputs. Changed files directly affect tasks whose `Inputs.Files` or `Inputs.Dirs` match the changed paths, then the engine cascades through downstream tasks that are eligible to rerun in watch mode.
+Watch file matching is driven by adapter task inputs. Changed files directly affect tasks whose `Inputs.Files`, `Inputs.Dirs`, `Inputs.Globs`, or `Inputs.Filtered` paths match the changed paths, then the engine cascades through downstream tasks that are eligible to rerun in watch mode.
 
 The watcher is scoped to declared inputs in the selected target closure plus Devflow's flush sync directory. This keeps idle watch daemons from recursively polling unrelated dependency trees such as `node_modules`. If a project truly needs to watch a normally ignored directory, declare it as an input path.
 
 Watch cascades respect dependency barriers. If an intermediate task in the affected slice is not allowed to run in watch mode, downstream tasks past that intermediate are not run in that cycle.
 
-`graph affected --files a,b --explain --json` reports why changed files do or do not affect tasks. Explanations include direct file matches, directory matches, ignored paths, and unmatched files. This is the primary debugging tool for generated-output watch loops.
+`graph affected --files a,b --explain --json` reports why changed files do or do not affect tasks. Explanations include direct file matches, directory matches, glob matches, filtered matches, ignored paths, and unmatched files. This is the primary debugging tool for generated-output watch loops.
 
 `Inputs.Ignore` uses the same path-matching model for fingerprinting and watch matching:
 - exact or glob matches use slash-normalized paths

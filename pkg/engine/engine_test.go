@@ -84,6 +84,132 @@ func TestRunUsesCacheOnSecondExecution(t *testing.T) {
 	}
 }
 
+func TestFilteredInputsSkipCompileOnIrrelevantEditAndRerunOnRelevantEdit(t *testing.T) {
+	isolateEngineUserCache(t)
+	worktree := t.TempDir()
+	sourcePath := filepath.Join(worktree, "internal", "api", "users.go")
+	outputPath := filepath.Join(worktree, "docs", "swagger.json")
+	writeSource := func(content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(sourcePath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sourcePath, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSource(`package api
+
+// @Summary List users
+func ListUsers() {
+	println("first")
+}
+
+// User is returned by the API.
+type User struct {
+	ID int
+}
+`)
+
+	var runs atomic.Int32
+	p := project.Define(func(ctx context.Context, b *project.Builder) error {
+		_ = ctx
+		b.Name("filtered-input-engine-project")
+		b.CacheNamespace("filtered-input-engine-project-" + filepath.Base(worktree))
+		filter := project.CombineContentFilters(
+			project.GoCommentLinesStartingWith("@"),
+			project.GoStructDeclarations(),
+		)
+		swagger := b.Task("swagger").
+			Run(func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				data, err := os.ReadFile(rt.Abs("internal/api/users.go"))
+				if err != nil {
+					return err
+				}
+				if strings.Contains(string(data), "broken()") {
+					return fmt.Errorf("compile should not run for non-filtered edits")
+				}
+				runs.Add(1)
+				if err := os.MkdirAll(filepath.Dir(rt.Abs("docs/swagger.json")), 0o755); err != nil {
+					return err
+				}
+				return os.WriteFile(rt.Abs("docs/swagger.json"), []byte("compiled"), 0o644)
+			}).
+			Inputs(project.Filtered(project.Glob("internal/**/*.go"), filter)).
+			Outputs("docs/swagger.json")
+		b.Target("docs", swagger)
+		return nil
+	})
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := eng.Run(context.Background(), Request{Target: "docs", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Result.CacheHits) != 0 {
+		t.Fatalf("unexpected first-run cache hits: %v", first.Result.CacheHits)
+	}
+	if got := runs.Load(); got != 1 {
+		t.Fatalf("compile task runs after first run = %d, want 1", got)
+	}
+
+	writeSource(`package api
+
+// @Summary List users
+func ListUsers() {
+	broken()
+}
+
+// User is returned by the API.
+type User struct {
+	ID int
+}
+`)
+	if err := os.Remove(outputPath); err != nil {
+		t.Fatal(err)
+	}
+	irrelevant, err := eng.Run(context.Background(), Request{Target: "docs", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatalf("irrelevant edit should restore cache instead of compiling non-compiling source: %v", err)
+	}
+	if len(irrelevant.Result.CacheHits) != 1 || irrelevant.Result.CacheHits[0] != "swagger" {
+		t.Fatalf("expected filtered cache hit after irrelevant edit, got %v", irrelevant.Result.CacheHits)
+	}
+	if got := runs.Load(); got != 1 {
+		t.Fatalf("compile task ran for irrelevant edit: runs=%d", got)
+	}
+	if _, err := os.Stat(outputPath); err != nil {
+		t.Fatalf("expected cached output to be restored: %v", err)
+	}
+
+	writeSource(`package api
+
+// @Summary Search users
+func ListUsers() {
+	println("second")
+}
+
+// User is returned by the API.
+type User struct {
+	ID int
+}
+`)
+	relevant, err := eng.Run(context.Background(), Request{Target: "docs", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(relevant.Result.CacheHits) != 0 {
+		t.Fatalf("expected relevant filtered edit to miss cache, got hits %v", relevant.Result.CacheHits)
+	}
+	if got := runs.Load(); got != 2 {
+		t.Fatalf("compile task runs after relevant edit = %d, want 2", got)
+	}
+}
+
 type taskLogAttemptProject struct {
 	attempt atomic.Int32
 }
@@ -865,9 +991,16 @@ func TestWatchInputPathsUseTargetClosureDeclaredInputs(t *testing.T) {
 			Inputs: project.Inputs{Dirs: []string{"prisma/migrations"}, Files: []string{"prisma/schema.prisma"}},
 		},
 		{
+			Name: "swagger",
+			Kind: project.KindOnce,
+			Inputs: project.Inputs{Filtered: []project.FilteredInput{
+				project.Filtered(project.Glob("api/**/*.go"), project.CombineContentFilters(project.GoCommentLinesStartingWith("@"), project.GoStructDeclarations())),
+			}},
+		},
+		{
 			Name:   "app",
 			Kind:   project.KindService,
-			Deps:   []string{"client", "migrations"},
+			Deps:   []string{"client", "migrations", "swagger"},
 			Inputs: project.Inputs{Files: []string{"src/server.ts"}},
 		},
 		{
@@ -885,7 +1018,7 @@ func TestWatchInputPathsUseTargetClosureDeclaredInputs(t *testing.T) {
 	}
 	eng := &Engine{graph: g}
 	got := eng.watchInputPaths(order)
-	want := []string{"package.json", "prisma/migrations", "prisma/schema.prisma", "src"}
+	want := []string{"api", "package.json", "prisma/migrations", "prisma/schema.prisma", "src"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("unexpected watch paths: got %v want %v", got, want)
 	}

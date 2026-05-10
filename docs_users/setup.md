@@ -124,6 +124,22 @@ codegen := b.Task("codegen").
 
 Prefer narrow semantic inputs over hashing the whole repository. Use `project.Glob("internal/storage/**/*.sql")` for generated-code inputs such as sqlc query files. Use `NoCache()` for finite commands with outputs that should not be restored from cache, such as explicit migration-authoring commands.
 
+When a tool only cares about part of a source file, use a filtered input instead of overriding the whole cache key. This keeps watch/debug paths explicit while hashing only the relevant content:
+
+```go
+swaggerRelevant := project.CombineContentFilters(
+	project.GoCommentLinesStartingWith("@"),
+	project.GoStructDeclarations(),
+)
+
+swagger := b.Task("swagger").
+	Command("swag", "init", "-g", "cmd/api/main.go").
+	Inputs(project.Filtered(project.Glob("internal/**/*.go"), swaggerRelevant)).
+	Outputs("docs")
+```
+
+`GoStructDeclarations()` includes the doc comments immediately before each struct, so comments attached to API structs can invalidate generated docs. Function body edits that do not change `@` comments or structs do not change the filtered cache key.
+
 Use `Stamp()` for local install/setup tasks that should run once per input key but should not copy heavyweight mutable folders into the global cache:
 
 ```go

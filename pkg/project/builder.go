@@ -288,6 +288,11 @@ func (t *TaskBuilder) Inputs(items ...any) *TaskBuilder {
 	return t
 }
 
+func (t *TaskBuilder) FilteredInput(path any, filter FileContentFilter) *TaskBuilder {
+	t.task.Inputs.Filtered = append(t.task.Inputs.Filtered, Filtered(path, filter))
+	return t
+}
+
 func (t *TaskBuilder) Ignore(patterns ...string) *TaskBuilder {
 	t.task.Inputs.Ignore = append(t.task.Inputs.Ignore, patterns...)
 	return t
@@ -466,6 +471,10 @@ func (t *TaskBuilder) addInput(item any) {
 		}
 	case InputGlob:
 		t.task.Inputs.Globs = append(t.task.Inputs.Globs, string(value))
+	case FilteredInput:
+		t.task.Inputs.Filtered = append(t.task.Inputs.Filtered, value)
+	case []FilteredInput:
+		t.task.Inputs.Filtered = append(t.task.Inputs.Filtered, value...)
 	case []string:
 		for _, path := range value {
 			t.addInput(path)

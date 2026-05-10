@@ -102,7 +102,7 @@ Use `graph affected --explain` when a file change restarts too much or too littl
 devflow graph affected --files internal/storage/sqlc/users.sql.go --explain --json
 ```
 
-The explanation shows which task input matched the file, which ignore pattern suppressed it, and which files did not match any task.
+The explanation shows which task input matched the file, including filtered semantic inputs, which ignore pattern suppressed it, and which files did not match any task.
 
 ## Status And Logs
 

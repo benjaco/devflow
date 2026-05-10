@@ -371,8 +371,19 @@ The default cache key is derived automatically from:
 - normalized task signature
 - dependency result keys
 - selected file and directory hashes
+- selected filtered file-content hashes
 - selected env values
 - custom fingerprint outputs
+
+Filtered inputs are generic `project.Inputs.Filtered` entries. The task declares a file, directory, or glob plus a signed content filter. Fingerprinting reads each matching file, runs the filter, and hashes only the filtered bytes; files with empty filtered output do not contribute an input hash. The filter signature is part of the normalized task signature, so changing the filter invalidates prior keys.
+
+The built-in helper filters live in `pkg/project` rather than in any framework package:
+- `LinesStartingWith(...)`
+- `GoCommentLinesStartingWith(...)`
+- `GoStructDeclarations()`, including leading doc comments attached to each struct
+- `CombineContentFilters(...)`
+
+Watch matching remains path-based. A filtered input still contributes its declared file, directory, or glob base to the selected target's watch paths, and `graph affected --explain` reports `filtered` or `filtered_glob` when a file change matches it. The expensive task command may then be skipped through the unchanged filtered cache key. This keeps the core generic while supporting semantic cases such as Swagger comments plus Go structs.
 
 ## Local Task Stamps
 

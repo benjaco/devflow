@@ -440,6 +440,38 @@ devflow graph affected --files internal/storage/sqlc/users.sql.go --explain --js
 
 This gives you a standard way to compile helper binaries once, cache them by input hash, and run the restored artifact later from downstream tasks.
 
+### Filtered Inputs
+
+Some tools only care about a slice of each input file. For example, a Swagger generator may only need Go `@...` comment annotations plus public struct declarations, not every function body edit in the package.
+
+Use filtered inputs to keep the watch scope explicit while narrowing the cache key:
+
+```go
+swaggerRelevant := project.CombineContentFilters(
+    project.GoCommentLinesStartingWith("@"),
+    project.GoStructDeclarations(),
+)
+
+swagger := b.Task("swagger").
+    Command("swag", "init", "-g", "cmd/api/main.go").
+    Inputs(project.Filtered(project.Glob("internal/**/*.go"), swaggerRelevant)).
+    Outputs("docs")
+```
+
+Filtered inputs:
+- still declare which files belong to the task, so watch and `graph affected` can see changes
+- hash only the bytes returned by the filter when computing the task key
+- skip files whose filtered content is empty
+- include the filter signature in the task definition, so changing the filter changes the key
+
+Built-in filters include:
+- `project.LinesStartingWith("prefix")` for plain text files
+- `project.GoCommentLinesStartingWith("@")` for Go comments after removing `//`, `/*`, and leading `*`
+- `project.GoStructDeclarations()` for Go struct declarations plus their leading doc comments
+- `project.CombineContentFilters(...)` for composing multiple filters
+
+This is preferred over a full cache-key override when the normal file/env/dependency model is still correct and only the per-file content needs to be narrowed.
+
 ## Service Readiness
 
 Service tasks can define an optional readiness function.

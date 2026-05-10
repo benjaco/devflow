@@ -42,6 +42,11 @@ func HashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+func HashBytes(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
+}
+
 func HashDir(root string, ignore []string) (string, error) {
 	return hashDir(root, "", ignore)
 }
@@ -167,6 +172,12 @@ func CollectTaskInputs(ctx context.Context, worktree string, task project.Task, 
 			fileSet["glob:"+filepath.ToSlash(pattern)+":missing"] = true
 		}
 	}
+	for _, input := range task.Inputs.Filtered {
+		if collectErr := collectFilteredInput(ctx, worktree, input, task.Inputs.Ignore, rt, fileSet); collectErr != nil {
+			err = collectErr
+			return
+		}
+	}
 	for item := range fileSet {
 		hashes = append(hashes, item)
 	}
@@ -223,6 +234,12 @@ func TaskSignature(task project.Task) (string, error) {
 	sort.Strings(payload.Inputs.Files)
 	sort.Strings(payload.Inputs.Dirs)
 	sort.Strings(payload.Inputs.Globs)
+	sort.Slice(payload.Inputs.Filtered, func(i, j int) bool {
+		if payload.Inputs.Filtered[i].Path != payload.Inputs.Filtered[j].Path {
+			return payload.Inputs.Filtered[i].Path < payload.Inputs.Filtered[j].Path
+		}
+		return payload.Inputs.Filtered[i].Filter.Signature < payload.Inputs.Filtered[j].Filter.Signature
+	})
 	sort.Strings(payload.Inputs.Env)
 	sort.Strings(payload.Inputs.Ignore)
 	sort.Strings(payload.Outputs.Paths)
@@ -287,6 +304,79 @@ func collectPathInput(worktree, rel string, ignore []string, fileSet map[string]
 		return err
 	}
 	fileSet["path-file:"+filepath.ToSlash(rel)+":"+sum] = true
+	return nil
+}
+
+func collectFilteredInput(ctx context.Context, worktree string, input project.FilteredInput, ignore []string, rt *project.Runtime, fileSet map[string]bool) error {
+	inputPath := cleanInputPath(input.Path)
+	if inputPath == "" || ignored(inputPath, "", ignore) {
+		return nil
+	}
+	signature := strings.TrimSpace(input.Filter.Signature)
+	if signature == "" {
+		signature = "identity"
+	}
+	if pathspec.HasGlob(inputPath) {
+		matches, err := pathspec.ExpandGlob(worktree, inputPath)
+		if err != nil {
+			return err
+		}
+		for _, rel := range matches {
+			if ignored(cleanInputPath(rel), "", ignore) {
+				continue
+			}
+			if err := collectFilteredFile(ctx, worktree, inputPath, rel, signature, input.Filter, rt, fileSet); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	full := filepath.Join(worktree, inputPath)
+	info, err := os.Stat(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if !info.IsDir() {
+		return collectFilteredFile(ctx, worktree, inputPath, inputPath, signature, input.Filter, rt, fileSet)
+	}
+	return filepath.WalkDir(full, func(pathValue string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(worktree, pathValue)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(filepath.Clean(rel))
+		dirRel := strings.TrimPrefix(rel, inputPath+"/")
+		if ignored(dirRel, inputPath, ignore) {
+			return nil
+		}
+		return collectFilteredFile(ctx, worktree, inputPath, rel, signature, input.Filter, rt, fileSet)
+	})
+}
+
+func collectFilteredFile(ctx context.Context, worktree, inputPath, rel, signature string, filter project.FileContentFilter, rt *project.Runtime, fileSet map[string]bool) error {
+	data, err := os.ReadFile(filepath.Join(worktree, filepath.FromSlash(rel)))
+	if err != nil {
+		return err
+	}
+	filtered, err := filter.Apply(ctx, rt, project.FileContent{Path: rel, Content: data})
+	if err != nil {
+		return err
+	}
+	if len(strings.TrimSpace(string(filtered))) == 0 {
+		return nil
+	}
+	sum := HashBytes(filtered)
+	fileSet["filtered:"+filepath.ToSlash(inputPath)+":"+signature+":"+filepath.ToSlash(rel)+":"+sum] = true
 	return nil
 }
 

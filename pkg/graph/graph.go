@@ -287,6 +287,29 @@ func explainTaskInput(task project.Task, changed string) (FileImpact, bool) {
 		}
 		return FileImpact{File: changed, Task: task.Name, Affected: true, Reason: "glob", Input: pattern}, true
 	}
+	for _, input := range task.Inputs.Filtered {
+		inputPath := cleanInputPath(input.Path)
+		if pathspec.HasGlob(inputPath) {
+			if !pathspec.MatchGlob(inputPath, changed) {
+				continue
+			}
+			if ignore, ignored := ignoredByInput(task.Inputs.Ignore, changed, ""); ignored {
+				return FileImpact{File: changed, Task: task.Name, Affected: false, Reason: "ignored", Input: inputPath, Ignore: ignore}, true
+			}
+			return FileImpact{File: changed, Task: task.Name, Affected: true, Reason: "filtered_glob", Input: inputPath}, true
+		}
+		if changed != inputPath && !stringsHasPathPrefix(changed, inputPath) {
+			continue
+		}
+		rel := ""
+		if changed != inputPath {
+			rel = strings.TrimPrefix(changed, inputPath+"/")
+		}
+		if pattern, ignored := ignoredByInput(task.Inputs.Ignore, changed, rel); ignored {
+			return FileImpact{File: changed, Task: task.Name, Affected: false, Reason: "ignored", Input: inputPath, Relative: rel, Ignore: pattern}, true
+		}
+		return FileImpact{File: changed, Task: task.Name, Affected: true, Reason: "filtered", Input: inputPath, Relative: rel}, true
+	}
 	return FileImpact{}, false
 }
 

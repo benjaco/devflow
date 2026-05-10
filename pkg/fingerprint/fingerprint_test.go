@@ -271,6 +271,121 @@ func TestCollectTaskInputsSupportsPathAndGlobInputs(t *testing.T) {
 	}
 }
 
+func TestCollectTaskInputsFilteredGoSemanticContent(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "internal/api/users.go", `package api
+
+// @Summary List users
+func ListUsers() {
+	println("first")
+}
+
+// User is returned by the API.
+type User struct {
+	ID int
+}
+`)
+	rt := &project.Runtime{Worktree: root, Env: map[string]string{}}
+	filter := project.CombineContentFilters(
+		project.GoCommentLinesStartingWith("@"),
+		project.GoStructDeclarations(),
+	)
+	task := project.Task{
+		Name: "swagger",
+		Kind: project.KindOnce,
+		Inputs: project.Inputs{
+			Filtered: []project.FilteredInput{
+				project.Filtered(project.Glob("internal/**/*.go"), filter),
+			},
+		},
+	}
+	first, _, _, err := CollectTaskInputs(context.Background(), root, task, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writeTestFile(t, root, "internal/api/users.go", `package api
+
+// @Summary List users
+func ListUsers() {
+	println("second")
+}
+
+// User is returned by the API.
+type User struct {
+	ID int
+}
+`)
+	second, _, _, err := CollectTaskInputs(context.Background(), root, task, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("irrelevant function body edit changed filtered input hash\nfirst: %v\nsecond: %v", first, second)
+	}
+
+	writeTestFile(t, root, "internal/api/users.go", `package api
+
+// @Summary Search users
+func ListUsers() {
+	println("second")
+}
+
+// User is returned by the API.
+type User struct {
+	ID int
+}
+`)
+	annotationChanged, _, _, err := CollectTaskInputs(context.Background(), root, task, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reflect.DeepEqual(second, annotationChanged) {
+		t.Fatal("expected @ comment edit to change filtered input hash")
+	}
+
+	writeTestFile(t, root, "internal/api/users.go", `package api
+
+// @Summary Search users
+func ListUsers() {
+	println("second")
+}
+
+// User includes API-visible docs.
+type User struct {
+	ID int
+}
+`)
+	docChanged, _, _, err := CollectTaskInputs(context.Background(), root, task, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reflect.DeepEqual(annotationChanged, docChanged) {
+		t.Fatal("expected struct doc comment edit to change filtered input hash")
+	}
+
+	writeTestFile(t, root, "internal/api/users.go", `package api
+
+// @Summary Search users
+func ListUsers() {
+	println("second")
+}
+
+// User includes API-visible docs.
+type User struct {
+	ID int
+	Email string
+}
+`)
+	structChanged, _, _, err := CollectTaskInputs(context.Background(), root, task, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reflect.DeepEqual(docChanged, structChanged) {
+		t.Fatal("expected struct field edit to change filtered input hash")
+	}
+}
+
 func writeTestFile(t *testing.T, root, rel, content string) {
 	t.Helper()
 	path := filepath.Join(root, rel)

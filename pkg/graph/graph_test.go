@@ -179,6 +179,34 @@ func TestExplainAffectedByFilesReportsPathAndGlobInputs(t *testing.T) {
 	}
 }
 
+func TestExplainAffectedByFilesReportsFilteredInputs(t *testing.T) {
+	g, err := New([]project.Task{
+		{
+			Name: "swagger",
+			Kind: project.KindOnce,
+			Inputs: project.Inputs{
+				Filtered: []project.FilteredInput{
+					project.Filtered(project.Glob("internal/**/*.go"), project.GoStructDeclarations()),
+				},
+				Ignore: []string{"internal/generated"},
+			},
+		},
+	}, []project.Target{{Name: "docs", RootTasks: []string{"swagger"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	impacts := g.ExplainAffectedByFiles([]string{"internal/api/users.go", "internal/generated/users.go"})
+	if len(impacts) != 2 {
+		t.Fatalf("expected 2 impacts, got %+v", impacts)
+	}
+	if impacts[0].File != "internal/api/users.go" || impacts[0].Reason != "filtered_glob" || !impacts[0].Affected {
+		t.Fatalf("unexpected filtered impact: %+v", impacts[0])
+	}
+	if impacts[1].File != "internal/generated/users.go" || impacts[1].Reason != "ignored" || impacts[1].Affected {
+		t.Fatalf("unexpected ignored filtered impact: %+v", impacts[1])
+	}
+}
+
 func join(items []string) string {
 	out := ""
 	for i, item := range items {

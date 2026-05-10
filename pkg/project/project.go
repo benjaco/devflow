@@ -34,15 +34,32 @@ type FingerprintFunc func(ctx context.Context, rt *Runtime) (string, error)
 type CacheKeyFunc func(ctx context.Context, rt *Runtime) (string, error)
 type RunFunc func(ctx context.Context, rt *Runtime) error
 type ReadyFunc func(ctx context.Context, rt *Runtime) error
+type FileContentFilterFunc func(ctx context.Context, rt *Runtime, file FileContent) ([]byte, error)
+
+type FileContent struct {
+	Path    string
+	Content []byte
+}
+
+type FileContentFilter struct {
+	Signature string `json:"signature"`
+	fn        FileContentFilterFunc
+}
+
+type FilteredInput struct {
+	Path   string            `json:"path"`
+	Filter FileContentFilter `json:"filter"`
+}
 
 type Inputs struct {
-	Paths  []string
-	Files  []string
-	Dirs   []string
-	Globs  []string
-	Env    []string
-	Ignore []string
-	Custom []FingerprintFunc
+	Paths    []string
+	Files    []string
+	Dirs     []string
+	Globs    []string
+	Filtered []FilteredInput
+	Env      []string
+	Ignore   []string
+	Custom   []FingerprintFunc
 }
 
 type Outputs struct {
