@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -171,6 +172,49 @@ func TestEnsureCreatesMissingDaemonLogForLiveDaemon(t *testing.T) {
 	}
 	if got := starts.Load(); got != 1 {
 		t.Fatalf("expected existing daemon to be reused, got %d starts", got)
+	}
+}
+
+func TestSubscribeReturnsWhenContextCanceled(t *testing.T) {
+	socketPath := filepath.Join(os.TempDir(), "df-subscribe-"+time.Now().Format("150405.000000000")+".sock")
+	defer os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	connected := make(chan struct{})
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var req Request
+		_ = json.NewDecoder(conn).Decode(&req)
+		close(connected)
+		_, _ = conn.Read(make([]byte, 1))
+	}()
+
+	client := &Client{socketPath: socketPath}
+	subCtx, cancelSub := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Subscribe(subCtx, func(api.Event) {})
+	}()
+	select {
+	case <-connected:
+	case <-time.After(time.Second):
+		t.Fatal("Subscribe did not connect to test daemon")
+	}
+	cancelSub()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Subscribe returned error after cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Subscribe did not return after context cancellation")
 	}
 }
 

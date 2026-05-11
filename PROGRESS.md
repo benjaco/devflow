@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-05-10
+Last updated: 2026-05-12
 
 ## Current Status
 
@@ -42,6 +42,26 @@ Last updated: 2026-05-10
   - helper filters for line prefixes, Go comment prefixes, Go structs with leading doc comments, and filter composition
   - fingerprint, graph affected, and watch-path support for filtered inputs
   - engine-owned in-memory filtered-hash cache so unchanged files avoid repeated filter parsing during daemon/watch loops
+- Delve-backed Go debug-service direction documented before implementation:
+  - external debug build plus `dlv exec --headless --accept-multiclient --continue`
+  - stable local debug ports and DAP remote attach
+  - daemon-owned stop/rebuild/relaunch sequence on watch changes
+  - Windows process-tree cleanup called out as a required foundation
+- First-class Go debug services implemented:
+  - `project.KindDebugService` and `b.GoDebugService(...)`
+  - external `go build -gcflags=all=-N -l` to a stable `.devflow/debug/<task>` binary
+  - supervised `dlv exec --headless --api-version=2 --accept-multiclient --continue`
+  - stable named localhost debug ports and status JSON attach metadata in `NodeStatus.Debug`
+  - service-like engine behavior for scheduling, watch restart, flush health, stop cleanup, daemon restart, and TUI visibility
+  - CI installs Delve `v1.26.2` on Linux, macOS, and Windows so real `dlv exec` smoke coverage runs in the default matrix
+  - real Delve watch-restart coverage starts a debug service, edits Go source, and verifies the service relaunches with a new PID, live debug listener, and intact debug attach metadata
+  - verified locally with Delve `v1.26.2`, targeted debug lifecycle tests, `go test ./...`, and `go build -o <temp>/devflow ./cmd/devflow`
+- Go-next example now has a real `backend-debug` target:
+  - uses the built-in `project.GoDebugService` helper rather than hand-written Delve lifecycle code
+  - builds `./backend/src` as a debug binary
+  - starts it through `dlv exec` on a stable `backend_debug` port
+  - exposes backend health on the normal backend port
+  - has focused example coverage proving CI-mode readiness, stopped-state cleanup, debug metadata, and binary creation
 - Bounded parallel ready-queue scheduling implemented in `pkg/engine`
 - Typed engine event stream implemented for run/task/cache/process/log events
 - Polling watch mode implemented with Devflow-owned debounced batches and selective reruns
@@ -137,7 +157,8 @@ Last updated: 2026-05-10
   - verifies the watch cycle event is emitted
   - verifies the affected service reruns
 - Added a GitHub Actions workflow at `.github/workflows/build.yml` that:
-  - sets up Go from `go.mod`
+  - sets up Go 1.24 for the OS matrix
+  - installs Delve for debug-service smoke coverage
   - runs `go test ./...`
   - builds `./cmd/devflow`
 - Updated the README to state clearly that GitHub Actions does not replace installing Go locally when you want to build or run `devflow` yourself

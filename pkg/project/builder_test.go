@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/benjaco/devflow/pkg/api"
@@ -109,6 +110,100 @@ func TestBuilderSupportsFilteredInputs(t *testing.T) {
 	}
 	if !task.Cache {
 		t.Fatal("filtered input task with outputs should be cacheable")
+	}
+}
+
+func TestBuilderGoDebugServiceDefinesDebugMetadata(t *testing.T) {
+	p := Define(func(ctx context.Context, b *Builder) error {
+		b.Name("debug-demo")
+		gen := b.Task("generate").
+			Run(func(context.Context, *Runtime) error { return nil }).
+			Inputs("schema.sql")
+		debug := b.GoDebugService("api_debug").
+			Package("./cmd/api").
+			BuildFlags("-tags=dev").
+			BuildEnv("CGO_ENABLED", "1").
+			DebugPort("debug_api").
+			Env("PORT", b.Port("api")).
+			Args("--config", ".devflow/dev.yaml").
+			Inputs("cmd/api", "internal").
+			DependsOn(gen).
+			ReadyHTTP("api", "/health", 200)
+		b.Target("debug", debug)
+		return nil
+	})
+
+	task := taskByNameForTest(p.Tasks(), "api_debug")
+	if task.Kind != KindDebugService {
+		t.Fatalf("kind = %q, want %q", task.Kind, KindDebugService)
+	}
+	if task.Restart != RestartOnInputChange {
+		t.Fatalf("restart = %q, want %q", task.Restart, RestartOnInputChange)
+	}
+	if task.Cache || task.Stamp {
+		t.Fatalf("debug services must not be cache/stamp tasks: cache=%v stamp=%v", task.Cache, task.Stamp)
+	}
+	if task.Debug == nil {
+		t.Fatal("expected debug metadata")
+	}
+	if task.Debug.Type != "go" || task.Debug.PortName != "debug_api" || task.Debug.Package != "./cmd/api" {
+		t.Fatalf("unexpected debug metadata: %+v", task.Debug)
+	}
+	if !strings.Contains(task.Debug.Binary, ".devflow/debug/api_debug") {
+		t.Fatalf("unexpected debug binary %q", task.Debug.Binary)
+	}
+	if got := strings.Join(task.RequiredCLIs, ","); got != "go,dlv" {
+		t.Fatalf("required CLIs = %q, want go,dlv", got)
+	}
+	if len(task.Deps) != 1 || task.Deps[0] != "generate" {
+		t.Fatalf("deps = %+v, want generate", task.Deps)
+	}
+
+	cfg, err := p.ConfigureInstance(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	portNames := strings.Join(cfg.PortNames, ",")
+	if !strings.Contains(portNames, "debug_api") || !strings.Contains(portNames, "api") {
+		t.Fatalf("expected app and debug ports, got %q", portNames)
+	}
+}
+
+func TestGoDebugServiceHelperDefinesRawTask(t *testing.T) {
+	task := GoDebugService("backend_debug", GoDebugServiceOptions{
+		Package:       "./backend/src",
+		BuildEnv:      map[string]string{"CGO_ENABLED": "0"},
+		DebugPortName: "backend_debug",
+		EnvPorts:      map[string]string{"PORT": "backend"},
+		Deps:          []string{"backend_codegen", "postgres"},
+		Inputs:        Inputs{Files: []string{"go.mod"}, Dirs: []string{"backend/src"}},
+		Ready:         ReadyHTTPNamedPort("backend", "/health", 200),
+		Description:   "Debug backend",
+	})
+
+	if task.Kind != KindDebugService {
+		t.Fatalf("kind = %q, want %q", task.Kind, KindDebugService)
+	}
+	if task.Run == nil {
+		t.Fatal("expected built-in debug runner")
+	}
+	if task.Debug == nil || task.Debug.PortName != "backend_debug" || task.Debug.Package != "./backend/src" {
+		t.Fatalf("unexpected debug metadata: %+v", task.Debug)
+	}
+	if !strings.Contains(task.Debug.Binary, ".devflow/debug/backend_debug") {
+		t.Fatalf("unexpected debug binary %q", task.Debug.Binary)
+	}
+	if got := strings.Join(task.RequiredCLIs, ","); got != "go,dlv" {
+		t.Fatalf("required CLIs = %q, want go,dlv", got)
+	}
+	if len(task.Deps) != 2 || task.Deps[0] != "backend_codegen" || task.Deps[1] != "postgres" {
+		t.Fatalf("deps = %+v", task.Deps)
+	}
+	if task.Restart != RestartOnInputChange {
+		t.Fatalf("restart = %q, want %q", task.Restart, RestartOnInputChange)
+	}
+	if task.Signature == "" {
+		t.Fatal("expected stable signature")
 	}
 }
 

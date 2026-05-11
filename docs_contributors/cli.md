@@ -155,6 +155,7 @@ Bare `docs` is intentionally a usage error so agents and users do not accidental
 - sanitized DB details
 - derived local URLs such as `backend`
 - daemon/supervisor PID, liveness, and log path when present
+- per-node debug metadata for `debug_service` tasks, including host, port, port name, binary path, package, protocol, and a Go remote-attach shape
 
 Task states now distinguish:
 - `failed`: the task itself failed

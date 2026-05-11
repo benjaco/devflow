@@ -2,7 +2,7 @@
 
 Devflow uses three testing layers:
 
-GitHub Actions runs the default `go test ./...` and `go build ./cmd/devflow` validation on Linux, macOS, and Windows for pushes, pull requests, and release tags.
+GitHub Actions runs the default `go test ./...` and `go build ./cmd/devflow` validation on Linux, macOS, and Windows for pushes, pull requests, and release tags. The CI matrix uses Go 1.24 and installs Delve with `go install github.com/go-delve/delve/cmd/dlv@v1.26.2` before running tests so real Go debug-service smoke coverage runs on each OS.
 
 Cross-platform tests should avoid Unix-only assumptions unless the test is guarded by build tags or an explicit platform skip. Prefer generated Go helper binaries over shell-script fake tools, add `.exe` to built helper paths on Windows, and use Go encoders for JSON fixtures so Windows paths are escaped correctly. Long-running process tests should verify process-tree cleanup on Windows because orphaned children can keep task log files locked after the parent exits.
 
@@ -25,6 +25,7 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - interactive prompt detection and answer forwarding with a real prompt CLI fixture
 - service lifecycle management
 - CI-mode service targets act as readiness probes and stop services before returning
+- Go debug-service coverage includes builder API metadata, external debug binary build planning, status attach metadata, stable debug-port readiness, watch restart sequencing, and process-tree cleanup through fake `go`/`dlv` helper binaries. CI also installs real Delve and runs real `dlv exec` coverage on Linux, macOS, and Windows for both CI-mode readiness/stop and watch-mode source-edit restart back into a debug service. Real editor attach coverage remains opt-in until the debug-service contract is proven in real projects.
 - daemon lifecycle coverage for per-worktree daemon startup locking, CLI connection, daemon event persistence/fanout, daemon executable refresh after source/local binary changes, daemon log path creation, and preserving legacy supervisor/executor PIDs for later cleanup
 - stop cleanup for daemon-owned work, daemon shutdown after `stop --all`, legacy supervisor/executor refs and descendants, tracked service, and stale status process groups
 - read-only `status` coverage proving stopped-state inspection does not start a daemon

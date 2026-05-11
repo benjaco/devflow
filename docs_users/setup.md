@@ -179,6 +179,58 @@ api := b.Service("api").
 
 Use readiness hooks for services that need a health check before downstream work or `flush` can report success. For named-port readiness, use `b.Port("api")` and pass that value into the service with `Env`.
 
+## Go Debug Services
+
+Use `GoDebugService` when Devflow should own a Go service under Delve:
+
+```go
+apiDebug := b.GoDebugService("api_debug").
+	Package("./cmd/api").
+	BuildFlags("-tags=dev").
+	BuildEnv("CGO_ENABLED", "1").
+	DebugPort("api_debug").
+	Env("PORT", b.Port("api")).
+	Args("--config", ".devflow/dev.yaml").
+	Inputs("go.mod", "go.sum", "cmd/api", "internal").
+	DependsOn(codegen).
+	ReadyHTTP("api", "/health", 200).
+	ReadyTimeout(30 * time.Second)
+
+b.Target("debug", apiDebug)
+```
+
+Devflow builds a stable worktree-local debug binary with `go build -gcflags=all=-N -l`, then supervises:
+
+```bash
+dlv exec .devflow/debug/api_debug --headless --api-version=2 --listen=127.0.0.1:<port> --accept-multiclient --continue -- <args>
+```
+
+The debug port is a named local port. `status --json` includes each debug node's host, port, binary, package, and an editor attach shape. Use a VS Code/Cursor Go remote attach configuration that points at that stable host/port.
+
+Debug services are long-running service tasks, not cacheable tasks. On watch changes, Devflow stops the Delve process tree, rebuilds the debug binary, and relaunches Delve on the same named port before marking the service ready. Use `DependsOn(...)` for generated code, database prep, or other build steps that must complete before the debug binary is rebuilt.
+
+`GoDebugService` automatically marks `go` and `dlv` as required CLIs for the task, so `doctor --target debug --json` reports whether Delve is installed.
+
+Adapters that still return raw `[]project.Task` can use the same built-in handler without writing Delve lifecycle code:
+
+```go
+func (myProject) RequiredCLIs() []project.RequiredCLI {
+	return []project.RequiredCLI{
+		{Name: "go", Command: "go"},
+		{Name: "dlv", Command: "dlv"},
+	}
+}
+
+project.GoDebugService("api_debug", project.GoDebugServiceOptions{
+	Package:       "./cmd/api",
+	DebugPortName: "api_debug",
+	EnvPorts:      map[string]string{"PORT": "api"},
+	Deps:          []string{"codegen", "db"},
+	Inputs:        project.Inputs{Files: []string{"go.mod", "go.sum"}, Dirs: []string{"cmd/api", "internal"}},
+	Ready:         project.ReadyHTTPNamedPort("api", "/health", 200),
+})
+```
+
 ## Prisma And Postgres
 
 For a common Prisma/Postgres development graph, use the database components instead of hand-writing runtime and log plumbing:

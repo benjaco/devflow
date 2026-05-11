@@ -81,13 +81,36 @@ type Instance struct {
 }
 
 type NodeStatus struct {
-	Name       string    `json:"name"`
-	Kind       string    `json:"kind"`
-	State      NodeState `json:"state"`
-	LastRunKey string    `json:"lastRunKey,omitempty"`
-	LastError  string    `json:"lastError,omitempty"`
-	PID        int       `json:"pid,omitempty"`
-	LogPath    string    `json:"logPath,omitempty"`
+	Name       string       `json:"name"`
+	Kind       string       `json:"kind"`
+	State      NodeState    `json:"state"`
+	LastRunKey string       `json:"lastRunKey,omitempty"`
+	LastError  string       `json:"lastError,omitempty"`
+	PID        int          `json:"pid,omitempty"`
+	LogPath    string       `json:"logPath,omitempty"`
+	Debug      *DebugStatus `json:"debug,omitempty"`
+}
+
+type DebugStatus struct {
+	Type     string            `json:"type,omitempty"`
+	Host     string            `json:"host,omitempty"`
+	Port     int               `json:"port,omitempty"`
+	PortName string            `json:"portName,omitempty"`
+	Protocol string            `json:"protocol,omitempty"`
+	Binary   string            `json:"binary,omitempty"`
+	Package  string            `json:"package,omitempty"`
+	Attach   DebugAttachConfig `json:"attach,omitempty"`
+}
+
+type DebugAttachConfig struct {
+	Name         string `json:"name,omitempty"`
+	Type         string `json:"type,omitempty"`
+	Request      string `json:"request,omitempty"`
+	Mode         string `json:"mode,omitempty"`
+	Host         string `json:"host,omitempty"`
+	Port         int    `json:"port,omitempty"`
+	DebugAdapter string `json:"debugAdapter,omitempty"`
+	CWD          string `json:"cwd,omitempty"`
 }
 
 type RunResult struct {

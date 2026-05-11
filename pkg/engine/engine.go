@@ -354,6 +354,7 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 			Kind:    string(task.Kind),
 			State:   api.StatePending,
 			LogPath: instance.LogPath(req.Worktree, inst.ID, name),
+			Debug:   debugStatus(task, inst),
 		}
 	}
 	if err := instance.SaveStatus(req.Worktree, inst.ID, req.Target, req.Mode, state.status); err != nil {
@@ -384,6 +385,52 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 		},
 	}
 	return inst, state, baseRT, nil
+}
+
+func debugStatus(task project.Task, inst *api.Instance) *api.DebugStatus {
+	if task.Debug == nil || inst == nil {
+		return nil
+	}
+	port := 0
+	if task.Debug.PortName != "" {
+		port = inst.Ports[task.Debug.PortName]
+	}
+	host := task.Debug.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	protocol := task.Debug.Protocol
+	if protocol == "" {
+		protocol = "dap"
+	}
+	debugType := task.Debug.Type
+	if debugType == "" {
+		debugType = "debug"
+	}
+	attachType := debugType
+	if debugType == "go" {
+		attachType = "go"
+	}
+	attachName := "Attach Devflow: " + task.Name
+	return &api.DebugStatus{
+		Type:     debugType,
+		Host:     host,
+		Port:     port,
+		PortName: task.Debug.PortName,
+		Protocol: protocol,
+		Binary:   task.Debug.Binary,
+		Package:  task.Debug.Package,
+		Attach: api.DebugAttachConfig{
+			Name:         attachName,
+			Type:         attachType,
+			Request:      "attach",
+			Mode:         "remote",
+			Host:         host,
+			Port:         port,
+			DebugAdapter: "dlv-dap",
+			CWD:          inst.Worktree,
+		},
+	}
 }
 
 func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, baseRT *project.Runtime, state *runState, order []string) error {
@@ -441,7 +488,7 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 			}
 
 			state.setNodeState(name, api.StateReady, "", "", 0)
-			if task.Kind != project.KindService {
+			if !project.IsServiceKind(task.Kind) {
 				state.setNodeState(name, api.StateRunning, "", "", 0)
 			}
 
@@ -580,7 +627,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 		state.setErrorState(task.Name, ctx, "", err, 0)
 		return taskResult{name: task.Name, err: err}
 	}
-	if task.Kind == project.KindService {
+	if project.IsServiceKind(task.Kind) {
 		handle, ok := state.serviceHandle(task.Name)
 		if !ok {
 			err := fmt.Errorf("service task %q returned without starting a service", task.Name)
@@ -1342,7 +1389,7 @@ func (e *Engine) affectedWatchOrder(target string, files []string) ([]string, []
 	}
 	for _, name := range closure {
 		task := e.graph.Tasks[name]
-		if task.Kind == project.KindService && task.Restart == project.RestartAlways {
+		if project.IsServiceKind(task.Kind) && task.Restart == project.RestartAlways {
 			candidates[name] = true
 		}
 	}
@@ -1358,7 +1405,7 @@ func (e *Engine) affectedWatchOrder(target string, files []string) ([]string, []
 		if task.Kind == project.KindWarmup && !task.AllowInWatch {
 			continue
 		}
-		if task.Kind == project.KindService && task.Restart == project.RestartNever {
+		if project.IsServiceKind(task.Kind) && task.Restart == project.RestartNever {
 			continue
 		}
 		blockedByDep := false
@@ -1481,7 +1528,7 @@ func (e *Engine) watchDownstream(names []string) []string {
 		seen[name] = true
 		current := e.graph.Tasks[name]
 		for _, child := range reverse[name] {
-			if current.Kind == project.KindService && e.graph.Tasks[child].Kind == project.KindService && !e.graph.Tasks[child].WatchRestartOnServiceDeps {
+			if project.IsServiceKind(current.Kind) && project.IsServiceKind(e.graph.Tasks[child].Kind) && !e.graph.Tasks[child].WatchRestartOnServiceDeps {
 				continue
 			}
 			queue = append(queue, child)
@@ -1534,7 +1581,7 @@ func (e *Engine) evaluateFlush(ctx context.Context, req Request, baseRT *project
 		task := e.graph.Tasks[name]
 		node := status[name]
 		result.Nodes = append(result.Nodes, node)
-		if task.Kind == project.KindService {
+		if project.IsServiceKind(task.Kind) {
 			service := e.evaluateFlushService(ctx, req, baseRT, state, task, node)
 			result.Services = append(result.Services, service)
 			if !service.Ready {

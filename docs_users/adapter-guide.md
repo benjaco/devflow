@@ -234,6 +234,37 @@ Dependency barriers still apply. If a changed upstream path reaches a task that 
 
 Use `WatchRestartOnServiceDeps` only when a service-to-service dependency should propagate restarts, such as a runtime service depending on a database service. Service-to-service restart propagation is off by default.
 
+## Go Debug Services
+
+Use `b.GoDebugService(...)` when Devflow should supervise Delve and the debuggee:
+
+```go
+codegen := b.Task("codegen").
+    Command("go", "run", "./tools/codegen").
+    Inputs("schema.json").
+    Outputs("internal/generated")
+
+apiDebug := b.GoDebugService("api_debug").
+    Package("./cmd/api").
+    BuildFlags("-tags=dev").
+    BuildEnv("CGO_ENABLED", "1").
+    DebugPort("api_debug").
+    Env("PORT", b.Port("api")).
+    Args("--config", ".devflow/dev.yaml").
+    Inputs("go.mod", "go.sum", "cmd/api", "internal", "internal/generated").
+    DependsOn(codegen).
+    ReadyHTTP("api", "/health", 200).
+    ReadyTimeout(30 * time.Second)
+
+b.Target("debug", apiDebug)
+```
+
+The build step is intentionally external to Delve: Devflow runs `go build -gcflags=all=-N -l -o .devflow/debug/<task> <package>`, then launches `dlv exec` in headless multi-client mode on a stable local debug port. `status --json` includes the node's debug host, port, binary path, package, and an attach shape for editor integration.
+
+Debug services are service-like for lifecycle purposes: they are supervised, never globally cached, can depend on normal build/codegen/database tasks, participate in watch restarts, and are checked by `flush` like other services. Use `ReadyHTTP` or another app readiness hook when the debuggee also needs to prove the application is usable after Delve starts.
+
+Low-level adapters that still return raw `[]project.Task` should use `project.GoDebugService(...)` with `project.GoDebugServiceOptions` instead of hand-writing `go build` and `dlv exec` calls. `EnvPorts` maps runtime env vars such as `PORT` to named Devflow ports, while normal instance env such as `DATABASE_URL` is inherited automatically. Raw adapters must still include `go` and `dlv` in their project `RequiredCLIs()` catalog so target-scoped `doctor` can resolve those task requirements.
+
 ## DB Source Policies
 
 When a DB snapshot miss happens, the adapter should rebuild from a configured base source instead of implying a reset command.

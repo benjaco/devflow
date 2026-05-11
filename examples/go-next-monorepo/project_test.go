@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -132,6 +133,46 @@ func TestExampleProjectIsolatesTwoWorktrees(t *testing.T) {
 	if first.out.Instance.Ports["postgres"] == second.out.Instance.Ports["postgres"] {
 		t.Fatalf("expected distinct postgres ports: %v vs %v", first.out.Instance.Ports, second.out.Instance.Ports)
 	}
+}
+
+func TestExampleProjectBackendDebugTarget(t *testing.T) {
+	if _, err := exec.LookPath("dlv"); err != nil {
+		t.Skip("dlv is required for the backend debug target")
+	}
+	isolateExampleUserCache(t)
+	t.Setenv("DEVFLOW_EXAMPLE_FAKE_DB", "1")
+	worktree := seededWorktree(t)
+	eng, err := engine.New(exampleProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := eng.Run(context.Background(), engine.Request{
+		Target:      "backend-debug",
+		Worktree:    worktree,
+		Mode:        api.ModeCI,
+		MaxParallel: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Result.Success {
+		t.Fatalf("expected debug target success, got %+v", out.Result)
+	}
+	status, err := instance.LoadStatus(worktree, out.Instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := status.Nodes["backend_debug"]
+	if node.State != api.StateStopped {
+		t.Fatalf("expected CI debug service to stop after readiness, got %+v", node)
+	}
+	if node.Debug == nil || node.Debug.Port == 0 || node.Debug.PortName != "backend_debug" {
+		t.Fatalf("expected debug metadata on backend_debug, got %+v", node.Debug)
+	}
+	if node.Debug.Attach.Request != "attach" || node.Debug.Attach.Mode != "remote" {
+		t.Fatalf("unexpected attach metadata: %+v", node.Debug.Attach)
+	}
+	assertFileExists(t, filepath.Join(worktree, filepath.FromSlash(node.Debug.Binary)))
 }
 
 func TestExampleProjectWatchSelectiveReruns(t *testing.T) {

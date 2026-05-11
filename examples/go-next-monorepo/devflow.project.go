@@ -75,7 +75,7 @@ func (exampleProject) ConfigureInstance(ctx context.Context, worktree string) (p
 	manager := database.New()
 	return project.InstanceConfig{
 		Label:     filepath.Base(worktree),
-		PortNames: []string{"backend", "frontend", "postgres"},
+		PortNames: []string{"backend", "backend_debug", "frontend", "postgres"},
 		Env: project.MergeEnvMaps(dotenv, map[string]string{
 			"DEVFLOW_EXAMPLE_PROJECT": "go-next-monorepo",
 		}),
@@ -106,6 +106,13 @@ func (exampleProject) ConfigureInstance(ctx context.Context, worktree string) (p
 			return nil
 		},
 	}, nil
+}
+
+func (exampleProject) RequiredCLIs() []project.RequiredCLI {
+	return []project.RequiredCLI{
+		{Name: "go", Command: "go"},
+		{Name: "dlv", Command: "dlv"},
+	}
 }
 
 func (exampleProject) Tasks() []project.Task {
@@ -571,6 +578,18 @@ func (exampleProject) Tasks() []project.Task {
 				return err
 			},
 		},
+		project.GoDebugService("backend_debug", project.GoDebugServiceOptions{
+			Package:                   "./backend/src",
+			BuildEnv:                  map[string]string{"CGO_ENABLED": "0"},
+			DebugPortName:             "backend_debug",
+			EnvPorts:                  map[string]string{"PORT": "backend", "BACKEND_PORT": "backend"},
+			Deps:                      []string{"backend_codegen", "postgres"},
+			Inputs:                    project.Inputs{Files: []string{"go.mod"}, Dirs: []string{"backend/src", "backend/generated"}, Env: []string{"DATABASE_URL"}},
+			WatchRestartOnServiceDeps: true,
+			Description:               "Run the backend under Delve on a stable local debug port",
+			Ready:                     project.ReadyHTTPNamedPort("backend", "/health", 200),
+			ReadyTimeout:              10 * time.Second,
+		}),
 		{
 			Name:         "frontend_dev",
 			Kind:         project.KindService,
@@ -616,6 +635,11 @@ func (exampleProject) Targets() []project.Target {
 			Name:        "frontend-stack",
 			RootTasks:   []string{"backend_dev", "frontend_dev"},
 			Description: "Start the example frontend stack",
+		},
+		{
+			Name:        "backend-debug",
+			RootTasks:   []string{"backend_debug"},
+			Description: "Start the example backend under Delve",
 		},
 		{
 			Name:        "fullstack",

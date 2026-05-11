@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -728,6 +730,60 @@ func testServiceSpec(rt *project.Runtime) process.CommandSpec {
 		Dir:  rt.Worktree,
 		Env:  rt.Env,
 	}
+}
+
+func installFakeDebugCommands(t *testing.T, binDir string) {
+	t.Helper()
+	src := testCommandPath()
+	for _, name := range []string{"go", "dlv"} {
+		dst := filepath.Join(binDir, name+engineTestExeSuffix())
+		data, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dst, data, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func countDebugStarts(recordPath string) int {
+	data, err := os.ReadFile(recordPath)
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(data), "fake-dlv ")
+}
+
+func nodeRunningWithDebugPort(t *testing.T, worktree, instanceID, task string) bool {
+	t.Helper()
+	status, err := instance.LoadStatus(worktree, instanceID)
+	if err != nil {
+		return false
+	}
+	node := status.Nodes[task]
+	return node.State == api.StateRunning && node.PID > 0 && node.Debug != nil && node.Debug.Port > 0 && node.Debug.Attach.Port == node.Debug.Port
+}
+
+func readFileForFailure(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err.Error()
+	}
+	return string(data)
+}
+
+func readStatusForFailure(worktree, instanceID string) string {
+	status, err := instance.LoadStatus(worktree, instanceID)
+	if err != nil {
+		return err.Error()
+	}
+	var parts []string
+	for name, node := range status.Nodes {
+		parts = append(parts, fmt.Sprintf("%s=%s error=%q pid=%d debug=%+v", name, node.State, node.LastError, node.PID, node.Debug))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "; ")
 }
 
 func isolateEngineUserCache(t *testing.T) {
@@ -2115,6 +2171,293 @@ func TestServiceReadinessTimeoutFailsRun(t *testing.T) {
 	}
 }
 
+func TestGoDebugServiceWatchBuildsDelveAndRestarts(t *testing.T) {
+	isolateEngineUserCache(t)
+	worktree := t.TempDir()
+	fakeBin := t.TempDir()
+	installFakeDebugCommands(t, fakeBin)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	recordPath := filepath.Join(worktree, "debug-record.log")
+
+	sourcePath := filepath.Join(worktree, "cmd", "api", "main.go")
+	if err := os.MkdirAll(filepath.Dir(sourcePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "schema.txt"), []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := project.Define(func(ctx context.Context, b *project.Builder) error {
+		_ = ctx
+		b.Name("debug-watch-project")
+		b.Env("DEVFLOW_FAKE_DEBUG_RECORD", recordPath)
+		generate := b.Task("generate").
+			Run(func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				return project.WriteFile(rt, "generated.txt", []byte("generated\n"), 0o644)
+			}).
+			Inputs("schema.txt").
+			Outputs("generated.txt")
+		debug := b.GoDebugService("api_debug").
+			Package("./cmd/api").
+			DebugPort("debug_api").
+			BuildFlags("-tags=dev").
+			Inputs("cmd/api").
+			DependsOn(generate).
+			Args("--config", ".devflow/dev.yaml").
+			ReadyTimeout(2 * time.Second)
+		b.Target("debug", debug)
+		return nil
+	})
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- eng.Watch(ctx, Request{Target: "debug", Worktree: worktree, Mode: api.ModeWatch})
+	}()
+	instanceID := waitForEngineWatchReady(t, worktree)
+	if !waitForBool(6*time.Second, func() bool {
+		return countDebugStarts(recordPath) >= 1 && nodeRunningWithDebugPort(t, worktree, instanceID, "api_debug")
+	}) {
+		t.Fatalf("debug service did not start: record=%q status=%s", readFileForFailure(recordPath), readStatusForFailure(worktree, instanceID))
+	}
+
+	if err := os.WriteFile(sourcePath, []byte("package main\nfunc main() { println(\"changed\") }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForBool(6*time.Second, func() bool {
+		return countDebugStarts(recordPath) >= 2 && nodeRunningWithDebugPort(t, worktree, instanceID, "api_debug")
+	}) {
+		t.Fatalf("debug service did not restart: record=%q status=%s", readFileForFailure(recordPath), readStatusForFailure(worktree, instanceID))
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("watch did not exit after cancel")
+	}
+}
+
+func TestGoDebugServiceRunsWithRealDelveInCIProbe(t *testing.T) {
+	if _, err := exec.LookPath("dlv"); err != nil {
+		t.Skip("dlv not installed")
+	}
+	isolateEngineUserCache(t)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "go.mod"), []byte("module debug-smoke\n\ngo 1.23\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mainPath := filepath.Join(worktree, "cmd", "api", "main.go")
+	if err := os.MkdirAll(filepath.Dir(mainPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mainPath, []byte(`package main
+
+import "time"
+
+func main() {
+	for {
+		time.Sleep(time.Second)
+	}
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := project.Define(func(ctx context.Context, b *project.Builder) error {
+		_ = ctx
+		b.Name("real-delve-debug-project")
+		debug := b.GoDebugService("api_debug").
+			Package("./cmd/api").
+			DebugPort("debug_api").
+			Inputs("go.mod", "cmd/api").
+			ReadyTimeout(10 * time.Second)
+		b.Target("debug", debug)
+		return nil
+	})
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := eng.Run(context.Background(), Request{Target: "debug", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		logPath := ""
+		if out != nil {
+			logPath = instance.LogPath(worktree, out.Instance.ID, "api_debug")
+		}
+		t.Fatalf("real dlv debug run failed: %v\nlog:\n%s", err, readFileForFailure(logPath))
+	}
+	if !out.Result.Success {
+		t.Fatalf("expected success, got %+v", out.Result)
+	}
+	status, err := instance.LoadStatus(worktree, out.Instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := status.Nodes["api_debug"]
+	if node.State != api.StateStopped {
+		t.Fatalf("CI mode should stop debug service after readiness, got %q", node.State)
+	}
+	if node.Debug == nil || node.Debug.Port == 0 || node.Debug.Attach.Port != node.Debug.Port {
+		t.Fatalf("missing debug status metadata: %+v", node.Debug)
+	}
+	if node.PID != 0 {
+		t.Fatalf("expected stopped debug service PID to be cleared, got %d", node.PID)
+	}
+}
+
+func TestGoDebugServiceWatchRestartsRealDelveAfterSourceEdit(t *testing.T) {
+	if _, err := exec.LookPath("dlv"); err != nil {
+		t.Skip("dlv not installed")
+	}
+	isolateEngineUserCache(t)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "go.mod"), []byte("module real-delve-watch\n\ngo 1.23\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mainPath := filepath.Join(worktree, "cmd", "api", "main.go")
+	if err := os.MkdirAll(filepath.Dir(mainPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeDebugLoopProgram(t, mainPath, "v1")
+
+	p := project.Define(func(ctx context.Context, b *project.Builder) error {
+		_ = ctx
+		b.Name("real-delve-watch-project")
+		debug := b.GoDebugService("api_debug").
+			Package("./cmd/api").
+			DebugPort("debug_api").
+			Inputs("go.mod", "cmd/api").
+			ReadyTimeout(20 * time.Second)
+		b.Target("debug", debug)
+		return nil
+	})
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	watchDone := make(chan struct{})
+	var watchErr error
+	var watchErrMu sync.Mutex
+	watchError := func() error {
+		watchErrMu.Lock()
+		defer watchErrMu.Unlock()
+		return watchErr
+	}
+	go func() {
+		err := eng.Watch(ctx, Request{Target: "debug", Worktree: worktree, Mode: api.ModeWatch})
+		watchErrMu.Lock()
+		watchErr = err
+		watchErrMu.Unlock()
+		close(watchDone)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-watchDone:
+			err := watchError()
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Fatalf("debug watch returned error during cleanup: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("debug watch did not stop during cleanup")
+		}
+	}()
+
+	instanceID := waitForEngineWatchReadyWithin(t, worktree, 30*time.Second)
+	logPath := instance.LogPath(worktree, instanceID, "api_debug")
+	failIfWatchExited(t, watchDone, watchError, worktree, instanceID)
+
+	var firstPID int
+	if !waitForBool(30*time.Second, func() bool {
+		failIfWatchExited(t, watchDone, watchError, worktree, instanceID)
+		status, err := instance.LoadStatus(worktree, instanceID)
+		if err != nil {
+			return false
+		}
+		node := status.Nodes["api_debug"]
+		if node.State != api.StateRunning || node.PID == 0 || node.Debug == nil || node.Debug.Port == 0 || node.Debug.Attach.Port != node.Debug.Port {
+			return false
+		}
+		if !tcpPortOpen(node.Debug.Port) {
+			return false
+		}
+		firstPID = node.PID
+		return strings.Count(readFileForFailure(logPath), "debug: starting Delve on") >= 1
+	}) {
+		t.Fatalf("real Delve debug service did not start on %s: status=%s log=%s", runtime.GOOS, readStatusForFailure(worktree, instanceID), readFileForFailure(logPath))
+	}
+
+	writeDebugLoopProgram(t, mainPath, "v2")
+	if !waitForBool(40*time.Second, func() bool {
+		failIfWatchExited(t, watchDone, watchError, worktree, instanceID)
+		status, err := instance.LoadStatus(worktree, instanceID)
+		if err != nil {
+			return false
+		}
+		node := status.Nodes["api_debug"]
+		if node.State != api.StateRunning || node.PID == 0 || node.PID == firstPID || node.Debug == nil || node.Debug.Port == 0 || node.Debug.Attach.Port != node.Debug.Port {
+			return false
+		}
+		return tcpPortOpen(node.Debug.Port)
+	}) {
+		t.Fatalf("real Delve debug service did not restart after source edit on %s: firstPID=%d status=%s log=%s", runtime.GOOS, firstPID, readStatusForFailure(worktree, instanceID), readFileForFailure(logPath))
+	}
+}
+
+func writeDebugLoopProgram(t *testing.T, path, body string) {
+	t.Helper()
+	source := fmt.Sprintf(`package main
+
+import "time"
+
+var version = %q
+
+func main() {
+	_ = version
+	for {
+		time.Sleep(time.Second)
+	}
+}
+`, body)
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func tcpPortOpen(port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 150*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func failIfWatchExited(t *testing.T, done <-chan struct{}, errFn func() error, worktree, instanceID string) {
+	t.Helper()
+	select {
+	case <-done:
+		err := errFn()
+		t.Fatalf("debug watch exited early: %v status=%s", err, readStatusForFailure(worktree, instanceID))
+	default:
+	}
+}
+
 type binaryToolProject struct {
 	tool project.BinaryTool
 }
@@ -2549,12 +2892,16 @@ func waitForBool(timeout time.Duration, fn func() bool) bool {
 }
 
 func waitForEngineWatchReady(t *testing.T, worktree string) string {
+	return waitForEngineWatchReadyWithin(t, worktree, 4*time.Second)
+}
+
+func waitForEngineWatchReadyWithin(t *testing.T, worktree string, timeout time.Duration) string {
 	t.Helper()
 	instanceID, realWorktree, err := instance.IDForWorktree(worktree)
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, 4*time.Second, func() bool {
+	waitFor(t, timeout, func() bool {
 		_, err := os.Stat(instance.FlushWatchReadyPath(realWorktree, instanceID))
 		return err == nil
 	})

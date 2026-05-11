@@ -461,6 +461,28 @@ Semantics:
 
 This is intended for helper binaries such as code generators, schema tools, or repo-local build utilities. The helper stays generic: the engine does not know how the binary is produced, only which inputs fingerprint it and which output file should be cached.
 
+## Go Debug Services
+
+Go debugging is a distinct service shape rather than a normal service with a `dlv` command pasted into `Command(...)`.
+
+The implemented round-one model:
+- adapters declare `b.GoDebugService("<task>")`
+- the task kind is `debug_service`, but the engine treats it as service-like for scheduling, watch restart, flush health, and stop cleanup
+- build a debug binary explicitly with `go build -gcflags=all=-N -l`
+- write it to a stable worktree-local path such as `.devflow/debug/<service>`
+- start Delve with `dlv exec <binary> --headless --api-version=2 --listen=127.0.0.1:<debug-port> --accept-multiclient --continue -- <app-args>`
+- allocate the debug endpoint as a stable named localhost port
+- expose editor attach metadata through `NodeStatus.Debug` in `status --json`
+- require debugger readiness by probing the debug TCP port
+- compose app readiness through the existing service readiness model when the adapter calls `ReadyHTTP`, `ReadyTCP`, `ReadyFile`, or `Ready`
+- on watch changes, stop the old supervised Delve process tree, rebuild, and relaunch on the same named port
+
+The builder API is `b.GoDebugService(...)`. Raw-task adapters should use `project.GoDebugService(...)` and `project.GoDebugServiceOptions` so the Delve lifecycle remains centralized in `pkg/project` instead of being copied into example or project adapter files.
+
+This is different from normal service supervision because Delve owns a launched debuggee process and editor attachment is stateful. Devflow should still be the outer owner through the per-worktree daemon. Round one should avoid attach-to-existing-process workflows and editor-driven Delve restart orchestration.
+
+Cross-platform cleanup is part of the architecture, not a test afterthought. Unix starts supervised processes in a process group and escalates from graceful signal to process-group kill. Windows currently uses process-tree termination through `taskkill /T /F`. Future hardening can replace that with Job Objects, but debug service tests must keep proving that watch restart and stop paths do not leave orphaned Delve/debuggee processes or locked debug binaries.
+
 ## Event Stream
 
 The engine now emits a typed in-process event stream for live consumers. Event categories include:

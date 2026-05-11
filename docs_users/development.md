@@ -48,6 +48,19 @@ For finite check/test targets that depend on services such as Postgres or a loca
 
 For AI-assisted development, prefer `watch --detach` plus `flush` over an attached service `run`. Attached runs are useful for a human terminal, but they are not a clean "start and return when ready" automation interface.
 
+## Go Debugging
+
+If the adapter exposes a debug target with `GoDebugService`, start it like any other dev target:
+
+```bash
+devflow watch debug --detach --json
+devflow status --json
+```
+
+The debug node in `status --json` includes the stable localhost debug port and an attach configuration shape. Point VS Code or Cursor's Go debugger at that host/port with remote attach. Devflow owns the outer lifecycle: on relevant file changes it stops Delve, rebuilds the debug binary, restarts Delve on the same named port, and then waits for debugger/app readiness.
+
+Editor reconnect after a Delve process replacement is editor-dependent. The stable port keeps manual re-attach cheap, but Devflow does not promise invisible debugger reconnection after every restart.
+
 ## TUI
 
 Run `devflow` or `devflow tui` with no args in a project worktree to start or reconnect to the worktree daemon, ensure the default target is running in watch mode, and open the TUI. This is the normal day-to-day entry point when you want edits to cascade automatically.

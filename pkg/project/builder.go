@@ -167,6 +167,10 @@ func (b *Builder) Service(name string) *TaskBuilder {
 	return task
 }
 
+func (b *Builder) GoDebugService(name string) *GoDebugServiceBuilder {
+	return newGoDebugServiceBuilder(b, name)
+}
+
 func (b *Builder) Group(name string, deps ...any) *TaskBuilder {
 	task := b.newTask(name, KindGroup)
 	task.DependsOn(deps...)
@@ -449,7 +453,7 @@ func (t *TaskBuilder) build(requiredCatalog map[string]bool) Task {
 				spec.Dir = local.Abs(spec.Dir)
 			}
 			spec.Env = mergeEnvMaps(local.Env, spec.Env)
-			if task.Kind == KindService {
+			if IsServiceKind(task.Kind) {
 				_, err := local.StartServiceSpec(ctx, spec)
 				return err
 			}
@@ -615,6 +619,8 @@ func refName(ref any) string {
 	case TaskRef:
 		return value.name
 	case *TaskBuilder:
+		return value.Name()
+	case *GoDebugServiceBuilder:
 		return value.Name()
 	default:
 		panic(fmt.Sprintf("unsupported task reference type %T", ref))

@@ -16,10 +16,11 @@ import (
 type Kind string
 
 const (
-	KindOnce    Kind = "once"
-	KindService Kind = "service"
-	KindGroup   Kind = "group"
-	KindWarmup  Kind = "warmup"
+	KindOnce         Kind = "once"
+	KindService      Kind = "service"
+	KindDebugService Kind = "debug_service"
+	KindGroup        Kind = "group"
+	KindWarmup       Kind = "warmup"
 )
 
 type RestartPolicy string
@@ -90,6 +91,20 @@ type Task struct {
 	Description               string
 	Signature                 string
 	CacheKeyOverride          CacheKeyFunc
+	Debug                     *DebugConfig
+}
+
+type DebugConfig struct {
+	Type     string
+	Host     string
+	PortName string
+	Protocol string
+	Binary   string
+	Package  string
+}
+
+func IsServiceKind(kind Kind) bool {
+	return kind == KindService || kind == KindDebugService
 }
 
 type Target struct {
@@ -322,7 +337,7 @@ func ShellTask(name, description string, kind Kind, deps []string, cache bool, o
 		Description: description,
 		Signature:   command,
 		Run: func(ctx context.Context, rt *Runtime) error {
-			if kind == KindService {
+			if IsServiceKind(kind) {
 				_, err := rt.StartService(ctx, "sh", "-c", command)
 				return err
 			}

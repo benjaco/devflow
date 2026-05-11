@@ -1044,6 +1044,9 @@ func renderLogPanel(snap snapshot, selectedName string) []string {
 		if node.PID > 0 {
 			lines = append(lines, fmt.Sprintf("pid=%d", node.PID))
 		}
+		if node.Debug != nil {
+			lines = append(lines, fmt.Sprintf("debug=%s://%s:%d port=%s package=%s", node.Debug.Protocol, node.Debug.Host, node.Debug.Port, node.Debug.PortName, node.Debug.Package))
+		}
 		if node.LastRunKey != "" {
 			lines = append(lines, fmt.Sprintf("key=%s", node.LastRunKey))
 		}

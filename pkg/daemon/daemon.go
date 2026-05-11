@@ -356,8 +356,20 @@ func (c *Client) Subscribe(ctx context.Context, onEvent func(api.Event)) error {
 	dialer := net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "unix", c.socketPath)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	defer close(done)
 	defer conn.Close()
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return err
@@ -1332,7 +1344,7 @@ func (s *Server) restart(ctx context.Context, projectName, task string, upstream
 	if err != nil {
 		return nil, err
 	}
-	if taskDef.Kind == project.KindService {
+	if project.IsServiceKind(taskDef.Kind) {
 		if inst.LastRun.Target == "" {
 			return nil, fmt.Errorf("service restart requires a previously detached run for this instance")
 		}
@@ -1566,7 +1578,7 @@ func writeInvalidateTransition(root, instanceID, target string, g *graph.Graph, 
 		node.LastError = ""
 		node.PID = 0
 		switch node.Kind {
-		case string(project.KindService):
+		case string(project.KindService), string(project.KindDebugService):
 			node.State = api.StatePending
 		case string(project.KindGroup), string(project.KindWarmup), string(project.KindOnce):
 			if node.State != api.StateDirty {

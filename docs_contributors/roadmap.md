@@ -45,6 +45,11 @@ The BikeCoach real-project integration moved the next focus from generic operato
    - Add stronger JSON contract tests for status, instances, events, and flush.
    - Build an MCP wrapper over the stable CLI surface after the real-project workflow is smoother.
 
+3. Go debug-service hardening
+   - Validate VS Code/Cursor attach behavior against the `NodeStatus.Debug` attach metadata.
+   - Consider replacing Windows `taskkill /T /F` cleanup with Job Objects if real repeated Delve restarts show locked binaries or orphaned debuggee processes.
+   - Defer attach-to-existing-process workflows, editor-driven DAP restart orchestration, and legacy JSON-RPC attach until the owned `dlv exec` path is proven in real projects.
+
 ## Feedback Disposition
 
 - Completed from BikeCoach feedback: per-worktree localbuild locking for concurrent CLI commands.
@@ -56,6 +61,7 @@ The BikeCoach real-project integration moved the next focus from generic operato
 - Completed from Prisma/Postgres adoption test: Prisma migration inspection ignores `migration_lock.toml`, fresh schemas with models fail before smoke tests when no migrations exist, remote clone failures from `pg_dump` are not masked, `stop --all` stops the managed DB container, and first task errors are preserved over sibling cancellation noise.
 - Completed from Prisma/Postgres clean retry: first `flush` after `watch --detach` now periodically rewrites the sync sentinel while waiting so watcher startup scan races do not cause false ack timeouts.
 - Completed from reworked Prisma/Postgres setup feedback: the builder/component API is the preferred adapter shape, `prisma.NewMigration(b)` now reconciles the managed database before authoring so edited latest migrations do not force a manual reset, and docs clarify component task names, consumer-owned target names, `pg_dump` major-version compatibility, and stopped database metadata.
+- Completed from Delve research: first-class `GoDebugService` builds a stable debug binary with `go build -gcflags=all=-N -l`, runs `dlv exec` headless on a stable local debug port, exposes debug attach metadata in status JSON, participates in daemon/watch stop-rebuild-relaunch, and has fake `go`/`dlv` lifecycle coverage plus real Delve CI-mode smoke coverage installed in the OS matrix.
 - Accepted as immediate roadmap input: complete script-convergence docs, a full managed Postgres example, and fixed-port examples.
 - Reframed: "service target `run` returns after readiness" should not silently change attached `run` semantics. The current automation path is `watch --detach` plus `flush`; CI mode can probe readiness but stops services before returning.
 - Reframed: a fixed-port HTTP readiness helper should probably be part of broader env-aware readiness patterns rather than a BikeCoach-specific helper.
