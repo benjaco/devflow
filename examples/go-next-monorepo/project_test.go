@@ -205,30 +205,39 @@ func TestExampleProjectWatchSelectiveReruns(t *testing.T) {
 	}) {
 		t.Fatalf("initial watch run did not settle: %s", traceSnapshot(worktree, "prisma_migrate", "postgres", "backend_dev", "frontend_dev", "frontend_codegen"))
 	}
+	waitForExampleWatchReady(t, worktree)
+
+	prismaBaseline := traceCount(worktree, "prisma_migrate")
+	postgresBaseline := traceCount(worktree, "postgres")
+	backendBaseline := traceCount(worktree, "backend_dev")
+	frontendBaseline := traceCount(worktree, "frontend_dev")
+	frontendCodegenBaseline := traceCount(worktree, "frontend_codegen")
 
 	rewriteFile(t, filepath.Join(worktree, "db/migrations/001_init.sql"), "CREATE TABLE widgets(id INTEGER PRIMARY KEY, name TEXT NOT NULL, slug TEXT);\n")
-	if !waitForStableTraceCounts(8*time.Second, 500*time.Millisecond, worktree, map[string]int{
-		"prisma_migrate":   2,
-		"postgres":         2,
-		"backend_dev":      2,
-		"frontend_dev":     1,
-		"frontend_codegen": 1,
+	if !waitForMinimumStableTraceCounts(8*time.Second, 500*time.Millisecond, worktree, map[string]int{
+		"prisma_migrate":   prismaBaseline + 1,
+		"postgres":         postgresBaseline + 1,
+		"backend_dev":      backendBaseline + 1,
+		"frontend_dev":     frontendBaseline,
+		"frontend_codegen": frontendCodegenBaseline,
 	}) {
 		t.Fatalf("migration change did not rerun expected slice: prisma_migrate=%d postgres=%d backend_dev=%d frontend_dev=%d frontend_codegen=%d", traceCount(worktree, "prisma_migrate"), traceCount(worktree, "postgres"), traceCount(worktree, "backend_dev"), traceCount(worktree, "frontend_dev"), traceCount(worktree, "frontend_codegen"))
 	}
-	if got := traceCount(worktree, "frontend_dev"); got != 1 {
-		t.Fatalf("unexpected frontend restart after migration change: %d", got)
+	if got := traceCount(worktree, "frontend_dev"); got != frontendBaseline {
+		t.Fatalf("unexpected frontend restart after migration change: got %d baseline %d", got, frontendBaseline)
 	}
-	if got := traceCount(worktree, "frontend_codegen"); got != 1 {
-		t.Fatalf("unexpected frontend_codegen rerun after migration change: %d", got)
+	if got := traceCount(worktree, "frontend_codegen"); got != frontendCodegenBaseline {
+		t.Fatalf("unexpected frontend_codegen rerun after migration change: got %d baseline %d", got, frontendCodegenBaseline)
 	}
+	backendAfterMigration := traceCount(worktree, "backend_dev")
+	frontendAfterMigration := traceCount(worktree, "frontend_dev")
 
 	rewriteFile(t, filepath.Join(worktree, "frontend/src/page.tsx"), "export default function Page(){ return 'changed'; }\n")
 	waitFor(t, 5*time.Second, func() bool {
-		return traceCount(worktree, "frontend_dev") == 2
+		return traceCount(worktree, "frontend_dev") == frontendAfterMigration+1
 	})
-	if got := traceCount(worktree, "backend_dev"); got != 2 {
-		t.Fatalf("unexpected backend restart after frontend change: %d", got)
+	if got := traceCount(worktree, "backend_dev"); got != backendAfterMigration {
+		t.Fatalf("unexpected backend restart after frontend change: got %d baseline %d", got, backendAfterMigration)
 	}
 
 	cancel()

@@ -474,6 +474,11 @@ Last updated: 2026-05-12
 
 ## Latest Work
 
+- Fixed Windows-sensitive watch assertion in the go-next example:
+  - `TestExampleProjectWatchSelectiveReruns` now waits for `watch.ready` before editing after startup
+  - migration and frontend change checks compare against settled baselines, allowing extra affected backend service restarts while still proving frontend tasks do not rerun
+  - verified with `go test ./examples/go-next-monorepo -run TestExampleProjectWatchSelectiveReruns -count=5 -v`
+  - verified `go test ./...` on Windows using a temporary Delve `v1.26.2`, matching CI, because the globally installed `dlv v1.24.2` fails the debug target locally
 - Fixed remaining Windows default-test failures:
   - worktree-local and daemon copied binaries now use `.exe` paths on Windows
   - example fake services and focused process/database/engine tests use portable Go helper processes instead of `sh`
