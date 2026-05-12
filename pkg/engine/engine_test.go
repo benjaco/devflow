@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2331,15 +2333,18 @@ func TestGoDebugServiceWatchRestartsRealDelveAfterSourceEdit(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(mainPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeDebugLoopProgram(t, mainPath, "v1")
+	writeDebugHTTPProgram(t, mainPath, "v1")
 
 	p := project.Define(func(ctx context.Context, b *project.Builder) error {
 		_ = ctx
 		b.Name("real-delve-watch-project")
+		apiPort := b.Port("api")
 		debug := b.GoDebugService("api_debug").
 			Package("./cmd/api").
 			DebugPort("debug_api").
+			Env("PORT", apiPort).
 			Inputs("go.mod", "cmd/api").
+			ReadyHTTP("api", "/health", 200).
 			ReadyTimeout(20 * time.Second)
 		b.Target("debug", debug)
 		return nil
@@ -2379,6 +2384,14 @@ func TestGoDebugServiceWatchRestartsRealDelveAfterSourceEdit(t *testing.T) {
 	}()
 
 	instanceID := waitForEngineWatchReadyWithin(t, worktree, 30*time.Second)
+	inst, err := instance.Resolve(worktree, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiPort := inst.Ports["api"]
+	if apiPort == 0 {
+		t.Fatalf("expected api port to be allocated: %+v", inst.Ports)
+	}
 	logPath := instance.LogPath(worktree, instanceID, "api_debug")
 	failIfWatchExited(t, watchDone, watchError, worktree, instanceID)
 
@@ -2396,13 +2409,17 @@ func TestGoDebugServiceWatchRestartsRealDelveAfterSourceEdit(t *testing.T) {
 		if !tcpPortOpen(node.Debug.Port) {
 			return false
 		}
+		body, ok := httpBodyForPort(apiPort)
+		if !ok || body != "v1" {
+			return false
+		}
 		firstPID = node.PID
 		return strings.Count(readFileForFailure(logPath), "debug: starting Delve on") >= 1
 	}) {
 		t.Fatalf("real Delve debug service did not start on %s: status=%s log=%s", runtime.GOOS, readStatusForFailure(worktree, instanceID), readFileForFailure(logPath))
 	}
 
-	writeDebugLoopProgram(t, mainPath, "v2")
+	writeDebugHTTPProgram(t, mainPath, "v2")
 	if !waitForBool(40*time.Second, func() bool {
 		failIfWatchExited(t, watchDone, watchError, worktree, instanceID)
 		status, err := instance.LoadStatus(worktree, instanceID)
@@ -2413,30 +2430,62 @@ func TestGoDebugServiceWatchRestartsRealDelveAfterSourceEdit(t *testing.T) {
 		if node.State != api.StateRunning || node.PID == 0 || node.PID == firstPID || node.Debug == nil || node.Debug.Port == 0 || node.Debug.Attach.Port != node.Debug.Port {
 			return false
 		}
-		return tcpPortOpen(node.Debug.Port)
+		if !tcpPortOpen(node.Debug.Port) {
+			return false
+		}
+		body, ok := httpBodyForPort(apiPort)
+		return ok && body == "v2"
 	}) {
 		t.Fatalf("real Delve debug service did not restart after source edit on %s: firstPID=%d status=%s log=%s", runtime.GOOS, firstPID, readStatusForFailure(worktree, instanceID), readFileForFailure(logPath))
 	}
 }
 
-func writeDebugLoopProgram(t *testing.T, path, body string) {
+func writeDebugHTTPProgram(t *testing.T, path, body string) {
 	t.Helper()
 	source := fmt.Sprintf(`package main
 
-import "time"
+import (
+	"fmt"
+	"net/http"
+	"os"
+)
 
-var version = %q
+const response = %q
 
 func main() {
-	_ = version
-	for {
-		time.Sleep(time.Second)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "0"
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, response)
+	})
+	if err := http.ListenAndServe("127.0.0.1:"+port, mux); err != nil {
+		panic(err)
 	}
 }
 `, body)
 	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func httpBodyForPort(port int) (string, bool) {
+	client := &http.Client{Timeout: 250 * time.Millisecond}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port))
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
 }
 
 func tcpPortOpen(port int) bool {

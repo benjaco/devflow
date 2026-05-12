@@ -54,7 +54,7 @@ Last updated: 2026-05-12
   - stable named localhost debug ports and status JSON attach metadata in `NodeStatus.Debug`
   - service-like engine behavior for scheduling, watch restart, flush health, stop cleanup, daemon restart, and TUI visibility
   - CI installs Delve `v1.26.2` on Linux, macOS, and Windows so real `dlv exec` smoke coverage runs in the default matrix
-  - real Delve watch-restart coverage starts a debug service, edits Go source, and verifies the service relaunches with a new PID, live debug listener, and intact debug attach metadata
+  - real Delve watch-restart coverage starts a debug HTTP service, verifies the first response body, edits Go source, and verifies the service relaunches with a new PID, live debug listener, intact debug attach metadata, and the new HTTP response body
   - verified locally with Delve `v1.26.2`, targeted debug lifecycle tests, `go test ./...`, and `go build -o <temp>/devflow ./cmd/devflow`
 - Go-next example now has a real `backend-debug` target:
   - uses the built-in `project.GoDebugService` helper rather than hand-written Delve lifecycle code
