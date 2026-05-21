@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-05-20
+Last updated: 2026-05-21
 
 ## Current Status
 
@@ -21,6 +21,10 @@ Last updated: 2026-05-20
   - Prisma and PayloadCMS helpers register task-backed migration-create actions with declared migration-file effects
   - migration creation is no longer modeled or documented as `new-migration` / `migration_new` targets
   - action result JSON reports created files from declared write effects
+- PayloadCMS component input coverage hardened:
+  - PayloadCMS migration tasks now include schema module inputs by default (`src/collections`, `src/globals`)
+  - adapters can override or extend schema module paths with `SchemaInputs(...)` / `AddSchemaInputs(...)`
+  - the PayloadCMS example now has watch coverage that edits a real collection module and proves Devflow reruns migration preparation without rerunning local `npm install`
 - Repository scaffold created
 - Root docs created:
   - `README.md`

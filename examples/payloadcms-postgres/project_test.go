@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -81,6 +82,87 @@ func TestPayloadCMSMigrationsApplyWithFakePayload(t *testing.T) {
 	record := readFilePayloadTest(t, recordPath)
 	if !strings.Contains(record, "npm run payload -- migrate") {
 		t.Fatalf("expected payload migrate command, got:\n%s", record)
+	}
+}
+
+func TestPayloadCMSWatchPicksUpCollectionModuleChange(t *testing.T) {
+	isolatePayloadUserCache(t)
+	worktree := seededPayloadWorktree(t)
+	fakeBin := installFakeNPM(t)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	recordPath := filepath.Join(worktree, ".devflow", "fake-npm-record.txt")
+	t.Setenv("DEVFLOW_FAKE_NPM_RECORD", recordPath)
+
+	eng, err := engine.New(testPayloadProjectWithoutManagedDB(), worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := eng.SubscribeEvents()
+	var (
+		eventMu     sync.Mutex
+		watchStarts []string
+	)
+	go func() {
+		for evt := range events {
+			if evt.Type != api.EventWatchCycleStart {
+				continue
+			}
+			eventMu.Lock()
+			watchStarts = append(watchStarts, "files="+strings.Join(evt.Files, ",")+" affected="+strings.Join(evt.AffectedTasks, ","))
+			if len(watchStarts) > 8 {
+				watchStarts = append([]string(nil), watchStarts[len(watchStarts)-8:]...)
+			}
+			eventMu.Unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Watch(ctx, engine.Request{
+			Target:      "setup",
+			Worktree:    worktree,
+			Mode:        api.ModeWatch,
+			MaxParallel: 2,
+		})
+	}()
+	defer func() {
+		cancel()
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("watch returned error during cleanup: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("watch did not stop during cleanup")
+		}
+	}()
+
+	waitForPayloadWatchReady(t, worktree)
+	waitForPayload(t, 8*time.Second, func() bool {
+		return payloadRecordCount(recordPath, "npm run payload -- migrate") >= 1
+	})
+	migrateBaseline := payloadRecordCount(recordPath, "npm run payload -- migrate")
+	installBaseline := payloadRecordCount(recordPath, "npm install")
+
+	writePayloadFile(t, worktree, "src/collections/Posts.ts", `export const Posts = {
+  slug: 'posts',
+  fields: [
+    { name: 'title', type: 'text', required: true },
+    { name: 'legacy', type: 'text' },
+    { name: 'status', type: 'select', options: ['draft', 'published'] },
+  ],
+}
+`)
+
+	waitForPayload(t, 8*time.Second, func() bool {
+		return payloadRecordCount(recordPath, "npm run payload -- migrate") >= migrateBaseline+1
+	})
+	if got := payloadRecordCount(recordPath, "npm install"); got != installBaseline {
+		t.Fatalf("collection module edit should not rerun npm install: got %d baseline %d\nrecord:\n%s", got, installBaseline, readFilePayloadTest(t, recordPath))
+	}
+	if !payloadWatchStartsContain(&eventMu, watchStarts, "src/collections/Posts.ts", "payload_migrations") {
+		t.Fatalf("expected watch cycle for collection module to affect payload_migrations, got: %s", payloadRecentWatchStarts(&eventMu, watchStarts))
 	}
 }
 
@@ -174,8 +256,13 @@ func testPayloadProjectWithoutManagedDB() project.Project {
 			Config("src/payload.config.ts").
 			MigrationDir("src/migrations").
 			Command("npm", "run", "payload", "--")
-		b.Target("setup", payload.Migrations(b))
-		payload.NewMigration(b)
+		npmInstall := b.Task("npm_install").
+			Command("npm", "install").
+			Inputs("package.json", "package-lock.json").
+			Stamp()
+		migrations := payload.Migrations(b).DependsOn(npmInstall)
+		payload.NewMigration(b).DependsOn(npmInstall)
+		b.Target("setup", npmInstall, migrations)
 		return nil
 	})
 }
@@ -272,6 +359,62 @@ func readFilePayloadTest(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func waitForPayloadWatchReady(t *testing.T, worktree string) string {
+	t.Helper()
+	instanceID, realWorktree, err := instance.IDForWorktree(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForPayload(t, 8*time.Second, func() bool {
+		_, err := os.Stat(instance.FlushWatchReadyPath(realWorktree, instanceID))
+		return err == nil
+	})
+	return instanceID
+}
+
+func waitForPayload(t *testing.T, timeout time.Duration, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("condition not met before timeout")
+}
+
+func payloadRecordCount(path, needle string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, needle) {
+			count++
+		}
+	}
+	return count
+}
+
+func payloadWatchStartsContain(mu *sync.Mutex, values []string, file, affected string) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	for _, value := range values {
+		if strings.Contains(value, file) && strings.Contains(value, affected) {
+			return true
+		}
+	}
+	return false
+}
+
+func payloadRecentWatchStarts(mu *sync.Mutex, values []string) string {
+	mu.Lock()
+	defer mu.Unlock()
+	return strings.Join(values, "\n")
 }
 
 func exeSuffixPayloadTest() string {

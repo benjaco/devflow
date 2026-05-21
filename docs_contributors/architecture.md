@@ -356,7 +356,7 @@ Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`
 
 `PostgresDumpSourcePolicy` must fail when `pg_dump` fails. It writes through a temporary dump file instead of an unchecked shell pipeline so `psql` cannot mask a failed clone with an empty successful restore.
 
-PayloadCMS follows the same operator rule as Prisma: normal `up`/watch paths apply existing migrations non-interactively through `payload.Migrations(b)`, while migration creation belongs to an explicit action registered by `payload.NewMigration(b)`. Payload can ask for confirmations when changes may be destructive; those prompts flow through the generic interactive prompt path instead of being handled with Payload-specific TUI logic.
+PayloadCMS follows the same operator rule as Prisma: normal `up`/watch paths apply existing migrations non-interactively through `payload.Migrations(b)`, while migration creation belongs to an explicit action registered by `payload.NewMigration(b)`. Payload can ask for confirmations when changes may be destructive; those prompts flow through the generic interactive prompt path instead of being handled with Payload-specific TUI logic. Payload schema module paths are part of the component input contract, not only app-service inputs: by default the component includes `src/collections` and `src/globals`, and adapters can override them with `SchemaInputs(...)`.
 
 Managed Postgres target pattern:
 - preserve the Docker volume unless an explicit restore/rebuild path owns the destruction

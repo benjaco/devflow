@@ -2078,7 +2078,7 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 
 	doctorStdout := &bytes.Buffer{}
 	app = &App{Stdout: doctorStdout, Stderr: &bytes.Buffer{}}
-	if err := app.Run([]string{"doctor", "--json", "--worktree", worktree, "--project", "go-next-monorepo"}); err != nil {
+	if err := app.Run([]string{"doctor", "--json", "--worktree", worktree, "--project", "go-next-monorepo", "--target", "fullstack"}); err != nil {
 		t.Fatal(err)
 	}
 	var doctor api.DoctorResult

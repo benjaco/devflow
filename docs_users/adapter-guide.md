@@ -142,6 +142,7 @@ db := database.Postgres("payload").PortName("postgres")
 payload := database.PayloadCMS("payload").
     Config("src/payload.config.ts").
     MigrationDir("src/migrations").
+    SchemaInputs("src/collections", "src/globals").
     Database(db)
 
 npmInstall := b.Task("npm_install").
@@ -162,6 +163,8 @@ app := b.Service("app").
 
 b.Target("up", app)
 ```
+
+Payload schema inputs default to `src/collections` and `src/globals`; configure `SchemaInputs(...)` for projects that keep collections, globals, blocks, or reusable Payload config modules elsewhere. These inputs drive both fingerprints and watch matching.
 
 By default, the component uses `npx payload migrate` and `npx payload migrate:create <name>`. If your project wraps Payload in an npm script, use:
 

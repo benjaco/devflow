@@ -269,6 +269,7 @@ db := database.Postgres("payload").PortName("postgres")
 payload := database.PayloadCMS("payload").
 	Config("src/payload.config.ts").
 	MigrationDir("src/migrations").
+	SchemaInputs("src/collections", "src/globals").
 	Database(db)
 
 npmInstall := b.Task("npm_install").
@@ -292,6 +293,8 @@ b.Target("setup", npmInstall, migrations)
 ```
 
 `payload.Migrations(b)` starts the managed Postgres runtime when a `database.Postgres` component is attached, waits for host-port readiness, and runs Payload's normal migration apply command. It is not task-cacheable because database state is a live runtime side effect.
+
+Payload schema inputs default to `src/collections` and `src/globals` in addition to the config and migration directory. Use `SchemaInputs(...)` when your collections, globals, blocks, or other config modules live elsewhere. Watch mode uses the same inputs, so edits to those modules are picked up and rerun the Payload migration preparation task.
 
 `payload.NewMigration(b)` registers the explicit authoring action. It reads the action input `name` through `DEVFLOW_MIGRATION_NAME`, runs Payload migration creation, writes into the configured migration directory, and is intentionally not task-cacheable. Payload can prompt for confirmations when a migration may be destructive, for example after deleting a field. Devflow models those prompts as explicit interactive events, so the TUI or daemon client can ask the user instead of hiding a hanging subprocess in watch mode.
 

@@ -114,6 +114,11 @@ func TestPayloadCMSComponentDefinesMigrationTasks(t *testing.T) {
 	if migrations.Cache {
 		t.Fatal("PayloadCMS migration apply task should not be task-cacheable")
 	}
+	for _, path := range []string{"src/payload.config.ts", "src/migrations", "src/collections", "src/globals"} {
+		if !stringSliceContainsDatabaseTest(migrations.Inputs.Paths, path) {
+			t.Fatalf("expected migrations path inputs to include %q, got %+v", path, migrations.Inputs.Paths)
+		}
+	}
 	for _, key := range []string{"DATABASE_URL"} {
 		if !stringSliceContainsDatabaseTest(migrations.Inputs.Env, key) {
 			t.Fatalf("expected migrations input env to include %q, got %+v", key, migrations.Inputs.Env)

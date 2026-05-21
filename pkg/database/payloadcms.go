@@ -15,6 +15,7 @@ type PayloadCMSComponent struct {
 	name          string
 	configPath    string
 	migrationsDir string
+	schemaInputs  []any
 	commandName   string
 	commandArgs   []string
 	migrationEnv  string
@@ -37,6 +38,7 @@ func PayloadCMS(name string) *PayloadCMSComponent {
 		name:          name,
 		configPath:    "src/payload.config.ts",
 		migrationsDir: "src/migrations",
+		schemaInputs:  []any{"src/collections", "src/globals"},
 		commandName:   "npx",
 		commandArgs:   []string{"payload"},
 		migrationEnv:  "DEVFLOW_MIGRATION_NAME",
@@ -57,6 +59,16 @@ func (p *PayloadCMSComponent) MigrationDir(path string) *PayloadCMSComponent {
 	if path != "" {
 		p.migrationsDir = path
 	}
+	return p
+}
+
+func (p *PayloadCMSComponent) SchemaInputs(inputs ...any) *PayloadCMSComponent {
+	p.schemaInputs = append([]any(nil), inputs...)
+	return p
+}
+
+func (p *PayloadCMSComponent) AddSchemaInputs(inputs ...any) *PayloadCMSComponent {
+	p.schemaInputs = append(p.schemaInputs, inputs...)
 	return p
 }
 
@@ -107,8 +119,8 @@ func (p *PayloadCMSComponent) Migrations(b *project.Builder) *project.TaskBuilde
 	if p.migrationsTask != nil {
 		return p.migrationsTask
 	}
-	p.migrationsTask = b.Task(p.name+"_migrations").
-		Inputs(p.configPath, p.migrationsDir, "package.json", "package-lock.json").
+	p.migrationsTask = b.Task(p.name + "_migrations").
+		Inputs(p.taskInputs()...).
 		InputEnv("DATABASE_URL").
 		NoCache().
 		Run(func(ctx context.Context, rt *project.Runtime) error {
@@ -135,7 +147,7 @@ func (p *PayloadCMSComponent) NewMigration(b *project.Builder) *project.TaskBuil
 		return p.newMigrationTask
 	}
 	p.newMigrationTask = b.Task(p.name+"_new_migration").
-		Inputs(p.configPath, p.migrationsDir, "package.json", "package-lock.json").
+		Inputs(p.taskInputs()...).
 		InputEnv(p.migrationEnv, "DATABASE_URL", p.forceEnv).
 		Outputs(p.migrationsDir).
 		NoCache().
@@ -168,6 +180,12 @@ func (p *PayloadCMSComponent) NewMigration(b *project.Builder) *project.TaskBuil
 	p.requiredCLIs(p.newMigrationTask)
 	p.registerMigrationAction(b)
 	return p.newMigrationTask
+}
+
+func (p *PayloadCMSComponent) taskInputs() []any {
+	inputs := []any{p.configPath, p.migrationsDir, "package.json", "package-lock.json"}
+	inputs = append(inputs, p.schemaInputs...)
+	return inputs
 }
 
 func (p *PayloadCMSComponent) registerMigrationAction(b *project.Builder) {
