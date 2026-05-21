@@ -22,9 +22,11 @@ const (
 )
 
 type PromptSpec struct {
-	Pattern string
-	Prompt  string
-	Kind    PromptKind
+	Pattern  string
+	Patterns []string
+	Prompt   string
+	Kind     PromptKind
+	Repeat   bool
 }
 
 type PromptRequest struct {
@@ -393,17 +395,18 @@ func (r *interactiveReader) maybePrompt() {
 		return
 	}
 	spec := r.prompts[r.promptIndex]
-	if spec.Pattern == "" || !strings.Contains(r.recentBuf, spec.Pattern) {
+	pattern := spec.match(r.recentBuf)
+	if pattern == "" {
 		return
 	}
 	if r.onPrompt == nil {
-		r.setErr(fmt.Errorf("interactive prompt encountered without handler: %s", spec.Pattern))
+		r.setErr(fmt.Errorf("interactive prompt encountered without handler: %s", pattern))
 		return
 	}
 	r.requestSeq++
 	req := PromptRequest{
 		ID:     fmt.Sprintf("prompt-%d", r.requestSeq),
-		Prompt: firstNonEmpty(spec.Prompt, spec.Pattern),
+		Prompt: firstNonEmpty(spec.Prompt, pattern),
 		Kind:   spec.Kind,
 	}
 	resp, err := r.onPrompt(req)
@@ -415,8 +418,34 @@ func (r *interactiveReader) maybePrompt() {
 		r.setErr(err)
 		return
 	}
-	r.promptIndex++
+	if !spec.Repeat {
+		r.promptIndex++
+	}
 	r.recentBuf = ""
+}
+
+func (p PromptSpec) match(value string) string {
+	for _, pattern := range p.patterns() {
+		if pattern != "" && strings.Contains(value, pattern) {
+			return pattern
+		}
+	}
+	return ""
+}
+
+func (p PromptSpec) patterns() []string {
+	if len(p.Patterns) == 0 {
+		if p.Pattern == "" {
+			return nil
+		}
+		return []string{p.Pattern}
+	}
+	out := make([]string, 0, len(p.Patterns)+1)
+	if p.Pattern != "" {
+		out = append(out, p.Pattern)
+	}
+	out = append(out, p.Patterns...)
+	return out
 }
 
 func (r *interactiveReader) setErr(err error) {

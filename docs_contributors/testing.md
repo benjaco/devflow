@@ -22,7 +22,7 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 
 - subprocess stdout/stderr capture
 - per-task log truncation at task-attempt start so custom adapter progress and subprocess output both reflect the current run attempt
-- interactive prompt detection and answer forwarding with a real prompt CLI fixture
+- interactive prompt detection and answer forwarding with a real prompt CLI fixture, including alternate/repeated prompt patterns
 - service lifecycle management
 - CI-mode service targets act as readiness probes and stop services before returning
 - Go debug-service coverage includes builder API metadata, external debug binary build planning, status attach metadata, stable debug-port readiness, watch restart sequencing, and process-tree cleanup through fake `go`/`dlv` helper binaries. CI also installs real Delve and runs real `dlv exec` coverage on Linux, macOS, and Windows for both CI-mode readiness/stop and watch-mode source-edit restart back into a debug service. The real watch restart test starts an HTTP app under Delve, verifies the first response body, edits the source constant, waits for the restart, and verifies the endpoint returns the new body. Real editor attach coverage remains opt-in until the debug-service contract is proven in real projects.
@@ -35,10 +35,11 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - database runtime command planning and snapshot-manifest coverage
 - builder API coverage for command tasks, services, target definitions, automatic cacheability from outputs, port env references, dotenv loading, path inputs, glob inputs, and filtered inputs
 - local stamped task coverage for install/setup commands that skip on matching input keys, rerun when declared local outputs are missing, stay isolated per worktree, ignore matching global cache entries, and avoid watch loops when commands touch unchanged input mtimes
-- database component coverage for common Postgres/Prisma task generation, optional snapshot-root defaults, instance DB/env finalization, and explicit non-cacheable migration authoring
+- database component coverage for common Postgres/Prisma/PayloadCMS task generation, optional snapshot-root defaults, instance DB/env finalization, and explicit non-cacheable migration authoring
 - database runtime host-port readiness, stale published-port reconciliation, Docker control-command timeout coverage, and process-group cancellation for Docker helper children that keep pipes open
 - managed migration workflow coverage for exact snapshot reuse, nearest-prefix restore, incompatible base fingerprint misses, changed-latest tail replay, per-migration prefix snapshots, Prisma default milestone snapshots based on uncommitted migration folders, direct Git-status parsing for modified/untracked Prisma migration folders, final-only snapshotting for committed Prisma tails, checked remote Postgres clone policy failures, Prisma directory-only migration inspection, Prisma lock-file churn, model-free schemas without migrations, added/deleted Prisma migrations, changed older Prisma migration rebuilds, failed Prisma migration apply without snapshotting, Prisma prefix deploy snapshots, fresh/no-migration migration-needed errors, schema-without-migration migration-needed errors, Prisma authoring database reconciliation, database prep progress logs before Docker/Prisma subprocess output, no duplicated runtime subprocess log lines, and Prisma generate helpers
 - Prisma schema/migration inspection and nearest-prefix snapshot planning coverage
+- PayloadCMS/Postgres example coverage for project detection, graph shape, migration apply command wiring, and deleted-field schema edits that create a migration only after a confirmation prompt using a fake Payload/npm command
 - dotenv parsing and merged runtime-env coverage with devflow-managed DB overrides
 - CLI JSON output shape, including command-level lifecycle coverage for `run`, `status`, `logs`, `instances`, `doctor`, and `stop`
 - scoped docs command coverage for `devflow docs setup`, `devflow docs development`, and the bare `devflow docs` usage error
@@ -48,7 +49,7 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - global cache coverage for the single OS user cache root and project cache namespaces
 - required CLI detection, target-scoped required CLI selection, and platform-script install coverage in `pkg/project` and `internal/cli`
 - engine-level interactive prompt event plus answer-file integration coverage
-- TUI database/Prisma panel rendering, drift warning, Prisma snapshot-summary loading, daemon-backed migration target action, detached-target relaunch, selected-task invalidate/rerun forced relaunch behavior, log scroll preservation across same-log reloads, default startup waiting for a matching non-empty status snapshot instead of stale blank state, and progress/footer status coverage
+- TUI database/Prisma panel rendering, drift warning, Prisma snapshot-summary loading, daemon-backed migration-create action, detached-target relaunch, selected-task invalidate/rerun forced relaunch behavior, log scroll preservation across same-log reloads, default startup waiting for a matching non-empty status snapshot instead of stale blank state, and progress/footer status coverage
 - TUI daemon ownership coverage proving a daemon created for the TUI session is stopped on exit while an already-running daemon is left alone
 - sequential engine execution with cache hits
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work, plus explicit `migration_needed` task-state classification for database migration authoring guards

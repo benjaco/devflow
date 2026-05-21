@@ -114,10 +114,11 @@ func init() {
             Inputs("go.mod", "go.sum", "cmd", "internal", "prisma/schema.prisma").
             NoCache()
 
+        prisma.NewMigration(b)
+
         b.Target("up", app)
         b.Target("build", backend, frontend)
         b.Target("test", unit)
-        b.Target("new-migration", prisma.NewMigration(b))
         return nil
     }))
 }
@@ -130,6 +131,45 @@ Important details:
 - Install/setup tasks such as `npm_install` should use `Stamp()` with local outputs like `node_modules` when they must run once per lockfile key without copying dependency folders into Devflow's global cache.
 - `unit.NoCache()` keeps tests as a live check even though they have declared inputs.
 - `database.Postgres("prisma")` defaults the snapshot directory; set `SnapshotRoot(...)` only when the default is wrong.
+
+## PayloadCMS/Postgres Component
+
+PayloadCMS projects can use the same builder style:
+
+```go
+db := database.Postgres("payload").PortName("postgres")
+
+payload := database.PayloadCMS("payload").
+    Config("src/payload.config.ts").
+    MigrationDir("src/migrations").
+    Database(db)
+
+npmInstall := b.Task("npm_install").
+    Command("npm", "install").
+    Inputs("package.json", "package-lock.json").
+    Stamp()
+
+migrations := payload.Migrations(b).DependsOn(npmInstall)
+payload.NewMigration(b).DependsOn(npmInstall)
+
+app := b.Service("app").
+    Command("npm", "run", "dev").
+    DependsOn(migrations).
+    Inputs("src", "package.json", "package-lock.json").
+    InputEnv("DATABASE_URL", "PAYLOAD_SECRET", "PORT").
+    Env("PORT", b.Port("app")).
+    ReadyHTTP("app", "/health", 200)
+
+b.Target("up", app)
+```
+
+By default, the component uses `npx payload migrate` and `npx payload migrate:create <name>`. If your project wraps Payload in an npm script, use:
+
+```go
+payload.Command("npm", "run", "payload", "--")
+```
+
+Payload migration creation may ask for confirmations around destructive changes. The component declares those prompts so the TUI and daemon can ask the user. Normal boot/watch targets should depend on `payload.Migrations(b)`, not `payload.NewMigration(b)`.
 
 ## Required CLI Installation
 
@@ -220,6 +260,53 @@ Recommended precedence:
 - devflow-owned runtime overrides
 
 Use dotenv values for normal app configuration, but keep leased ports, instance IDs, and per-instance DB URLs under devflow control.
+
+## Explicit Interactive Actions
+
+Prompting commands should be explicit authoring or operator actions, not hidden in normal `up`/watch paths. For custom tools, use interactive command specs:
+
+```go
+task := b.Task("dangerous_authoring_action").
+    CommandSpec(process.CommandSpec{
+        Name:        "mytool",
+        Args:        []string{"author"},
+        Interactive: true,
+        Prompts: []process.PromptSpec{
+            {
+                Patterns: []string{
+                    "Drop field? [y/N]: ",
+                    "Delete column? [y/N]: ",
+                },
+                Prompt: "Accept destructive migration warning?",
+                Kind:   process.PromptConfirm,
+                Repeat: true,
+            },
+        },
+    }).
+    NoCache()
+```
+
+Use `Patterns` when a tool has multiple possible prompt texts. Use `Repeat` when the same spec should answer a sequence of similar confirmations.
+
+To make that task a foreground user action instead of a normal target, register it with an action spec:
+
+```go
+b.Action("custom.migration.create").
+    Kind("devflow.database.migration.create").
+    Category(project.ActionCategoryAuthoring).
+    Component("custom").
+    Task(task).
+    Input(project.ActionInput{
+        Name:       "name",
+        Required:   true,
+        Positional: true,
+        Env:        "MIGRATION_NAME",
+    }).
+    Writes("migrations/**").
+    RelaunchPreviousTargetAfterSuccess()
+```
+
+Users can then run `devflow action run custom.migration.create --name add_status` or, for migration-create actions, `devflow migration create add_status --component custom`.
 
 ## Watch Restart Policies
 
@@ -328,10 +415,10 @@ app := b.Service("app").
     ReadyHTTP("app", "/health", 200)
 
 b.Target("up", app)
-b.Target("new-migration", prisma.NewMigration(b))
+prisma.NewMigration(b)
 ```
 
-The component task names are derived from the component name: `prisma_client`, `prisma_migrations`, and `prisma_new_migration` for `database.Prisma("prisma")`. Target names are consumer-owned. These docs use `new-migration`; you can expose an additional alias such as `migration_new` if an existing workflow already uses that name.
+The component task names are derived from the component name: `prisma_client`, `prisma_migrations`, and `prisma_new_migration` for `database.Prisma("prisma")`. `prisma.NewMigration(b)` registers an explicit action with kind `devflow.database.migration.create`; it is not a normal target and does not run during `up`, `watch`, or `test`.
 
 `prisma.Migrations(b)` will:
 - inspect the Prisma schema and migration folder
@@ -346,7 +433,7 @@ That prefix snapshotting matters during development. Committed migrations are as
 
 `prisma.NewMigration(b)` uses the same prefix restore model before it invokes Prisma migration generation. It restores or rebuilds the managed database to the best compatible state, reapplies any missing or edited tail migrations, then runs `npx prisma migrate dev --name "$DEVFLOW_MIGRATION_NAME" --create-only`. This avoids Prisma seeing an old live database where an edited migration was already applied with different contents.
 
-When a daemon-owned run is active, `devflow tui` has a `d` database/Prisma panel that shows the managed Postgres identity, recent cached Prisma migration-prefix snapshots, and schema/migration drift. Pressing `m` is an explicit migration-authoring action; it sends a daemon action that runs the project migration target such as `new-migration`, then relaunches the previously detached target so services restart through the graph. Normal `up` startup should still avoid hidden migration generation. `F2` and `F4` are backup keys for terminals where letter shortcuts conflict.
+When a daemon-owned run is active, `devflow tui` has a `d` database/Prisma panel that shows the managed Postgres identity, recent cached Prisma migration-prefix snapshots, and schema/migration drift. Pressing `m` is an explicit migration-authoring action; it sends a daemon action of kind `devflow.database.migration.create`, then relaunches the previously detached target so services restart through the graph. Normal `up` startup should still avoid hidden migration generation. `F2` and `F4` are backup keys for terminals where letter shortcuts conflict.
 
 If `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but no new migration appears, the Prisma migration task returns an explicit migration-needed error instead of pretending the database is current. Devflow records that task as `migration_needed` so the TUI can show an authoring action instead of a generic failure.
 
@@ -366,7 +453,7 @@ result, err := mgr.EnsureMigratedDatabase(ctx, database.ManagedMigrationOptions{
 
 `ApplyEach` snapshots every migration prefix. If the latest migration changes, Devflow can restore the previous prefix snapshot and apply only the changed tail.
 
-Keep migration generation as an explicit target/action, not part of normal `up` startup. The component registers Prisma config for the TUI, so `devflow tui` can flag drift, ask for a migration name, and run the same target-backed generation path without guessing paths. The TUI action is for authoring only; normal watch/flush still waits for a migration to exist instead of creating one implicitly.
+Keep migration generation as an explicit action, not part of normal `up` startup. The component registers Prisma config and a migration-create action for the TUI, so `devflow tui` can flag drift, ask for a migration name, and run the action without guessing paths. The TUI action is for authoring only; normal watch/flush still waits for a migration to exist instead of creating one implicitly.
 
 Typical graph shape:
 - `prisma_client`: finite task that runs `npx prisma generate`

@@ -20,6 +20,7 @@ import (
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/cache"
 	"github.com/benjaco/devflow/pkg/daemon"
+	"github.com/benjaco/devflow/pkg/database"
 	"github.com/benjaco/devflow/pkg/engine"
 	"github.com/benjaco/devflow/pkg/graph"
 	"github.com/benjaco/devflow/pkg/instance"
@@ -54,6 +55,10 @@ func (a *App) Run(args []string) error {
 		return a.stopCmd(args[1:])
 	case "cache":
 		return a.cacheCmd(args[1:])
+	case "action":
+		return a.actionCmd(args[1:])
+	case "migration":
+		return a.migrationCmd(args[1:])
 	case "status":
 		return a.statusCmd(args[1:])
 	case "logs":
@@ -152,7 +157,7 @@ func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
 }
 
 func (a *App) usage() error {
-	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|cache|status|logs|instances|doctor|clis|graph|tui|version|upgrade|docs>")
+	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|action|migration|cache|status|logs|instances|doctor|clis|graph|tui|version|upgrade|docs>")
 	return flag.ErrHelp
 }
 
@@ -532,6 +537,171 @@ func (a *App) stopCmd(args []string) error {
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "stopped: %s\n", strings.Join(stopped, ", "))
 	return nil
+}
+
+func (a *App) actionCmd(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: devflow action <list|run>")
+	}
+	switch args[0] {
+	case "list":
+		return a.actionListCmd(args[1:])
+	case "run":
+		return a.actionRunCmd(args[1:])
+	default:
+		return fmt.Errorf("usage: devflow action <list|run>")
+	}
+}
+
+func (a *App) actionListCmd(args []string) error {
+	fs := flag.NewFlagSet("action list", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	jsonOut := fs.Bool("json", false, "emit stable JSON output")
+	worktree := fs.String("worktree", "", "project worktree path")
+	projectName := fs.String("project", defaultProject(), "registered project adapter name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	root, err := resolveWorktree(*worktree)
+	if err != nil {
+		return err
+	}
+	client, _, err := daemon.Ensure(context.Background(), root, *projectName)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Call(context.Background(), daemon.Request{
+		Action:  daemon.ActionListActions,
+		Project: *projectName,
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Actions == nil {
+		return fmt.Errorf("daemon did not return action list")
+	}
+	if *jsonOut {
+		return writeJSON(a.Stdout, resp.Actions)
+	}
+	for _, action := range resp.Actions.Actions {
+		label := action.Label
+		if label == "" {
+			label = action.ID
+		}
+		_, _ = fmt.Fprintf(a.Stdout, "%s\t%s\t%s\n", action.ID, action.Kind, label)
+	}
+	return nil
+}
+
+func (a *App) actionRunCmd(args []string) error {
+	actionID := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		actionID = args[0]
+		args = args[1:]
+	}
+	inputs := map[string]string{}
+	inputFlags := kvFlags{}
+	fs := flag.NewFlagSet("action run", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	jsonOut := fs.Bool("json", false, "emit stable JSON output")
+	worktree := fs.String("worktree", "", "project worktree path")
+	projectName := fs.String("project", defaultProject(), "registered project adapter name")
+	kind := fs.String("kind", "", "action kind to run when no action ID is provided")
+	component := fs.String("component", "", "component ID used to disambiguate action kind")
+	name := fs.String("name", "", "common input value named \"name\"")
+	fs.Var(&inputFlags, "input", "action input as key=value; may be repeated")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if actionID == "" && fs.NArg() > 0 {
+		actionID = fs.Arg(0)
+	}
+	if *name != "" {
+		inputs["name"] = *name
+	}
+	for key, value := range inputFlags.values {
+		inputs[key] = value
+	}
+	if fs.NArg() > 1 && inputs["name"] == "" {
+		inputs["name"] = fs.Arg(1)
+	}
+	if actionID == "" && *kind == "" {
+		return fmt.Errorf("usage: devflow action run <action-id> [--input key=value]")
+	}
+	return a.runAction(actionID, *kind, *component, inputs, *jsonOut, *worktree, *projectName)
+}
+
+func (a *App) migrationCmd(args []string) error {
+	if len(args) == 0 || args[0] != "create" {
+		return fmt.Errorf("usage: devflow migration create <name>")
+	}
+	return a.migrationCreateCmd(args[1:])
+}
+
+func (a *App) migrationCreateCmd(args []string) error {
+	name := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		name = args[0]
+		args = args[1:]
+	}
+	fs := flag.NewFlagSet("migration create", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	jsonOut := fs.Bool("json", false, "emit stable JSON output")
+	worktree := fs.String("worktree", "", "project worktree path")
+	projectName := fs.String("project", defaultProject(), "registered project adapter name")
+	component := fs.String("component", "", "component ID used when several migration systems exist")
+	force := fs.Bool("force", false, "allow component-specific force/accept-warning behavior when declared")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if name == "" {
+		if fs.NArg() != 1 {
+			return fmt.Errorf("usage: devflow migration create <name>")
+		}
+		name = fs.Arg(0)
+	}
+	inputs := map[string]string{"name": name}
+	if *force {
+		inputs["force"] = "true"
+	}
+	return a.runAction("", database.ActionMigrationCreate, *component, inputs, *jsonOut, *worktree, *projectName)
+}
+
+func (a *App) runAction(actionID, kind, component string, inputs map[string]string, jsonOut bool, worktreeFlag, projectName string) error {
+	root, err := resolveWorktree(worktreeFlag)
+	if err != nil {
+		return err
+	}
+	client, _, err := daemon.Ensure(context.Background(), root, projectName)
+	if err != nil {
+		return err
+	}
+	resp, callErr := client.Call(context.Background(), daemon.Request{
+		Action:       daemon.ActionRunAction,
+		Project:      projectName,
+		ActionID:     actionID,
+		ActionKind:   kind,
+		Component:    component,
+		Inputs:       inputs,
+		StreamEvents: !jsonOut,
+	}, func(evt api.Event) {
+		if evt.Type == api.EventLogLine && !jsonOut {
+			if evt.Task == "daemon" && evt.Line != "" {
+				_, _ = fmt.Fprintf(a.Stderr, "%s\n", evt.Line)
+			}
+		}
+	})
+	if resp.ActionResult != nil {
+		if jsonOut {
+			if err := writeJSON(a.Stdout, resp.ActionResult); err != nil {
+				return err
+			}
+			return callErr
+		}
+		_, _ = fmt.Fprintf(a.Stdout, "action=%s status=%s\n", resp.ActionResult.ActionID, resp.ActionResult.Status)
+		return callErr
+	}
+	return callErr
 }
 
 func (a *App) cacheCmd(args []string) error {
@@ -1476,8 +1646,44 @@ type restartProject struct {
 	target project.Target
 }
 
+type kvFlags struct {
+	values map[string]string
+}
+
+func (f *kvFlags) String() string {
+	if f == nil || len(f.values) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(f.values))
+	for key := range f.values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+f.values[key])
+	}
+	return strings.Join(parts, ",")
+}
+
+func (f *kvFlags) Set(value string) error {
+	key, val, ok := strings.Cut(value, "=")
+	key = strings.TrimSpace(key)
+	if !ok || key == "" {
+		return fmt.Errorf("expected key=value")
+	}
+	if f.values == nil {
+		f.values = map[string]string{}
+	}
+	f.values[key] = val
+	return nil
+}
+
 func (p restartProject) Name() string          { return p.base.Name() }
 func (p restartProject) Tasks() []project.Task { return p.base.Tasks() }
+func (p restartProject) Actions() []project.Action {
+	return project.Actions(p.base)
+}
 func (p restartProject) Targets() []project.Target {
 	targets := append([]project.Target(nil), p.base.Targets()...)
 	targets = append(targets, p.target)

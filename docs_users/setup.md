@@ -252,14 +252,66 @@ app := b.Service("app").
 	ReadyHTTP("app", "/health", 200)
 
 b.Target("up", app)
-b.Target("new-migration", prisma.NewMigration(b))
+prisma.NewMigration(b)
 ```
 
 `prisma.Migrations(b)` restores the best cached migration-prefix database state, applies only the missing tail, snapshots the final state, and reports migration-needed states when `schema.prisma` and `prisma/migrations` are out of sync. When the migration folder is in a Git worktree, Devflow only adds intermediate prefix snapshots around migration folders with uncommitted Git changes, including newly added or edited local migrations. If Git is unavailable, Devflow falls back to the final snapshot only. This keeps committed history fast while preserving the local workflow where you edit an in-progress migration and need to restore the previous prefix.
 
-`prisma.NewMigration(b)` is an explicit authoring action. It reads `DEVFLOW_MIGRATION_NAME`, reconciles the managed database to the best compatible migration-prefix state, creates a Prisma migration, and is intentionally not task-cacheable. This keeps edited latest migrations usable: Devflow restores the prior prefix and reapplies the changed tail before Prisma authors the next migration.
+`prisma.NewMigration(b)` registers an explicit authoring action. It reads the action input `name` through `DEVFLOW_MIGRATION_NAME`, reconciles the managed database to the best compatible migration-prefix state, creates a Prisma migration, and is intentionally not task-cacheable. This keeps edited latest migrations usable: Devflow restores the prior prefix and reapplies the changed tail before Prisma authors the next migration.
 
-The component task names are `prisma_client`, `prisma_migrations`, and `prisma_new_migration` when the component name is `prisma`. Target names are yours to choose. The docs use `new-migration`, but an adapter can also expose an alias such as `migration_new` while migrating from older scripts.
+## PayloadCMS And Postgres
+
+For PayloadCMS projects backed by Postgres, use the PayloadCMS database component so migration application and migration authoring are modeled consistently with the rest of the graph:
+
+```go
+db := database.Postgres("payload").PortName("postgres")
+
+payload := database.PayloadCMS("payload").
+	Config("src/payload.config.ts").
+	MigrationDir("src/migrations").
+	Database(db)
+
+npmInstall := b.Task("npm_install").
+	Command("npm", "install").
+	Inputs("package.json", "package-lock.json").
+	Stamp()
+
+migrations := payload.Migrations(b).DependsOn(npmInstall)
+payload.NewMigration(b).DependsOn(npmInstall)
+
+app := b.Service("app").
+	Command("npm", "run", "dev").
+	DependsOn(migrations).
+	Inputs("src", "package.json", "package-lock.json").
+	InputEnv("DATABASE_URL", "PAYLOAD_SECRET", "PORT").
+	Env("PORT", b.Port("app")).
+	ReadyHTTP("app", "/health", 200)
+
+b.Target("up", app)
+b.Target("setup", npmInstall, migrations)
+```
+
+`payload.Migrations(b)` starts the managed Postgres runtime when a `database.Postgres` component is attached, waits for host-port readiness, and runs Payload's normal migration apply command. It is not task-cacheable because database state is a live runtime side effect.
+
+`payload.NewMigration(b)` registers the explicit authoring action. It reads the action input `name` through `DEVFLOW_MIGRATION_NAME`, runs Payload migration creation, writes into the configured migration directory, and is intentionally not task-cacheable. Payload can prompt for confirmations when a migration may be destructive, for example after deleting a field. Devflow models those prompts as explicit interactive events, so the TUI or daemon client can ask the user instead of hiding a hanging subprocess in watch mode.
+
+By default the component runs:
+
+```bash
+npx payload migrate
+npx payload migrate:create "$DEVFLOW_MIGRATION_NAME"
+```
+
+If your project uses a package-manager script instead, configure the command prefix:
+
+```go
+payload := database.PayloadCMS("payload").
+	Command("npm", "run", "payload", "--")
+```
+
+Then Devflow runs `npm run payload -- migrate` and `npm run payload -- migrate:create <name>`. Use `DEVFLOW_PAYLOAD_FORCE_ACCEPT_WARNING=1` only when your adapter intentionally wants Payload's force-accept-warning path for automation; normal human/TUI flows should let the prompt surface.
+
+The component task names are `prisma_client`, `prisma_migrations`, and `prisma_new_migration` when the component name is `prisma`. Migration creation is exposed as a first-class action with kind `devflow.database.migration.create`, not as a normal target.
 
 ## Environment
 

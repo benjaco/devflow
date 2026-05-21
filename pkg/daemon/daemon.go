@@ -32,17 +32,18 @@ import (
 type Action string
 
 const (
-	ActionPing            Action = "ping"
-	ActionRun             Action = "run"
-	ActionWatch           Action = "watch"
-	ActionFlush           Action = "flush"
-	ActionStop            Action = "stop"
-	ActionStatus          Action = "status"
-	ActionSubscribe       Action = "subscribe"
-	ActionRestart         Action = "restart"
-	ActionInvalidate      Action = "invalidate"
-	ActionRetarget        Action = "retarget"
-	ActionPrismaMigration Action = "prisma_migration"
+	ActionPing        Action = "ping"
+	ActionRun         Action = "run"
+	ActionWatch       Action = "watch"
+	ActionFlush       Action = "flush"
+	ActionStop        Action = "stop"
+	ActionStatus      Action = "status"
+	ActionSubscribe   Action = "subscribe"
+	ActionRestart     Action = "restart"
+	ActionInvalidate  Action = "invalidate"
+	ActionRetarget    Action = "retarget"
+	ActionListActions Action = "action_list"
+	ActionRunAction   Action = "action_run"
 )
 
 type Request struct {
@@ -60,17 +61,23 @@ type Request struct {
 	Upstream     bool              `json:"upstream,omitempty"`
 	Downstream   bool              `json:"downstream,omitempty"`
 	Env          map[string]string `json:"env,omitempty"`
+	ActionID     string            `json:"actionId,omitempty"`
+	ActionKind   string            `json:"actionKind,omitempty"`
+	Component    string            `json:"component,omitempty"`
+	Inputs       map[string]string `json:"inputs,omitempty"`
 }
 
 type Response struct {
-	ID      string            `json:"id,omitempty"`
-	OK      bool              `json:"ok"`
-	Error   string            `json:"error,omitempty"`
-	Started *StartResult      `json:"started,omitempty"`
-	Run     *api.RunResult    `json:"run,omitempty"`
-	Flush   *api.FlushResult  `json:"flush,omitempty"`
-	Stop    *StopResult       `json:"stop,omitempty"`
-	Status  *api.StatusResult `json:"status,omitempty"`
+	ID           string            `json:"id,omitempty"`
+	OK           bool              `json:"ok"`
+	Error        string            `json:"error,omitempty"`
+	Started      *StartResult      `json:"started,omitempty"`
+	Run          *api.RunResult    `json:"run,omitempty"`
+	Flush        *api.FlushResult  `json:"flush,omitempty"`
+	Stop         *StopResult       `json:"stop,omitempty"`
+	Status       *api.StatusResult `json:"status,omitempty"`
+	Actions      *ActionListResult `json:"actions,omitempty"`
+	ActionResult *ActionRunResult  `json:"actionResult,omitempty"`
 }
 
 type StartResult struct {
@@ -84,6 +91,23 @@ type StartResult struct {
 type StopResult struct {
 	InstanceID string   `json:"instanceId"`
 	Stopped    []string `json:"stopped"`
+}
+
+type ActionListResult struct {
+	Project string           `json:"project"`
+	Actions []project.Action `json:"actions"`
+}
+
+type ActionRunResult struct {
+	RunID        string            `json:"runId,omitempty"`
+	ActionID     string            `json:"actionId"`
+	Kind         string            `json:"kind,omitempty"`
+	Component    string            `json:"component,omitempty"`
+	Status       string            `json:"status"`
+	Inputs       map[string]string `json:"inputs,omitempty"`
+	CreatedFiles []string          `json:"createdFiles,omitempty"`
+	Run          *api.RunResult    `json:"run,omitempty"`
+	Relaunch     *StartResult      `json:"relaunch,omitempty"`
 }
 
 type frame struct {
@@ -686,9 +710,22 @@ func (s *Server) handleRequest(ctx context.Context, req Request) Response {
 			return errorResponse(req.ID, err)
 		}
 		return resp
-	case ActionPrismaMigration:
-		if err := s.createPrismaMigration(ctx, req.Project, req.Target, req.Env); err != nil {
+	case ActionListActions:
+		result, err := s.listActions(req.Project)
+		if err != nil {
 			return errorResponse(req.ID, err)
+		}
+		resp.Actions = result
+		return resp
+	case ActionRunAction:
+		result, err := s.runProjectAction(ctx, req.Project, req.ActionID, req.ActionKind, req.Component, req.Inputs, req.Env)
+		if result != nil {
+			resp.ActionResult = result
+			resp.Run = result.Run
+			resp.Started = result.Relaunch
+		}
+		if err != nil {
+			return responseWithError(resp, err)
 		}
 		return resp
 	default:
@@ -1376,85 +1413,186 @@ func (s *Server) retarget(ctx context.Context, target string) error {
 	return err
 }
 
-func (s *Server) createPrismaMigration(ctx context.Context, projectName, explicitTarget string, env map[string]string) error {
-	name := strings.TrimSpace(env["DEVFLOW_MIGRATION_NAME"])
-	if name == "" {
-		return fmt.Errorf("migration name is required")
-	}
+func (s *Server) listActions(projectName string) (*ActionListResult, error) {
 	projectName, p, err := s.resolveProject(projectName)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	target := strings.TrimSpace(explicitTarget)
-	if target == "" {
-		target, err = resolvePrismaMigrationTarget(p)
-		if err != nil {
-			return err
-		}
+	return &ActionListResult{
+		Project: projectName,
+		Actions: project.Actions(p),
+	}, nil
+}
+
+func (s *Server) runProjectAction(ctx context.Context, projectName, actionID, kind, component string, inputs, env map[string]string) (*ActionRunResult, error) {
+	projectName, p, err := s.resolveProject(projectName)
+	if err != nil {
+		return nil, err
+	}
+	action, err := project.ResolveAction(p, actionID, kind, component)
+	if err != nil {
+		return nil, err
+	}
+	runEnv, normalizedInputs, err := actionInputsToEnv(action, inputs, env)
+	if err != nil {
+		return &ActionRunResult{
+			ActionID:  action.ID,
+			Kind:      action.Kind,
+			Component: action.Component,
+			Status:    "failed",
+			Inputs:    normalizedInputs,
+		}, err
 	}
 	inst, err := instance.Load(s.worktree, s.instanceID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	relaunchTarget := strings.TrimSpace(inst.LastRun.Target)
 	relaunchMode := inst.LastRun.Mode
 	relaunchMaxParallel := inst.LastRun.MaxParallel
-	shouldRelaunch := inst.LastRun.Detached && relaunchTarget != "" && relaunchTarget != target
-	s.publishStatus("creating Prisma migration %q through target %s", name, target)
-	result, err := s.runAttached(ctx, projectName, target, api.ModeCI, 0, map[string]string{"DEVFLOW_MIGRATION_NAME": name})
+	shouldRelaunch := action.Relaunch == project.ActionRelaunchPreviousTargetAfterSuccess && inst.LastRun.Detached && relaunchTarget != ""
+
+	result := &ActionRunResult{
+		RunID:     requestID(),
+		ActionID:  action.ID,
+		Kind:      action.Kind,
+		Component: action.Component,
+		Status:    "running",
+		Inputs:    normalizedInputs,
+	}
+	s.publishStatus("running action %s", action.ID)
+	if action.Task == "" {
+		result.Status = "failed"
+		return result, fmt.Errorf("action %q does not define an executable task", action.ID)
+	}
+	beforeWrites := snapshotActionWriteFiles(s.worktree, action.Effects.Writes)
+	runResult, err := s.runAttached(ctx, projectName, action.Task, api.ModeCI, 0, runEnv)
+	result.Run = runResult
+	result.CreatedFiles = diffCreatedActionFiles(beforeWrites, snapshotActionWriteFiles(s.worktree, action.Effects.Writes))
 	if err != nil {
-		return err
+		result.Status = "failed"
+		return result, err
 	}
-	if result == nil || !result.Success {
-		return fmt.Errorf("migration target %q did not finish successfully", target)
+	if runResult == nil || !runResult.Success {
+		result.Status = "failed"
+		return result, fmt.Errorf("action %q did not finish successfully", action.ID)
 	}
+	result.Status = "succeeded"
 	if shouldRelaunch {
-		s.publishStatus("relaunching detached target %s", relaunchTarget)
-		if _, err := s.startActive(ctx, projectName, relaunchTarget, relaunchMode, relaunchMaxParallel); err != nil {
-			return err
+		s.publishStatus("relaunching detached target %s after action %s", relaunchTarget, action.ID)
+		started, err := s.startActive(ctx, projectName, relaunchTarget, relaunchMode, relaunchMaxParallel)
+		if err != nil {
+			result.Status = "succeeded_with_relaunch_failed"
+			return result, err
 		}
+		result.Relaunch = started
 		s.publishStatus("detached target %s relaunched", relaunchTarget)
 	}
-	return nil
+	return result, nil
 }
 
-func resolvePrismaMigrationTarget(p project.Project) (string, error) {
-	for _, candidate := range []string{"new-migration", "migration_new", "prisma_new_migration"} {
-		if _, _, err := project.ResolveExecutionProject(p, candidate); err == nil {
-			return candidate, nil
+func snapshotActionWriteFiles(worktree string, patterns []string) map[string]bool {
+	files := map[string]bool{}
+	for _, pattern := range patterns {
+		pattern = filepath.ToSlash(strings.TrimSpace(pattern))
+		if pattern == "" {
+			continue
 		}
-	}
-	taskNames := map[string]bool{}
-	for _, task := range p.Tasks() {
-		if strings.HasSuffix(task.Name, "_new_migration") || task.Name == "prisma_new_migration" {
-			taskNames[task.Name] = true
+		if strings.HasSuffix(pattern, "/**") {
+			collectActionWritePath(worktree, strings.TrimSuffix(pattern, "/**"), files)
+			continue
 		}
-	}
-	targets := make([]string, 0, 1)
-	for _, target := range p.Targets() {
-		for _, root := range target.RootTasks {
-			if taskNames[root] {
-				targets = append(targets, target.Name)
-				break
+		if strings.ContainsAny(pattern, "*?[") {
+			matches, _ := filepath.Glob(filepath.Join(worktree, filepath.FromSlash(pattern)))
+			for _, match := range matches {
+				rel, err := filepath.Rel(worktree, match)
+				if err == nil {
+					collectActionWritePath(worktree, rel, files)
+				}
 			}
+			continue
+		}
+		collectActionWritePath(worktree, pattern, files)
+	}
+	return files
+}
+
+func collectActionWritePath(worktree, rel string, out map[string]bool) {
+	abs := filepath.Join(worktree, filepath.FromSlash(rel))
+	info, err := os.Stat(abs)
+	if err != nil {
+		return
+	}
+	if !info.IsDir() {
+		out[filepath.ToSlash(filepath.Clean(rel))] = true
+		return
+	}
+	_ = filepath.WalkDir(abs, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		relPath, err := filepath.Rel(worktree, path)
+		if err == nil {
+			out[filepath.ToSlash(relPath)] = true
+		}
+		return nil
+	})
+}
+
+func diffCreatedActionFiles(before, after map[string]bool) []string {
+	created := make([]string, 0)
+	for path := range after {
+		if !before[path] {
+			created = append(created, path)
 		}
 	}
-	sort.Strings(targets)
-	if len(targets) == 1 {
-		return targets[0], nil
+	sort.Strings(created)
+	return created
+}
+
+func actionInputsToEnv(action project.Action, inputs, env map[string]string) (map[string]string, map[string]string, error) {
+	runEnv := map[string]string{}
+	for key, value := range env {
+		runEnv[key] = value
 	}
-	if len(targets) > 1 {
-		return "", fmt.Errorf("multiple Prisma migration targets found: %s", strings.Join(targets, ", "))
+	normalized := map[string]string{}
+	for key, value := range inputs {
+		normalized[key] = value
 	}
-	tasks := make([]string, 0, len(taskNames))
-	for name := range taskNames {
-		tasks = append(tasks, name)
+	for _, input := range action.Inputs {
+		value, ok := normalized[input.Name]
+		if !ok && input.Default != "" {
+			value = input.Default
+			ok = true
+			normalized[input.Name] = value
+		}
+		if input.Required && strings.TrimSpace(value) == "" {
+			return runEnv, normalized, fmt.Errorf("action %q requires input %q", action.ID, input.Name)
+		}
+		if input.Env != "" && ok {
+			runEnv[input.Env] = actionInputEnvValue(input, value)
+		}
 	}
-	sort.Strings(tasks)
-	if len(tasks) == 1 {
-		return tasks[0], nil
+	return runEnv, normalized, nil
+}
+
+func actionInputEnvValue(input project.ActionInput, value string) string {
+	if input.Type != project.ActionInputBool {
+		return value
 	}
-	return "", fmt.Errorf("no Prisma migration target found; add b.Target(\"new-migration\", prisma.NewMigration(b))")
+	if isTruthyDaemon(value) {
+		return "1"
+	}
+	return "0"
+}
+
+func isTruthyDaemon(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func executionGraphForProject(p project.Project, target string) (*graph.Graph, string, error) {
@@ -1476,6 +1614,9 @@ type restartProject struct {
 
 func (p restartProject) Name() string          { return p.base.Name() }
 func (p restartProject) Tasks() []project.Task { return p.base.Tasks() }
+func (p restartProject) Actions() []project.Action {
+	return project.Actions(p.base)
+}
 func (p restartProject) Targets() []project.Target {
 	targets := append([]project.Target(nil), p.base.Targets()...)
 	targets = append(targets, p.target)

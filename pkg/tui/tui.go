@@ -600,9 +600,11 @@ func (d *dashboard) openPrismaMigrationPrompt() {
 		d.setStatus(fmt.Sprintf("[red]failed to resolve prisma config: %v", err))
 		return
 	}
-	if !cfg.Available {
-		d.setStatus("[red]no Prisma schema detected or configured")
-		return
+	title := "Create Migration"
+	detail := "devflow.database.migration.create action"
+	if cfg.Available {
+		title = "Create Prisma Migration"
+		detail = fmt.Sprintf("%s -> %s", cfg.SchemaPath, cfg.MigrationsDir)
 	}
 	var input *tview.InputField
 	input = tview.NewInputField().
@@ -627,9 +629,9 @@ func (d *dashboard) openPrismaMigrationPrompt() {
 		})
 	frame := tview.NewFrame(input).
 		SetBorders(1, 1, 1, 1, 1, 1).
-		AddText("Create Prisma Migration", true, tview.AlignCenter, tcell.ColorWhite).
+		AddText(title, true, tview.AlignCenter, tcell.ColorWhite).
 		AddText("Enter creates the migration. Escape cancels.", false, tview.AlignCenter, tcell.ColorGray).
-		AddText(fmt.Sprintf("%s -> %s", cfg.SchemaPath, cfg.MigrationsDir), false, tview.AlignCenter, tcell.ColorGray)
+		AddText(detail, false, tview.AlignCenter, tcell.ColorGray)
 	d.activeInput = true
 	d.pages.AddPage("prisma_migration", centered(frame, 84, 8), true, true)
 	d.app.SetFocus(input)
@@ -651,7 +653,7 @@ func (d *dashboard) triggerGeneratePrismaMigration(name string) {
 		return
 	}
 	d.busy = true
-	d.setStatus(fmt.Sprintf("[yellow]creating Prisma migration %q...", name))
+	d.setStatus(fmt.Sprintf("[yellow]creating migration %q...", name))
 	go func() {
 		progress := func(message string) {
 			message = strings.TrimSpace(message)
@@ -670,11 +672,11 @@ func (d *dashboard) triggerGeneratePrismaMigration(name string) {
 			d.showDatabasePanel = true
 			d.showSupervisorLog = false
 			if err != nil {
-				d.setStatus(fmt.Sprintf("[red]Prisma migration failed: %v", err))
+				d.setStatus(fmt.Sprintf("[red]migration failed: %v", err))
 				_ = d.refresh()
 				return
 			}
-			d.setStatus(fmt.Sprintf("[green]created Prisma migration %q", name))
+			d.setStatus(fmt.Sprintf("[green]created migration %q", name))
 			_ = d.refresh()
 		})
 	}()
@@ -1250,10 +1252,11 @@ func generatePrismaMigrationFromTUI(root, instanceID, name string, progressFns .
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	_, err := callDaemonForTUI(ctx, root, daemon.Request{
-		Action:       daemon.ActionPrismaMigration,
+		Action:       daemon.ActionRunAction,
+		ActionKind:   database.ActionMigrationCreate,
 		StreamEvents: true,
-		Env: map[string]string{
-			"DEVFLOW_MIGRATION_NAME": name,
+		Inputs: map[string]string{
+			"name": name,
 		},
 	}, func(evt api.Event) {
 		reportDaemonEventForTUI(evt, progress)

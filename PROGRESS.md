@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-05-12
+Last updated: 2026-05-20
 
 ## Current Status
 
@@ -10,10 +10,17 @@ Last updated: 2026-05-12
 
 ## In Progress
 
-- None
+- None.
 
 ## Completed
 
+- First-class project actions implemented:
+  - `project.Action` plus builder registration, aliases, typed inputs, declared effects, and relaunch policy
+  - daemon `action_list` / `action_run` APIs and CLI `devflow action list`, `devflow action run`, and `devflow migration create`
+  - TUI migration creation now invokes the standard `devflow.database.migration.create` action kind instead of a target convention
+  - Prisma and PayloadCMS helpers register task-backed migration-create actions with declared migration-file effects
+  - migration creation is no longer modeled or documented as `new-migration` / `migration_new` targets
+  - action result JSON reports created files from declared write effects
 - Repository scaffold created
 - Root docs created:
   - `README.md`
@@ -613,6 +620,13 @@ Last updated: 2026-05-12
   - `devflow docs development` prints day-to-day CLI/TUI/operator docs only
   - bare `devflow docs` is now a usage error so agents and users do not accidentally pull both lanes into one context
   - user/contributor docs and tests now cover the scoped docs command contract
+- Added PayloadCMS/Postgres adapter support:
+  - `database.PayloadCMS` wires migration application and explicit non-cacheable migration authoring tasks against optional managed Postgres
+  - interactive prompt specs now support alternate patterns and repeated confirmations for Payload-style destructive migration prompts
+  - the TUI migration action now uses the generic migration-create action path instead of requiring Prisma metadata
+  - added `examples/payloadcms-postgres` with graph/detection coverage plus fake Payload/npm tests for migration apply and confirmed migration creation after a deleted-field schema edit
+  - updated user/contributor docs for PayloadCMS setup, explicit migration authoring, and prompt handling
+  - verified with `go test ./pkg/process`, `go test ./pkg/database`, `go test ./examples/payloadcms-postgres`, and `go test ./pkg/daemon ./pkg/tui`
 
 ## Recent Feedback
 

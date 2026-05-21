@@ -38,6 +38,7 @@ type PrismaComponent struct {
 	clientTask       *project.TaskBuilder
 	migrationsTask   *project.TaskBuilder
 	newMigrationTask *project.TaskBuilder
+	migrationAction  *project.ActionBuilder
 }
 
 func Postgres(name string) *PostgresComponent {
@@ -181,6 +182,7 @@ func (p *PrismaComponent) Migrations(b *project.Builder) *project.TaskBuilder {
 func (p *PrismaComponent) NewMigration(b *project.Builder) *project.TaskBuilder {
 	p.bind(b)
 	if p.newMigrationTask != nil {
+		p.registerMigrationAction(b)
 		return p.newMigrationTask
 	}
 	inputEnv := []string{"DEVFLOW_MIGRATION_NAME", "DATABASE_URL"}
@@ -223,7 +225,37 @@ func (p *PrismaComponent) NewMigration(b *project.Builder) *project.TaskBuilder 
 			return nil
 		})
 	p.newMigrationTask.RequiredCLIs("docker", "npx")
+	p.registerMigrationAction(b)
 	return p.newMigrationTask
+}
+
+func (p *PrismaComponent) registerMigrationAction(b *project.Builder) {
+	if p.newMigrationTask == nil || p.migrationAction != nil {
+		return
+	}
+	action := b.Action(p.name + ".migration.create")
+	action.
+		Kind(ActionMigrationCreate).
+		Category(project.ActionCategoryAuthoring).
+		Label("Create Prisma migration").
+		Description("Generate a new Prisma migration file from schema changes.").
+		Component(p.name).
+		Task(p.newMigrationTask).
+		Input(project.ActionInput{
+			Name:        "name",
+			Type:        project.ActionInputString,
+			Label:       "Migration name",
+			Required:    true,
+			Positional:  true,
+			Env:         "DEVFLOW_MIGRATION_NAME",
+			Description: "Slug used by Prisma for the generated migration folder.",
+		}).
+		Writes(p.migrationsDir).
+		Touches("database."+p.name).
+		Invalidates(p.name+"_migrations", p.name+"_client").
+		RelaunchPreviousTargetAfterSuccess().
+		Alias(p.name + ":migration:create")
+	p.migrationAction = action
 }
 
 func (p *PrismaComponent) bind(b *project.Builder) {

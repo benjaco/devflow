@@ -155,6 +155,9 @@ func (p syntheticTargetProject) RequiredCLIs() []RequiredCLI {
 	}
 	return legacy.Dependencies()
 }
+func (p syntheticTargetProject) Actions() []Action {
+	return Actions(p.base)
+}
 func (p syntheticTargetProject) Targets() []Target {
 	targets := append([]Target(nil), p.base.Targets()...)
 	targets = append(targets, p.target)

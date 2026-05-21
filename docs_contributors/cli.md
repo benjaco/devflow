@@ -8,6 +8,9 @@ Implemented commands:
 - `devflow flush [target]`
 - `devflow restart <task>`
 - `devflow stop`
+- `devflow action list`
+- `devflow action run <action-id>`
+- `devflow migration create <name>`
 - `devflow cache status`
 - `devflow cache invalidate`
 - `devflow cache gc`
@@ -114,6 +117,32 @@ Daemon behavior:
 
 `flush --json` returns `FlushResult` with the request ID, instance ID, worktree, project, target, mode, whether a daemon watch loop was started, sync/health success, node states, service health, and structured issues. The command exits non-zero when `success=false`, including timeout and health-check failures.
 
+`action` is the generic foreground operation surface for explicit project operations that are not normal DAG targets. Actions are discovered from the project adapter through the daemon.
+
+Usage:
+
+```bash
+devflow action list
+devflow action list --json
+devflow action run <action-id-or-alias>
+devflow action run <action-id-or-alias> --input name=value --json
+devflow action run --kind devflow.database.migration.create --component prisma --name add_user
+```
+
+`action list --json` returns the project name plus registered action specs, including stable action ID, semantic kind, category, component, input schema, effects, relaunch policy, and aliases. `action run --json` returns an action result with action ID, kind, status, inputs, created files discovered from declared write effects, the underlying run result when the action is task-backed, and relaunch metadata when the action restarts the previous daemon target.
+
+`migration create` is a convenience command over the standard action kind `devflow.database.migration.create`.
+
+Usage:
+
+```bash
+devflow migration create add_user
+devflow migration create add_user --component prisma
+devflow migration create add_user --json
+```
+
+If exactly one migration-create action exists, the component flag can be omitted. If several migration systems are registered, `--component` disambiguates. Migration creation is never inferred from targets such as `new-migration`; adapters must register actions.
+
 `version` prints the installed Devflow version. `version --json` returns:
 
 ```json
@@ -175,7 +204,7 @@ The first slice includes:
 - live tail of the selected task log
 - toggle to the daemon/supervisor log
 - `d` toggles a database/Prisma panel with managed Postgres identity and recent cached Prisma migration-prefix snapshots; `F2` is a backup key
-- the database/Prisma panel flags schema/migration drift and `m` asks for a migration name, then sends a daemon action that runs the project migration target such as `new-migration` through the daemon-owned engine and relaunches the previously detached target; `F4` is a backup key
+- the database/Prisma panel flags schema/migration drift and `m` asks for a migration name, then sends a daemon action with kind `devflow.database.migration.create` through the daemon-owned engine and relaunches the previously detached target; `F4` is a backup key
 - while the TUI creates a Prisma migration, the footer status reports target/task state and the latest task output line
 - global shortcuts are disabled while text-input popups are focused, so migration names can contain normal letters
 - running tasks pinned first and pending work directly below them

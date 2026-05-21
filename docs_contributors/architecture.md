@@ -215,6 +215,7 @@ Devflow now supports prompt-driven interactive one-shot commands without blockin
 Current behavior:
 - tasks can mark a subprocess command as interactive through `process.CommandSpec`
 - the command declares expected prompt patterns and prompt kinds
+- prompt specs can provide alternate `Patterns` and `Repeat` for tools that emit different or repeated confirmations, such as destructive migration warnings
 - when a prompt pattern is detected in subprocess output, the engine emits an `interaction_requested` event
 - the engine waits for an answer file under the instance state directory
 - when an answer arrives, the engine writes it back to the subprocess stdin and emits `interaction_answered`
@@ -333,6 +334,7 @@ The bundled example adapter now exercises this shape structurally:
 Higher-level workflow helpers now exist on top of those primitives:
 - `database.Postgres` for the common managed local Postgres instance wiring, including default snapshot root, runtime env, and port allocation
 - `database.Prisma` for common Prisma tasks: client generation, migration-prefix DB preparation, and explicit migration authoring
+- `database.PayloadCMS` for common PayloadCMS migration application and explicit migration authoring against managed Postgres, including prompt specs for confirmation-heavy migration creation
 - `EnsureMigratedDatabase` for generic migration folders
 - `PostgresMigrationFileApplier` for applying one SQL file per migration and snapshotting every prefix
 - `EnsurePrismaDevDatabase` for Prisma schema + migration folders, applying pending migrations through prefix-limited `prisma migrate deploy` runs by default
@@ -344,7 +346,7 @@ Prisma migration inspection is directory-only. Files under `prisma/migrations`, 
 
 The important cache invariant is prefix safety. A snapshot can only be reused when its migration list is a valid prefix of the current migration list and the base fingerprint still matches. `EnsureMigratedDatabase` with `ApplyEach` snapshots every prefix after applying it. The default `EnsurePrismaDevDatabase` path is less chatty: committed migration history is treated as stable and applies as one tail before the final snapshot. Intermediate Prisma snapshots are created only at boundaries needed for migration folders with uncommitted Git changes, plus the final state. If Git is unavailable or the worktree is not a Git repository, the default falls back to final-only snapshotting. That preserves local migration editing without running Prisma once per historical committed migration on cold rebuilds. Adapters that need exhaustive Prisma prefix snapshots can still provide `MigrateEach`.
 
-Prisma has two authoring guards: if `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but the migration list has not advanced beyond the restored prefix, the default workflow returns a migration-needed error telling the adapter to generate a migration first. The engine writes errors that implement `MigrationNeeded() bool`, plus known Prisma migration-needed messages, as `migration_needed` rather than `failed`, and downstream work remains pending. Migration generation must be modeled as an explicit target/action using `PreparePrismaMigrationAuthoringDatabase` plus `GeneratePrismaMigration`, or as the explicit TUI `m` action, not hidden inside normal `up`.
+Prisma has two authoring guards: if `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but the migration list has not advanced beyond the restored prefix, the default workflow returns a migration-needed error telling the adapter to generate a migration first. The engine writes errors that implement `MigrationNeeded() bool`, plus known Prisma migration-needed messages, as `migration_needed` rather than `failed`, and downstream work remains pending. Migration generation must be modeled as an explicit action using `PreparePrismaMigrationAuthoringDatabase` plus `GeneratePrismaMigration`, or as the explicit TUI `m` action, not hidden inside normal `up`.
 
 Prisma database preparation emits progress lines before snapshot planning, runtime recreation, readiness waits, source-policy application, and final runtime start. This is intentionally visible in task logs and the TUI footer because Docker reconciliation can happen before any Prisma subprocess writes output. Progress helpers own writing those component progress lines to the task log and event stream; subprocess output is written to the task log by `pkg/process` and forwarded to live consumers through an event-only callback so Prisma CLI output is not duplicated.
 
@@ -353,6 +355,8 @@ Migration authoring prep intentionally differs from normal DB prep: it restores/
 Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`. `Migrate` is an all-at-once command and only snapshots the final state; `MigrateEach` preserves the exhaustive per-prefix cache contract.
 
 `PostgresDumpSourcePolicy` must fail when `pg_dump` fails. It writes through a temporary dump file instead of an unchecked shell pipeline so `psql` cannot mask a failed clone with an empty successful restore.
+
+PayloadCMS follows the same operator rule as Prisma: normal `up`/watch paths apply existing migrations non-interactively through `payload.Migrations(b)`, while migration creation belongs to an explicit action registered by `payload.NewMigration(b)`. Payload can ask for confirmations when changes may be destructive; those prompts flow through the generic interactive prompt path instead of being handled with Payload-specific TUI logic.
 
 Managed Postgres target pattern:
 - preserve the Docker volume unless an explicit restore/rebuild path owns the destruction
@@ -622,7 +626,7 @@ The first usable TUI slice is now implemented as a local terminal console connec
 - task log tail
 - daemon/supervisor log toggle
 - database/Prisma panel showing managed Postgres identity and recent Prisma migration-prefix snapshots
-- explicit Prisma migration generation from inside the TUI by asking for a migration name, sending a daemon action, running the project migration target through the daemon-owned engine, and relaunching the previously detached target after success
+- explicit migration generation from inside the TUI by asking for a migration name, sending a daemon migration-create action through the daemon-owned engine, surfacing declared prompts, and relaunching the previously detached target after success
 - instance/worktree/runtime header
 - stable terminal rendering via a real TUI library instead of manual ANSI frame painting
 - invalidate-and-rerun from the selected task by sending a daemon action that invalidates the selected downstream cacheable once-task slice and relaunches the current target

@@ -75,13 +75,23 @@ Useful TUI keys:
 - `g` / `G`: top/bottom
 - `l`: selected task log or supervisor log
 - `d`: database/Prisma panel
-- `m`: create a Prisma migration when the database panel reports one is needed
+- `m`: create a migration through the project migration-create action
 - `i`: invalidate selected task and rerun downstream
 - `t`: retarget to the selected task
 
 The selected log keeps its current scroll position while it refreshes. Switching to another task, the supervisor log, or the database panel starts that newly selected view from the top.
 
-The database/Prisma panel shows managed Postgres identity, cached migration-prefix snapshots, and schema/migration drift. Migration authoring is explicit; normal startup does not secretly generate migrations. When you create a migration from the TUI, Devflow sends a daemon action that runs the project migration target such as `new-migration`, streams task progress in the footer immediately, and then relaunches the previously detached target so services come back through the graph.
+The database/Prisma panel shows managed Postgres identity, cached Prisma migration-prefix snapshots, and schema/migration drift when Prisma metadata is available. Migration authoring is explicit; normal startup does not secretly generate migrations. When you create a migration from the TUI, Devflow sends a daemon action with kind `devflow.database.migration.create`, streams task progress in the footer immediately, surfaces any declared confirmation prompts, and then relaunches the previously detached target so services come back through the graph. The same `m` action can drive non-Prisma components such as PayloadCMS when the adapter registers a migration-create action.
+
+The same action is available from the CLI:
+
+```bash
+devflow action list
+devflow migration create add_user
+devflow migration create add_user --component prisma --json
+```
+
+Use `--component` when a project has more than one migration system.
 
 ## Watch Mode
 

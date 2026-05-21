@@ -313,12 +313,12 @@ func TestGeneratePrismaMigrationFromTUIRunsProjectTargetAndRelaunches(t *testing
 		gotRoot = root
 		gotReq = req
 		if onEvent != nil {
-			onEvent(api.Event{Type: api.EventRunStarted, Target: "new-migration"})
+			onEvent(api.Event{Type: api.EventRunStarted, Target: "prisma_new_migration"})
 			onEvent(api.Event{Type: api.EventTaskState, Task: "prisma_new_migration", State: api.StateRunning})
 			onEvent(api.Event{Type: api.EventLogLine, Task: "prisma_new_migration", Stream: "stdout", Line: "created migration add-age"})
 			onEvent(api.Event{Type: api.EventLogLine, Task: "daemon", Stream: "status", Line: "detached target up relaunched"})
 			success := true
-			onEvent(api.Event{Type: api.EventRunFinished, Target: "new-migration", Success: &success})
+			onEvent(api.Event{Type: api.EventRunFinished, Target: "prisma_new_migration", Success: &success})
 		}
 		return daemon.Response{OK: true}, nil
 	}
@@ -333,16 +333,16 @@ func TestGeneratePrismaMigrationFromTUIRunsProjectTargetAndRelaunches(t *testing
 	if gotRoot != worktree {
 		t.Fatalf("unexpected daemon root: got %q want %q", gotRoot, worktree)
 	}
-	if gotReq.Action != daemon.ActionPrismaMigration || !gotReq.StreamEvents || gotReq.Env["DEVFLOW_MIGRATION_NAME"] != "add-age" {
+	if gotReq.Action != daemon.ActionRunAction || gotReq.ActionKind != database.ActionMigrationCreate || !gotReq.StreamEvents || gotReq.Inputs["name"] != "add-age" {
 		t.Fatalf("unexpected daemon request: %+v", gotReq)
 	}
 	for _, want := range []string{
 		"connecting to daemon",
-		"run started: new-migration",
+		"run started: prisma_new_migration",
 		"prisma_new_migration: running",
 		"prisma_new_migration stdout: created migration add-age",
 		"detached target up relaunched",
-		"run finished: new-migration",
+		"run finished: prisma_new_migration",
 	} {
 		if !tuiProgressContains(progress, want) {
 			t.Fatalf("expected progress to contain %q, got %+v", want, progress)

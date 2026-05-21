@@ -31,9 +31,11 @@ type Builder struct {
 	portSeen  map[string]bool
 	finalize  []func(*api.Instance) error
 
-	tasks   []*TaskBuilder
-	taskMap map[string]*TaskBuilder
-	targets []Target
+	tasks     []*TaskBuilder
+	taskMap   map[string]*TaskBuilder
+	targets   []Target
+	actions   []*ActionBuilder
+	actionMap map[string]*ActionBuilder
 
 	prismaConfig *PrismaConfig
 }
@@ -56,6 +58,11 @@ type PortRef struct {
 	name string
 }
 
+type ActionBuilder struct {
+	builder *Builder
+	action  Action
+}
+
 type InputGlob string
 
 func Define(fn ConfigureFunc) Project {
@@ -76,6 +83,7 @@ func NewBuilder() *Builder {
 		env:          map[string]string{},
 		portSeen:     map[string]bool{},
 		taskMap:      map[string]*TaskBuilder{},
+		actionMap:    map[string]*ActionBuilder{},
 	}
 }
 
@@ -188,6 +196,20 @@ func (b *Builder) Target(name string, roots ...any) *Builder {
 	return b
 }
 
+func (b *Builder) Action(id string) *ActionBuilder {
+	id = strings.TrimSpace(id)
+	if existing := b.actionMap[id]; existing != nil {
+		return existing
+	}
+	action := &ActionBuilder{
+		builder: b,
+		action:  Action{ID: id},
+	}
+	b.actions = append(b.actions, action)
+	b.actionMap[id] = action
+	return action
+}
+
 func (b *Builder) Project() (Project, error) {
 	if b.name == "" {
 		return nil, fmt.Errorf("project name is required")
@@ -204,6 +226,13 @@ func (b *Builder) Project() (Project, error) {
 		built := task.build(catalog)
 		tasks = append(tasks, built)
 	}
+	actions := make([]Action, 0, len(b.actions))
+	for _, action := range b.actions {
+		built := action.build()
+		if built.ID != "" {
+			actions = append(actions, built)
+		}
+	}
 	return builtProject{
 		name:           b.name,
 		defaultTarget:  b.defaultTarget,
@@ -215,6 +244,7 @@ func (b *Builder) Project() (Project, error) {
 		finalize:       append([]func(*api.Instance) error(nil), b.finalize...),
 		tasks:          tasks,
 		targets:        append([]Target(nil), b.targets...),
+		actions:        actions,
 		prismaConfig:   clonePrismaConfig(b.prismaConfig),
 	}, nil
 }
@@ -249,6 +279,121 @@ func (t *TaskBuilder) Name() string {
 		return ""
 	}
 	return t.task.Name
+}
+
+func (a *ActionBuilder) Kind(kind string) *ActionBuilder {
+	if a != nil {
+		a.action.Kind = strings.TrimSpace(kind)
+	}
+	return a
+}
+
+func (a *ActionBuilder) Category(category ActionCategory) *ActionBuilder {
+	if a != nil {
+		a.action.Category = category
+	}
+	return a
+}
+
+func (a *ActionBuilder) Label(label string) *ActionBuilder {
+	if a != nil {
+		a.action.Label = strings.TrimSpace(label)
+	}
+	return a
+}
+
+func (a *ActionBuilder) Description(description string) *ActionBuilder {
+	if a != nil {
+		a.action.Description = strings.TrimSpace(description)
+	}
+	return a
+}
+
+func (a *ActionBuilder) Component(component string) *ActionBuilder {
+	if a != nil {
+		a.action.Component = strings.TrimSpace(component)
+	}
+	return a
+}
+
+func (a *ActionBuilder) Task(task any) *ActionBuilder {
+	if a != nil {
+		a.action.Task = refName(task)
+	}
+	return a
+}
+
+func (a *ActionBuilder) Input(input ActionInput) *ActionBuilder {
+	if a == nil {
+		return a
+	}
+	input.Name = strings.TrimSpace(input.Name)
+	if input.Name == "" {
+		return a
+	}
+	if input.Type == "" {
+		input.Type = ActionInputString
+	}
+	a.action.Inputs = append(a.action.Inputs, input)
+	return a
+}
+
+func (a *ActionBuilder) Alias(aliases ...string) *ActionBuilder {
+	if a != nil {
+		a.action.Aliases = append(a.action.Aliases, aliases...)
+	}
+	return a
+}
+
+func (a *ActionBuilder) Writes(paths ...string) *ActionBuilder {
+	if a != nil {
+		a.action.Effects.Writes = append(a.action.Effects.Writes, paths...)
+	}
+	return a
+}
+
+func (a *ActionBuilder) Touches(resources ...string) *ActionBuilder {
+	if a != nil {
+		a.action.Effects.Touches = append(a.action.Effects.Touches, resources...)
+	}
+	return a
+}
+
+func (a *ActionBuilder) Invalidates(refs ...any) *ActionBuilder {
+	if a == nil {
+		return a
+	}
+	for _, ref := range refs {
+		if name := refName(ref); name != "" {
+			a.action.Effects.Invalidates = append(a.action.Effects.Invalidates, name)
+		}
+	}
+	return a
+}
+
+func (a *ActionBuilder) Relaunch(policy ActionRelaunchPolicy) *ActionBuilder {
+	if a != nil {
+		a.action.Relaunch = policy
+	}
+	return a
+}
+
+func (a *ActionBuilder) RelaunchPreviousTargetAfterSuccess() *ActionBuilder {
+	return a.Relaunch(ActionRelaunchPreviousTargetAfterSuccess)
+}
+
+func (a *ActionBuilder) build() Action {
+	if a == nil {
+		return Action{}
+	}
+	action := a.action
+	action.Aliases = uniqueStrings(action.Aliases)
+	action.Inputs = cloneActionInputs(action.Inputs)
+	action.Effects = cloneActionEffects(action.Effects)
+	if action.Relaunch == "" {
+		action.Relaunch = ActionRelaunchNever
+	}
+	return action
 }
 
 func (t *TaskBuilder) Command(name string, args ...string) *TaskBuilder {
@@ -503,6 +648,7 @@ type builtProject struct {
 	finalize       []func(*api.Instance) error
 	tasks          []Task
 	targets        []Target
+	actions        []Action
 	prismaConfig   *PrismaConfig
 }
 
@@ -527,6 +673,17 @@ func (p builtProject) Tasks() []Task {
 
 func (p builtProject) Targets() []Target {
 	return append([]Target(nil), p.targets...)
+}
+
+func (p builtProject) Actions() []Action {
+	actions := make([]Action, 0, len(p.actions))
+	for _, action := range p.actions {
+		action.Inputs = cloneActionInputs(action.Inputs)
+		action.Effects = cloneActionEffects(action.Effects)
+		action.Aliases = append([]string(nil), action.Aliases...)
+		actions = append(actions, action)
+	}
+	return actions
 }
 
 func (p builtProject) PrismaConfig() PrismaConfig {

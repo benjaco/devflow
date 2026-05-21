@@ -19,6 +19,7 @@ import (
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/cache"
 	"github.com/benjaco/devflow/pkg/daemon"
+	"github.com/benjaco/devflow/pkg/database"
 	"github.com/benjaco/devflow/pkg/instance"
 	"github.com/benjaco/devflow/pkg/process"
 	"github.com/benjaco/devflow/pkg/project"
@@ -29,6 +30,7 @@ type taskTargetCLIProject struct{}
 type depsCLIProject struct{}
 type targetDepsCLIProject struct{}
 type graphExplainCLIProject struct{}
+type actionCLIProject struct{}
 
 func (failCLIProject) Name() string { return "cli-fail-project" }
 
@@ -205,6 +207,50 @@ func (graphExplainCLIProject) Targets() []project.Target {
 	return []project.Target{{Name: "up", RootTasks: []string{"build"}}}
 }
 
+func (actionCLIProject) Name() string { return "cli-action-project" }
+
+func (actionCLIProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "cli-action"}, nil
+}
+
+func (actionCLIProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name: "create_migration",
+			Kind: project.KindOnce,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				return os.WriteFile(filepath.Join(rt.Worktree, "action.txt"), []byte(rt.Env["MIGRATION_NAME"]), 0o644)
+			},
+		},
+	}
+}
+
+func (actionCLIProject) Targets() []project.Target {
+	return []project.Target{{Name: "up", RootTasks: []string{"create_migration"}}}
+}
+
+func (actionCLIProject) Actions() []project.Action {
+	return []project.Action{
+		{
+			ID:        "db.migration.create",
+			Kind:      database.ActionMigrationCreate,
+			Category:  project.ActionCategoryAuthoring,
+			Label:     "Create test migration",
+			Component: "db",
+			Task:      "create_migration",
+			Inputs: []project.ActionInput{
+				{Name: "name", Type: project.ActionInputString, Required: true, Positional: true, Env: "MIGRATION_NAME"},
+			},
+			Effects:  project.ActionEffects{Writes: []string{"action.txt"}},
+			Relaunch: project.ActionRelaunchNever,
+			Aliases:  []string{"db:migration:create"},
+		},
+	}
+}
+
 func init() {
 	daemon.SetStartDaemonFuncForTest(func(worktree, instanceID, projectName string) error {
 		logPath := filepath.Join(worktree, ".devflow", "logs", instanceID, "daemon.log")
@@ -218,6 +264,7 @@ func init() {
 	project.Register(depsCLIProject{})
 	project.Register(targetDepsCLIProject{})
 	project.Register(graphExplainCLIProject{})
+	project.Register(actionCLIProject{})
 }
 
 func TestGraphListJSON(t *testing.T) {
@@ -231,6 +278,67 @@ func TestGraphListJSON(t *testing.T) {
 	}
 	if _, ok := payload["tasks"]; !ok {
 		t.Fatalf("missing tasks: %v", payload)
+	}
+}
+
+func TestActionListJSON(t *testing.T) {
+	worktree := t.TempDir()
+	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"action", "list", "--json", "--project", "cli-action-project", "--worktree", worktree}); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Project string `json:"project"`
+		Actions []struct {
+			ID        string `json:"id"`
+			Kind      string `json:"kind"`
+			Component string `json:"component"`
+		} `json:"actions"`
+	}
+	if err := json.Unmarshal(app.Stdout.(*bytes.Buffer).Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Project != "cli-action-project" || len(payload.Actions) != 1 {
+		t.Fatalf("unexpected action list: %+v", payload)
+	}
+	if payload.Actions[0].ID != "db.migration.create" || payload.Actions[0].Kind != database.ActionMigrationCreate || payload.Actions[0].Component != "db" {
+		t.Fatalf("unexpected action payload: %+v", payload.Actions[0])
+	}
+}
+
+func TestMigrationCreateRunsActionJSON(t *testing.T) {
+	worktree := t.TempDir()
+	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	err := app.Run([]string{"migration", "create", "add-user", "--json", "--project", "cli-action-project", "--worktree", worktree})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		ActionID string            `json:"actionId"`
+		Kind     string            `json:"kind"`
+		Status   string            `json:"status"`
+		Inputs   map[string]string `json:"inputs"`
+		Created  []string          `json:"createdFiles"`
+		Run      *api.RunResult    `json:"run"`
+	}
+	if err := json.Unmarshal(app.Stdout.(*bytes.Buffer).Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.ActionID != "db.migration.create" || payload.Kind != database.ActionMigrationCreate || payload.Status != "succeeded" {
+		t.Fatalf("unexpected action result: %+v", payload)
+	}
+	if payload.Inputs["name"] != "add-user" {
+		t.Fatalf("unexpected inputs: %+v", payload.Inputs)
+	}
+	if len(payload.Created) != 1 || payload.Created[0] != "action.txt" {
+		t.Fatalf("unexpected created files: %+v", payload.Created)
+	}
+	data, err := os.ReadFile(filepath.Join(worktree, "action.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "add-user" {
+		t.Fatalf("unexpected action output %q", string(data))
 	}
 }
 

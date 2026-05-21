@@ -95,6 +95,61 @@ func TestRunInteractiveAnswersPrompts(t *testing.T) {
 	}
 }
 
+func TestRunInteractiveAnswersRepeatedAlternativePrompts(t *testing.T) {
+	root := t.TempDir()
+	prompts := []PromptRequest{}
+	var mu sync.Mutex
+	lines := []string{}
+	bin := buildPromptCLI(t)
+	_, err := Run(context.Background(), CommandSpec{
+		Name:        bin,
+		Dir:         root,
+		Env:         map[string]string{"PROMPTCLI_REPEAT_CONFIRM": "1"},
+		Interactive: true,
+		Prompts: []PromptSpec{
+			{
+				Patterns: []string{
+					"Drop field? [y/N]: ",
+					"Delete column? [y/N]: ",
+				},
+				Prompt: "Accept data-loss warning?",
+				Kind:   PromptConfirm,
+				Repeat: true,
+			},
+		},
+		OnPrompt: func(req PromptRequest) (PromptResponse, error) {
+			prompts = append(prompts, req)
+			return PromptResponse{Value: "y"}, nil
+		},
+		OnLine: func(stream, line string) {
+			mu.Lock()
+			defer mu.Unlock()
+			lines = append(lines, stream+": "+line)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts) != 2 {
+		t.Fatalf("expected repeated prompt handler to answer 2 prompts, got %d", len(prompts))
+	}
+	for _, prompt := range prompts {
+		if prompt.Kind != PromptConfirm || prompt.Prompt != "Accept data-loss warning?" {
+			t.Fatalf("unexpected prompt: %+v", prompt)
+		}
+	}
+	found := false
+	for _, line := range lines {
+		if strings.Contains(line, "confirmed twice") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected confirmation output, got %v", lines)
+	}
+}
+
 func TestRunTruncatesLogPerAttempt(t *testing.T) {
 	root := t.TempDir()
 	logPath := filepath.Join(root, "task.log")

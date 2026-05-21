@@ -175,6 +175,59 @@ func TestEnsureCreatesMissingDaemonLogForLiveDaemon(t *testing.T) {
 	}
 }
 
+func TestRunProjectActionExecutesTaskBackedAction(t *testing.T) {
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const projectName = "daemon-action-run"
+	project.Register(project.Define(func(ctx context.Context, b *project.Builder) error {
+		b.Name(projectName)
+		task := b.Task("write_action_input").
+			NoCache().
+			Run(func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				return os.WriteFile(filepath.Join(rt.Worktree, "action.txt"), []byte(rt.Env["THING_NAME"]), 0o644)
+			})
+		b.Target("up", task)
+		b.Action("thing.create").
+			Kind("devflow.test.create").
+			Component("thing").
+			Task(task).
+			Input(project.ActionInput{Name: "name", Required: true, Env: "THING_NAME"}).
+			Writes("action.txt")
+		return nil
+	}))
+
+	s := &Server{
+		worktree:    worktree,
+		instanceID:  inst.ID,
+		projectName: projectName,
+		subscribers: map[chan api.Event]bool{},
+		shutdown:    make(chan struct{}),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := s.runProjectAction(ctx, projectName, "thing.create", "", "", map[string]string{"name": "alpha"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil || result.Status != "succeeded" || result.ActionID != "thing.create" {
+		t.Fatalf("unexpected action result: %+v", result)
+	}
+	if len(result.CreatedFiles) != 1 || result.CreatedFiles[0] != "action.txt" {
+		t.Fatalf("unexpected created files: %+v", result.CreatedFiles)
+	}
+	data, err := os.ReadFile(filepath.Join(worktree, "action.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "alpha" {
+		t.Fatalf("unexpected action file content %q", string(data))
+	}
+}
+
 func TestSubscribeReturnsWhenContextCanceled(t *testing.T) {
 	socketPath := filepath.Join(os.TempDir(), "df-subscribe-"+time.Now().Format("150405.000000000")+".sock")
 	defer os.Remove(socketPath)
@@ -317,22 +370,6 @@ func TestParseLegacyProcesses(t *testing.T) {
 	}
 	if processes[1].pid != 11 || processes[1].ppid != 10 || processes[1].command != "node src/server.ts" {
 		t.Fatalf("unexpected second process: %+v", processes[1])
-	}
-}
-
-func TestResolvePrismaMigrationTargetUsesComponentTaskFallback(t *testing.T) {
-	p := daemonTestProject{
-		name: "daemon-prisma-task-fallback",
-		tasks: []project.Task{
-			{Name: "custom_new_migration", Kind: project.KindOnce},
-		},
-	}
-	target, err := resolvePrismaMigrationTarget(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if target != "custom_new_migration" {
-		t.Fatalf("unexpected fallback target %q", target)
 	}
 }
 
