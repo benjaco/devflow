@@ -119,5 +119,5 @@ func WriteEnvFile(path string, env map[string]string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	return ReplaceFile(tmpPath, path)
 }

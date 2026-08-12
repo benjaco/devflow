@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/benjaco/devflow/internal/fsutil"
 )
 
 func WriteFileAtomic(path string, v any) error {
@@ -35,7 +37,7 @@ func WriteFileAtomic(path string, v any) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	return fsutil.ReplaceFile(tmpPath, path)
 }
 
 func ReadFile(path string, v any) error {

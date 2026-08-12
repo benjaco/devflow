@@ -21,7 +21,7 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - cache-key override stability and correctness
 - instance identity and env persistence
 - port allocation and reuse
-- atomic JSON/runtime-env replacement under concurrent writes, failed-marshalling preservation, owner-only Unix permissions, cross-platform file-lock serialization, and non-blocking concurrent event fanout
+- atomic JSON/runtime-env replacement under repeated concurrent writes, failed-marshalling preservation, owner-only Unix permissions, bounded Windows destination-sharing retry, cross-platform file-lock serialization, and non-blocking concurrent event fanout
 
 ## Integration Tests
 

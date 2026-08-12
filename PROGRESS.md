@@ -14,6 +14,13 @@ Last updated: 2026-08-12
 
 ## Completed
 
+- Windows atomic persistence race hardening:
+  - routed JSON state and `runtime.env` temporary-file commits through one shared same-destination replacement primitive
+  - serialized in-process writers per normalized destination without globally blocking unrelated state files
+  - added bounded Windows-only retry for transient `MoveFileEx` access-denied, sharing-violation, and lock-violation errors while preserving the old destination until replacement succeeds
+  - retained unique same-directory temporary files, cleanup, failed-marshalling preservation, and Unix owner-only permissions
+  - added concurrent runtime-env coverage and a Windows-only locked-destination test alongside the reported 32-writer JSON regression; passed the full default/race suites, Go 1.25 focused checks, vet, Staticcheck, govulncheck, and Windows amd64/arm64 compilation
+
 - Adapter-owned Docker supervision cleanup:
   - added a generic `project.ServiceHandle` lifecycle boundary while preserving the legacy process-only runtime callback; Engine-managed resources can now be supervised with PID `0`
   - made CI cleanup, attached shutdown, watch restarts, readiness, and flush health operate on registered handle liveness while retaining OS PID checks for process-backed services

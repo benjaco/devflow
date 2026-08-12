@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -65,6 +68,43 @@ func TestWriteEnvFileSortedAtomicAndPrivate(t *testing.T) {
 	}
 	if got, want := string(data), "B=replacement\n"; got != want {
 		t.Fatalf("replacement env contents = %q, want %q", got, want)
+	}
+}
+
+func TestWriteEnvFileConcurrentWritersLeaveCompleteFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "runtime.env")
+	const writers = 32
+	errCh := make(chan error, writers)
+	var wg sync.WaitGroup
+	for value := 0; value < writers; value++ {
+		wg.Add(1)
+		go func(value int) {
+			defer wg.Done()
+			errCh <- WriteEnvFile(path, map[string]string{"VALUE": strconv.Itoa(value)})
+		}(value)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("concurrent atomic env write failed: %v", err)
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := strings.TrimPrefix(strings.TrimSpace(string(data)), "VALUE=")
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 || parsed >= writers {
+		t.Fatalf("final env file is incomplete or unexpected: %q", data)
+	}
+	matches, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".runtime.env.tmp-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary env files were not cleaned up: %v", matches)
 	}
 }
 
