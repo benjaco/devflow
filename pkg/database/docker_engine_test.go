@@ -3,6 +3,7 @@ package database
 import (
 	"archive/tar"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 
 	contextdocker "github.com/docker/cli/cli/context/docker"
 	contextstore "github.com/docker/cli/cli/context/store"
+	"github.com/moby/moby/api/pkg/stdcopy"
 	containertypes "github.com/moby/moby/api/types/container"
 	mobyclient "github.com/moby/moby/client"
 )
@@ -203,6 +205,114 @@ func TestSDKDockerEngineExecCancellationClosesHijackedStream(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Engine exec did not stop after context cancellation")
+	}
+}
+
+func TestSDKDockerEngineWatchesMultiplexedContainerLogsAndExit(t *testing.T) {
+	logsQuery := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/containers/devflow-pg-test/logs"):
+			logsQuery <- request.URL.RawQuery
+			response.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
+			writeDockerLogFrame(t, response, stdcopy.Stdout, "postgres ready\npartial")
+			writeDockerLogFrame(t, response, stdcopy.Stderr, "warning\r\n")
+		case strings.HasSuffix(request.URL.Path, "/containers/devflow-pg-test/wait"):
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"StatusCode":0}`)
+		default:
+			http.Error(response, "unexpected Engine API request", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := mobyclient.New(
+		mobyclient.WithHost("tcp://"+server.Listener.Addr().String()),
+		mobyclient.WithAPIVersion("1.55"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	var lines []string
+	engine := &sdkDockerEngine{client: client}
+	if err := engine.WatchContainer(context.Background(), "devflow-pg-test", func(stream, line string) {
+		lines = append(lines, stream+":"+line)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(lines, "|"); got != "stdout:postgres ready|stderr:warning|stdout:partial" {
+		t.Fatalf("forwarded container logs = %q", got)
+	}
+	select {
+	case query := <-logsQuery:
+		for _, expected := range []string{"follow=1", "stderr=1", "stdout=1"} {
+			if !strings.Contains(query, expected) {
+				t.Fatalf("container logs query %q is missing %q", query, expected)
+			}
+		}
+	default:
+		t.Fatal("expected a container logs request")
+	}
+}
+
+func TestSDKDockerEngineWatchCancellationClosesLogStream(t *testing.T) {
+	logAttached := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/containers/devflow-pg-test/logs"):
+			response.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
+			writeDockerLogFrame(t, response, stdcopy.Stdout, "postgres starting\n")
+			if flusher, ok := response.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			close(logAttached)
+			<-request.Context().Done()
+		case strings.HasSuffix(request.URL.Path, "/containers/devflow-pg-test/wait"):
+			<-request.Context().Done()
+		default:
+			http.Error(response, "unexpected Engine API request", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := mobyclient.New(
+		mobyclient.WithHost("tcp://"+server.Listener.Addr().String()),
+		mobyclient.WithAPIVersion("1.55"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	engine := &sdkDockerEngine{client: client}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- engine.WatchContainer(ctx, "devflow-pg-test", nil)
+	}()
+	select {
+	case <-logAttached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("container log stream was not attached")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("watch cancellation error = %v, want context canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("container watch did not stop after context cancellation")
+	}
+}
+
+func writeDockerLogFrame(t *testing.T, writer io.Writer, stream stdcopy.StdType, payload string) {
+	t.Helper()
+	header := make([]byte, 8)
+	header[0] = byte(stream)
+	binary.BigEndian.PutUint32(header[4:], uint32(len(payload)))
+	if _, err := writer.Write(append(header, payload...)); err != nil {
+		t.Errorf("write Docker log frame: %v", err)
 	}
 }
 

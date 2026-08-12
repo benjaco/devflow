@@ -181,6 +181,18 @@ func (h *Handle) PID() int {
 	return h.cmd.Process.Pid
 }
 
+func (h *Handle) Alive() bool {
+	if h == nil || h.cmd == nil || h.cmd.Process == nil {
+		return false
+	}
+	select {
+	case <-h.done:
+		return false
+	default:
+		return true
+	}
+}
+
 func (h *Handle) Wait() error {
 	if h == nil {
 		return nil

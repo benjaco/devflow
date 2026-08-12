@@ -322,7 +322,7 @@ func (exampleProject) Tasks() []project.Task {
 			Deps:         []string{"snapshot_db_state"},
 			Restart:      project.RestartOnInputChange,
 			Description:  "Run the dedicated Postgres runtime for this worktree",
-			Signature:    "postgres-runtime-v1",
+			Signature:    "postgres-runtime-v2-engine-api",
 			Ready:        exampleDBReady,
 			ReadyTimeout: 30 * time.Second,
 			Run: func(ctx context.Context, rt *project.Runtime) error {
@@ -334,18 +334,14 @@ func (exampleProject) Tasks() []project.Task {
 					return err
 				}
 				manager := database.New()
-				if err := manager.EnsureRuntime(ctx, rt.Instance.DB); err != nil {
+				handle, err := manager.StartRuntimeService(ctx, rt.Instance.DB, database.RuntimeServiceOptions{
+					OnLine: rt.LineEmitter(),
+				})
+				if err != nil {
 					return err
 				}
-				env := cloneEnv(rt.Env)
-				env["DB_CONTAINER"] = rt.Instance.DB.ContainerName
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "docker",
-					Args: []string{"logs", "-f", env["DB_CONTAINER"]},
-					Dir:  rt.Worktree,
-					Env:  env,
-				})
-				return err
+				rt.RegisterServiceHandle(handle)
+				return nil
 			},
 		},
 		{
@@ -844,12 +840,20 @@ func pipeSQLFile(ctx context.Context, rt *project.Runtime, rel string) error {
 	if err != nil {
 		return err
 	}
-	return rt.RunCmdSpec(ctx, process.CommandSpec{
-		Name: "docker",
-		Args: []string{"exec", "-i", rt.Instance.DB.ContainerName, "psql", "-U", rt.Instance.DB.User, "-d", rt.Instance.DB.Name, "-v", "ON_ERROR_STOP=1", "-c", string(sql)},
-		Dir:  rt.Worktree,
-		Env:  cloneEnv(rt.Env),
-	})
+	output, execErr := database.New().ExecSQL(ctx, rt.Instance.DB, string(sql))
+	stream := "stdout"
+	if execErr != nil {
+		stream = "stderr"
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(string(output), "\n"), "\n") {
+		if line != "" {
+			rt.EmitLogLine(stream, line)
+		}
+	}
+	if execErr != nil {
+		return fmt.Errorf("apply SQL file %s: %w", rel, execErr)
+	}
+	return nil
 }
 
 func mergeStringMaps(base, overlay map[string]string) map[string]string {

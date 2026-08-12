@@ -67,6 +67,20 @@ func TestEmbeddedWebAppGraphValidates(t *testing.T) {
 			t.Fatalf("expected task %q to be registered", name)
 		}
 	}
+	if _, exists := g.Tasks["check_db_tools"]; exists {
+		t.Fatal("embedded adapter must not retain a Docker CLI probe task")
+	}
+	if got := g.Tasks["postgres"].Kind; got != project.KindService {
+		t.Fatalf("managed Postgres task kind = %q, want supervised service", got)
+	}
+}
+
+func TestEmbeddedWebAppDoesNotRequireDockerExecutable(t *testing.T) {
+	for _, required := range (embeddedWebAppProject{}).RequiredCLIs() {
+		if required.Name == "docker" || required.Command == "docker" {
+			t.Fatalf("managed database must use the Engine API, got Docker CLI requirement %+v", required)
+		}
+	}
 }
 
 func TestEmbeddedWebAppConfigureInstanceAppliesOverrides(t *testing.T) {

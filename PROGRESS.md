@@ -5,14 +5,24 @@ Last updated: 2026-08-12
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: the August 2026 repository health, Apple Silicon/PostGIS portability, and managed-database Docker Engine API reviews are complete; the per-worktree daemon remains the mutable dev/watch/operator control plane while `run --ci` remains direct and finite
-- Confidence: native `darwin/arm64` default/database/example tests, real native-ARM64 Docker/Postgres snapshot/restore and PostgreSQL 16/17/18 PostGIS spatial/persistence e2e, the full race suite, vet, Staticcheck, govulncheck, clean module metadata, the Go 1.25 minimum toolchain, and complete Linux amd64/arm64 plus Windows amd64/arm64 compilation pass; the real remote-clone case remains locally blocked by missing host Postgres clients, while real-Delve app readiness remains blocked by disabled macOS Developer Tools security
+- State: the August 2026 repository health, Apple Silicon/PostGIS portability, managed-database Docker Engine API, and adapter-owned Docker supervision reviews are complete; the per-worktree daemon remains the mutable dev/watch/operator control plane while `run --ci` remains direct and finite
+- Confidence: native `darwin/arm64` default/database/example tests, real native-ARM64 Docker/Postgres service lifecycle and snapshot/restore, PostgreSQL 16/17/18 PostGIS spatial/persistence e2e, the full race suite, vet, Staticcheck, govulncheck, clean module metadata, the Go 1.25 minimum toolchain, and complete Linux amd64/arm64 plus Windows amd64/arm64 compilation pass; the real remote-clone case remains locally blocked by missing host Postgres clients, while real-Delve app readiness remains blocked by disabled macOS Developer Tools security
 
 ## In Progress
 
 - None.
 
 ## Completed
+
+- Adapter-owned Docker supervision cleanup:
+  - added a generic `project.ServiceHandle` lifecycle boundary while preserving the legacy process-only runtime callback; Engine-managed resources can now be supervised with PID `0`
+  - made CI cleanup, attached shutdown, watch restarts, readiness, and flush health operate on registered handle liveness while retaining OS PID checks for process-backed services
+  - added `database.Manager.StartRuntimeService`, which ensures Postgres, follows multiplexed stdout/stderr, waits for container exit, and stops it entirely through the Docker Engine API
+  - removed the embedded-web-app adapter's Docker CLI catalog entry, `docker info` task, `docker logs -f` wrapper shell, and shell-trap shutdown path
+  - migrated the older go-next-monorepo and web-worker-workspace service/log paths to the same handle and added `Manager.ExecSQL` so their real migration paths no longer invoke `docker exec`; bundled adapter source is now Docker-CLI-free
+  - added deterministic Engine log-demultiplexing, managed-service lifecycle, CI/flush PID-less supervision, and adapter graph/prerequisite coverage
+  - added the real managed Postgres log/watch/stop lifecycle case to the native Linux amd64/arm64 Docker Actions job and passed it locally through Docker Desktop on native Apple ARM
+  - passed `go test ./...`, `go test -race ./...`, vet, Staticcheck, govulncheck, tidy/format/diff checks, workflow parsing, and Linux/Windows amd64/arm64 compilation
 
 - Managed-database Docker Engine API migration:
   - replaced every `pkg/database` Docker CLI spawn with the official Go Engine client and a narrow package-owned interface; there is no `docker` executable fallback or managed-component CLI requirement
@@ -698,4 +708,4 @@ Last updated: 2026-08-12
 - Round-1 release flow deliberately has no binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable
 - Fine-grained detached per-service restart is not fully implemented yet
 - The example adapter still uses a deterministic fake-DB path in normal tests; the full real Docker-backed module suite remains opt-in, while the focused PostGIS case is required in CI on native Linux amd64/arm64
-- The `embedded-web-app` adapter is now manually validated against a local repo for build, DB prep, detached runtime, health, and shutdown flows; remaining gaps are automated Docker-backed coverage and richer control UX
+- The `embedded-web-app` adapter is manually validated against a local repo for build, DB prep, detached runtime, health, and shutdown flows. Its shared production container supervision now has real Docker-backed package coverage; a full adapter-level Docker smoke remains manual, as does richer control UX.

@@ -54,7 +54,7 @@ type runState struct {
 	status    map[string]api.NodeStatus
 	depKeys   map[string]string
 	cacheHits []string
-	services  map[string]*process.Handle
+	services  map[string]project.ServiceHandle
 	publish   func(api.Event)
 }
 
@@ -344,7 +344,7 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 		inst:     inst,
 		status:   map[string]api.NodeStatus{},
 		depKeys:  map[string]string{},
-		services: map[string]*process.Handle{},
+		services: map[string]project.ServiceHandle{},
 		publish:  e.publish,
 	}
 	for _, name := range order {
@@ -377,7 +377,7 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 		EventFn: func(evt api.Event) {
 			e.publish(evt)
 		},
-		OnService: func(task string, handle *process.Handle) {
+		OnServiceHandle: func(task string, handle project.ServiceHandle) {
 			state.registerService(task, handle)
 		},
 		OnPrompt: func(task string, prompt process.PromptRequest) (process.PromptResponse, error) {
@@ -647,7 +647,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 	return taskResult{name: task.Name}
 }
 
-func (e *Engine) awaitServiceReady(ctx context.Context, rt *project.Runtime, task project.Task, handle *process.Handle) error {
+func (e *Engine) awaitServiceReady(ctx context.Context, rt *project.Runtime, task project.Task, handle project.ServiceHandle) error {
 	if task.Ready == nil {
 		return nil
 	}
@@ -827,7 +827,7 @@ func (e *Engine) taskKey(ctx context.Context, rt *project.Runtime, task project.
 	})
 }
 
-func (e *Engine) waitForServices(parent context.Context, req Request, inst *api.Instance, status map[string]api.NodeStatus, services map[string]*process.Handle) error {
+func (e *Engine) waitForServices(parent context.Context, req Request, inst *api.Instance, status map[string]api.NodeStatus, services map[string]project.ServiceHandle) error {
 	ctx, cancel := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -837,7 +837,7 @@ func (e *Engine) waitForServices(parent context.Context, req Request, inst *api.
 	}
 	exits := make(chan exit, len(services))
 	for name, handle := range services {
-		go func(task string, h *process.Handle) {
+		go func(task string, h project.ServiceHandle) {
 			exits <- exit{task: task, err: h.Wait()}
 		}(name, handle)
 	}
@@ -1065,11 +1065,15 @@ func (s *runState) publishEvent(evt api.Event) {
 	s.publish(evt)
 }
 
-func (s *runState) registerService(task string, handle *process.Handle) {
+func (s *runState) registerService(task string, handle project.ServiceHandle) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.services[task] = handle
-	s.inst.Processes[task] = api.ProcessRef{PID: handle.PID(), StartedAt: time.Now().UTC()}
+	if pid := handle.PID(); pid > 0 {
+		s.inst.Processes[task] = api.ProcessRef{PID: pid, StartedAt: time.Now().UTC()}
+	} else {
+		delete(s.inst.Processes, task)
+	}
 	node := s.status[task]
 	node.PID = handle.PID()
 	s.status[task] = node
@@ -1077,7 +1081,7 @@ func (s *runState) registerService(task string, handle *process.Handle) {
 	s.saveLocked()
 }
 
-func (s *runState) serviceHandle(task string) (*process.Handle, bool) {
+func (s *runState) serviceHandle(task string) (project.ServiceHandle, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	handle, ok := s.services[task]
@@ -1116,10 +1120,10 @@ func (s *runState) snapshotCacheHits() []string {
 	return out
 }
 
-func (s *runState) snapshotServices() map[string]*process.Handle {
+func (s *runState) snapshotServices() map[string]project.ServiceHandle {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make(map[string]*process.Handle, len(s.services))
+	out := make(map[string]project.ServiceHandle, len(s.services))
 	for name, handle := range s.services {
 		out[name] = handle
 	}
@@ -1234,7 +1238,7 @@ func cloneMap(in map[string]string) map[string]string {
 	return out
 }
 
-func sortedHandles(m map[string]*process.Handle) []string {
+func sortedHandles(m map[string]project.ServiceHandle) []string {
 	names := make([]string, 0, len(m))
 	for name := range m {
 		names = append(names, name)
@@ -1626,7 +1630,12 @@ func (e *Engine) evaluateFlushService(ctx context.Context, req Request, baseRT *
 		service.Error = fmt.Sprintf("service state is %q, want %q", node.State, api.StateRunning)
 		return service
 	}
-	if node.PID <= 0 || !instance.ProcessAlive(node.PID) {
+	handle, registered := state.serviceHandle(task.Name)
+	if !registered || !handle.Alive() {
+		service.Error = "service is not alive"
+		return service
+	}
+	if node.PID > 0 && !instance.ProcessAlive(node.PID) {
 		service.Error = "service process is not alive"
 		return service
 	}

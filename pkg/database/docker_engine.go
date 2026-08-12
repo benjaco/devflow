@@ -89,6 +89,7 @@ type dockerEngine interface {
 	StartContainer(context.Context, string) error
 	StopContainer(context.Context, string, int) error
 	RemoveContainer(context.Context, string, bool) error
+	WatchContainer(context.Context, string, func(string, string)) error
 	Exec(context.Context, string, []string) ([]byte, error)
 	InspectVolume(context.Context, string) (bool, error)
 	CreateVolume(context.Context, string) error
@@ -323,6 +324,121 @@ func (e *sdkDockerEngine) RemoveContainer(ctx context.Context, name string, forc
 		return nil
 	}
 	return err
+}
+
+func (e *sdkDockerEngine) WatchContainer(ctx context.Context, name string, onLine func(string, string)) error {
+	logs, err := e.client.ContainerLogs(ctx, name, mobyclient.ContainerLogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Follow:     true,
+		Tail:       "all",
+	})
+	if err != nil {
+		return err
+	}
+	defer logs.Close()
+
+	stdout := newDockerLogLineWriter("stdout", onLine)
+	stderr := newDockerLogLineWriter("stderr", onLine)
+	copyDone := make(chan error, 1)
+	go func() {
+		_, copyErr := stdcopy.StdCopy(stdout, stderr, logs)
+		stdout.Flush()
+		stderr.Flush()
+		copyDone <- copyErr
+	}()
+
+	wait := e.client.ContainerWait(ctx, name, mobyclient.ContainerWaitOptions{
+		Condition: containertypes.WaitConditionNotRunning,
+	})
+	copyResult := (<-chan error)(copyDone)
+	finishLogCopy := func() error {
+		_ = logs.Close()
+		if copyResult == nil {
+			return nil
+		}
+		copyErr := <-copyResult
+		copyResult = nil
+		return copyErr
+	}
+	for {
+		select {
+		case copyErr := <-copyResult:
+			copyResult = nil
+			if copyErr != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return fmt.Errorf("follow container logs: %w", copyErr)
+			}
+		case result := <-wait.Result:
+			if copyErr := finishLogCopy(); copyErr != nil && ctx.Err() == nil {
+				return fmt.Errorf("finish container logs: %w", copyErr)
+			}
+			if result.Error != nil && strings.TrimSpace(result.Error.Message) != "" {
+				return fmt.Errorf("wait for container: %s", result.Error.Message)
+			}
+			if result.StatusCode != 0 {
+				return &dockerContainerExitError{name: name, code: result.StatusCode}
+			}
+			return nil
+		case waitErr := <-wait.Error:
+			_ = finishLogCopy()
+			if waitErr == nil && ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return waitErr
+		case <-ctx.Done():
+			_ = finishLogCopy()
+			return ctx.Err()
+		}
+	}
+}
+
+type dockerContainerExitError struct {
+	name string
+	code int64
+}
+
+func (e *dockerContainerExitError) Error() string {
+	return fmt.Sprintf("container %s exited with code %d", e.name, e.code)
+}
+
+type dockerLogLineWriter struct {
+	stream string
+	onLine func(string, string)
+	buffer []byte
+}
+
+func newDockerLogLineWriter(stream string, onLine func(string, string)) *dockerLogLineWriter {
+	return &dockerLogLineWriter{stream: stream, onLine: onLine}
+}
+
+func (w *dockerLogLineWriter) Write(data []byte) (int, error) {
+	w.buffer = append(w.buffer, data...)
+	for {
+		newline := bytes.IndexByte(w.buffer, '\n')
+		if newline < 0 {
+			break
+		}
+		w.emit(w.buffer[:newline])
+		w.buffer = w.buffer[newline+1:]
+	}
+	return len(data), nil
+}
+
+func (w *dockerLogLineWriter) Flush() {
+	if len(w.buffer) == 0 {
+		return
+	}
+	w.emit(w.buffer)
+	w.buffer = nil
+}
+
+func (w *dockerLogLineWriter) emit(line []byte) {
+	if w.onLine != nil {
+		w.onLine(w.stream, strings.TrimSuffix(string(line), "\r"))
+	}
 }
 
 func (e *sdkDockerEngine) Exec(ctx context.Context, containerName string, command []string) ([]byte, error) {

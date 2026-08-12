@@ -162,16 +162,30 @@ func CacheNamespace(p Project) string {
 }
 
 type Runtime struct {
-	Worktree  string
-	Instance  *api.Instance
-	Mode      api.RunMode
-	Env       map[string]string
-	TaskName  string
-	LogPath   string
-	EventFn   func(api.Event)
-	OnService func(task string, handle *process.Handle)
-	DepKeys   []string
-	OnPrompt  func(task string, req process.PromptRequest) (process.PromptResponse, error)
+	Worktree string
+	Instance *api.Instance
+	Mode     api.RunMode
+	Env      map[string]string
+	TaskName string
+	LogPath  string
+	EventFn  func(api.Event)
+	// OnService is the legacy process-only registration hook. New engine
+	// integrations use OnServiceHandle so managed resources need no wrapper
+	// process.
+	OnService       func(task string, handle *process.Handle)
+	OnServiceHandle func(task string, handle ServiceHandle)
+	DepKeys         []string
+	OnPrompt        func(task string, req process.PromptRequest) (process.PromptResponse, error)
+}
+
+// ServiceHandle is the lifecycle boundary for supervised services. Normal
+// command services use *process.Handle; integrations such as managed
+// containers can implement the same contract without spawning a wrapper CLI.
+type ServiceHandle interface {
+	PID() int
+	Alive() bool
+	Wait() error
+	Stop() error
 }
 
 func (rt *Runtime) Abs(path string) string {
@@ -303,10 +317,24 @@ func (rt *Runtime) StartServiceSpec(ctx context.Context, spec process.CommandSpe
 	if err != nil {
 		return nil, err
 	}
-	if rt.OnService != nil {
-		rt.OnService(rt.TaskName, handle)
-	}
+	rt.RegisterServiceHandle(handle)
 	return handle, nil
+}
+
+// RegisterServiceHandle registers a supervised service with the engine.
+// StartServiceSpec calls it automatically; managed-resource integrations use
+// it directly. The handle must implement idempotent Stop.
+func (rt *Runtime) RegisterServiceHandle(handle ServiceHandle) {
+	if rt == nil || handle == nil {
+		return
+	}
+	if rt.OnServiceHandle != nil {
+		rt.OnServiceHandle(rt.TaskName, handle)
+		return
+	}
+	if processHandle, ok := handle.(*process.Handle); ok && rt.OnService != nil {
+		rt.OnService(rt.TaskName, processHandle)
+	}
 }
 
 func (rt *Runtime) emitProcessLine(stream, line string) {

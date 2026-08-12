@@ -29,6 +29,71 @@ func TestDockerEngineArchitectureMatchesHostE2E(t *testing.T) {
 	}
 }
 
+func TestDockerRuntimeServiceLifecycleE2E(t *testing.T) {
+	requireDockerE2E(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	mgr := New()
+	db := e2eDBInstance(t)
+	t.Cleanup(func() {
+		_ = mgr.DestroyRuntime(context.Background(), db, true)
+	})
+
+	lines := make(chan string, 32)
+	handle, err := mgr.StartRuntimeService(ctx, db, RuntimeServiceOptions{
+		OnLine: func(stream, line string) {
+			select {
+			case lines <- stream + ":" + line:
+			default:
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.WaitReady(ctx, db, 45*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if handle.PID() != 0 || !handle.Alive() {
+		t.Fatalf("unexpected managed-container handle state: pid=%d alive=%t", handle.PID(), handle.Alive())
+	}
+	sqlOutput, err := mgr.ExecSQL(ctx, db, `SELECT 'engine-api-sql';`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(sqlOutput), "engine-api-sql") {
+		t.Fatalf("unexpected Engine API SQL output %q", sqlOutput)
+	}
+
+	select {
+	case line := <-lines:
+		if !strings.HasPrefix(line, "stdout:") && !strings.HasPrefix(line, "stderr:") {
+			t.Fatalf("unexpected container log stream %q", line)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for a Postgres log line from the Docker Engine API")
+	}
+
+	if err := handle.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Wait(); err != nil {
+		t.Fatalf("intentional managed-container stop returned %v", err)
+	}
+	if handle.Alive() {
+		t.Fatal("managed-container handle remained alive after stop")
+	}
+	container, exists, err := mgr.inspectContainer(ctx, db.ContainerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists || container.Running {
+		t.Fatalf("unexpected container state after service stop: exists=%t running=%t", exists, container.Running)
+	}
+}
+
 func TestDockerRuntimeSnapshotRestoreE2E(t *testing.T) {
 	requireDockerE2E(t)
 

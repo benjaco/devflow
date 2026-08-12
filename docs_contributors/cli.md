@@ -186,6 +186,8 @@ Bare `docs` is intentionally a usage error so agents and users do not accidental
 - daemon/supervisor PID, liveness, and log path when present
 - per-node debug metadata for `debug_service` tasks, including host, port, port name, binary path, package, protocol, and a Go remote-attach shape
 
+`NodeStatus.pid` is a host-process identifier, not a universal service identity. Process-backed services report a positive PID. Engine-managed resources such as the managed Postgres container report PID `0` while running; their liveness is held by the daemon's registered service handle and verified by `flush`, and their output still uses the normal task log/typed log-event surfaces.
+
 Task states now distinguish:
 - `failed`: the task itself failed
 - `migration_needed`: the task intentionally blocked because a database migration must be authored before downstream work can run

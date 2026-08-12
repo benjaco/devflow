@@ -121,6 +121,18 @@ func (e *fakeDockerEngine) RemoveContainer(ctx context.Context, name string, for
 	return err
 }
 
+func (e *fakeDockerEngine) WatchContainer(ctx context.Context, name string, onLine func(string, string)) error {
+	out, err := e.runner.CombinedOutput(ctx, "docker-engine", "watch-container", name)
+	if onLine != nil {
+		for _, line := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
+			if line != "" {
+				onLine("stdout", line)
+			}
+		}
+	}
+	return err
+}
+
 func (e *fakeDockerEngine) Exec(ctx context.Context, container string, command []string) ([]byte, error) {
 	return e.runner.CombinedOutput(ctx, "docker", append([]string{"exec", container}, command...)...)
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -62,16 +61,6 @@ func (embeddedWebAppProject) RequiredCLIs() []project.RequiredCLI {
 				"darwin":  {Script: "brew install sqlc"},
 				"linux":   {Script: "if command -v go >/dev/null 2>&1; then GOBIN=${HOME}/.local/bin go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest; else echo 'Go is required to install sqlc on linux'; exit 1; fi"},
 				"windows": {Shell: "powershell", Script: "if (Get-Command go -ErrorAction SilentlyContinue) { go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest } else { Write-Error 'Go is required to install sqlc on Windows'; exit 1 }"},
-			},
-		},
-		{
-			Name:        "docker",
-			Command:     "docker",
-			Description: "Docker runtime for dedicated Postgres containers",
-			Install: map[string]project.InstallScript{
-				"darwin":  {Script: "brew install --cask docker"},
-				"linux":   {Script: "if command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y docker.io; else echo 'unsupported linux package manager for Docker'; exit 1; fi"},
-				"windows": {Shell: "powershell", Script: "choco install docker-desktop -y"},
 			},
 		},
 	}
@@ -179,31 +168,6 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 			},
 		},
 		{
-			Name:        "check_db_tools",
-			Kind:        project.KindOnce,
-			Description: "Verify the database runtime tooling required for the embedded web app example",
-			Signature:   "embedded-web-app-check-db-tools-v1",
-			RequiredCLIs: []string{
-				"docker",
-			},
-			Run: func(ctx context.Context, rt *project.Runtime) error {
-				_ = ctx
-				if err := project.EnsureRequiredCLIs(embeddedWebAppProject{}.RequiredCLIs(), "docker"); err != nil {
-					return err
-				}
-				cmd := exec.Command("docker", "info")
-				cmd.Dir = rt.Worktree
-				if out, err := cmd.CombinedOutput(); err != nil {
-					text := strings.TrimSpace(string(out))
-					if text == "" {
-						text = err.Error()
-					}
-					return fmt.Errorf("docker daemon not ready: %s", text)
-				}
-				return nil
-			},
-		},
-		{
 			Name:        "warmup_go_download",
 			Kind:        project.KindWarmup,
 			Deps:        []string{"check_build_tools"},
@@ -244,7 +208,6 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 		{
 			Name:        "prepare_db_base",
 			Kind:        project.KindOnce,
-			Deps:        []string{"check_db_tools"},
 			Description: "Restore the nearest cached database snapshot or recreate from the configured base source",
 			Signature:   "embedded-web-app-prepare-db-base-v1",
 			Inputs:      project.Inputs{Dirs: []string{"internal/storage/migrations"}, Files: []string{"sqlc.yaml"}},
@@ -421,7 +384,7 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 			Deps:         []string{"snapshot_db_state"},
 			Restart:      project.RestartOnInputChange,
 			Description:  "Run the dedicated Postgres runtime for this embedded web app worktree",
-			Signature:    "embedded-web-app-postgres-runtime-v1",
+			Signature:    "embedded-web-app-postgres-runtime-v2-engine-api",
 			Ready:        embeddedWebAppDBReady,
 			ReadyTimeout: 30 * time.Second,
 			Run: func(ctx context.Context, rt *project.Runtime) error {
@@ -437,18 +400,14 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 					return err
 				}
 				manager := database.New()
-				if err := manager.EnsureRuntime(ctx, rt.Instance.DB); err != nil {
+				handle, err := manager.StartRuntimeService(ctx, rt.Instance.DB, database.RuntimeServiceOptions{
+					OnLine: rt.LineEmitter(),
+				})
+				if err != nil {
 					return err
 				}
-				env := cloneEnv(rt.Env)
-				env["DB_CONTAINER"] = rt.Instance.DB.ContainerName
-				_, err := rt.StartServiceSpec(ctx, process.CommandSpec{
-					Name: "sh",
-					Args: []string{"-c", "trap 'docker stop -t 10 \"$DB_CONTAINER\" >/dev/null 2>&1 || true; exit 0' INT TERM; docker logs -f \"$DB_CONTAINER\""},
-					Dir:  rt.Worktree,
-					Env:  env,
-				})
-				return err
+				rt.RegisterServiceHandle(handle)
+				return nil
 			},
 		},
 		{

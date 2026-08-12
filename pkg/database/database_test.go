@@ -417,6 +417,65 @@ func TestWaitReadyReportsPostGISExtensionFailureAtReadinessTimeout(t *testing.T)
 	}
 }
 
+func TestExecSQLUsesManagedContainerEngineAPI(t *testing.T) {
+	statement := "CREATE TABLE widgets (id integer PRIMARY KEY);"
+	command := key(
+		"docker", "exec", "devflow-pg-app",
+		"psql", "-X", "-v", "ON_ERROR_STOP=1",
+		"-U", "devflow", "-d", "app", "-c", statement,
+	)
+	runner := &fakeRunner{responses: map[string]response{
+		command: {out: []byte("CREATE TABLE\n")},
+	}}
+	output, err := newTestManager(runner).ExecSQL(context.Background(), api.DBInstance{
+		Name:          "app",
+		User:          "devflow",
+		ContainerName: "devflow-pg-app",
+	}, statement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(output) != "CREATE TABLE\n" {
+		t.Fatalf("SQL output = %q", output)
+	}
+	if len(runner.calls) != 1 || runner.calls[0] != command {
+		t.Fatalf("unexpected Engine exec planning calls: %+v", runner.calls)
+	}
+}
+
+func TestExecSQLValidatesDatabaseIdentityBeforeEngineCall(t *testing.T) {
+	runner := &fakeRunner{}
+	_, err := newTestManager(runner).ExecSQL(context.Background(), api.DBInstance{}, "SELECT 1")
+	if err == nil || !strings.Contains(err.Error(), "container name is required") {
+		t.Fatalf("expected database identity error, got %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("validation reached the Engine boundary: %+v", runner.calls)
+	}
+}
+
+func TestExecSQLUsesConfiguredContainerPort(t *testing.T) {
+	statement := "SELECT 1"
+	command := key(
+		"docker", "exec", "devflow-pg-custom",
+		"psql", "-X", "-v", "ON_ERROR_STOP=1",
+		"-U", "devflow", "-d", "app", "-p", "6432", "-c", statement,
+	)
+	runner := &fakeRunner{responses: map[string]response{command: {}}}
+	_, err := newTestManager(runner).ExecSQL(context.Background(), api.DBInstance{
+		Name:          "app",
+		User:          "devflow",
+		ContainerName: "devflow-pg-custom",
+		ContainerPort: 6432,
+	}, statement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 || runner.calls[0] != command {
+		t.Fatalf("configured container port was not passed to psql: %+v", runner.calls)
+	}
+}
+
 func TestEnsureRuntimeCreatesVolumeAndContainer(t *testing.T) {
 	runner := &fakeRunner{
 		responses: map[string]response{

@@ -2142,6 +2142,121 @@ func TestCIModeServiceReadinessPassesThenStopsService(t *testing.T) {
 	}
 }
 
+type genericServiceHandle struct {
+	done    chan struct{}
+	stop    sync.Once
+	stopped atomic.Bool
+}
+
+func newGenericServiceHandle() *genericServiceHandle {
+	return &genericServiceHandle{done: make(chan struct{})}
+}
+
+func (h *genericServiceHandle) PID() int    { return 0 }
+func (h *genericServiceHandle) Alive() bool { return !h.stopped.Load() }
+func (h *genericServiceHandle) Wait() error {
+	<-h.done
+	return nil
+}
+func (h *genericServiceHandle) Stop() error {
+	h.stop.Do(func() {
+		h.stopped.Store(true)
+		close(h.done)
+	})
+	return nil
+}
+
+type genericServiceProject struct {
+	handle *genericServiceHandle
+}
+
+func (p *genericServiceProject) Name() string { return "generic-service-project" }
+func (p *genericServiceProject) ConfigureInstance(context.Context, string) (project.InstanceConfig, error) {
+	return project.InstanceConfig{Label: "generic-service"}, nil
+}
+func (p *genericServiceProject) Targets() []project.Target {
+	return []project.Target{{Name: "ci", RootTasks: []string{"managed"}}}
+}
+func (p *genericServiceProject) Tasks() []project.Task {
+	return []project.Task{{
+		Name:  "managed",
+		Kind:  project.KindService,
+		Ready: func(context.Context, *project.Runtime) error { return nil },
+		Run: func(_ context.Context, rt *project.Runtime) error {
+			p.handle = newGenericServiceHandle()
+			rt.RegisterServiceHandle(p.handle)
+			return nil
+		},
+	}}
+}
+
+func TestCIModeSupervisesNonProcessServiceHandle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	p := &genericServiceProject{}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := eng.Run(context.Background(), Request{Target: "ci", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.handle == nil || !p.handle.stopped.Load() {
+		t.Fatal("CI did not stop the registered non-process service")
+	}
+	if len(out.Instance.Processes) != 0 {
+		t.Fatalf("non-process service was persisted as an OS process: %+v", out.Instance.Processes)
+	}
+	status, err := instance.LoadStatus(worktree, out.Instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node := status.Nodes["managed"]; node.State != api.StateStopped || node.PID != 0 {
+		t.Fatalf("unexpected non-process service status: %+v", node)
+	}
+}
+
+func TestWatchFlushAcceptsLiveNonProcessServiceHandle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	p := &genericServiceProject{}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Watch(ctx, Request{Target: "ci", Worktree: worktree, Mode: api.ModeWatch})
+	}()
+	instanceID := waitForEngineWatchReady(t, worktree)
+
+	requestID := writeEngineFlushRequest(t, worktree, instanceID)
+	result := waitForEngineFlushAck(t, worktree, instanceID, requestID)
+	if !result.Success || len(result.Services) != 1 {
+		t.Fatalf("unexpected non-process service flush: %+v", result)
+	}
+	service := result.Services[0]
+	if service.Task != "managed" || service.PID != 0 || !service.Alive || !service.Ready {
+		t.Fatalf("unexpected non-process service health: %+v", service)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("watch returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for watch shutdown")
+	}
+	if p.handle == nil || !p.handle.stopped.Load() {
+		t.Fatal("watch shutdown did not stop the non-process service")
+	}
+}
+
 func TestServiceReadinessTimeoutFailsRun(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

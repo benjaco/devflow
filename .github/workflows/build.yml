@@ -162,4 +162,4 @@ jobs:
       - name: Run database Docker integration tests
         env:
           DEVFLOW_E2E_DOCKER: "1"
-        run: go test -count=1 -timeout=40m ./pkg/database -run 'TestDocker(EngineArchitectureMatchesHost|PostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPort|PostGISRuntimeSpatialQuery)E2E' -v
+        run: go test -count=1 -timeout=40m ./pkg/database -run 'TestDocker(EngineArchitectureMatchesHost|RuntimeServiceLifecycle|PostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPort|PostGISRuntimeSpatialQuery)E2E' -v

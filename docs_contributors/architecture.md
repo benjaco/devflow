@@ -70,7 +70,7 @@ Per-worktree state lives under `.devflow/`:
 Daemon/supervisor state is also per worktree. The instance snapshot records:
 - the per-worktree daemon PID as the supervisor PID
 - legacy child executor PIDs when old supervisor state is being reconciled
-- service task PIDs
+- service task PIDs when the supervised service is an operating-system process; managed resources such as database containers have no host PID entry
 - the daemon log path
 
 Task cache storage is global for the user:
@@ -116,6 +116,12 @@ The important rule is precedence:
 That allows projects to keep normal local app settings in `.env` while still ensuring the launched frontend/backend processes point at the correct per-instance Postgres runtime and leased ports.
 
 Instance env is persisted under `.devflow/state` so detached supervisors, status, and relaunches can recover the same runtime configuration. Do not treat it as encrypted secret storage. Adapters should avoid storing long-lived production secrets there, avoid logging full env maps, and override runtime values such as `PORT` for unit-test tasks when those tests should not inherit the service runtime port.
+
+## Service Supervision Boundary
+
+The engine supervises `project.ServiceHandle`, not only child processes. A handle reports liveness, waits for termination, stops idempotently, and may expose a host PID. `process.Handle` implements that contract for command-backed services. Engine-managed resources can return PID `0`; the engine retains their in-memory handle for readiness, flush health, watch restarts, CI cleanup, and attached-run shutdown without persisting a false OS-process reference.
+
+Database adapters use `database.Manager.StartRuntimeService` for this path. It ensures the container, follows stdout/stderr through the Docker Engine log API, waits for container termination through the Engine API, and stops the container through the Engine API. Adapters register the returned handle with `Runtime.RegisterServiceHandle` and route its log callback through `Runtime.LineEmitter`. A wrapper process running `docker logs -f` is neither required nor permitted by the managed-database portability contract.
 
 ## Watch Cascades
 
@@ -168,7 +174,7 @@ This proves that edits completed before the `flush` command wrote the sentinel h
 Flush health is scoped to the selected target closure:
 - once, group, and warmup tasks must be `done` or `cached`
 - service tasks must be `running`
-- service PIDs must still be alive
+- the registered service handle must still be alive; process-backed handles additionally require a live host PID
 - service readiness hooks must pass when defined
 - services outside the selected target closure are not part of flush success
 
@@ -289,6 +295,8 @@ The new `pkg/database` package provides the runtime primitives for that model:
 The default runtime images are `postgres:16.14` and `alpine:3.24.1`. Both are official multi-architecture images, and no platform override is added, so Docker selects native `linux/arm64` images on Apple Silicon and native `linux/amd64` images on x86 hosts. Low-level `Config.ContainerPort` and `Config.SidecarImage` values must survive into persisted `api.DBInstance` state; snapshot/restore and readiness must use those persisted values instead of silently falling back to package constants.
 
 Managed database operations use the official Docker Engine Go client, not `docker` command subprocesses. Endpoint resolution follows Docker precedence in-process: `DOCKER_HOST`, `DOCKER_CONTEXT`, the Docker config's `currentContext`, then the platform default. Docker's context transport supplies Unix sockets, Windows named pipes, TCP/TLS, and SSH context support. The native Windows default is `npipe:////./pipe/docker_engine`; macOS and Linux use the selected context or Unix socket. The Docker executable is therefore not a managed-database prerequisite, although a reachable Engine (normally Docker Desktop on macOS/Windows) still is.
+
+Long-lived database service supervision uses the same client. `StartRuntimeService` follows multiplexed container stdout/stderr and waits for container exit through Engine API streams, returning a PID-less `project.ServiceHandle` that the engine can stop and health-check. `Manager.ExecSQL` provides structured in-container `psql` execution for lower-level migration adapters. Together they remove adapter-owned `docker info`, `docker logs`, `docker exec`, and wrapper-shell shutdown paths while preserving task logs and typed log events.
 
 `database.PostGIS(name, postgresVersion)` is a persisted database flavor and PostgreSQL-major contract, not an adapter-specific image override. Supported majors are 16, 17, and 18. Runtime image resolution uses Docker engine architecture because that is the platform which executes the container. On amd64/x86_64 it resolves to `postgis/postgis:<major>-<postgis>` (`3.5` for PostgreSQL 16/17 and `3.6` for 18). On arm64/aarch64 it resolves to `devflow/postgis:<major>-bookworm-postgis3-arm64-v1`, built from `postgres:<major>-bookworm` with matching package names through the Dockerfile embedded from `pkg/database/docker/postgis-arm64.Dockerfile`. The generated image tag includes both the PostgreSQL major and recipe revision so version/recipe changes reconcile stale containers without aliasing the image cache. Explicit `Config.Image`/component `Image(...)` overrides architecture selection but still requires a matching supported major. Readiness includes idempotent `CREATE EXTENSION IF NOT EXISTS postgis` in the configured database.
 

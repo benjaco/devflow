@@ -264,6 +264,27 @@ func (m *Manager) StopRuntime(ctx context.Context, db api.DBInstance) error {
 	return m.stopContainer(ctx, db.ContainerName, 10)
 }
 
+// ExecSQL executes a SQL statement inside the managed Postgres container
+// through the Docker Engine API. Output is returned even when psql fails.
+func (m *Manager) ExecSQL(ctx context.Context, db api.DBInstance, statement string) ([]byte, error) {
+	if db.ContainerName == "" {
+		return nil, fmt.Errorf("database container name is required")
+	}
+	if db.User == "" || db.Name == "" {
+		return nil, fmt.Errorf("database user and name are required")
+	}
+	command := []string{
+		"psql", "-X", "-v", "ON_ERROR_STOP=1",
+		"-U", db.User,
+		"-d", db.Name,
+	}
+	if db.ContainerPort > 0 && db.ContainerPort != DefaultContainerPort {
+		command = append(command, "-p", strconv.Itoa(db.ContainerPort))
+	}
+	command = append(command, "-c", statement)
+	return m.execContainer(ctx, dockerDataTimeout, db.ContainerName, command)
+}
+
 func (m *Manager) DestroyRuntime(ctx context.Context, db api.DBInstance, removeVolume bool) error {
 	if db.ContainerName != "" {
 		if err := m.removeContainer(ctx, db.ContainerName, true); err != nil {
@@ -787,6 +808,13 @@ func (m *Manager) execContainer(ctx context.Context, timeout time.Duration, cont
 	return dockerValue(m, ctx, timeout, "execute command in Docker container "+containerName, func(ctx context.Context, engine dockerEngine) ([]byte, error) {
 		return engine.Exec(ctx, containerName, command)
 	})
+}
+
+func (m *Manager) watchContainer(ctx context.Context, containerName string, onLine func(string, string)) error {
+	_, err := dockerValue(m, ctx, 0, "watch Docker container "+containerName, func(ctx context.Context, engine dockerEngine) (struct{}, error) {
+		return struct{}{}, engine.WatchContainer(ctx, containerName, onLine)
+	})
+	return err
 }
 
 func (m *Manager) removeVolume(ctx context.Context, name string, force bool) error {

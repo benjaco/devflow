@@ -410,6 +410,24 @@ Each PostGIS major uses a distinct `-pg<major>` Docker volume. PostgreSQL 16 and
 
 The underlying runtime uses host-visible readiness, not only in-container readiness. The app connects through the mapped host port, so Devflow waits until Postgres is ready inside Docker and the host port accepts connections.
 
+Low-level adapters that declare a raw Postgres service task should supervise the managed container directly:
+
+```go
+manager := database.New()
+handle, err := manager.StartRuntimeService(ctx, rt.Instance.DB, database.RuntimeServiceOptions{
+    OnLine: rt.LineEmitter(),
+})
+if err != nil {
+    return err
+}
+rt.RegisterServiceHandle(handle)
+return nil
+```
+
+The handle has no host PID because Docker owns the container process. Devflow still follows its logs, detects exit, checks it during `flush`, and stops it during watch restarts, CI cleanup, and normal shutdown. Do not add a `docker info` prerequisite or launch `docker logs -f` as a wrapper service; the database package connects to the Docker Engine directly and supports Unix sockets, Windows named pipes, and configured TCP/TLS or SSH contexts.
+
+Custom low-level migration tasks can read a SQL file and call `database.New().ExecSQL(ctx, rt.Instance.DB, sql)`. This runs `psql` inside the managed container through the Engine exec API and returns its output even on failure, so adapters can forward it with `Runtime.EmitLogLine` without depending on `docker exec` or host path syntax.
+
 `EnsureRuntime` preserves the data volume, but recreates a stale container when its published host/container port mapping or resolved Postgres image does not match the current Devflow instance. Avoid unconditional container removal in normal startup paths. The default `postgres:16.14` runtime and `alpine:3.24.1` snapshot sidecar are official multi-architecture images, so Docker selects `linux/arm64` natively on Apple Silicon. Custom images must publish the architecture they are expected to run on; adapters should not force `linux/amd64` unless emulation is an intentional project requirement. The high-level component exposes `Image(...)`, `SidecarImage(...)`, and `ContainerPort(...)` for compatible custom runtimes.
 
 Snapshot archives contain physical Postgres cluster files. Their manifests record the source image platform and configured PostgreSQL major; managed migration restore ignores manifests with missing required metadata or a different architecture/version, rebuilding from source/migrations instead. This intentionally invalidates old Intel snapshot caches after a move to Apple Silicon and prevents physical clusters from crossing PostgreSQL majors. Project data that must move between machines or versions should use a logical `pg_dump`, not `.devflow/db-snapshots` as a transport format.
@@ -630,8 +648,8 @@ Examples:
 Rules:
 - readiness should be narrow and deterministic
 - a readiness check should describe service usability, not broad system health
-- if a readiness check is configured, the engine will fail the task if it times out or the process exits first
-- tasks without a readiness check are considered ready immediately after process start
+- if a readiness check is configured, the engine will fail the task if it times out or the supervised service exits first
+- tasks without a readiness check are considered ready immediately after registering their service handle
 
 ## Local Stamps
 
