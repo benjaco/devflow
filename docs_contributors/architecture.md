@@ -287,7 +287,7 @@ The chosen direction is now full per-worktree separation for local databases:
 The new `pkg/database` package provides the runtime primitives for that model:
 - derive deterministic per-instance container and volume names
 - ensure the container is running, recreating stale containers whose published host/container port mapping or configured image no longer matches the selected instance while preserving the volume
-- wait for readiness via `pg_isready` plus host-port readiness when the DB instance has a host
+- wait for readiness via `pg_isready`, host-port readiness when the DB instance has a host, and a successful container-loopback TCP `psql` probe against the exact configured database; forcing TCP avoids mistaking the official image's socket-only bootstrap server for the final runtime
 - stop or destroy the runtime
 - snapshot and restore the Postgres data volume with the sidecar image persisted in instance/manifest state
 - inspect Prisma schema/migration state and choose the nearest cached migration-prefix snapshot
@@ -296,7 +296,7 @@ The default runtime images are `postgres:16.14` and `alpine:3.24.1`. Both are of
 
 Managed database operations use the official Docker Engine Go client, not `docker` command subprocesses. Endpoint resolution follows Docker precedence in-process: `DOCKER_HOST`, `DOCKER_CONTEXT`, the Docker config's `currentContext`, then the platform default. Docker's context transport supplies Unix sockets, Windows named pipes, TCP/TLS, and SSH context support. The native Windows default is `npipe:////./pipe/docker_engine`; macOS and Linux use the selected context or Unix socket. The Docker executable is therefore not a managed-database prerequisite, although a reachable Engine (normally Docker Desktop on macOS/Windows) still is.
 
-Long-lived database service supervision uses the same client. `StartRuntimeService` follows multiplexed container stdout/stderr and waits for container exit through Engine API streams, returning a PID-less `project.ServiceHandle` that the engine can stop and health-check. `Manager.ExecSQL` provides structured in-container `psql` execution for lower-level migration adapters. Together they remove adapter-owned `docker info`, `docker logs`, `docker exec`, and wrapper-shell shutdown paths while preserving task logs and typed log events.
+Long-lived database service supervision uses the same client. `StartRuntimeService` follows multiplexed container stdout/stderr and waits for container exit through Engine API streams, returning a PID-less `project.ServiceHandle` that the engine can stop and health-check. After a normal exit, the follower drains the Engine log response to EOF so buffered final frames are not lost; cancellation and Engine wait errors close the stream to unblock it. `Manager.ExecSQL` provides structured in-container `psql` execution for lower-level migration adapters. Together they remove adapter-owned `docker info`, `docker logs`, `docker exec`, and wrapper-shell shutdown paths while preserving task logs and typed log events.
 
 `database.PostGIS(name, postgresVersion)` is a persisted database flavor and PostgreSQL-major contract, not an adapter-specific image override. Supported majors are 16, 17, and 18. Runtime image resolution uses Docker engine architecture because that is the platform which executes the container. On amd64/x86_64 it resolves to `postgis/postgis:<major>-<postgis>` (`3.5` for PostgreSQL 16/17 and `3.6` for 18). On arm64/aarch64 it resolves to `devflow/postgis:<major>-bookworm-postgis3-arm64-v1`, built from `postgres:<major>-bookworm` with matching package names through the Dockerfile embedded from `pkg/database/docker/postgis-arm64.Dockerfile`. The generated image tag includes both the PostgreSQL major and recipe revision so version/recipe changes reconcile stale containers without aliasing the image cache. Explicit `Config.Image`/component `Image(...)` overrides architecture selection but still requires a matching supported major. Readiness includes idempotent `CREATE EXTENSION IF NOT EXISTS postgis` in the configured database.
 
@@ -381,7 +381,7 @@ PayloadCMS follows the same operator rule as Prisma: normal `up`/watch paths app
 Managed Postgres target pattern:
 - preserve the Docker volume unless an explicit restore/rebuild path owns the destruction
 - call `EnsureRuntime` before migration/app tasks
-- call `WaitReady` before connecting through the host DSN; it checks Docker readiness and the host-mapped port
+- call `WaitReady` before connecting through the host DSN; it checks Docker readiness, the host-mapped port, and a real TCP query against the exact configured database
 - run migrations against `db.URL`, not a container-local address
 - stop the final DB container through `devflow stop --all`; this preserves the Docker volume
 

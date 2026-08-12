@@ -217,6 +217,12 @@ func TestSDKDockerEngineWatchesMultiplexedContainerLogsAndExit(t *testing.T) {
 			response.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
 			writeDockerLogFrame(t, response, stdcopy.Stdout, "postgres ready\npartial")
 			writeDockerLogFrame(t, response, stdcopy.Stderr, "warning\r\n")
+			if flusher, ok := response.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			// Keep the log response alive after the wait endpoint can report the
+			// exit. WatchContainer must drain this stream rather than closing it.
+			time.Sleep(50 * time.Millisecond)
 		case strings.HasSuffix(request.URL.Path, "/containers/devflow-pg-test/wait"):
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(response, `{"StatusCode":0}`)

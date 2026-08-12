@@ -394,7 +394,8 @@ func TestWaitReadyEnablesPostGISExtension(t *testing.T) {
 	if err := newTestManager(runner).WaitReady(context.Background(), db, time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if !runner.sawPrefix("docker exec devflow-pg-geo psql -X -v ON_ERROR_STOP=1") {
+	extensionCommand := key("docker", "exec", "devflow-pg-geo", "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", "devflow", "-d", "geo", "-c", "CREATE EXTENSION IF NOT EXISTS postgis")
+	if runner.callCount(extensionCommand) != 1 {
 		t.Fatalf("expected PostGIS extension activation, calls: %+v", runner.calls)
 	}
 }
@@ -779,6 +780,33 @@ func TestWaitReadyAlsoWaitsForHostPortWhenHostSet(t *testing.T) {
 	}
 }
 
+func TestWaitReadyRetriesUntilConfiguredDatabaseAcceptsSQL(t *testing.T) {
+	probeCommand := key(
+		"docker", "exec", "devflow-pg-abc",
+		"psql", "-X", "-v", "ON_ERROR_STOP=1",
+		"-h", "127.0.0.1", "-U", "devflow", "-d", "app_wt_abc", "-At", "-c", "SELECT 1",
+	)
+	runner := &fakeRunner{responses: map[string]response{
+		key("docker", "exec", "devflow-pg-abc", "pg_isready", "-U", "devflow", "-d", "app_wt_abc"): {},
+		probeCommand: {sequence: []response{
+			{err: errors.New(`FATAL: database "app_wt_abc" does not exist`)},
+			{},
+		}},
+	}}
+	db := api.DBInstance{
+		Name:          "app_wt_abc",
+		Port:          55432,
+		User:          "devflow",
+		ContainerName: "devflow-pg-abc",
+	}
+	if err := newTestManager(runner).WaitReady(context.Background(), db, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.callCount(probeCommand); got != 2 {
+		t.Fatalf("database SQL readiness probes = %d, want 2; calls: %+v", got, runner.calls)
+	}
+}
+
 func TestWaitReadyUsesCustomContainerPort(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -802,6 +830,14 @@ func TestWaitReadyUsesCustomContainerPort(t *testing.T) {
 	}
 	if err := mgr.WaitReady(context.Background(), db, time.Second); err != nil {
 		t.Fatal(err)
+	}
+	probeCommand := key(
+		"docker", "exec", "devflow-pg-custom",
+		"psql", "-X", "-v", "ON_ERROR_STOP=1",
+		"-h", "127.0.0.1", "-U", "devflow", "-d", "app_wt_custom", "-p", "6432", "-At", "-c", "SELECT 1",
+	)
+	if runner.callCount(probeCommand) != 1 {
+		t.Fatalf("configured container port was not passed to SQL readiness probe: %+v", runner.calls)
 	}
 }
 
@@ -1137,6 +1173,16 @@ func (f *fakeRunner) calledBefore(firstPrefix, secondPrefix string) bool {
 		}
 	}
 	return first >= 0 && second >= 0 && first < second
+}
+
+func (f *fakeRunner) callCount(want string) int {
+	count := 0
+	for _, call := range f.calls {
+		if call == want {
+			count++
+		}
+	}
+	return count
 }
 
 func (f *fakeRunner) callWithPrefix(prefix string) string {
