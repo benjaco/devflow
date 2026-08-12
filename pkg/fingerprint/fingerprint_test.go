@@ -175,6 +175,48 @@ func TestTaskKeyChangesWhenCustomFingerprintsChange(t *testing.T) {
 	}
 }
 
+func TestTaskKeySupportsCustomFingerprintFunctions(t *testing.T) {
+	task := project.Task{
+		Name: "gen",
+		Kind: project.KindOnce,
+		Inputs: project.Inputs{Custom: []project.FingerprintFunc{
+			func(context.Context, *project.Runtime) (string, error) { return "semantic", nil },
+		}},
+	}
+	if _, err := TaskKey(TaskKeyInput{Task: task, CustomFingerprints: []string{"semantic"}}); err != nil {
+		t.Fatalf("custom fingerprint function made task signature invalid: %v", err)
+	}
+}
+
+func TestTaskSignatureDoesNotReorderTaskDefinition(t *testing.T) {
+	task := project.Task{
+		Name: "gen",
+		Inputs: project.Inputs{
+			Paths: []string{"z", "a"},
+			Filtered: []project.FilteredInput{
+				project.Filtered("z.go", project.LinesStartingWith("z")),
+				project.Filtered("a.go", project.LinesStartingWith("a")),
+			},
+		},
+		Outputs: project.Outputs{Paths: []string{"z.out", "a.out"}},
+	}
+	wantPaths := append([]string(nil), task.Inputs.Paths...)
+	wantFiltered := []string{"z.go:lines-starting-with:[\"z\"]", "a.go:lines-starting-with:[\"a\"]"}
+	wantOutputs := append([]string(nil), task.Outputs.Paths...)
+	if _, err := TaskSignature(task); err != nil {
+		t.Fatal(err)
+	}
+	gotFiltered := make([]string, 0, len(task.Inputs.Filtered))
+	for _, input := range task.Inputs.Filtered {
+		gotFiltered = append(gotFiltered, input.Path+":"+input.Filter.Signature)
+	}
+	if !reflect.DeepEqual(task.Inputs.Paths, wantPaths) ||
+		!reflect.DeepEqual(gotFiltered, wantFiltered) ||
+		!reflect.DeepEqual(task.Outputs.Paths, wantOutputs) {
+		t.Fatalf("task signature mutated task definition: inputs=%v filtered=%v outputs=%v", task.Inputs.Paths, task.Inputs.Filtered, task.Outputs.Paths)
+	}
+}
+
 func TestTaskKeyChangesWhenTaskDefinitionChanges(t *testing.T) {
 	first, err := TaskKey(TaskKeyInput{
 		Task: project.Task{

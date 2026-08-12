@@ -347,10 +347,6 @@ func (g *GoDebugServiceBuilder) spec() goDebugServiceSpec {
 	return spec
 }
 
-func (g *GoDebugServiceBuilder) effectiveBinaryPath() string {
-	return goDebugBinaryPath(g.task.Name(), g.binaryPath)
-}
-
 type goDebugServiceSpec struct {
 	name            string
 	pkg             string

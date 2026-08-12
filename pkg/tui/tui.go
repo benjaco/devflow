@@ -1268,7 +1268,7 @@ func reportDaemonEventForTUI(evt api.Event, progress func(string)) {
 	switch evt.Type {
 	case api.EventLogLine:
 		if evt.Task == "daemon" && evt.Line != "" {
-			reportTUIProgress(progress, compactTUIStatus(evt.Line, 120))
+			reportTUIProgress(progress, "%s", compactTUIStatus(evt.Line, 120))
 			return
 		}
 		if evt.Task != "" && evt.Line != "" {

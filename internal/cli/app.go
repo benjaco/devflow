@@ -1641,11 +1641,6 @@ func resolvedProject(name, worktree string) (project.Project, error) {
 	return nil, fmt.Errorf("multiple projects are registered; pass --project explicitly")
 }
 
-type restartProject struct {
-	base   project.Project
-	target project.Target
-}
-
 type kvFlags struct {
 	values map[string]string
 }
@@ -1679,41 +1674,6 @@ func (f *kvFlags) Set(value string) error {
 	return nil
 }
 
-func (p restartProject) Name() string          { return p.base.Name() }
-func (p restartProject) Tasks() []project.Task { return p.base.Tasks() }
-func (p restartProject) Actions() []project.Action {
-	return project.Actions(p.base)
-}
-func (p restartProject) Targets() []project.Target {
-	targets := append([]project.Target(nil), p.base.Targets()...)
-	targets = append(targets, p.target)
-	return targets
-}
-func (p restartProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
-	return p.base.ConfigureInstance(ctx, worktree)
-}
-
-func restartClosure(g *graph.Graph, task string, upstream, downstream bool) ([]string, error) {
-	if _, ok := g.Tasks[task]; !ok {
-		return nil, fmt.Errorf("unknown task %q", task)
-	}
-	names := []string{task}
-	if upstream && downstream {
-		up := g.Upstream([]string{task})
-		down := g.Downstream(up)
-		return g.TopoSort(down)
-	}
-	if downstream {
-		names = g.Downstream([]string{task})
-		return g.TopoSort(names)
-	}
-	if upstream {
-		names = g.Upstream([]string{task})
-		return g.TopoSort(names)
-	}
-	return g.TopoSort(names)
-}
-
 func resolveWorktree(flagValue string) (string, error) {
 	if flagValue != "" {
 		return filepath.Abs(flagValue)
@@ -1743,42 +1703,6 @@ func resolveInstance(worktreeFlag, instanceID string) (string, string, error) {
 		return "", "", err
 	}
 	return real, id, nil
-}
-
-func markStoppedNodes(worktree, instanceID string, names []string) error {
-	if len(names) == 0 {
-		return nil
-	}
-	state, err := instance.LoadStatus(worktree, instanceID)
-	if err != nil {
-		return nil
-	}
-	for _, name := range names {
-		node, ok := state.Nodes[name]
-		if !ok {
-			continue
-		}
-		node.State = api.StateStopped
-		node.PID = 0
-		state.Nodes[name] = node
-	}
-	return instance.SaveStatus(worktree, instanceID, state.Target, state.Mode, state.Nodes)
-}
-
-func markAllStoppedNodes(worktree, instanceID string) error {
-	state, err := instance.LoadStatus(worktree, instanceID)
-	if err != nil {
-		return nil
-	}
-	for name, node := range state.Nodes {
-		switch node.State {
-		case api.StatePending, api.StateReady, api.StateRunning, api.StateDirty:
-			node.State = api.StateStopped
-			node.PID = 0
-			state.Nodes[name] = node
-		}
-	}
-	return instance.SaveStatus(worktree, instanceID, state.Target, state.Mode, state.Nodes)
 }
 
 func resolveLogPath(worktree, instanceID, task string) (string, error) {
@@ -1847,25 +1771,6 @@ func statusMatchesInitialRun(state *instance.State, target string, mode api.RunM
 	return len(state.Nodes) > 0
 }
 
-func newFlushRequestID() string {
-	return fmt.Sprintf("flush-%d-%d", time.Now().UTC().UnixNano(), os.Getpid())
-}
-
-func newFlushResult(requestID, worktree, instanceID, projectName, target string, startedAt time.Time) api.FlushResult {
-	now := time.Now().UTC()
-	return api.FlushResult{
-		RequestID:  requestID,
-		InstanceID: instanceID,
-		Worktree:   worktree,
-		Project:    projectName,
-		Target:     target,
-		Mode:       api.ModeWatch,
-		Success:    false,
-		DurationMs: now.Sub(startedAt).Milliseconds(),
-		UpdatedAt:  now,
-	}
-}
-
 func (a *App) finishFlush(result api.FlushResult, jsonOut bool) error {
 	if err := a.writeFlushResult(result, jsonOut); err != nil {
 		return err
@@ -1901,119 +1806,6 @@ func (a *App) writeFlushResult(result api.FlushResult, jsonOut bool) error {
 		_, _ = fmt.Fprintf(a.Stdout, "%s%s: %s%s\n", issue.Kind, task, issue.Message, logPath)
 	}
 	return nil
-}
-
-func waitForFlushAck(worktree, instanceID, requestID, syncPath string, timeout time.Duration) (api.FlushResult, bool, error) {
-	if timeout <= 0 {
-		return api.FlushResult{}, false, nil
-	}
-	deadline := time.Now().Add(timeout)
-	retouchInterval := 100 * time.Millisecond
-	nextTouch := time.Now().Add(retouchInterval)
-	for time.Now().Before(deadline) {
-		result, err := instance.LoadFlushAck(worktree, instanceID, requestID)
-		if err == nil {
-			return result, true, nil
-		}
-		if !os.IsNotExist(err) {
-			return api.FlushResult{}, false, err
-		}
-		if syncPath != "" && !time.Now().Before(nextTouch) {
-			_ = os.WriteFile(syncPath, []byte(requestID+"\n"+time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o644)
-			nextTouch = time.Now().Add(retouchInterval)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return api.FlushResult{}, false, nil
-}
-
-func waitForWatchReady(worktree, instanceID string, after time.Time, timeout time.Duration) bool {
-	if timeout <= 0 {
-		return false
-	}
-	deadline := time.Now().Add(timeout)
-	path := instance.FlushWatchReadyPath(worktree, instanceID)
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			readyAt, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
-			if parseErr == nil && !readyAt.Before(after) {
-				return true
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return false
-}
-
-func stopAllExtraProcessRefs(worktree, instanceID string, inst *api.Instance) map[string]int {
-	refs := map[string]int{}
-	if inst != nil && inst.Supervisor.ExecPID <= 0 {
-		logPath := inst.Supervisor.LogPath
-		if logPath == "" {
-			logPath = filepath.Join(worktree, ".devflow", "logs", instanceID, "supervisor.log")
-		}
-		if pid := supervisorChildPIDFromLog(logPath); pid > 0 {
-			refs["executor"] = pid
-		}
-	}
-	if state, err := instance.LoadStatus(worktree, instanceID); err == nil {
-		for name, node := range state.Nodes {
-			if node.PID > 0 {
-				refs[name] = node.PID
-			}
-		}
-	}
-	return refs
-}
-
-func supervisorChildPIDFromLog(path string) int {
-	if path == "" {
-		return 0
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	pid := 0
-	for _, line := range strings.Split(string(data), "\n") {
-		idx := strings.LastIndex(line, "child pid=")
-		if idx < 0 {
-			continue
-		}
-		var candidate int
-		if _, err := fmt.Sscanf(line[idx:], "child pid=%d", &candidate); err == nil && candidate > 0 {
-			pid = candidate
-		}
-	}
-	return pid
-}
-
-func supervisorStatus(inst *api.Instance) *api.SupervisorStatus {
-	if inst == nil || inst.Supervisor.PID <= 0 {
-		return nil
-	}
-	return &api.SupervisorStatus{
-		PID:       inst.Supervisor.PID,
-		ExecPID:   inst.Supervisor.ExecPID,
-		Alive:     instance.ProcessAlive(inst.Supervisor.PID),
-		StartedAt: inst.Supervisor.StartedAt,
-		LogPath:   inst.Supervisor.LogPath,
-	}
-}
-
-func instanceURLs(inst *api.Instance) map[string]string {
-	if inst == nil {
-		return nil
-	}
-	urls := map[string]string{}
-	if port := inst.Ports["backend"]; port > 0 {
-		urls["backend"] = fmt.Sprintf("http://127.0.0.1:%d", port)
-	}
-	if port := inst.Ports["frontend"]; port > 0 {
-		urls["frontend"] = fmt.Sprintf("http://127.0.0.1:%d", port)
-	}
-	return urls
 }
 
 func writeJSONLine(w io.Writer, v any) error {

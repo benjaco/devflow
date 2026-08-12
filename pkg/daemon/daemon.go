@@ -1178,7 +1178,7 @@ func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResu
 	if err != nil {
 		return nil, err
 	}
-	stopped := []string{}
+	var stopped []string
 	if all {
 		stopped, err = instance.StopDaemonWork(inst, stopAllExtraProcessRefs(s.worktree, s.instanceID, inst), os.Getpid())
 	} else {
@@ -1660,7 +1660,7 @@ func downstreamInvalidateTasks(g *graph.Graph, target, selected string) ([]strin
 	if !ok {
 		return nil, fmt.Errorf("unknown task %q", selected)
 	}
-	candidates := []string{}
+	var candidates []string
 	if selectedTask.Kind == project.KindGroup {
 		candidates = g.Upstream([]string{selected})
 	} else {

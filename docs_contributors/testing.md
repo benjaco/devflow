@@ -2,21 +2,26 @@
 
 Devflow uses three testing layers:
 
-GitHub Actions runs the default `go test ./...` and `go build ./cmd/devflow` validation on Linux, macOS, and Windows for pushes, pull requests, and release tags. The CI matrix uses Go 1.24 and installs Delve with `go install github.com/go-delve/delve/cmd/dlv@v1.26.2` before running tests so real Go debug-service smoke coverage runs on each OS.
+GitHub Actions treats Go 1.25 as the supported minimum. Push and pull-request validation runs `go test ./...` plus `go build ./cmd/devflow` on Go 1.25 across Linux, macOS, and Windows, and also exercises the current stable Go release on Linux. The matrix installs Delve with `go install github.com/go-delve/delve/cmd/dlv@v1.26.3`; this patch line includes the macOS DWARFv5 fix and supports Go 1.26. Real Go debug-service smoke coverage runs on each OS. A separate Linux job runs `go test -race ./...`.
+
+The Linux quality job enforces `gofmt`, clean `go mod tidy -diff` output, `go vet`, Staticcheck `v0.7.0`, and govulncheck `v1.6.0`. Dependency and GitHub Actions update checks are scheduled monthly through Dependabot. Tag verification repeats the Go 1.25 test/build matrix on Linux, macOS, and Windows.
 
 Cross-platform tests should avoid Unix-only assumptions unless the test is guarded by build tags or an explicit platform skip. Prefer generated Go helper binaries over shell-script fake tools, add `.exe` to built helper paths on Windows, and use Go encoders for JSON fixtures so Windows paths are escaped correctly. Long-running process tests should verify process-tree cleanup on Windows because orphaned children can keep task log files locked after the parent exits.
+
+Real Delve app-readiness tests on macOS require the normal Delve prerequisites, including enabled Developer Tools security. Check `DevToolsSecurity -status`; if it is disabled, follow Delve's installation guidance before interpreting `stub exited while waiting for connection` as a Devflow regression. Do not change machine security settings automatically from tests.
 
 Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS user cache root. Set `HOME`, `XDG_CACHE_HOME`, and `LOCALAPPDATA`; Windows uses `LOCALAPPDATA` for `os.UserCacheDir()`, so `HOME` alone is not enough.
 
 ## Unit Tests
 
 - graph validation and closures
-- fingerprint determinism
+- fingerprint determinism, including custom callback fingerprints that remain executable rather than being JSON-serialized and task-signature normalization that does not mutate adapter task definitions
 - filtered file-content fingerprints, including semantic no-op edits, Go `@` comments, Go struct declarations with doc comments, in-memory filtered-hash reuse for unchanged files, and engine-level cache behavior where irrelevant edits restore cache while relevant filtered edits rerun the task
 - cache snapshot and restore semantics
 - cache-key override stability and correctness
 - instance identity and env persistence
 - port allocation and reuse
+- atomic JSON/runtime-env replacement under concurrent writes, failed-marshalling preservation, owner-only Unix permissions, cross-platform file-lock serialization, and non-blocking concurrent event fanout
 
 ## Integration Tests
 

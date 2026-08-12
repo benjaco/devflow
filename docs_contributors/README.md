@@ -20,7 +20,7 @@ Read these first:
 
 ## Local Setup
 
-Devflow is a Go project.
+Devflow is a Go 1.25 project. Use the latest supported Go 1.25 patch release or newer.
 
 ```bash
 go test ./...
@@ -136,6 +136,15 @@ Default:
 go test ./...
 ```
 
+Before handing off substantial changes, also run the checks enforced by CI:
+
+```bash
+go mod tidy -diff
+go vet ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+```
+
 Useful focused checks:
 
 ```bash
@@ -192,4 +201,4 @@ Update:
 devflow upgrade
 ```
 
-Push, pull request, and tag validation run the default test/build workflow on Linux, macOS, and Windows through GitHub Actions. No binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable are part of round 1.
+Push and pull-request validation runs quality/security checks, a Linux race-detector pass, Go 1.25 tests on Linux/macOS/Windows, and a current-stable Go compatibility run on Linux. Tag validation repeats the test/build workflow on all three operating systems. No binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable are part of round 1.

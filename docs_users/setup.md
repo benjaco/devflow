@@ -10,7 +10,7 @@ devflow docs development
 
 ## Prerequisites
 
-Install Go first. Devflow needs Go because project graph definitions are Go code.
+Install Go 1.25 or newer first. Devflow needs Go because project graph definitions are Go code.
 
 ```bash
 go install github.com/benjaco/devflow/cmd/devflow@latest
@@ -210,6 +210,8 @@ The debug port is a named local port. `status --json` includes each debug node's
 Debug services are long-running service tasks, not cacheable tasks. On watch changes, Devflow stops the Delve process tree, rebuilds the debug binary, and relaunches Delve on the same named port before marking the service ready. Use `DependsOn(...)` for generated code, database prep, or other build steps that must complete before the debug binary is rebuilt.
 
 `GoDebugService` automatically marks `go` and `dlv` as required CLIs for the task, so `doctor --target debug --json` reports whether Delve is installed.
+
+On macOS, Delve also needs the normal Apple developer-tools permissions. If a debug service reports `stub exited while waiting for connection`, check `DevToolsSecurity -status` and follow Delve's macOS installation guidance; Devflow does not enable machine-wide developer security settings for you.
 
 Adapters that still return raw `[]project.Task` can use the same built-in handler without writing Delve lifecycle code:
 

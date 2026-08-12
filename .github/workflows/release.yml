@@ -5,35 +5,43 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 jobs:
   verify-tag:
     name: verify tag (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
+        include:
+          - os: ubuntu-latest
+            binary: devflow
+          - os: macos-latest
+            binary: devflow
+          - os: windows-latest
+            binary: devflow.exe
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: "1.24.x"
+          go-version: "1.25.x"
           cache: true
+          cache-dependency-path: go.sum
 
       - name: Install Delve
         shell: bash
         run: |
-          go install github.com/go-delve/delve/cmd/dlv@v1.26.2
+          go install github.com/go-delve/delve/cmd/dlv@v1.26.3
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Run tests
-        run: go test ./...
+        run: go test -count=1 ./...
 
       - name: Build devflow
-        run: go build -v -o "${{ runner.temp }}/devflow" ./cmd/devflow
+        run: go build -trimpath -v -o "${{ runner.temp }}/${{ matrix.binary }}" ./cmd/devflow

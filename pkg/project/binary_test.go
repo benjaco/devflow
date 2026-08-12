@@ -139,10 +139,6 @@ func mustWriteProjectTestFile(t *testing.T, path, contents string) {
 	}
 }
 
-func processSpec(name string, args ...string) process.CommandSpec {
-	return process.CommandSpec{Name: name, Args: args}
-}
-
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

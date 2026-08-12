@@ -816,47 +816,6 @@ func TestFlushTimeoutReturnsStructuredFailure(t *testing.T) {
 	}
 }
 
-func TestWaitForFlushAckRetouchesSyncSentinel(t *testing.T) {
-	worktree := t.TempDir()
-	instanceID := "abc123"
-	requestID := "flush-retouch"
-	syncPath := instance.FlushSyncPath(worktree, instanceID, requestID)
-	if err := os.MkdirAll(filepath.Dir(syncPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(syncPath, []byte(requestID+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) {
-			data, err := os.ReadFile(syncPath)
-			if err == nil && strings.Count(string(data), "\n") >= 2 {
-				_ = instance.WriteFlushAck(worktree, instanceID, api.FlushResult{
-					RequestID:  requestID,
-					InstanceID: instanceID,
-					Worktree:   worktree,
-					Target:     "up",
-					Synced:     true,
-					Success:    true,
-				})
-				return
-			}
-			time.Sleep(25 * time.Millisecond)
-		}
-	}()
-	result, ok, err := waitForFlushAck(worktree, instanceID, requestID, syncPath, 2*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok || !result.Success || !result.Synced {
-		t.Fatalf("expected retouched sync sentinel to produce ack, ok=%v result=%+v", ok, result)
-	}
-	<-done
-}
-
 func TestDepsStatusAndInstallJSON(t *testing.T) {
 	marker := filepath.Join(os.TempDir(), "devflow-cli-deps-installed.txt")
 	_ = os.Remove(marker)

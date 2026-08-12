@@ -1,18 +1,29 @@
 # Progress
 
-Last updated: 2026-05-21
+Last updated: 2026-08-12
 
 ## Current Status
 
-- Phase: post-bootstrap core implementation
-- State: per-worktree daemon control plane is implemented for mutable dev/watch/operator workflows while `run --ci` remains direct and finite; task cache remains global and shared
-- Confidence: core parallel/watch/operator/readiness/bootstrap/database paths are working; the BikeCoach integration exposed remaining adoption-hardening gaps around full adoption examples and fixed-port guidance
+- Phase: post-bootstrap reliability and adoption hardening
+- State: the August 2026 repository health review is complete; the per-worktree daemon remains the mutable dev/watch/operator control plane while `run --ci` remains direct and finite
+- Confidence: default tests, shuffled tests, race detection, vet, Staticcheck, vulnerability scanning, the Go 1.25 minimum toolchain, and foreign-platform compilation pass; real Docker/Postgres e2e remains opt-in and was not run because the local Docker daemon was unavailable
 
 ## In Progress
 
 - None.
 
 ## Completed
+
+- August 2026 repository health and modernization pass:
+  - raised the supported module/toolchain floor from unsupported Go 1.23 to Go 1.25 and updated project-local bootstrap modules accordingly
+  - refreshed Tcell and the `x/sys`, `x/term`, and `x/text` dependencies; removed the two stale-module vulnerabilities reported before the refresh
+  - upgraded GitHub Actions, added Go 1.25 Linux/macOS/Windows plus current-stable Linux coverage, and added formatting, tidy, vet, Staticcheck, govulncheck, race-detector, timeout, least-privilege, and monthly Dependabot gates
+  - fixed custom callback fingerprints failing JSON signature generation and stopped signature normalization from reordering adapter task definitions
+  - replaced fixed temporary persistence files with concurrent-safe unique temp files, made JSON/runtime-env replacement non-truncating, and applied owner-only Unix permissions
+  - removed obsolete pre-daemon CLI helpers and other dead code identified by Staticcheck
+  - added direct atomic persistence, file-lock, event-bus, version, and fingerprint regression tests; moved flush-sentinel coverage to its daemon owner and fixed watch-test slice races found by the race detector
+  - validated default and shuffled tests, the full race suite, Go 1.25.12, vet, Staticcheck, govulncheck, workflow syntax, normal builds, and Linux/macOS/Windows amd64 plus Windows arm64 compilation
+  - kept Docker-backed database tests as an explicit follow-up because Docker was installed but its local daemon was not running; local real-Delve app-readiness was likewise environment-blocked by disabled macOS Developer Tools security and was documented without changing machine security settings
 
 - First-class project actions implemented:
   - `project.Action` plus builder registration, aliases, typed inputs, declared effects, and relaunch policy
@@ -479,10 +490,6 @@ Last updated: 2026-05-21
   - `devflow stop --all` now stops the instance-managed database container while preserving the volume
   - engine run errors preserve the first actionable task failure instead of being overwritten by sibling `context canceled`
 
-## In Progress
-
-- None
-
 ## Latest Work
 
 - Fixed Windows-sensitive watch assertion in the go-next example:
@@ -649,8 +656,10 @@ Last updated: 2026-05-21
 
 ## Next Steps
 
+- Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run Docker -v` on a host with a running Docker daemon and retain the result before the next database-runtime change
 - Convert bundled example adapters to the builder/component API so source examples match the new user-facing shape
 - Expand user docs/examples for script-to-Devflow convergence and fixed-port service guidance
+- Revisit the Go 1.25 minimum and pinned Delve line when the next stable Go release changes the supported-version window
 - Add binary artifacts, npm/Homebrew/Scoop installers, or richer update channels later only if Go install stops being enough
 
 ## Deferred / Known Gaps
@@ -658,4 +667,5 @@ Last updated: 2026-05-21
 - Round-1 release flow deliberately has no binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable
 - Fine-grained detached per-service restart is not fully implemented yet
 - The example adapter still uses a deterministic fake-DB path in normal tests; real Docker-backed coverage now exists as an opt-in module-level e2e layer rather than being part of default `go test ./...`
+- The August 2026 review could not execute the opt-in Docker suite because Docker was installed locally but its daemon was not running
 - The `embedded-web-app` adapter is now manually validated against a local repo for build, DB prep, detached runtime, health, and shutdown flows; remaining gaps are automated Docker-backed coverage and richer control UX

@@ -161,8 +161,8 @@ func TestPayloadCMSWatchPicksUpCollectionModuleChange(t *testing.T) {
 	if got := payloadRecordCount(recordPath, "npm install"); got != installBaseline {
 		t.Fatalf("collection module edit should not rerun npm install: got %d baseline %d\nrecord:\n%s", got, installBaseline, readFilePayloadTest(t, recordPath))
 	}
-	if !payloadWatchStartsContain(&eventMu, watchStarts, "src/collections/Posts.ts", "payload_migrations") {
-		t.Fatalf("expected watch cycle for collection module to affect payload_migrations, got: %s", payloadRecentWatchStarts(&eventMu, watchStarts))
+	if !payloadWatchStartsContain(&eventMu, &watchStarts, "src/collections/Posts.ts", "payload_migrations") {
+		t.Fatalf("expected watch cycle for collection module to affect payload_migrations, got: %s", payloadRecentWatchStarts(&eventMu, &watchStarts))
 	}
 }
 
@@ -400,10 +400,10 @@ func payloadRecordCount(path, needle string) int {
 	return count
 }
 
-func payloadWatchStartsContain(mu *sync.Mutex, values []string, file, affected string) bool {
+func payloadWatchStartsContain(mu *sync.Mutex, values *[]string, file, affected string) bool {
 	mu.Lock()
 	defer mu.Unlock()
-	for _, value := range values {
+	for _, value := range *values {
 		if strings.Contains(value, file) && strings.Contains(value, affected) {
 			return true
 		}
@@ -411,10 +411,10 @@ func payloadWatchStartsContain(mu *sync.Mutex, values []string, file, affected s
 	return false
 }
 
-func payloadRecentWatchStarts(mu *sync.Mutex, values []string) string {
+func payloadRecentWatchStarts(mu *sync.Mutex, values *[]string) string {
 	mu.Lock()
 	defer mu.Unlock()
-	return strings.Join(values, "\n")
+	return strings.Join(*values, "\n")
 }
 
 func exeSuffixPayloadTest() string {

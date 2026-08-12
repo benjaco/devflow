@@ -222,12 +222,39 @@ func CollectTaskInputsWithCache(ctx context.Context, worktree string, task proje
 }
 
 func TaskSignature(task project.Task) (string, error) {
+	// Keep executable callbacks out of the serialized signature. Custom
+	// fingerprint values are evaluated separately and included in TaskKey;
+	// function values themselves cannot be encoded deterministically.
+	type signatureInputs struct {
+		Paths    []string
+		Files    []string
+		Dirs     []string
+		Globs    []string
+		Filtered []project.FilteredInput
+		Env      []string
+		Ignore   []string
+		Custom   []string
+	}
+	inputs := signatureInputs{
+		Paths:    append([]string(nil), task.Inputs.Paths...),
+		Files:    append([]string(nil), task.Inputs.Files...),
+		Dirs:     append([]string(nil), task.Inputs.Dirs...),
+		Globs:    append([]string(nil), task.Inputs.Globs...),
+		Filtered: append([]project.FilteredInput(nil), task.Inputs.Filtered...),
+		Env:      append([]string(nil), task.Inputs.Env...),
+		Ignore:   append([]string(nil), task.Inputs.Ignore...),
+	}
+	outputs := project.Outputs{
+		Paths: append([]string(nil), task.Outputs.Paths...),
+		Files: append([]string(nil), task.Outputs.Files...),
+		Dirs:  append([]string(nil), task.Outputs.Dirs...),
+	}
 	payload := struct {
 		Name                      string                `json:"name"`
 		Kind                      project.Kind          `json:"kind"`
 		Deps                      []string              `json:"deps"`
 		RequiredCLIs              []string              `json:"requiredCLIs"`
-		Inputs                    project.Inputs        `json:"inputs"`
+		Inputs                    *signatureInputs      `json:"inputs"`
 		Outputs                   project.Outputs       `json:"outputs"`
 		Cache                     bool                  `json:"cache"`
 		Stamp                     bool                  `json:"stamp"`
@@ -242,8 +269,8 @@ func TaskSignature(task project.Task) (string, error) {
 		Kind:                      task.Kind,
 		Deps:                      append([]string(nil), task.Deps...),
 		RequiredCLIs:              append([]string(nil), task.RequiredCLIs...),
-		Inputs:                    task.Inputs,
-		Outputs:                   task.Outputs,
+		Inputs:                    &inputs,
+		Outputs:                   outputs,
 		Cache:                     task.Cache,
 		Stamp:                     task.Stamp,
 		Restart:                   task.Restart,
@@ -256,18 +283,18 @@ func TaskSignature(task project.Task) (string, error) {
 	sort.Strings(payload.Deps)
 	sort.Strings(payload.RequiredCLIs)
 	sort.Strings(payload.Tags)
-	sort.Strings(payload.Inputs.Paths)
-	sort.Strings(payload.Inputs.Files)
-	sort.Strings(payload.Inputs.Dirs)
-	sort.Strings(payload.Inputs.Globs)
-	sort.Slice(payload.Inputs.Filtered, func(i, j int) bool {
-		if payload.Inputs.Filtered[i].Path != payload.Inputs.Filtered[j].Path {
-			return payload.Inputs.Filtered[i].Path < payload.Inputs.Filtered[j].Path
+	sort.Strings(inputs.Paths)
+	sort.Strings(inputs.Files)
+	sort.Strings(inputs.Dirs)
+	sort.Strings(inputs.Globs)
+	sort.Slice(inputs.Filtered, func(i, j int) bool {
+		if inputs.Filtered[i].Path != inputs.Filtered[j].Path {
+			return inputs.Filtered[i].Path < inputs.Filtered[j].Path
 		}
-		return payload.Inputs.Filtered[i].Filter.Signature < payload.Inputs.Filtered[j].Filter.Signature
+		return inputs.Filtered[i].Filter.Signature < inputs.Filtered[j].Filter.Signature
 	})
-	sort.Strings(payload.Inputs.Env)
-	sort.Strings(payload.Inputs.Ignore)
+	sort.Strings(inputs.Env)
+	sort.Strings(inputs.Ignore)
 	sort.Strings(payload.Outputs.Paths)
 	sort.Strings(payload.Outputs.Files)
 	sort.Strings(payload.Outputs.Dirs)

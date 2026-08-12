@@ -94,6 +94,8 @@ The daemon Unix socket lives in a short per-user temp directory such as `/tmp/de
 
 This split keeps runtime logs and instance state local to the worktree, keeps task cache globally reusable, keeps port allocation coordinated for sibling git worktrees, and keeps socket paths short enough for real terminals and test worktrees.
 
+Structured state files and `runtime.env` are replaced through unique temporary files in the same directory so a failed or concurrent write cannot expose a partially truncated destination. On Unix-like systems these persisted files are owner-readable/writable only (`0600`), because instance JSON and runtime env can contain local database credentials or other sensitive development values. This is local hardening, not encryption.
+
 Flush coordination is per instance:
 - `flush/requests/<request-id>.json` records the requested sync point
 - `flush/sync/<request-id>.sync` is the file-watcher sentinel
@@ -378,6 +380,8 @@ The default cache key is derived automatically from:
 - selected filtered file-content hashes
 - selected env values
 - custom fingerprint outputs
+
+Custom fingerprint callbacks are executable adapter behavior, so the function values themselves are never JSON-serialized into the normalized task signature. The engine evaluates each callback and includes its returned value in the task key. Adapter authors should keep those values deterministic and use the task's explicit `Signature` when changing task behavior that cannot be represented by declared inputs. Signature normalization works on cloned slices so calculating a cache key cannot reorder the adapter's task definition in memory.
 
 Filtered inputs are generic `project.Inputs.Filtered` entries. The task declares a file, directory, or glob plus a signed content filter. Fingerprinting reads each matching file, runs the filter, and hashes only the filtered bytes; files with empty filtered output do not contribute an input hash. The filter signature is part of the normalized task signature, so changing the filter invalidates prior keys.
 

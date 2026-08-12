@@ -28,6 +28,7 @@
 - target-scoped required CLI declarations plus `doctor --target <target> --json`
 - deterministic example adapters plus a real embedded-web-app adapter
 - GitHub Actions build/test workflow
+- supported Go 1.25 baseline with current-stable Linux compatibility, cross-platform quality/security checks, a Linux race-detector gate, and monthly dependency update checks
 
 ## Next Milestones
 

@@ -247,7 +247,7 @@ func TestWorkspaceWatchSelectiveReruns(t *testing.T) {
 		"worker_dev":       3,
 		"frontend_dev":     2,
 	}) {
-		t.Fatalf("contract change did not rerun expected slice: %s watch=%s", traceSnapshot(worktree, "contract_codegen", "backend_codegen", "frontend_codegen", "worker_bundle", "backend_dev", "worker_dev", "frontend_dev"), recentWatchStarts(&eventMu, watchStarts))
+		t.Fatalf("contract change did not rerun expected slice: %s watch=%s", traceSnapshot(worktree, "contract_codegen", "backend_codegen", "frontend_codegen", "worker_bundle", "backend_dev", "worker_dev", "frontend_dev"), recentWatchStarts(&eventMu, &watchStarts))
 	}
 
 	rewriteFile(t, filepath.Join(worktree, "db/migrations/001_init.sql"), "create table jobs(id integer primary key, payload text not null, status text not null);\n")
@@ -258,7 +258,7 @@ func TestWorkspaceWatchSelectiveReruns(t *testing.T) {
 		"worker_dev":   4,
 		"frontend_dev": 2,
 	}) {
-		t.Fatalf("db change did not rerun expected slice: %s watch=%s", traceSnapshot(worktree, "db_migrate", "postgres", "backend_dev", "worker_dev", "frontend_dev"), recentWatchStarts(&eventMu, watchStarts))
+		t.Fatalf("db change did not rerun expected slice: %s watch=%s", traceSnapshot(worktree, "db_migrate", "postgres", "backend_dev", "worker_dev", "frontend_dev"), recentWatchStarts(&eventMu, &watchStarts))
 	}
 	if got := traceCount(worktree, "frontend_dev"); got != 2 {
 		t.Fatalf("unexpected frontend restart after DB change: %d", got)
@@ -282,24 +282,6 @@ func seededWorktree(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return worktree
-}
-
-func waitFor(t *testing.T, timeout time.Duration, fn func() bool) {
-	t.Helper()
-	if !waitForBool(timeout, fn) {
-		t.Fatal("condition not met before timeout")
-	}
-}
-
-func waitForBool(timeout time.Duration, fn func() bool) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if fn() {
-			return true
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	return false
 }
 
 func waitForStableTraceCounts(timeout, stableFor time.Duration, worktree string, expected map[string]int) bool {
@@ -338,13 +320,13 @@ func traceSnapshot(worktree string, tasks ...string) string {
 	return strings.Join(parts, " ")
 }
 
-func recentWatchStarts(mu *sync.Mutex, values []string) string {
+func recentWatchStarts(mu *sync.Mutex, values *[]string) string {
 	mu.Lock()
 	defer mu.Unlock()
-	if len(values) == 0 {
+	if len(*values) == 0 {
 		return "<none>"
 	}
-	return strings.Join(append([]string(nil), values...), " | ")
+	return strings.Join(append([]string(nil), (*values)...), " | ")
 }
 
 func assertFileExists(t *testing.T, path string) {

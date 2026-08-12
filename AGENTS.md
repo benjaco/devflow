@@ -13,9 +13,10 @@ Devflow is a local-first DAG runner for development workflows. Keep the core gen
 ## Key Commands
 
 - `go test ./...`
-- `go run ./cmd/devflow doctor --json`
-- `go run ./cmd/devflow run <target> --json --project <name>`
-- `go run ./cmd/devflow status --json`
+- `go test -race ./...`
+- `go vet ./...`
+- `go run ./cmd/devflow version --json`
+- In a target worktree containing `devflow.project.go`: `devflow doctor --json`, `devflow run <target> --json`, and `devflow status --json`
 
 ## Context Bootstrap
 
@@ -47,7 +48,7 @@ Devflow is a local-first DAG runner for development workflows. Keep the core gen
 
 ## Progress Tracking
 
-- Maintain the file [PROGRESS.md](/Users/benjaminschultzlarsen/Desktop/devflow/PROGRESS.md) as the canonical implementation ledger.
+- Maintain `PROGRESS.md` in the repository root as the canonical implementation ledger.
 - Update `PROGRESS.md` at the start and end of substantial work so repo state is recoverable without chat history.
 - Update `docs_contributors/agent-memory.md` when durable project context, mental models, or recurring constraints change.
 - Record:

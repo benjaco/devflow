@@ -336,7 +336,7 @@ func localBuildModuleSource(buildDir, bootstrapRoot string) (string, error) {
 	}
 	var b strings.Builder
 	_, _ = fmt.Fprintf(&b, "module %s\n\n", modulePath)
-	_, _ = fmt.Fprintln(&b, "go 1.23")
+	_, _ = fmt.Fprintln(&b, "go 1.25")
 	_, _ = fmt.Fprintf(&b, "\nrequire %s %s\n", version.ModulePath, requireVersion)
 	if bootstrapRoot != "" {
 		_, _ = fmt.Fprintf(&b, "\nreplace %s => %s\n", version.ModulePath, filepath.ToSlash(bootstrapRoot))

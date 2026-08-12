@@ -162,17 +162,16 @@ func CacheNamespace(p Project) string {
 }
 
 type Runtime struct {
-	Worktree   string
-	Instance   *api.Instance
-	Mode       api.RunMode
-	Env        map[string]string
-	TaskName   string
-	LogPath    string
-	EventFn    func(api.Event)
-	OnService  func(task string, handle *process.Handle)
-	onTaskDone func()
-	DepKeys    []string
-	OnPrompt   func(task string, req process.PromptRequest) (process.PromptResponse, error)
+	Worktree  string
+	Instance  *api.Instance
+	Mode      api.RunMode
+	Env       map[string]string
+	TaskName  string
+	LogPath   string
+	EventFn   func(api.Event)
+	OnService func(task string, handle *process.Handle)
+	DepKeys   []string
+	OnPrompt  func(task string, req process.PromptRequest) (process.PromptResponse, error)
 }
 
 func (rt *Runtime) Abs(path string) string {
