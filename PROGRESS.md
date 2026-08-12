@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-08-12
+Last updated: 2026-08-13
 
 ## Current Status
 
@@ -13,6 +13,18 @@ Last updated: 2026-08-12
 - None.
 
 ## Completed
+
+- Finite pipeline validation modes:
+  - added `devflow validate <target> --mode artifacts|orders|all --json` as a direct, finite command with `api.ModeValidation`, stable result types, top-level structured issues, and non-zero exits on validation findings
+  - artifact mode now resets a disposable worktree per task, materializes declared worktree inputs plus transitive dependency outputs, bypasses caches/stamps, reports declared/materialized inputs and produced outputs, and detects undeclared filesystem changes or missing/wrong-kind outputs
+  - order mode now enumerates every dependency-valid topological order, executes tasks sequentially from the same clean logical source state, checks each task's outputs immediately, and requires identical final declared-artifact snapshots across orders
+  - exhaustive order validation refuses to sample: graphs above the default/configured `--max-orders` return `complete=false` and run no permutations
+  - validation rejects service/debug-service closures, cacheable tasks without outputs, overlapping output ownership, absolute/escaping/reserved paths, worktree-root outputs, and external symlinks; `.git` and `.devflow` are not copied
+  - documented the worktree-filesystem guarantee and its limits around input minimality, transient files, databases, networks, absolute paths, global caches, and unregistered processes across user, adapter, CLI, architecture, agent, testing, roadmap, and shared-memory docs
+  - added package and CLI coverage for input projection, ignores/globs, dependency artifacts, in-place outputs, undeclared/missing outputs, empty directories, symlink safety, missing edges, cross-order mismatches, combinatorial limits, preflight errors, JSON success/failure, and real-worktree non-mutation
+  - added a compiled-CLI bootstrap regression that loads a real project-local adapter, proves artifact validation reports materialized inputs plus undeclared/missing outputs, proves both valid orders execute and expose a missing dependency, checks non-zero exits and structured JSON, and confirms validation does not write generated artifacts into the source worktree
+  - hardened the existing `RestartAlways` watch execution test to wait for `watch.ready`, eliminating the startup-baseline race exposed by shuffled verification
+  - verified with normal and shuffled full tests, the full race suite plus a final focused validation/CLI race pass, vet, Staticcheck, govulncheck, clean module metadata/format/diff checks, command build/version smoke, and Windows amd64 validation/CLI/binary cross-compilation
 
 - Windows atomic persistence race hardening:
   - routed JSON state and `runtime.env` temporary-file commits through one shared same-destination replacement primitive

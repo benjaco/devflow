@@ -1945,7 +1945,7 @@ func TestWatchRunRestartsRestartAlwaysServiceOnAnyTargetChange(t *testing.T) {
 	waitFor(t, 3*time.Second, func() bool {
 		return p.changedRuns.Load() == 1 && p.alwaysRuns.Load() == 1
 	})
-	time.Sleep(500 * time.Millisecond)
+	waitForEngineWatchReady(t, worktree)
 
 	if err := os.WriteFile(filepath.Join(worktree, "changed.txt"), []byte("v2"), 0o644); err != nil {
 		t.Fatal(err)

@@ -5,9 +5,25 @@ import "time"
 type RunMode string
 
 const (
-	ModeDev   RunMode = "dev"
-	ModeWatch RunMode = "watch"
-	ModeCI    RunMode = "ci"
+	ModeDev        RunMode = "dev"
+	ModeWatch      RunMode = "watch"
+	ModeCI         RunMode = "ci"
+	ModeValidation RunMode = "validation"
+)
+
+type ValidationMode string
+
+const (
+	ValidationModeAll       ValidationMode = "all"
+	ValidationModeArtifacts ValidationMode = "artifacts"
+	ValidationModeOrders    ValidationMode = "orders"
+)
+
+type ValidationIssueSeverity string
+
+const (
+	ValidationIssueError   ValidationIssueSeverity = "error"
+	ValidationIssueWarning ValidationIssueSeverity = "warning"
 )
 
 type NodeState string
@@ -127,6 +143,75 @@ type RunResult struct {
 	CacheHits  []string `json:"cacheHits"`
 	StartedAt  string   `json:"startedAt"`
 	FinishedAt string   `json:"finishedAt"`
+}
+
+type ValidationResult struct {
+	Project    string                    `json:"project"`
+	Target     string                    `json:"target"`
+	Worktree   string                    `json:"worktree"`
+	Mode       ValidationMode            `json:"mode"`
+	Success    bool                      `json:"success"`
+	DurationMs int64                     `json:"durationMs"`
+	Artifacts  *ArtifactValidationResult `json:"artifacts,omitempty"`
+	Orders     *OrderValidationResult    `json:"orders,omitempty"`
+	Issues     []ValidationIssue         `json:"issues,omitempty"`
+}
+
+type ValidationIssue struct {
+	Severity ValidationIssueSeverity `json:"severity"`
+	Kind     string                  `json:"kind"`
+	Task     string                  `json:"task,omitempty"`
+	Path     string                  `json:"path,omitempty"`
+	Message  string                  `json:"message"`
+}
+
+type ArtifactValidationResult struct {
+	Success bool                     `json:"success"`
+	Tasks   []ArtifactTaskValidation `json:"tasks"`
+	Issues  []ValidationIssue        `json:"issues,omitempty"`
+}
+
+type ArtifactTaskValidation struct {
+	Task               string            `json:"task"`
+	Kind               string            `json:"kind"`
+	Success            bool              `json:"success"`
+	InputCheck         string            `json:"inputCheck"`
+	OutputCheck        string            `json:"outputCheck"`
+	DeclaredInputs     []string          `json:"declaredInputs"`
+	MaterializedInputs []string          `json:"materializedInputs"`
+	DependencyOutputs  []string          `json:"dependencyOutputs"`
+	DeclaredOutputs    []string          `json:"declaredOutputs"`
+	ProducedOutputs    []string          `json:"producedOutputs"`
+	ObservedWrites     []string          `json:"observedWrites"`
+	UndeclaredWrites   []string          `json:"undeclaredWrites"`
+	MissingOutputs     []string          `json:"missingOutputs"`
+	DurationMs         int64             `json:"durationMs"`
+	Error              string            `json:"error,omitempty"`
+	Log                string            `json:"log,omitempty"`
+	Issues             []ValidationIssue `json:"issues,omitempty"`
+}
+
+type OrderValidationResult struct {
+	Success          bool                 `json:"success"`
+	Complete         bool                 `json:"complete"`
+	MaxOrders        int                  `json:"maxOrders"`
+	TotalOrders      int                  `json:"totalOrders,omitempty"`
+	DiscoveredOrders int                  `json:"discoveredOrders"`
+	BaselineDigest   string               `json:"baselineDigest,omitempty"`
+	Runs             []ValidationOrderRun `json:"runs"`
+	Issues           []ValidationIssue    `json:"issues,omitempty"`
+}
+
+type ValidationOrderRun struct {
+	Index             int      `json:"index"`
+	Tasks             []string `json:"tasks"`
+	Success           bool     `json:"success"`
+	FailedTask        string   `json:"failedTask,omitempty"`
+	Error             string   `json:"error,omitempty"`
+	Log               string   `json:"log,omitempty"`
+	OutputDigest      string   `json:"outputDigest,omitempty"`
+	OutputDifferences []string `json:"outputDifferences,omitempty"`
+	DurationMs        int64    `json:"durationMs"`
 }
 
 type FlushRequest struct {

@@ -17,6 +17,7 @@
 - `pkg/daemon`: per-worktree daemon, JSON-line socket protocol, action queue, and event fanout for mutable dev/watch/operator work
 - `pkg/event`: typed event bus used by the engine for run, task-state, cache, process, instance, and log events
 - `pkg/watch`: Devflow-owned polling file scanner and debounced change batching
+- `pkg/validation`: finite sandbox execution for input/output contract checks and exhaustive dependency-valid task-order checks
 
 ## Local Project Bootstrap
 
@@ -179,6 +180,23 @@ Flush health is scoped to the selected target closure:
 - services outside the selected target closure are not part of flush success
 
 Version 1 reports unhealthy in-chain services as `service_unhealthy` issues. It does not auto-restart unhealthy services during `flush`.
+
+## Pipeline Validation
+
+`devflow validate <target>` is a direct, finite verification surface. It does not use the worktree daemon, task cache, or task stamps, and tasks receive `Runtime.Mode == api.ModeValidation` together with `DEVFLOW_VALIDATION=1` and the selected `DEVFLOW_VALIDATION_MODE`.
+
+Artifact validation uses one disposable worktree and a deterministic dependency order. Before each finite task, Devflow resets that sandbox and materializes only:
+
+- the task's declared worktree file/path/dir/glob/filtered inputs, with normal ignore rules
+- declared outputs archived from the task's transitive dependencies
+
+The task then runs normally. Devflow compares filesystem snapshots around the task, reports final file changes outside its declared output paths, verifies every declared output exists with the requested file/directory type, and archives only declared outputs for downstream tasks. This proves that the explicit worktree inputs plus dependency outputs are sufficient for the observed run. It cannot prove that every declared input is necessary, observe a temporary file created and removed entirely during the task, or trace resources outside the sandbox.
+
+Order validation enumerates every topological ordering of the selected target closure. Each ordering starts from the same reset copy of the source worktree with `.git`, `.devflow`, and non-in-place declared outputs removed. Tasks execute one at a time with cache/stamp bypass. Every order must finish successfully, produce all declared outputs, and yield the same final declared-output content/type/mode snapshot as the first successful order. This catches undeclared dependency edges as well as order-dependent artifact generation.
+
+Exhaustiveness is a contract, not a best-effort label. The command enumerates up to `--max-orders` (default 1000) before running permutations. If the graph has more valid orders, it runs none of them, returns `complete=false`, and asks the caller to raise the bound. It never reports a sampled prefix as successful exhaustive validation.
+
+Validation only accepts target closures without service or debug-service tasks because those tasks do not finish one by one. `.git` and `.devflow` are reserved sandbox paths, absolute/escaping declarations and worktree-root outputs are rejected, and overlapping outputs from different tasks are rejected as ambiguous ownership. Worktree-local symlinks are dereferenced into the sandbox; symlinks that resolve outside the worktree are rejected. Task-defined effects outside `Runtime.Worktree`—databases, networks, absolute paths, global tool caches, and processes not registered as services—are not isolated, so users should validate finite, side-effect-safe targets.
 
 ## Interactive Commands
 

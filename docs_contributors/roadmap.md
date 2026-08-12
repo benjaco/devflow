@@ -29,6 +29,7 @@
 - deterministic example adapters plus a real embedded-web-app adapter
 - GitHub Actions build/test workflow
 - supported Go 1.25 baseline with current-stable Linux compatibility, cross-platform quality/security checks, a Linux race-detector gate, and monthly dependency update checks
+- finite pipeline validation with projected input/output sandboxes and exhaustive dependency-valid sequential order execution
 
 ## Next Milestones
 

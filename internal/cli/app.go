@@ -26,6 +26,7 @@ import (
 	"github.com/benjaco/devflow/pkg/instance"
 	"github.com/benjaco/devflow/pkg/project"
 	"github.com/benjaco/devflow/pkg/tui"
+	"github.com/benjaco/devflow/pkg/validation"
 )
 
 type App struct {
@@ -71,6 +72,8 @@ func (a *App) Run(args []string) error {
 		return a.depsCmd(args[1:])
 	case "graph":
 		return a.graphCmd(args[1:])
+	case "validate":
+		return a.validateCmd(args[1:])
 	case "watch":
 		return a.watchCmd(args[1:])
 	case "flush":
@@ -157,8 +160,92 @@ func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
 }
 
 func (a *App) usage() error {
-	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|action|migration|cache|status|logs|instances|doctor|clis|graph|tui|version|upgrade|docs>")
+	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|action|migration|cache|status|logs|instances|doctor|clis|graph|validate|tui|version|upgrade|docs>")
 	return flag.ErrHelp
+}
+
+func (a *App) validateCmd(args []string) error {
+	target := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		target = args[0]
+		args = args[1:]
+	}
+	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	jsonOut := fs.Bool("json", false, "emit stable JSON output")
+	worktree := fs.String("worktree", "", "project worktree path; defaults to the current directory")
+	projectName := fs.String("project", defaultProject(), "registered project adapter name")
+	mode := fs.String("mode", string(api.ValidationModeAll), "validation mode: artifacts, orders, or all")
+	maxOrders := validation.DefaultMaxOrders
+	fs.IntVar(&maxOrders, "max-orders", validation.DefaultMaxOrders, "maximum valid task orders to enumerate exhaustively")
+	fs.IntVar(&maxOrders, "max-permutations", validation.DefaultMaxOrders, "alias for --max-orders")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if target == "" {
+		if fs.NArg() != 1 {
+			return fmt.Errorf("usage: devflow validate <target> [--mode artifacts|orders|all]")
+		}
+		target = fs.Arg(0)
+	} else if fs.NArg() != 0 {
+		return fmt.Errorf("usage: devflow validate <target> [--mode artifacts|orders|all]")
+	}
+	if maxOrders <= 0 {
+		return fmt.Errorf("--max-orders must be positive")
+	}
+	modeValue := api.ValidationMode(strings.ToLower(strings.TrimSpace(*mode)))
+	if modeValue == "permutations" {
+		modeValue = api.ValidationModeOrders
+	}
+	root, err := resolveWorktree(*worktree)
+	if err != nil {
+		return err
+	}
+	p, err := project.Lookup(*projectName)
+	if err != nil {
+		return err
+	}
+	execProject, resolvedTarget, err := project.ResolveExecutionProject(p, target)
+	if err != nil {
+		return err
+	}
+	validator, err := validation.New(execProject)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	result, err := validator.Run(ctx, validation.Request{
+		Target:    resolvedTarget,
+		Worktree:  root,
+		Mode:      modeValue,
+		MaxOrders: maxOrders,
+	})
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		if err := writeJSON(a.Stdout, result); err != nil {
+			return err
+		}
+	} else {
+		artifactTasks := 0
+		ordersRun := 0
+		if result.Artifacts != nil {
+			artifactTasks = len(result.Artifacts.Tasks)
+		}
+		if result.Orders != nil {
+			ordersRun = len(result.Orders.Runs)
+		}
+		_, _ = fmt.Fprintf(a.Stdout, "validation target=%s mode=%s success=%v artifact_tasks=%d orders=%d\n", result.Target, result.Mode, result.Success, artifactTasks, ordersRun)
+		for _, issue := range result.Issues {
+			_, _ = fmt.Fprintf(a.Stdout, "%s %s: %s\n", issue.Severity, issue.Kind, issue.Message)
+		}
+	}
+	if !result.Success {
+		return validation.ErrValidationFailed
+	}
+	return nil
 }
 
 func (a *App) runCmd(args []string) error {
