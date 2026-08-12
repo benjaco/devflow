@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/benjaco/devflow/internal/testutil"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/process"
 	"github.com/benjaco/devflow/pkg/project"
@@ -55,33 +56,8 @@ func TestCommandSourcePolicyMergesAdapterAndDatabaseEnv(t *testing.T) {
 }
 
 func TestPostgresDumpSourcePolicyClonesRemoteIntoLocalDatabase(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-based test is unix-only")
-	}
 	worktree := t.TempDir()
-	binDir := filepath.Join(worktree, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	mustWriteExecutable(t, filepath.Join(binDir, "pg_dump"), `#!/bin/sh
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -f) dump_file="$2"; shift 2 ;;
-    *) remote_url="$1"; shift ;;
-  esac
-done
-printf 'dump:%s' "$remote_url" > "$dump_file"
-`)
-	mustWriteExecutable(t, filepath.Join(binDir, "psql"), `#!/bin/sh
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -f) dump_file="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-cat "$dump_file" > "$OUT_FILE"
-printf '%s' "$DATABASE_URL" >> "$OUT_FILE.url"
-`)
+	binDir := installFakePostgresClients(t)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	output := filepath.Join(worktree, "dump.txt")
 	policy := PostgresDumpSourcePolicy{
@@ -118,18 +94,12 @@ printf '%s' "$DATABASE_URL" >> "$OUT_FILE.url"
 }
 
 func TestPostgresDumpSourcePolicyFailsWhenPgDumpFails(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-based test is unix-only")
-	}
 	worktree := t.TempDir()
-	binDir := filepath.Join(worktree, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	mustWriteExecutable(t, filepath.Join(binDir, "pg_dump"), "#!/bin/sh\nprintf 'version mismatch\\n' >&2\nexit 42\n")
+	binDir := installFakePostgresClients(t)
 	psqlMarker := filepath.Join(worktree, "psql-ran.txt")
-	mustWriteExecutable(t, filepath.Join(binDir, "psql"), "#!/bin/sh\nprintf ran > "+strconvQuoteForShell(psqlMarker)+"\n")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DEVFLOW_FAKE_PG_DUMP_FAIL", "1")
+	t.Setenv("DEVFLOW_FAKE_PSQL_RECORD", psqlMarker)
 	policy := PostgresDumpSourcePolicy{RemoteURL: "postgres://remote/dev"}
 	err := policy.PrepareBase(context.Background(), api.DBInstance{
 		Name: "app_wt_abc",
@@ -144,6 +114,23 @@ func TestPostgresDumpSourcePolicyFailsWhenPgDumpFails(t *testing.T) {
 	if _, statErr := os.Stat(psqlMarker); !os.IsNotExist(statErr) {
 		t.Fatalf("expected psql not to run after pg_dump failure, stat err=%v", statErr)
 	}
+}
+
+func installFakePostgresClients(t *testing.T) string {
+	t.Helper()
+	binDir := t.TempDir()
+	source := testutil.BuildTestCommand(t)
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"pg_dump", "psql"} {
+		target := filepath.Join(binDir, name+testutil.ExeSuffix())
+		if err := os.WriteFile(target, data, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return binDir
 }
 
 func TestRuntimePrepareProgressLogsOnceAndEmitsEvent(t *testing.T) {
@@ -232,8 +219,4 @@ func mustWriteExecutable(t *testing.T, path, contents string) {
 	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func strconvQuoteForShell(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }

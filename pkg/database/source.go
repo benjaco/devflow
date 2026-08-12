@@ -78,25 +78,40 @@ func (p PostgresDumpSourcePolicy) PrepareBase(ctx context.Context, db api.DBInst
 	if p.RemoteURL == "" {
 		return fmt.Errorf("remote database URL is required")
 	}
-	spec := process.CommandSpec{
-		Name: "sh",
-		Args: []string{"-c", `
-set -eu
-dump_file="$(mktemp "${TMPDIR:-/tmp}/devflow-pg-dump.XXXXXX")"
-trap 'rm -f "$dump_file"' EXIT
-pg_dump --no-owner --no-privileges -f "$dump_file" "$DEVFLOW_REMOTE_DATABASE_URL"
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$dump_file"
-`},
-		Dir: opts.Worktree,
-		Env: mergeStringMaps(opts.Env, mergeStringMaps(databaseEnv(db), map[string]string{
-			"DEVFLOW_REMOTE_DATABASE_URL": p.RemoteURL,
-		})),
+	dump, err := os.CreateTemp("", "devflow-pg-dump-*.sql")
+	if err != nil {
+		return fmt.Errorf("create temporary Postgres dump: %w", err)
+	}
+	dumpPath := dump.Name()
+	if err := dump.Close(); err != nil {
+		_ = os.Remove(dumpPath)
+		return fmt.Errorf("close temporary Postgres dump: %w", err)
+	}
+	defer os.Remove(dumpPath)
+
+	env := mergeStringMaps(opts.Env, mergeStringMaps(databaseEnv(db), map[string]string{
+		"DEVFLOW_REMOTE_DATABASE_URL": p.RemoteURL,
+	}))
+	common := process.CommandSpec{
+		Dir:       opts.Worktree,
+		Env:       env,
 		LogPath:   opts.LogPath,
 		AppendLog: true,
 		OnLine:    opts.OnLine,
 	}
-	_, err := process.Run(ctx, spec)
-	return err
+	dumpSpec := common
+	dumpSpec.Name = "pg_dump"
+	dumpSpec.Args = []string{"--no-owner", "--no-privileges", "-f", dumpPath, p.RemoteURL}
+	if _, err := process.Run(ctx, dumpSpec); err != nil {
+		return fmt.Errorf("dump remote Postgres database: %w", err)
+	}
+	restoreSpec := common
+	restoreSpec.Name = "psql"
+	restoreSpec.Args = []string{db.URL, "-v", "ON_ERROR_STOP=1", "-f", dumpPath}
+	if _, err := process.Run(ctx, restoreSpec); err != nil {
+		return fmt.Errorf("restore remote Postgres database: %w", err)
+	}
+	return nil
 }
 
 type PrismaBaseResult struct {

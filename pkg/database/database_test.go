@@ -33,8 +33,33 @@ func TestDesiredBuildsDedicatedInstanceIdentity(t *testing.T) {
 	if db.Port != 55432 {
 		t.Fatalf("unexpected port: %d", db.Port)
 	}
+	if db.ContainerPort != DefaultContainerPort {
+		t.Fatalf("unexpected container port: %d", db.ContainerPort)
+	}
+	if db.SidecarImage != DefaultSidecarImage {
+		t.Fatalf("unexpected sidecar image: %q", db.SidecarImage)
+	}
 	if !strings.Contains(db.URL, "@127.0.0.1:55432/app_wt_abc123?sslmode=disable") {
 		t.Fatalf("unexpected database URL: %q", db.URL)
+	}
+}
+
+func TestDesiredPreservesCustomRuntimeImagesAndContainerPort(t *testing.T) {
+	mgr := New()
+	db := mgr.Desired("custom", Config{
+		Image:         "example/postgres:arm-ready",
+		SidecarImage:  "example/tar:stable",
+		HostPort:      55432,
+		ContainerPort: 6432,
+	})
+	if db.Image != "example/postgres:arm-ready" {
+		t.Fatalf("unexpected Postgres image: %q", db.Image)
+	}
+	if db.SidecarImage != "example/tar:stable" {
+		t.Fatalf("unexpected sidecar image: %q", db.SidecarImage)
+	}
+	if db.ContainerPort != 6432 {
+		t.Fatalf("unexpected container port: %d", db.ContainerPort)
 	}
 }
 
@@ -44,7 +69,7 @@ func TestEnsureRuntimeCreatesVolumeAndContainer(t *testing.T) {
 			key("docker", "inspect", "-f", "{{.State.Running}}", "devflow-pg-abc"): {err: errors.New("Error: No such container: devflow-pg-abc")},
 			key("docker", "volume", "inspect", "devflow-pgdata-abc"):               {err: errors.New("Error: No such volume: devflow-pgdata-abc")},
 			key("docker", "volume", "create", "devflow-pgdata-abc"):                {},
-			key("docker", "run", "-d", "--name", "devflow-pg-abc", "--label", "devflow.managed=true", "--label", "devflow.database=true", "-p", "55432:5432", "-e", "POSTGRES_USER=devflow", "-e", "POSTGRES_PASSWORD=secret", "-e", "POSTGRES_DB=app_wt_abc", "-v", "devflow-pgdata-abc:/var/lib/postgresql/data", "postgres:16.3"): {},
+			key("docker", "run", "-d", "--name", "devflow-pg-abc", "--label", "devflow.managed=true", "--label", "devflow.database=true", "-p", "55432:5432", "-e", "POSTGRES_USER=devflow", "-e", "POSTGRES_PASSWORD=secret", "-e", "POSTGRES_DB=app_wt_abc", "-v", "devflow-pgdata-abc:/var/lib/postgresql/data", "postgres:16.14"): {},
 		},
 	}
 	mgr := NewWithRunner(runner)
@@ -53,7 +78,7 @@ func TestEnsureRuntimeCreatesVolumeAndContainer(t *testing.T) {
 		Port:          55432,
 		User:          "devflow",
 		Password:      "secret",
-		Image:         "postgres:16.3",
+		Image:         "postgres:16.14",
 		ContainerName: "devflow-pg-abc",
 		VolumeName:    "devflow-pgdata-abc",
 	}
@@ -68,11 +93,44 @@ func TestEnsureRuntimeCreatesVolumeAndContainer(t *testing.T) {
 	}
 }
 
+func TestEnsureRuntimePullsMissingImageBeforeColdContainerStart(t *testing.T) {
+	runner := &fakeRunner{
+		responses: map[string]response{
+			key("docker", "inspect", "-f", "{{.State.Running}}", "devflow-pg-cold"): {err: errors.New("Error: No such container: devflow-pg-cold")},
+			key("docker", "image", "inspect", DefaultPostgresImage):                 {err: errors.New("Error response from daemon: No such image: " + DefaultPostgresImage)},
+			key("docker", "pull", DefaultPostgresImage):                             {},
+			key("docker", "volume", "inspect", "devflow-pgdata-cold"):               {err: errors.New("Error: No such volume: devflow-pgdata-cold")},
+			key("docker", "volume", "create", "devflow-pgdata-cold"):                {},
+			key("docker", "run", "-d", "--name", "devflow-pg-cold", "--label", "devflow.managed=true", "--label", "devflow.database=true", "-p", "55432:5432", "-e", "POSTGRES_USER=devflow", "-e", "POSTGRES_PASSWORD=secret", "-e", "POSTGRES_DB=app_wt_cold", "-v", "devflow-pgdata-cold:/var/lib/postgresql/data", DefaultPostgresImage): {},
+		},
+	}
+	mgr := NewWithRunner(runner)
+	db := api.DBInstance{
+		Name:          "app_wt_cold",
+		Port:          55432,
+		User:          "devflow",
+		Password:      "secret",
+		Image:         DefaultPostgresImage,
+		ContainerName: "devflow-pg-cold",
+		VolumeName:    "devflow-pgdata-cold",
+	}
+	if err := mgr.EnsureRuntime(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.sawPrefix("docker pull " + DefaultPostgresImage) {
+		t.Fatal("expected missing image to be pulled before container start")
+	}
+	if !runner.calledBefore("docker pull "+DefaultPostgresImage, "docker run -d --name devflow-pg-cold") {
+		t.Fatalf("expected image pull before container start, calls: %+v", runner.calls)
+	}
+}
+
 func TestEnsureRuntimeReusesRunningContainerWithExpectedHostPort(t *testing.T) {
 	runner := &fakeRunner{
 		responses: map[string]response{
 			key("docker", "inspect", "-f", "{{.State.Running}}", "devflow-pg-abc"): {out: []byte("true\n")},
 			portInspectKey("devflow-pg-abc"):                                       {out: []byte("55432\n")},
+			imageInspectKey("devflow-pg-abc"):                                      {out: []byte(DefaultPostgresImage + "\n")},
 		},
 	}
 	mgr := NewWithRunner(runner)
@@ -81,7 +139,7 @@ func TestEnsureRuntimeReusesRunningContainerWithExpectedHostPort(t *testing.T) {
 		Port:          55432,
 		User:          "devflow",
 		Password:      "secret",
-		Image:         "postgres:16.3",
+		Image:         "postgres:16.14",
 		ContainerName: "devflow-pg-abc",
 		VolumeName:    "devflow-pgdata-abc",
 	}
@@ -98,6 +156,7 @@ func TestEnsureRuntimeStartsStoppedContainerWithExpectedHostPort(t *testing.T) {
 		responses: map[string]response{
 			key("docker", "inspect", "-f", "{{.State.Running}}", "devflow-pg-abc"): {out: []byte("false\n")},
 			portInspectKey("devflow-pg-abc"):                                       {out: []byte("55432\n")},
+			imageInspectKey("devflow-pg-abc"):                                      {out: []byte(DefaultPostgresImage + "\n")},
 			key("docker", "volume", "inspect", "devflow-pgdata-abc"):               {},
 			key("docker", "start", "devflow-pg-abc"):                               {},
 		},
@@ -108,7 +167,7 @@ func TestEnsureRuntimeStartsStoppedContainerWithExpectedHostPort(t *testing.T) {
 		Port:          55432,
 		User:          "devflow",
 		Password:      "secret",
-		Image:         "postgres:16.3",
+		Image:         "postgres:16.14",
 		ContainerName: "devflow-pg-abc",
 		VolumeName:    "devflow-pgdata-abc",
 	}
@@ -123,14 +182,15 @@ func TestEnsureRuntimeStartsStoppedContainerWithExpectedHostPort(t *testing.T) {
 	}
 }
 
-func TestEnsureRuntimeRecreatesContainerWithWrongHostPort(t *testing.T) {
+func TestEnsureRuntimeRecreatesContainerWithWrongImage(t *testing.T) {
 	runner := &fakeRunner{
 		responses: map[string]response{
 			key("docker", "inspect", "-f", "{{.State.Running}}", "devflow-pg-abc"): {out: []byte("true\n")},
-			portInspectKey("devflow-pg-abc"):                                       {out: []byte("55433\n")},
+			portInspectKey("devflow-pg-abc"):                                       {out: []byte("55432\n")},
+			imageInspectKey("devflow-pg-abc"):                                      {out: []byte("postgres:15.10\n")},
 			key("docker", "rm", "-f", "devflow-pg-abc"):                            {},
 			key("docker", "volume", "inspect", "devflow-pgdata-abc"):               {},
-			key("docker", "run", "-d", "--name", "devflow-pg-abc", "--label", "devflow.managed=true", "--label", "devflow.database=true", "-p", "55432:5432", "-e", "POSTGRES_USER=devflow", "-e", "POSTGRES_PASSWORD=secret", "-e", "POSTGRES_DB=app_wt_abc", "-v", "devflow-pgdata-abc:/var/lib/postgresql/data", "postgres:16.3"): {},
+			key("docker", "run", "-d", "--name", "devflow-pg-abc", "--label", "devflow.managed=true", "--label", "devflow.database=true", "-p", "55432:5432", "-e", "POSTGRES_USER=devflow", "-e", "POSTGRES_PASSWORD=secret", "-e", "POSTGRES_DB=app_wt_abc", "-v", "devflow-pgdata-abc:/var/lib/postgresql/data", DefaultPostgresImage): {},
 		},
 	}
 	mgr := NewWithRunner(runner)
@@ -139,7 +199,66 @@ func TestEnsureRuntimeRecreatesContainerWithWrongHostPort(t *testing.T) {
 		Port:          55432,
 		User:          "devflow",
 		Password:      "secret",
-		Image:         "postgres:16.3",
+		Image:         DefaultPostgresImage,
+		ContainerName: "devflow-pg-abc",
+		VolumeName:    "devflow-pgdata-abc",
+	}
+	if err := mgr.EnsureRuntime(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.sawPrefix("docker rm -f devflow-pg-abc") {
+		t.Fatal("expected container using the stale image to be removed")
+	}
+	if !runner.sawPrefix("docker run -d --name devflow-pg-abc") {
+		t.Fatal("expected container using the configured image to be started")
+	}
+}
+
+func TestEnsureRuntimeHonorsCustomContainerPort(t *testing.T) {
+	runner := &fakeRunner{
+		responses: map[string]response{
+			key("docker", "inspect", "-f", "{{.State.Running}}", "devflow-pg-custom"): {err: errors.New("Error: No such container: devflow-pg-custom")},
+			key("docker", "volume", "inspect", "devflow-pgdata-custom"):               {err: errors.New("Error: No such volume: devflow-pgdata-custom")},
+			key("docker", "volume", "create", "devflow-pgdata-custom"):                {},
+			key("docker", "run", "-d", "--name", "devflow-pg-custom", "--label", "devflow.managed=true", "--label", "devflow.database=true", "-p", "55432:6432", "-e", "POSTGRES_USER=devflow", "-e", "POSTGRES_PASSWORD=secret", "-e", "POSTGRES_DB=app_wt_custom", "-v", "devflow-pgdata-custom:/var/lib/postgresql/data", "example/postgres:custom"): {},
+		},
+	}
+	mgr := NewWithRunner(runner)
+	db := api.DBInstance{
+		Name:          "app_wt_custom",
+		Port:          55432,
+		ContainerPort: 6432,
+		User:          "devflow",
+		Password:      "secret",
+		Image:         "example/postgres:custom",
+		ContainerName: "devflow-pg-custom",
+		VolumeName:    "devflow-pgdata-custom",
+	}
+	if err := mgr.EnsureRuntime(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.sawPrefix("docker run -d --name devflow-pg-custom") {
+		t.Fatal("expected custom-port container start")
+	}
+}
+
+func TestEnsureRuntimeRecreatesContainerWithWrongHostPort(t *testing.T) {
+	runner := &fakeRunner{
+		responses: map[string]response{
+			key("docker", "inspect", "-f", "{{.State.Running}}", "devflow-pg-abc"): {out: []byte("true\n")},
+			portInspectKey("devflow-pg-abc"):                                       {out: []byte("55433\n")},
+			key("docker", "rm", "-f", "devflow-pg-abc"):                            {},
+			key("docker", "volume", "inspect", "devflow-pgdata-abc"):               {},
+			key("docker", "run", "-d", "--name", "devflow-pg-abc", "--label", "devflow.managed=true", "--label", "devflow.database=true", "-p", "55432:5432", "-e", "POSTGRES_USER=devflow", "-e", "POSTGRES_PASSWORD=secret", "-e", "POSTGRES_DB=app_wt_abc", "-v", "devflow-pgdata-abc:/var/lib/postgresql/data", "postgres:16.14"): {},
+		},
+	}
+	mgr := NewWithRunner(runner)
+	db := api.DBInstance{
+		Name:          "app_wt_abc",
+		Port:          55432,
+		User:          "devflow",
+		Password:      "secret",
+		Image:         "postgres:16.14",
 		ContainerName: "devflow-pg-abc",
 		VolumeName:    "devflow-pgdata-abc",
 	}
@@ -172,7 +291,7 @@ func TestEnsureRuntimeTimesOutStaleContainerRemoval(t *testing.T) {
 		Port:          55432,
 		User:          "devflow",
 		Password:      "secret",
-		Image:         "postgres:16.3",
+		Image:         "postgres:16.14",
 		ContainerName: "devflow-pg-abc",
 		VolumeName:    "devflow-pgdata-abc",
 	}
@@ -226,6 +345,32 @@ func TestWaitReadyAlsoWaitsForHostPortWhenHostSet(t *testing.T) {
 	}
 }
 
+func TestWaitReadyUsesCustomContainerPort(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	runner := &fakeRunner{
+		responses: map[string]response{
+			key("docker", "exec", "devflow-pg-custom", "pg_isready", "-U", "devflow", "-d", "app_wt_custom", "-p", "6432"): {},
+		},
+	}
+	mgr := NewWithRunner(runner)
+	db := api.DBInstance{
+		Name:          "app_wt_custom",
+		Host:          "127.0.0.1",
+		Port:          port,
+		ContainerPort: 6432,
+		User:          "devflow",
+		ContainerName: "devflow-pg-custom",
+	}
+	if err := mgr.WaitReady(context.Background(), db, time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWaitHostReadyReportsHostPortFailures(t *testing.T) {
 	mgr := NewWithRunner(&fakeRunner{})
 	db := api.DBInstance{Host: "127.0.0.1", Port: freeLocalPort(t)}
@@ -240,7 +385,8 @@ func TestSnapshotWritesManifestAndArchiveCommand(t *testing.T) {
 	runner := &fakeRunner{
 		responses: map[string]response{
 			key("docker", "stop", "-t", "10", "devflow-pg-abc"): {},
-			key("docker", "run", "--rm", "-v", "devflow-pgdata-abc:/from", "-v", filepath.Join(root, "schema_v1")+":/to", DefaultSidecarImage, "sh", "-c", "cd /from && tar czf /to/volume.tgz ."): {},
+			platformInspectKey(DefaultPostgresImage):            {out: []byte("linux/arm64\n")},
+			key("docker", "run", "--rm", "-v", "devflow-pgdata-abc:/from", "-v", filepath.Join(root, "schema_v1")+":/to", "example/tar:stable", "sh", "-c", "cd /from && tar czf /to/volume.tgz ."): {},
 		},
 	}
 	mgr := NewWithRunner(runner)
@@ -248,7 +394,8 @@ func TestSnapshotWritesManifestAndArchiveCommand(t *testing.T) {
 		Name:          "app_wt_abc",
 		User:          "devflow",
 		Port:          55432,
-		Image:         "postgres:16.3",
+		Image:         "postgres:16.14",
+		SidecarImage:  "example/tar:stable",
 		ContainerName: "devflow-pg-abc",
 		VolumeName:    "devflow-pgdata-abc",
 		SnapshotRoot:  root,
@@ -259,6 +406,9 @@ func TestSnapshotWritesManifestAndArchiveCommand(t *testing.T) {
 	}
 	if manifest.Key != "schema_v1" {
 		t.Fatalf("unexpected snapshot key: %q", manifest.Key)
+	}
+	if manifest.Version != 2 || manifest.Platform != "linux/arm64" || manifest.SidecarImage != "example/tar:stable" || manifest.ContainerPort != DefaultContainerPort {
+		t.Fatalf("unexpected snapshot runtime metadata: %+v", manifest)
 	}
 	if _, err := os.Stat(filepath.Join(root, "schema_v1", "manifest.json")); err != nil {
 		t.Fatalf("expected manifest to exist: %v", err)
@@ -276,7 +426,7 @@ func TestRestoreSnapshotRecreatesVolumeAndUntars(t *testing.T) {
 	manifest := SnapshotManifest{
 		Version:       1,
 		Key:           "schema_v1",
-		Image:         "postgres:16.3",
+		Image:         "postgres:16.14",
 		ContainerName: "devflow-pg-abc",
 		VolumeName:    "devflow-pgdata-abc",
 		Database:      "app_wt_abc",
@@ -317,9 +467,72 @@ func TestRestoreSnapshotRecreatesVolumeAndUntars(t *testing.T) {
 	}
 }
 
+func TestRestoreNearestPrismaSnapshotTreatsUnknownOrMismatchedPlatformAsCacheMiss(t *testing.T) {
+	for _, snapshotPlatform := range []string{"", "linux/amd64"} {
+		name := snapshotPlatform
+		if name == "" {
+			name = "legacy-unknown"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			state := &PrismaState{
+				SchemaHash: "schema",
+				Migrations: []PrismaMigration{{Name: "001_init", Hash: "hash"}},
+				FullHash:   "full",
+			}
+			if _, err := SavePrismaSnapshot(root, "snapshot", state); err != nil {
+				t.Fatal(err)
+			}
+			manifest := SnapshotManifest{
+				Version:       2,
+				Key:           "snapshot",
+				Image:         DefaultPostgresImage,
+				Platform:      snapshotPlatform,
+				ContainerName: "devflow-pg-abc",
+				VolumeName:    "devflow-pgdata-abc",
+				Database:      "app_wt_abc",
+				User:          "devflow",
+				Port:          55432,
+				ArchivePath:   filepath.Join(root, "snapshot", "volume.tgz"),
+			}
+			if err := jsonWrite(filepath.Join(root, "snapshot", "manifest.json"), manifest); err != nil {
+				t.Fatal(err)
+			}
+			runner := &fakeRunner{responses: map[string]response{
+				platformInspectKey(DefaultPostgresImage): {out: []byte("linux/arm64\n")},
+			}}
+			mgr := NewWithRunner(runner)
+			db := api.DBInstance{
+				Image:         DefaultPostgresImage,
+				ContainerName: "devflow-pg-abc",
+				VolumeName:    "devflow-pgdata-abc",
+				SnapshotRoot:  root,
+			}
+			result, err := mgr.RestoreNearestPrismaSnapshot(context.Background(), db, state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result != nil {
+				t.Fatalf("expected incompatible snapshot to be ignored, got %+v", result)
+			}
+			if runner.sawPrefix("docker rm -f") || runner.sawPrefix("docker volume rm -f") {
+				t.Fatalf("expected compatibility check before destructive restore, calls: %+v", runner.calls)
+			}
+		})
+	}
+}
+
 func TestSnapshotKeySkipsEmptyParts(t *testing.T) {
 	if got := SnapshotKey("db", "", "schema", "v1"); got != "db_schema_v1" {
 		t.Fatalf("unexpected snapshot key %q", got)
+	}
+}
+
+func TestPostgresURLEscapesCredentialsAndIPv6(t *testing.T) {
+	got := postgresURL("::1", 55432, "dev@flow", "p:a/ss", "app name")
+	want := "postgres://dev%40flow:p%3Aa%2Fss@[::1]:55432/app%20name?sslmode=disable"
+	if got != want {
+		t.Fatalf("unexpected escaped database URL: got %q want %q", got, want)
 	}
 }
 
@@ -366,12 +579,34 @@ func (f *fakeRunner) sawPrefix(prefix string) bool {
 	return false
 }
 
+func (f *fakeRunner) calledBefore(firstPrefix, secondPrefix string) bool {
+	first := -1
+	second := -1
+	for index, call := range f.calls {
+		if first < 0 && strings.HasPrefix(call, firstPrefix) {
+			first = index
+		}
+		if second < 0 && strings.HasPrefix(call, secondPrefix) {
+			second = index
+		}
+	}
+	return first >= 0 && second >= 0 && first < second
+}
+
 func key(name string, args ...string) string {
 	return strings.TrimSpace(name + " " + strings.Join(args, " "))
 }
 
 func portInspectKey(container string) string {
 	return key("docker", "inspect", "-f", `{{range (index .NetworkSettings.Ports "5432/tcp")}}{{.HostPort}}{{"\n"}}{{end}}`, container)
+}
+
+func imageInspectKey(container string) string {
+	return key("docker", "inspect", "-f", "{{.Config.Image}}", container)
+}
+
+func platformInspectKey(image string) string {
+	return key("docker", "image", "inspect", "-f", "{{.Os}}/{{.Architecture}}", image)
 }
 
 func freeLocalPort(t *testing.T) int {

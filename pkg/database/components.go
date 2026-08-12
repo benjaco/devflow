@@ -13,14 +13,16 @@ import (
 )
 
 type PostgresComponent struct {
-	name         string
-	image        string
-	host         string
-	user         string
-	password     string
-	databaseName string
-	snapshotRoot string
-	portName     string
+	name          string
+	image         string
+	sidecarImage  string
+	host          string
+	containerPort int
+	user          string
+	password      string
+	databaseName  string
+	snapshotRoot  string
+	portName      string
 
 	bound bool
 }
@@ -58,6 +60,18 @@ func Postgres(name string) *PostgresComponent {
 
 func (p *PostgresComponent) Image(image string) *PostgresComponent {
 	p.image = image
+	return p
+}
+
+func (p *PostgresComponent) SidecarImage(image string) *PostgresComponent {
+	p.sidecarImage = image
+	return p
+}
+
+func (p *PostgresComponent) ContainerPort(port int) *PostgresComponent {
+	if port > 0 {
+		p.containerPort = port
+	}
 	return p
 }
 
@@ -175,7 +189,7 @@ func (p *PrismaComponent) Migrations(b *project.Builder) *project.TaskBuilder {
 			_ = rt.EmitJSONLine(p.name+"_migrations result", SummarizePrismaDevDatabase(result))
 			return nil
 		})
-	p.migrationsTask.RequiredCLIs("docker", "npx")
+	p.migrationsTask.RequiredCLIs(append([]string{"docker", "npx"}, p.sourceRequiredCLIs()...)...)
 	return p.migrationsTask
 }
 
@@ -224,7 +238,7 @@ func (p *PrismaComponent) NewMigration(b *project.Builder) *project.TaskBuilder 
 			rt.EmitLogLine("stdout", fmt.Sprintf("created Prisma migration %q", name))
 			return nil
 		})
-	p.newMigrationTask.RequiredCLIs("docker", "npx")
+	p.newMigrationTask.RequiredCLIs(append([]string{"docker", "npx"}, p.sourceRequiredCLIs()...)...)
 	p.registerMigrationAction(b)
 	return p.newMigrationTask
 }
@@ -264,12 +278,25 @@ func (p *PrismaComponent) bind(b *project.Builder) {
 	}
 	p.db.bind(b)
 	b.RequiredCLIs("npx")
+	b.RequiredCLIs(p.sourceRequiredCLIs()...)
 	b.PrismaConfig(project.PrismaConfig{
 		SchemaPath:    p.schemaPath,
 		MigrationsDir: p.migrationsDir,
 		BasePaths:     append([]string(nil), p.basePaths...),
 		CreateOnly:    true,
 	})
+}
+
+func (p *PrismaComponent) sourceRequiredCLIs() []string {
+	if p.sourceEnv != "" {
+		return []string{"pg_dump", "psql"}
+	}
+	switch p.sourcePolicy.(type) {
+	case PostgresDumpSourcePolicy, *PostgresDumpSourcePolicy:
+		return []string{"pg_dump", "psql"}
+	default:
+		return nil
+	}
 }
 
 func (p *PrismaComponent) sourcePolicyForRuntime(rt *project.Runtime) SourcePolicy {
@@ -311,13 +338,15 @@ func (p *PostgresComponent) bind(b *project.Builder) {
 			databaseName = cfg.name
 		}
 		db := manager.Desired(inst.ID, Config{
-			Image:        cfg.image,
-			Host:         cfg.host,
-			HostPort:     inst.Ports[cfg.portName],
-			Database:     sanitizeDBName(databaseName + "_" + inst.ID),
-			User:         firstNonEmptyDatabase(cfg.user, "devflow"),
-			Password:     firstNonEmptyDatabase(cfg.password, "devflow"),
-			SnapshotRoot: snapshotRoot,
+			Image:         cfg.image,
+			SidecarImage:  cfg.sidecarImage,
+			Host:          cfg.host,
+			HostPort:      inst.Ports[cfg.portName],
+			ContainerPort: cfg.containerPort,
+			Database:      sanitizeDBName(databaseName + "_" + inst.ID),
+			User:          firstNonEmptyDatabase(cfg.user, "devflow"),
+			Password:      firstNonEmptyDatabase(cfg.password, "devflow"),
+			SnapshotRoot:  snapshotRoot,
 		})
 		inst.DB = db
 		inst.Env = mergeEnvMaps(inst.Env, map[string]string{

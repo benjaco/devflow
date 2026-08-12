@@ -40,12 +40,22 @@ func TestPrismaComponentDefinesCommonTasksAndInstanceDB(t *testing.T) {
 	if migrations.Cache {
 		t.Fatal("database migration tasks should not be task-cacheable")
 	}
+	for _, cli := range []string{"docker", "npx", "pg_dump", "psql"} {
+		if !stringSliceContainsDatabaseTest(migrations.RequiredCLIs, cli) {
+			t.Fatalf("expected migrations required CLIs to include %q, got %+v", cli, migrations.RequiredCLIs)
+		}
+	}
 	newMigration := taskByName(tasks, "prisma_new_migration")
 	if newMigration.Cache {
 		t.Fatal("migration authoring task should not be cacheable")
 	}
 	if len(newMigration.Outputs.Paths) != 1 || newMigration.Outputs.Paths[0] != "prisma/migrations" {
 		t.Fatalf("unexpected new migration outputs: %+v", newMigration.Outputs)
+	}
+	for _, cli := range []string{"docker", "npx", "pg_dump", "psql"} {
+		if !stringSliceContainsDatabaseTest(newMigration.RequiredCLIs, cli) {
+			t.Fatalf("expected migration authoring required CLIs to include %q, got %+v", cli, newMigration.RequiredCLIs)
+		}
 	}
 	for _, key := range []string{"DEVFLOW_MIGRATION_NAME", "DATABASE_URL", "DEV_DATABASE_URL"} {
 		if !stringSliceContainsDatabaseTest(newMigration.Inputs.Env, key) {
@@ -171,6 +181,35 @@ func TestPayloadCMSComponentDefinesMigrationTasks(t *testing.T) {
 	}
 	if inst.Env["DATABASE_URL"] == "" {
 		t.Fatal("expected DATABASE_URL in instance env")
+	}
+}
+
+func TestPostgresComponentPreservesCustomRuntimeImagesAndPort(t *testing.T) {
+	p := project.Define(func(ctx context.Context, b *project.Builder) error {
+		b.Name("custom-postgres")
+		db := Postgres("db").
+			Image("example/postgres:arm-ready").
+			SidecarImage("example/tar:stable").
+			ContainerPort(6432)
+		prisma := Prisma("prisma").Database(db)
+		b.Target("setup", prisma.Migrations(b))
+		return nil
+	})
+	cfg, err := p.ConfigureInstance(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst := &api.Instance{
+		ID:       "abc123",
+		Worktree: t.TempDir(),
+		Ports:    map[string]int{"db": 15432},
+		Env:      map[string]string{},
+	}
+	if err := cfg.Finalize(inst); err != nil {
+		t.Fatal(err)
+	}
+	if inst.DB.Image != "example/postgres:arm-ready" || inst.DB.SidecarImage != "example/tar:stable" || inst.DB.ContainerPort != 6432 {
+		t.Fatalf("unexpected custom database runtime: %+v", inst.DB)
 	}
 }
 

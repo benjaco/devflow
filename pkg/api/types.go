@@ -31,9 +31,11 @@ type DBInstance struct {
 	URL           string `json:"url,omitempty"`
 	Host          string `json:"host,omitempty"`
 	Port          int    `json:"port,omitempty"`
+	ContainerPort int    `json:"containerPort,omitempty"`
 	User          string `json:"user,omitempty"`
 	Password      string `json:"password,omitempty"`
 	Image         string `json:"image,omitempty"`
+	SidecarImage  string `json:"sidecarImage,omitempty"`
 	ContainerName string `json:"containerName,omitempty"`
 	VolumeName    string `json:"volumeName,omitempty"`
 	SnapshotRoot  string `json:"snapshotRoot,omitempty"`

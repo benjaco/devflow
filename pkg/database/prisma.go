@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -240,6 +241,9 @@ func (m *Manager) RestoreNearestPrismaSnapshot(ctx context.Context, db api.DBIns
 	}
 	manifest, err := m.RestoreSnapshot(ctx, db, plan.SnapshotKey)
 	if err != nil {
+		if errors.Is(err, ErrSnapshotIncompatible) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return &PrismaRestoreResult{

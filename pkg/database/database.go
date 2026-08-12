@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,14 +18,15 @@ import (
 )
 
 const (
-	DefaultPostgresImage = "postgres:16.3"
-	DefaultSidecarImage  = "alpine:3.20"
+	DefaultPostgresImage = "postgres:16.14"
+	DefaultSidecarImage  = "alpine:3.24.1"
 	DefaultContainerPort = 5432
 )
 
 var (
-	dockerControlTimeout = 15 * time.Second
-	dockerDataTimeout    = 10 * time.Minute
+	dockerControlTimeout    = 15 * time.Second
+	dockerDataTimeout       = 10 * time.Minute
+	ErrSnapshotIncompatible = errors.New("database snapshot is incompatible with the current runtime")
 )
 
 type Config struct {
@@ -46,11 +48,14 @@ type SnapshotManifest struct {
 	Key           string    `json:"key"`
 	CreatedAt     time.Time `json:"createdAt"`
 	Image         string    `json:"image"`
+	Platform      string    `json:"platform,omitempty"`
+	SidecarImage  string    `json:"sidecarImage,omitempty"`
 	ContainerName string    `json:"containerName"`
 	VolumeName    string    `json:"volumeName"`
 	Database      string    `json:"database"`
 	User          string    `json:"user"`
 	Port          int       `json:"port"`
+	ContainerPort int       `json:"containerPort,omitempty"`
 	ArchivePath   string    `json:"archivePath"`
 }
 
@@ -99,9 +104,11 @@ func (m *Manager) Desired(instanceID string, cfg Config) api.DBInstance {
 		URL:           postgresURL(cfg.Host, cfg.HostPort, cfg.User, cfg.Password, cfg.Database),
 		Host:          cfg.Host,
 		Port:          cfg.HostPort,
+		ContainerPort: cfg.ContainerPort,
 		User:          cfg.User,
 		Password:      cfg.Password,
 		Image:         cfg.Image,
+		SidecarImage:  cfg.SidecarImage,
 		ContainerName: containerName,
 		VolumeName:    volumeName,
 		SnapshotRoot:  cfg.SnapshotRoot,
@@ -118,6 +125,7 @@ func (m *Manager) EnsureRuntime(ctx context.Context, db api.DBInstance) error {
 	if db.Image == "" {
 		db.Image = DefaultPostgresImage
 	}
+	containerPort := dbContainerPort(db)
 	if db.User == "" || db.Password == "" || db.Name == "" {
 		return fmt.Errorf("database name, user, and password are required")
 	}
@@ -126,12 +134,21 @@ func (m *Manager) EnsureRuntime(ctx context.Context, db api.DBInstance) error {
 	if err != nil {
 		return err
 	}
+	imageReady := false
 	if exists {
-		portOK, err := m.containerPublishesHostPort(ctx, db.ContainerName, db.Port)
+		portOK, err := m.containerPublishesHostPort(ctx, db.ContainerName, db.Port, containerPort)
 		if err != nil {
 			return err
 		}
-		if !portOK {
+		imageOK, err := m.containerUsesImage(ctx, db.ContainerName, db.Image)
+		if err != nil {
+			return err
+		}
+		if !portOK || !imageOK {
+			if err := m.ensureImage(ctx, db.Image); err != nil {
+				return err
+			}
+			imageReady = true
 			if _, err := m.runDocker(ctx, dockerControlTimeout, "rm", "-f", db.ContainerName); err != nil && !containerMissing(err) {
 				return err
 			}
@@ -141,6 +158,11 @@ func (m *Manager) EnsureRuntime(ctx context.Context, db api.DBInstance) error {
 	}
 	if running {
 		return nil
+	}
+	if !exists && !imageReady {
+		if err := m.ensureImage(ctx, db.Image); err != nil {
+			return err
+		}
 	}
 	if err := m.ensureVolume(ctx, db.VolumeName); err != nil {
 		return err
@@ -153,7 +175,7 @@ func (m *Manager) EnsureRuntime(ctx context.Context, db api.DBInstance) error {
 		"--name", db.ContainerName,
 		"--label", "devflow.managed=true",
 		"--label", "devflow.database=true",
-		"-p", fmt.Sprintf("%d:%d", db.Port, DefaultContainerPort),
+		"-p", fmt.Sprintf("%d:%d", db.Port, containerPort),
 		"-e", "POSTGRES_USER="+db.User,
 		"-e", "POSTGRES_PASSWORD="+db.Password,
 		"-e", "POSTGRES_DB="+db.Name,
@@ -170,7 +192,11 @@ func (m *Manager) WaitReady(ctx context.Context, db api.DBInstance, timeout time
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		commandTimeout := minDuration(dockerControlTimeout, time.Until(deadline))
-		_, err := m.runDocker(ctx, commandTimeout, "exec", db.ContainerName, "pg_isready", "-U", db.User, "-d", db.Name)
+		readyArgs := []string{"exec", db.ContainerName, "pg_isready", "-U", db.User, "-d", db.Name}
+		if db.ContainerPort > 0 && db.ContainerPort != DefaultContainerPort {
+			readyArgs = append(readyArgs, "-p", strconv.Itoa(db.ContainerPort))
+		}
+		_, err := m.runDocker(ctx, commandTimeout, readyArgs...)
 		if err == nil && (strings.TrimSpace(db.Host) == "" || hostPortReady(ctx, db.Host, db.Port, 200*time.Millisecond) == nil) {
 			return nil
 		}
@@ -235,6 +261,14 @@ func (m *Manager) Snapshot(ctx context.Context, db api.DBInstance, key string) (
 	if key == "" {
 		return nil, fmt.Errorf("snapshot key is required")
 	}
+	image := db.Image
+	if image == "" {
+		image = DefaultPostgresImage
+	}
+	platform, err := m.ensureImagePlatform(ctx, image)
+	if err != nil {
+		return nil, err
+	}
 	if err := m.StopRuntime(ctx, db); err != nil {
 		return nil, err
 	}
@@ -246,25 +280,28 @@ func (m *Manager) Snapshot(ctx context.Context, db api.DBInstance, key string) (
 		return nil, err
 	}
 	archivePath := filepath.Join(snapshotDir, "volume.tgz")
-	_, err := m.runDocker(ctx, dockerDataTimeout, "run", "--rm",
+	_, err = m.runDocker(ctx, dockerDataTimeout, "run", "--rm",
 		"-v", db.VolumeName+":/from",
 		"-v", snapshotDir+":/to",
-		DefaultSidecarImage,
+		dbSidecarImage(db),
 		"sh", "-c", "cd /from && tar czf /to/volume.tgz .",
 	)
 	if err != nil {
 		return nil, err
 	}
 	manifest := &SnapshotManifest{
-		Version:       1,
+		Version:       2,
 		Key:           key,
 		CreatedAt:     time.Now().UTC(),
-		Image:         db.Image,
+		Image:         image,
+		Platform:      platform,
+		SidecarImage:  dbSidecarImage(db),
 		ContainerName: db.ContainerName,
 		VolumeName:    db.VolumeName,
 		Database:      db.Name,
 		User:          db.User,
 		Port:          db.Port,
+		ContainerPort: dbContainerPort(db),
 		ArchivePath:   archivePath,
 	}
 	if err := jsonutil.WriteFileAtomic(filepath.Join(snapshotDir, "manifest.json"), manifest); err != nil {
@@ -285,6 +322,20 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, db api.DBInstance, key st
 	if err != nil {
 		return nil, err
 	}
+	image := db.Image
+	if image == "" {
+		image = DefaultPostgresImage
+	}
+	platform, err := m.ensureImagePlatform(ctx, image)
+	if err != nil {
+		return nil, err
+	}
+	if platform != "" && manifest.Platform == "" {
+		return nil, fmt.Errorf("%w: snapshot %q has no recorded image platform", ErrSnapshotIncompatible, key)
+	}
+	if platform != "" && manifest.Platform != platform {
+		return nil, fmt.Errorf("%w: snapshot %q uses %s, current image uses %s", ErrSnapshotIncompatible, key, manifest.Platform, platform)
+	}
 	if err := m.DestroyRuntime(ctx, db, true); err != nil {
 		return nil, err
 	}
@@ -294,7 +345,7 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, db api.DBInstance, key st
 	_, err = m.runDocker(ctx, dockerDataTimeout, "run", "--rm",
 		"-v", db.VolumeName+":/to",
 		"-v", snapshotDir+":/from",
-		DefaultSidecarImage,
+		dbSidecarImage(db),
 		"sh", "-c", "cd /to && tar xzf /from/volume.tgz",
 	)
 	if err != nil {
@@ -364,8 +415,8 @@ func (m *Manager) inspectContainer(ctx context.Context, name string) (running bo
 	return strings.TrimSpace(string(out)) == "true", true, nil
 }
 
-func (m *Manager) containerPublishesHostPort(ctx context.Context, name string, hostPort int) (bool, error) {
-	format := fmt.Sprintf(`{{range (index .NetworkSettings.Ports "%d/tcp")}}{{.HostPort}}{{"\n"}}{{end}}`, DefaultContainerPort)
+func (m *Manager) containerPublishesHostPort(ctx context.Context, name string, hostPort, containerPort int) (bool, error) {
+	format := fmt.Sprintf(`{{range (index .NetworkSettings.Ports "%d/tcp")}}{{.HostPort}}{{"\n"}}{{end}}`, containerPort)
 	out, err := m.runDocker(ctx, dockerControlTimeout, "inspect", "-f", format, name)
 	if containerMissing(err) {
 		return false, nil
@@ -382,6 +433,17 @@ func (m *Manager) containerPublishesHostPort(ctx context.Context, name string, h
 	return false, nil
 }
 
+func (m *Manager) containerUsesImage(ctx context.Context, name, image string) (bool, error) {
+	out, err := m.runDocker(ctx, dockerControlTimeout, "inspect", "-f", "{{.Config.Image}}", name)
+	if containerMissing(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) == image, nil
+}
+
 func (m *Manager) ensureVolume(ctx context.Context, name string) error {
 	_, err := m.runDocker(ctx, dockerControlTimeout, "volume", "inspect", name)
 	if err == nil {
@@ -394,15 +456,67 @@ func (m *Manager) ensureVolume(ctx context.Context, name string) error {
 	return err
 }
 
+func (m *Manager) ensureImage(ctx context.Context, image string) error {
+	_, err := m.runDocker(ctx, dockerControlTimeout, "image", "inspect", image)
+	if err == nil {
+		return nil
+	}
+	if !imageMissing(err) {
+		return err
+	}
+	_, err = m.runDocker(ctx, dockerDataTimeout, "pull", image)
+	return err
+}
+
+func (m *Manager) ensureImagePlatform(ctx context.Context, image string) (string, error) {
+	if image == "" {
+		image = DefaultPostgresImage
+	}
+	if err := m.ensureImage(ctx, image); err != nil {
+		return "", err
+	}
+	out, err := m.runDocker(ctx, dockerControlTimeout, "image", "inspect", "-f", "{{.Os}}/{{.Architecture}}", image)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func postgresURL(host string, port int, user, password, database string) string {
-	auth := user
+	var userInfo *url.Userinfo
 	if password != "" {
-		auth += ":" + password
+		userInfo = url.UserPassword(user, password)
+	} else if user != "" {
+		userInfo = url.User(user)
 	}
+	hostPort := host
 	if port > 0 {
-		return "postgres://" + auth + "@" + host + ":" + strconv.Itoa(port) + "/" + database + "?sslmode=disable"
+		hostPort = net.JoinHostPort(host, strconv.Itoa(port))
 	}
-	return "postgres://" + auth + "@" + host + "/" + database + "?sslmode=disable"
+	dsn := &url.URL{
+		Scheme: "postgres",
+		User:   userInfo,
+		Host:   hostPort,
+		Path:   "/" + database,
+	}
+	query := dsn.Query()
+	query.Set("sslmode", "disable")
+	dsn.RawQuery = query.Encode()
+	return dsn.String()
+}
+
+func dbContainerPort(db api.DBInstance) int {
+	if db.ContainerPort > 0 {
+		return db.ContainerPort
+	}
+	return DefaultContainerPort
+}
+
+func dbSidecarImage(db api.DBInstance) string {
+	if strings.TrimSpace(db.SidecarImage) != "" {
+		return db.SidecarImage
+	}
+	return DefaultSidecarImage
 }
 
 func containerMissing(err error) bool {
@@ -411,6 +525,10 @@ func containerMissing(err error) bool {
 
 func volumeMissing(err error) bool {
 	return commandErrContains(err, "No such volume") || commandErrContains(err, "No such object")
+}
+
+func imageMissing(err error) bool {
+	return commandErrContains(err, "No such image") || commandErrContains(err, "No such object")
 }
 
 func commandErrContains(err error, fragment string) bool {

@@ -384,7 +384,7 @@ policy := database.PostgresDumpSourcePolicy{
 }
 ```
 
-The policy writes the dump to a temporary file and only invokes `psql` after `pg_dump` succeeds, so a `pg_dump` version mismatch is surfaced as a Devflow task failure instead of being masked by an empty successful restore. In practice, use a host `pg_dump` whose major version matches the remote Postgres server.
+The policy writes the dump to an owner-only temporary file and only invokes `psql` after `pg_dump` succeeds, so a `pg_dump` version mismatch is surfaced as a Devflow task failure instead of being masked by an empty successful restore. It executes both clients directly rather than through `sh`, keeping this path portable on macOS, Linux, and Windows. `CloneFromEnv(...)` adds `pg_dump` and `psql` to target-scoped required-CLI checks. In practice, use a host `pg_dump` whose major version matches the remote Postgres server; on Apple Silicon Homebrew installs the clients with `brew install libpq`, and `$(brew --prefix libpq)/bin` may need to be added to `PATH`.
 
 It is not a "reset DB" operator action. The goal is to reuse the best compatible local state or rebuild a new base automatically.
 
@@ -400,7 +400,9 @@ db := database.Postgres("prisma")
 
 The underlying runtime uses host-visible readiness, not only in-container readiness. The app connects through the mapped host port, so Devflow waits until Postgres is ready inside Docker and the host port accepts connections.
 
-`EnsureRuntime` preserves the data volume, but recreates a stale container when its published host port does not match the current Devflow instance. Avoid unconditional container removal in normal startup paths.
+`EnsureRuntime` preserves the data volume, but recreates a stale container when its published host/container port mapping or configured Postgres image does not match the current Devflow instance. Avoid unconditional container removal in normal startup paths. The default `postgres:16.14` runtime and `alpine:3.24.1` snapshot sidecar are official multi-architecture images, so Docker selects `linux/arm64` natively on Apple Silicon. Custom images must publish the architecture they are expected to run on; adapters should not force `linux/amd64` unless emulation is an intentional project requirement. The high-level component exposes `Image(...)`, `SidecarImage(...)`, and `ContainerPort(...)` for compatible custom runtimes.
+
+Snapshot archives contain physical Postgres cluster files. Their manifests record the source image platform; managed migration restore ignores legacy manifests with no platform and manifests from a different architecture, rebuilding from source/migrations instead. This intentionally invalidates old Intel snapshot caches after a move to Apple Silicon rather than relying on raw cluster portability. Project data that must move between machines should use a logical `pg_dump`, not `.devflow/db-snapshots` as a transport format.
 
 For a Prisma project, the high-level path is:
 

@@ -2,7 +2,7 @@
 
 Devflow uses three testing layers:
 
-GitHub Actions treats Go 1.25 as the supported minimum. Push and pull-request validation runs `go test ./...` plus `go build ./cmd/devflow` on Go 1.25 across Linux, macOS, and Windows, and also exercises the current stable Go release on Linux. The matrix installs Delve with `go install github.com/go-delve/delve/cmd/dlv@v1.26.3`; this patch line includes the macOS DWARFv5 fix and supports Go 1.26. Real Go debug-service smoke coverage runs on each OS. A separate Linux job runs `go test -race ./...`.
+GitHub Actions treats Go 1.25 as the supported minimum. Push and pull-request validation runs `go test ./...` plus `go build ./cmd/devflow` on Go 1.25 across Linux amd64, macOS 15 arm64, and Windows amd64, and also exercises the current stable Go release on Linux. Each matrix entry asserts its native Go host architecture so the macOS job remains a real Apple Silicon gate rather than silently becoming an Intel/emulated check. The matrix installs Delve with `go install github.com/go-delve/delve/cmd/dlv@v1.26.3`; this patch line includes the macOS DWARFv5 fix and supports Go 1.26. Real Go debug-service smoke coverage runs on each OS. A separate Linux job runs `go test -race ./...`.
 
 The Linux quality job enforces `gofmt`, clean `go mod tidy -diff` output, `go vet`, Staticcheck `v0.7.0`, and govulncheck `v1.6.0`. Dependency and GitHub Actions update checks are scheduled monthly through Dependabot. Tag verification repeats the Go 1.25 test/build matrix on Linux, macOS, and Windows.
 
@@ -37,7 +37,7 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - `stop --all` cleanup for the instance-managed database container while preserving the volume
 - service readiness success and timeout behavior
 - built-binary helper build/run/start coverage and cache-restore coverage
-- database runtime command planning and snapshot-manifest coverage
+- database runtime command planning and snapshot-manifest coverage, including cold-image pull ordering, configured image reconciliation, custom container ports, custom snapshot sidecars, escaped DSNs, legacy default fallback, and pre-destructive cache misses for legacy/cross-architecture physical snapshots
 - builder API coverage for command tasks, services, target definitions, automatic cacheability from outputs, port env references, dotenv loading, path inputs, glob inputs, and filtered inputs
 - local stamped task coverage for install/setup commands that skip on matching input keys, rerun when declared local outputs are missing, stay isolated per worktree, ignore matching global cache entries, and avoid watch loops when commands touch unchanged input mtimes
 - database component coverage for common Postgres/Prisma/PayloadCMS task generation, optional snapshot-root defaults, instance DB/env finalization, and explicit non-cacheable migration authoring
@@ -65,6 +65,7 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - watch service restart policies, including `RestartAlways` selection and full watch execution behavior
 - flush coordination coverage for request/ack path generation, watcher inclusion of the flush sync directory under `.devflow`, engine ack timing after reruns and sync-only batches, failed-task ack issues, service readiness health issues, CLI daemon/timeout behavior, and sync-sentinel retouch while waiting for an ack
 - opt-in real Docker-backed database runtime snapshot/restore coverage in `pkg/database`
+- opt-in real remote Postgres clone coverage using separate non-default source and destination host ports, the production `pg_dump`/`psql` source policy, and assertions over cloned schema plus row data
 - opt-in real Docker-backed Prisma snapshot metadata + restore coverage in `pkg/database`
 
 ## Example/Smoke Coverage
@@ -86,6 +87,10 @@ Docker-backed integration coverage is intentionally opt-in. Enable it with:
 ```bash
 DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run Docker
 ```
+
+On Apple Silicon, check `docker info --format '{{.Architecture}}'` reports `aarch64` or `arm64` before running the opt-in suite. The suite then exercises the same native multi-architecture Postgres and Alpine images used by normal managed-database workflows. If Docker Desktop is installed but its engine is stopped, the test skips with a daemon-not-ready reason; do not treat the installed client alone as database coverage.
+
+The remote-clone case additionally requires host `pg_dump` and `psql` clients compatible with the default Postgres image. It starts distinct source and destination containers on dynamically allocated non-default host ports, seeds the source, runs `PostgresDumpSourcePolicy`, and verifies the destination schema and rows. On Apple Silicon with Homebrew, install the clients with `brew install libpq` and make sure `$(brew --prefix libpq)/bin` is on `PATH` before running the suite.
 
 There is also now a real `embedded-web-app` adapter with:
 - unit coverage for graph shape and env finalization

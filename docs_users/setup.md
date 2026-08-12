@@ -235,6 +235,10 @@ project.GoDebugService("api_debug", project.GoDebugServiceOptions{
 
 ## Prisma And Postgres
 
+Managed Postgres requires a running Docker engine. On macOS, install and start Docker Desktop before running the target; `docker version` must show both a client and a server. Apple Silicon is supported natively: Devflow's default `postgres:16.14` and `alpine:3.24.1` images publish `linux/arm64` variants, and Devflow deliberately does not force `linux/amd64` emulation. If an adapter overrides either image through `Image(...)` or `SidecarImage(...)`, choose a multi-architecture image or an explicit ARM64-compatible build; `ContainerPort(...)` is available for compatible custom Postgres images that listen somewhere other than 5432.
+
+Database snapshots are physical Postgres volume archives, not portable SQL dumps. New manifests record the Docker image platform. When moving a worktree from Intel to Apple Silicon, Devflow treats legacy snapshots without platform metadata and snapshots recorded for another architecture as cache misses, then rebuilds from the configured source and migrations. Keep `DEV_DATABASE_URL` or another base source available when a cold rebuild depends on remote seed data.
+
 For a common Prisma/Postgres development graph, use the database components instead of hand-writing runtime and log plumbing:
 
 ```go
@@ -258,6 +262,8 @@ prisma.NewMigration(b)
 ```
 
 `prisma.Migrations(b)` restores the best cached migration-prefix database state, applies only the missing tail, snapshots the final state, and reports migration-needed states when `schema.prisma` and `prisma/migrations` are out of sync. When the migration folder is in a Git worktree, Devflow only adds intermediate prefix snapshots around migration folders with uncommitted Git changes, including newly added or edited local migrations. If Git is unavailable, Devflow falls back to the final snapshot only. This keeps committed history fast while preserving the local workflow where you edit an in-progress migration and need to restore the previous prefix.
+
+`CloneFromEnv(...)` uses the host `pg_dump` and `psql` executables. Devflow declares both tools in target-scoped doctor output and runs them directly without a Unix shell, so the clone path is portable across macOS, Linux, and Windows. On Apple Silicon with Homebrew, `brew install libpq` installs both; because the formula can be keg-only, add `$(brew --prefix libpq)/bin` to `PATH`. Match the `pg_dump` major version to the remote Postgres server.
 
 `prisma.NewMigration(b)` registers an explicit authoring action. It reads the action input `name` through `DEVFLOW_MIGRATION_NAME`, reconciles the managed database to the best compatible migration-prefix state, creates a Prisma migration, and is intentionally not task-cacheable. This keeps edited latest migrations usable: Devflow restores the prior prefix and reapplies the changed tail before Prisma authors the next migration.
 

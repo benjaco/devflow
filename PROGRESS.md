@@ -5,14 +5,26 @@ Last updated: 2026-08-12
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: the August 2026 repository health review is complete; the per-worktree daemon remains the mutable dev/watch/operator control plane while `run --ci` remains direct and finite
-- Confidence: default tests, shuffled tests, race detection, vet, Staticcheck, vulnerability scanning, the Go 1.25 minimum toolchain, and foreign-platform compilation pass; real Docker/Postgres e2e remains opt-in and was not run because the local Docker daemon was unavailable
+- State: the August 2026 repository health and Apple Silicon portability reviews are complete; the per-worktree daemon remains the mutable dev/watch/operator control plane while `run --ci` remains direct and finite
+- Confidence: native `darwin/arm64` default/database/example tests, real ARM64 Docker/Postgres snapshot/restore e2e, shuffled tests, race detection, vet, Staticcheck, vulnerability scanning, the Go 1.25 minimum toolchain, and foreign-platform compilation pass; the new real remote-clone case is locally environment-blocked by a stopped Docker daemon and missing host Postgres clients, while real-Delve app readiness remains blocked by disabled macOS Developer Tools security
 
 ## In Progress
 
 - None.
 
 ## Completed
+
+- Apple Silicon and managed-database portability pass:
+  - ran the repository natively on macOS 26 `arm64` with CGO enabled and passed the full default suite plus focused database race coverage
+  - made macOS 15 `arm64` an explicit CI/release matrix target with a native-host architecture assertion while retaining Linux/Windows amd64 coverage and foreign-platform compilation checks
+  - refreshed the official multi-architecture runtime defaults to `postgres:16.14` and `alpine:3.24.1` without forcing `linux/amd64` emulation
+  - preserved configured container ports and snapshot sidecar images in instance/manifest state, used them for readiness/snapshot/restore, and reconciled stale containers when either port mapping or Postgres image changes
+  - recorded Docker image platforms in physical snapshot manifests and made legacy/Intel snapshots safe cache misses before restore on Apple Silicon
+  - separated cold Docker image pulls from short control-plane timeouts so first-machine ARM image downloads no longer fail inside a 15-second detached container start
+  - replaced the Unix-shell Postgres clone pipeline with direct `pg_dump` and `psql` execution, declared both tools in target-scoped Prisma checks, and added generated cross-platform helper-binary coverage
+  - made Postgres DSNs escape credentials/database paths correctly and support IPv6 hosts
+  - ran the opt-in Docker suite successfully against native `linux/arm64` Postgres and Alpine images, covering real runtime readiness plus volume and Prisma snapshot/restore; cleaned the interrupted test volume afterward
+  - added an opt-in real remote Postgres clone e2e that uses distinct non-default source/destination ports, seeds a schema plus rows, runs the production `pg_dump`/`psql` policy, and verifies the cloned data
 
 - August 2026 repository health and modernization pass:
   - raised the supported module/toolchain floor from unsupported Go 1.23 to Go 1.25 and updated project-local bootstrap modules accordingly
@@ -23,7 +35,7 @@ Last updated: 2026-08-12
   - removed obsolete pre-daemon CLI helpers and other dead code identified by Staticcheck
   - added direct atomic persistence, file-lock, event-bus, version, and fingerprint regression tests; moved flush-sentinel coverage to its daemon owner and fixed watch-test slice races found by the race detector
   - validated default and shuffled tests, the full race suite, Go 1.25.12, vet, Staticcheck, govulncheck, workflow syntax, normal builds, and Linux/macOS/Windows amd64 plus Windows arm64 compilation
-  - kept Docker-backed database tests as an explicit follow-up because Docker was installed but its local daemon was not running; local real-Delve app-readiness was likewise environment-blocked by disabled macOS Developer Tools security and was documented without changing machine security settings
+  - initially kept Docker-backed database tests as an explicit follow-up because Docker was installed but its local daemon was not running; the later Apple Silicon pass completed that suite, while local real-Delve app-readiness remains environment-blocked by disabled macOS Developer Tools security and was documented without changing machine security settings
 
 - First-class project actions implemented:
   - `project.Action` plus builder registration, aliases, typed inputs, declared effects, and relaunch policy
@@ -656,7 +668,7 @@ Last updated: 2026-08-12
 
 ## Next Steps
 
-- Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run Docker -v` on a host with a running Docker daemon and retain the result before the next database-runtime change
+- Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
 - Convert bundled example adapters to the builder/component API so source examples match the new user-facing shape
 - Expand user docs/examples for script-to-Devflow convergence and fixed-port service guidance
 - Revisit the Go 1.25 minimum and pinned Delve line when the next stable Go release changes the supported-version window
@@ -667,5 +679,4 @@ Last updated: 2026-08-12
 - Round-1 release flow deliberately has no binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable
 - Fine-grained detached per-service restart is not fully implemented yet
 - The example adapter still uses a deterministic fake-DB path in normal tests; real Docker-backed coverage now exists as an opt-in module-level e2e layer rather than being part of default `go test ./...`
-- The August 2026 review could not execute the opt-in Docker suite because Docker was installed locally but its daemon was not running
 - The `embedded-web-app` adapter is now manually validated against a local repo for build, DB prep, detached runtime, health, and shutdown flows; remaining gaps are automated Docker-backed coverage and richer control UX

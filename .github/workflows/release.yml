@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   verify-tag:
-    name: verify tag (${{ matrix.os }})
+    name: verify tag (${{ matrix.os }}/${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -18,10 +18,13 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            arch: amd64
             binary: devflow
-          - os: macos-latest
+          - os: macos-15
+            arch: arm64
             binary: devflow
           - os: windows-latest
+            arch: amd64
             binary: devflow.exe
     steps:
       - name: Check out repository
@@ -39,6 +42,15 @@ jobs:
         run: |
           go install github.com/go-delve/delve/cmd/dlv@v1.26.3
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Verify native architecture
+        shell: bash
+        run: |
+          actual="$(go env GOHOSTARCH)"
+          if [[ "$actual" != "${{ matrix.arch }}" ]]; then
+            echo "expected ${{ matrix.arch }}, got $actual"
+            exit 1
+          fi
 
       - name: Run tests
         run: go test -count=1 ./...

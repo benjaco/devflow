@@ -22,6 +22,12 @@ func main() {
 	case "npm":
 		runFakeNPM()
 		return
+	case "pg_dump":
+		runFakePGDump()
+		return
+	case "psql":
+		runFakePSQL()
+		return
 	}
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: testcmd <emit|write|serve>")
@@ -53,6 +59,67 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown testcmd command %q\n", os.Args[1])
 		os.Exit(2)
+	}
+}
+
+func runFakePGDump() {
+	if os.Getenv("DEVFLOW_FAKE_PG_DUMP_FAIL") != "" {
+		fmt.Fprintln(os.Stderr, "version mismatch")
+		os.Exit(42)
+	}
+	dumpPath := ""
+	remoteURL := ""
+	for index := 1; index < len(os.Args); index++ {
+		if os.Args[index] == "-f" && index+1 < len(os.Args) {
+			dumpPath = os.Args[index+1]
+			index++
+			continue
+		}
+		if !strings.HasPrefix(os.Args[index], "-") {
+			remoteURL = os.Args[index]
+		}
+	}
+	if dumpPath == "" || remoteURL == "" {
+		fmt.Fprintln(os.Stderr, "fake pg_dump requires -f and a remote URL")
+		os.Exit(2)
+	}
+	if err := os.WriteFile(dumpPath, []byte("dump:"+remoteURL), 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func runFakePSQL() {
+	if marker := os.Getenv("DEVFLOW_FAKE_PSQL_RECORD"); marker != "" {
+		if err := os.WriteFile(marker, []byte("ran\n"), 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	dumpPath := ""
+	for index := 1; index < len(os.Args); index++ {
+		if os.Args[index] == "-f" && index+1 < len(os.Args) {
+			dumpPath = os.Args[index+1]
+			break
+		}
+	}
+	output := os.Getenv("OUT_FILE")
+	if dumpPath == "" || output == "" {
+		fmt.Fprintln(os.Stderr, "fake psql requires -f and OUT_FILE")
+		os.Exit(2)
+	}
+	data, err := os.ReadFile(dumpPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(output, data, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(output+".url", []byte(os.Getenv("DATABASE_URL")), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 

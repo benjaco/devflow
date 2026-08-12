@@ -190,7 +190,7 @@ func TestRenderDatabasePanelIncludesPrismaSnapshots(t *testing.T) {
 				Port:          55432,
 				User:          "devflow",
 				Password:      "secret",
-				Image:         "postgres:16.3",
+				Image:         "postgres:16.14",
 				ContainerName: "devflow-pg-abc",
 				VolumeName:    "devflow-pgdata-abc",
 				SnapshotRoot:  "/tmp/devflow/db-snapshots",

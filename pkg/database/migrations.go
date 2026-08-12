@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -223,6 +224,9 @@ func (m *Manager) RestoreNearestMigrationSnapshot(ctx context.Context, db api.DB
 	}
 	manifest, err := m.RestoreSnapshot(ctx, db, plan.SnapshotKey)
 	if err != nil {
+		if errors.Is(err, ErrSnapshotIncompatible) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return &MigrationRestoreResult{

@@ -280,13 +280,17 @@ The chosen direction is now full per-worktree separation for local databases:
 
 The new `pkg/database` package provides the runtime primitives for that model:
 - derive deterministic per-instance container and volume names
-- ensure the container is running, recreating stale containers whose published host port no longer matches the selected instance
+- ensure the container is running, recreating stale containers whose published host/container port mapping or configured image no longer matches the selected instance while preserving the volume
 - wait for readiness via `pg_isready` plus host-port readiness when the DB instance has a host
 - stop or destroy the runtime
-- snapshot and restore the Postgres data volume
+- snapshot and restore the Postgres data volume with the sidecar image persisted in instance/manifest state
 - inspect Prisma schema/migration state and choose the nearest cached migration-prefix snapshot
 
-Docker control-plane commands such as inspect, start, stop, remove, and detached container start are bounded by short command timeouts. Long data-plane sidecar work such as snapshot archive/restore has a separate longer timeout. Docker commands run in their own process group on Unix-like platforms; timeout/cancel kills the group and uses a bounded wait so Docker Desktop helper children cannot keep stdout/stderr pipes open forever. A stuck Docker Desktop or Docker CLI should surface as a database task error rather than leaving a task in `running` forever.
+The default runtime images are `postgres:16.14` and `alpine:3.24.1`. Both are official multi-architecture images, and no Docker `--platform` override is added, so Docker selects native `linux/arm64` images on Apple Silicon and native `linux/amd64` images on x86 hosts. Low-level `Config.ContainerPort` and `Config.SidecarImage` values must survive into persisted `api.DBInstance` state; snapshot/restore and readiness must use those persisted values instead of silently falling back to package constants.
+
+Volume snapshots are physical Postgres cluster archives. Snapshot manifest version 2 records the Docker image OS/architecture. Managed Prisma/migration restore treats legacy manifests without platform metadata and manifests whose platform differs from the selected image as cache misses, before any container or volume is destroyed, so an Intel-to-ARM move rebuilds from the source policy and migrations. Direct `RestoreSnapshot` returns `ErrSnapshotIncompatible` for the same condition. Do not turn `.devflow/db-snapshots` into a cross-machine data transfer format; use logical dumps for that purpose.
+
+Docker control-plane commands such as inspect, start, stop, remove, and detached container start are bounded by short command timeouts. Cold image acquisition is resolved explicitly with `docker image inspect` plus a separately bounded long `docker pull`; do not let a first-machine image download happen implicitly inside the short detached-run timeout. Long data-plane sidecar work such as snapshot archive/restore has the same longer timeout class. Docker commands run in their own process group on Unix-like platforms; timeout/cancel kills the group and uses a bounded wait so Docker Desktop helper children cannot keep stdout/stderr pipes open forever. A stuck Docker Desktop or Docker CLI should surface as a database task error rather than leaving a task in `running` forever.
 
 This keeps DB isolation strong and avoids shared-cluster coupling between worktrees.
 
@@ -356,7 +360,7 @@ Migration authoring prep intentionally differs from normal DB prep: it restores/
 
 Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`. `Migrate` is an all-at-once command and only snapshots the final state; `MigrateEach` preserves the exhaustive per-prefix cache contract.
 
-`PostgresDumpSourcePolicy` must fail when `pg_dump` fails. It writes through a temporary dump file instead of an unchecked shell pipeline so `psql` cannot mask a failed clone with an empty successful restore.
+`PostgresDumpSourcePolicy` must fail when `pg_dump` fails. It writes through an owner-only temporary dump file instead of an unchecked shell pipeline so `psql` cannot mask a failed clone with an empty successful restore. It invokes `pg_dump` and `psql` as separate commands without a Unix shell, and Prisma components using that policy declare both host clients as target-scoped required CLIs.
 
 PayloadCMS follows the same operator rule as Prisma: normal `up`/watch paths apply existing migrations non-interactively through `payload.Migrations(b)`, while migration creation belongs to an explicit action registered by `payload.NewMigration(b)`. Payload can ask for confirmations when changes may be destructive; those prompts flow through the generic interactive prompt path instead of being handled with Payload-specific TUI logic. Payload schema module paths are part of the component input contract, not only app-service inputs: by default the component includes `src/collections` and `src/globals`, and adapters can override them with `SchemaInputs(...)`.
 
