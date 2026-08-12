@@ -352,14 +352,23 @@ func (e *sdkDockerEngine) WatchContainer(ctx context.Context, name string, onLin
 		Condition: containertypes.WaitConditionNotRunning,
 	})
 	copyResult := (<-chan error)(copyDone)
-	finishLogCopy := func() error {
-		_ = logs.Close()
+	finishLogCopy := func(closeStream bool) error {
 		if copyResult == nil {
 			return nil
 		}
-		copyErr := <-copyResult
-		copyResult = nil
-		return copyErr
+		if closeStream {
+			_ = logs.Close()
+		}
+		select {
+		case copyErr := <-copyResult:
+			copyResult = nil
+			return copyErr
+		case <-ctx.Done():
+			_ = logs.Close()
+			<-copyResult
+			copyResult = nil
+			return ctx.Err()
+		}
 	}
 	for {
 		select {
@@ -372,7 +381,14 @@ func (e *sdkDockerEngine) WatchContainer(ctx context.Context, name string, onLin
 				return fmt.Errorf("follow container logs: %w", copyErr)
 			}
 		case result := <-wait.Result:
-			if copyErr := finishLogCopy(); copyErr != nil && ctx.Err() == nil {
+			// A successful wait means the container has stopped, but the followed
+			// HTTP log stream can still have buffered frames to deliver. Let it
+			// reach EOF naturally; closing it here races the copy and produces
+			// http.ErrBodyReadAfterClose under the race detector.
+			if copyErr := finishLogCopy(false); copyErr != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				return fmt.Errorf("finish container logs: %w", copyErr)
 			}
 			if result.Error != nil && strings.TrimSpace(result.Error.Message) != "" {
@@ -383,13 +399,13 @@ func (e *sdkDockerEngine) WatchContainer(ctx context.Context, name string, onLin
 			}
 			return nil
 		case waitErr := <-wait.Error:
-			_ = finishLogCopy()
+			_ = finishLogCopy(true)
 			if waitErr == nil && ctx.Err() != nil {
 				return ctx.Err()
 			}
 			return waitErr
 		case <-ctx.Done():
-			_ = finishLogCopy()
+			_ = finishLogCopy(true)
 			return ctx.Err()
 		}
 	}

@@ -198,23 +198,29 @@ func (m *Manager) WaitReady(ctx context.Context, db api.DBInstance, timeout time
 		if db.ContainerPort > 0 && db.ContainerPort != DefaultContainerPort {
 			readyCommand = append(readyCommand, "-p", strconv.Itoa(db.ContainerPort))
 		}
-		_, err := m.execContainer(ctx, commandTimeout, db.ContainerName, readyCommand)
-		if err != nil {
+		ready := false
+		if _, err := m.execContainer(ctx, commandTimeout, db.ContainerName, readyCommand); err != nil {
 			lastErr = err
+		} else if strings.TrimSpace(db.Host) != "" {
+			lastErr = hostPortReady(ctx, db.Host, db.Port, 200*time.Millisecond)
+			if lastErr == nil {
+				ready = true
+			}
 		} else {
 			lastErr = nil
-			if strings.TrimSpace(db.Host) != "" {
-				lastErr = hostPortReady(ctx, db.Host, db.Port, 200*time.Millisecond)
+			ready = true
+		}
+		if ready {
+			// The official image initializes through a temporary socket-only
+			// server. Force TCP so only the final published runtime can pass.
+			if _, err := m.execContainer(ctx, commandTimeout, db.ContainerName, psqlCommand(db, "SELECT 1", "127.0.0.1", true)); err != nil {
+				lastErr = fmt.Errorf("connect to configured database %q: %w", db.Name, err)
+				ready = false
 			}
 		}
-		if err == nil && lastErr == nil {
+		if ready {
 			if db.Flavor == FlavorPostGIS {
-				if _, err := m.execContainer(ctx, commandTimeout, db.ContainerName, []string{
-					"psql", "-X", "-v", "ON_ERROR_STOP=1",
-					"-U", db.User,
-					"-d", db.Name,
-					"-c", "CREATE EXTENSION IF NOT EXISTS postgis",
-				}); err != nil {
+				if _, err := m.execContainer(ctx, commandTimeout, db.ContainerName, psqlCommand(db, "CREATE EXTENSION IF NOT EXISTS postgis", "", false)); err != nil {
 					lastErr = fmt.Errorf("enable PostGIS extension in database %q: %w", db.Name, err)
 				} else {
 					return nil
@@ -273,16 +279,25 @@ func (m *Manager) ExecSQL(ctx context.Context, db api.DBInstance, statement stri
 	if db.User == "" || db.Name == "" {
 		return nil, fmt.Errorf("database user and name are required")
 	}
+	return m.execContainer(ctx, dockerDataTimeout, db.ContainerName, psqlCommand(db, statement, "", false))
+}
+
+func psqlCommand(db api.DBInstance, statement, host string, tuplesOnly bool) []string {
 	command := []string{
 		"psql", "-X", "-v", "ON_ERROR_STOP=1",
-		"-U", db.User,
-		"-d", db.Name,
 	}
+	if host != "" {
+		command = append(command, "-h", host)
+	}
+	command = append(command, "-U", db.User, "-d", db.Name)
 	if db.ContainerPort > 0 && db.ContainerPort != DefaultContainerPort {
 		command = append(command, "-p", strconv.Itoa(db.ContainerPort))
 	}
+	if tuplesOnly {
+		command = append(command, "-At")
+	}
 	command = append(command, "-c", statement)
-	return m.execContainer(ctx, dockerDataTimeout, db.ContainerName, command)
+	return command
 }
 
 func (m *Manager) DestroyRuntime(ctx context.Context, db api.DBInstance, removeVolume bool) error {

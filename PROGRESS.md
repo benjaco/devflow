@@ -25,6 +25,11 @@ Last updated: 2026-08-13
   - added a compiled-CLI bootstrap regression that loads a real project-local adapter, proves artifact validation reports materialized inputs plus undeclared/missing outputs, proves both valid orders execute and expose a missing dependency, checks non-zero exits and structured JSON, and confirms validation does not write generated artifacts into the source worktree
   - hardened the existing `RestartAlways` watch execution test to wait for `watch.ready`, eliminating the startup-baseline race exposed by shuffled verification
   - verified with normal and shuffled full tests, the full race suite plus a final focused validation/CLI race pass, vet, Staticcheck, govulncheck, clean module metadata/format/diff checks, command build/version smoke, and Windows amd64 validation/CLI/binary cross-compilation
+- GitHub Actions database startup/log-stream race hardening:
+  - changed normal managed-container exit handling to drain followed Engine logs to EOF instead of closing a response body that `stdcopy` is still reading; cancellation and wait-error paths still close the stream to unblock promptly
+  - made `WaitReady` prove a real TCP `psql` query against the configured database and persisted container port after `pg_isready`/host-port checks, preventing the official image's temporary bootstrap server or a missing database from satisfying readiness
+  - added deterministic regressions for a wait result preceding log EOF, configured-database SQL retries, custom readiness ports, and exact PostGIS extension activation
+  - passed 20 repeated focused race runs, the full default/race suites, Go 1.25.12, vet, Staticcheck, govulncheck, tidy/format/diff checks, Linux/Windows amd64/arm64 builds, five fresh native Apple-ARM Docker service lifecycles, and a real native-ARM PostGIS 16 spatial/persistence run; the remote-clone test remains locally skipped only because host `pg_dump` is not installed and stays required in Linux CI
 
 - Windows atomic persistence race hardening:
   - routed JSON state and `runtime.env` temporary-file commits through one shared same-destination replacement primitive
