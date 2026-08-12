@@ -211,6 +211,7 @@ func TestRenderDatabasePanelIncludesPrismaSnapshots(t *testing.T) {
 		"managed postgres",
 		"host=127.0.0.1",
 		"port=55432",
+		"flavor=postgres",
 		"container=devflow-pg-abc",
 		"prisma snapshots: 1 cached migration-prefix states",
 		"latest=prisma_new migrations=2",
@@ -222,6 +223,25 @@ func TestRenderDatabasePanelIncludesPrismaSnapshots(t *testing.T) {
 	}
 	if strings.Contains(joined, "secret") {
 		t.Fatalf("database panel leaked DB password:\n%s", joined)
+	}
+}
+
+func TestRenderDatabasePanelShowsArchitectureSelectedPostGISFlavor(t *testing.T) {
+	snap := snapshot{
+		instance: &api.Instance{DB: api.DBInstance{
+			Name:            "geo_wt_abc",
+			Host:            "127.0.0.1",
+			Port:            55432,
+			User:            "devflow",
+			Flavor:          database.FlavorPostGIS,
+			PostgresVersion: 18,
+			ContainerName:   "devflow-pg-abc",
+		}},
+		logTitle: databasePanelTitle,
+	}
+	joined := strings.Join(renderLogPanel(snap, ""), "\n")
+	if !strings.Contains(joined, "flavor=postgis postgres=18 image=auto") {
+		t.Fatalf("expected architecture-selected PostGIS flavor in database panel, got:\n%s", joined)
 	}
 }
 

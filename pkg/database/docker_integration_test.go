@@ -7,12 +7,27 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/benjaco/devflow/pkg/api"
 )
+
+func TestDockerEngineArchitectureMatchesHostE2E(t *testing.T) {
+	requireDockerE2E(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	architecture, err := New().dockerArchitecture(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dockerArchitectureMatchesHost(runtime.GOARCH, architecture) {
+		t.Fatalf("Docker Engine architecture %q does not match native Go host architecture %q", architecture, runtime.GOARCH)
+	}
+}
 
 func TestDockerRuntimeSnapshotRestoreE2E(t *testing.T) {
 	requireDockerE2E(t)
@@ -32,7 +47,7 @@ func TestDockerRuntimeSnapshotRestoreE2E(t *testing.T) {
 	if err := mgr.WaitReady(ctx, db, 45*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeVolumeMarker(ctx, db.VolumeName, "before"); err != nil {
+	if err := writeVolumeMarker(ctx, db, "before"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -53,10 +68,10 @@ func TestDockerRuntimeSnapshotRestoreE2E(t *testing.T) {
 	if err := mgr.WaitReady(ctx, db, 45*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeVolumeMarker(ctx, db.VolumeName, "after"); err != nil {
+	if err := writeVolumeMarker(ctx, db, "after"); err != nil {
 		t.Fatal(err)
 	}
-	got, err := readVolumeMarker(ctx, db.VolumeName)
+	got, err := readVolumeMarker(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +88,7 @@ func TestDockerRuntimeSnapshotRestoreE2E(t *testing.T) {
 	if err := mgr.WaitReady(ctx, db, 45*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	got, err = readVolumeMarker(ctx, db.VolumeName)
+	got, err = readVolumeMarker(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +124,7 @@ func TestDockerPrismaSnapshotRestoreNearestE2E(t *testing.T) {
 	if err := mgr.WaitReady(ctx, db, 45*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeVolumeMarker(ctx, db.VolumeName, "prisma-before"); err != nil {
+	if err := writeVolumeMarker(ctx, db, "prisma-before"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -127,7 +142,7 @@ func TestDockerPrismaSnapshotRestoreNearestE2E(t *testing.T) {
 	if err := mgr.WaitReady(ctx, db, 45*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeVolumeMarker(ctx, db.VolumeName, "prisma-after"); err != nil {
+	if err := writeVolumeMarker(ctx, db, "prisma-after"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -145,7 +160,7 @@ func TestDockerPrismaSnapshotRestoreNearestE2E(t *testing.T) {
 	if err := mgr.WaitReady(ctx, db, 45*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	got, err := readVolumeMarker(ctx, db.VolumeName)
+	got, err := readVolumeMarker(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,6 +243,121 @@ ORDER BY id;`
 	}
 }
 
+func TestDockerPostGISRuntimeSpatialQueryE2E(t *testing.T) {
+	requireDockerE2E(t)
+
+	for _, postgresVersion := range []int{16, 17, 18} {
+		t.Run(strconv.Itoa(postgresVersion), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+			defer cancel()
+
+			mgr := New()
+			db := e2ePostGISDBInstance(t, postgresVersion)
+			t.Cleanup(func() {
+				_ = mgr.DestroyRuntime(context.Background(), db, true)
+			})
+
+			if err := mgr.EnsureRuntime(ctx, db); err != nil {
+				t.Fatal(err)
+			}
+			dockerArchitecture := assertPostGISRuntimeImageMatchesDockerArchitecture(t, ctx, mgr, db)
+			if err := mgr.WaitReady(ctx, db, 90*time.Second); err != nil {
+				t.Fatal(err)
+			}
+
+			query := `SELECT
+    extversion || '|' ||
+    ST_AsText(ST_SetSRID(ST_MakePoint(12.5683, 55.6761), 4326)) || '|' ||
+    round(ST_Distance(
+        ST_SetSRID(ST_MakePoint(12.5683, 55.6761), 4326)::geography,
+        ST_SetSRID(ST_MakePoint(12.5683, 55.6861), 4326)::geography
+    ))::text
+FROM pg_extension
+WHERE extname = 'postgis';`
+			got, err := runPostgresContainerSQL(ctx, db, query, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parts := strings.Split(got, "|")
+			runtime, err := postGISRuntimeForVersion(postgresVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
+			postGISVersionPrefix := "3."
+			if dockerArchitecture == "amd64" || dockerArchitecture == "x86_64" {
+				postGISVersionPrefix = runtime.upstreamPostGISVersion + "."
+			}
+			if len(parts) != 3 || !strings.HasPrefix(parts[0], postGISVersionPrefix) || parts[1] != "POINT(12.5683 55.6761)" {
+				t.Fatalf("unexpected PostGIS result %q", got)
+			}
+			distance, err := strconv.Atoi(parts[2])
+			if err != nil {
+				t.Fatalf("parse PostGIS distance from %q: %v", got, err)
+			}
+			if distance < 1100 || distance > 1120 {
+				t.Fatalf("unexpected PostGIS geography distance %d meters", distance)
+			}
+
+			serverMajor, err := runPostgresContainerSQL(ctx, db, `SELECT current_setting('server_version_num')::int / 10000;`, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if serverMajor != strconv.Itoa(postgresVersion) {
+				t.Fatalf("runtime reported PostgreSQL major %q, want %d", serverMajor, postgresVersion)
+			}
+
+			if _, err := runPostgresContainerSQL(ctx, db, `CREATE TABLE devflow_postgis_persistence_probe (
+    id integer PRIMARY KEY,
+    location geometry(Point, 4326) NOT NULL
+);
+INSERT INTO devflow_postgis_persistence_probe (id, location)
+VALUES (1, ST_SetSRID(ST_MakePoint(12.5683, 55.6761), 4326));`, false); err != nil {
+				t.Fatal(err)
+			}
+			if err := mgr.DestroyRuntime(ctx, db, false); err != nil {
+				t.Fatal(err)
+			}
+			if err := mgr.EnsureRuntime(ctx, db); err != nil {
+				t.Fatal(err)
+			}
+			if err := mgr.WaitReady(ctx, db, 90*time.Second); err != nil {
+				t.Fatal(err)
+			}
+			persisted, err := runPostgresContainerSQL(ctx, db, `SELECT id::text || '|' || ST_AsText(location)
+FROM devflow_postgis_persistence_probe;`, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persisted != "1|POINT(12.5683 55.6761)" {
+				t.Fatalf("unexpected persisted PostGIS row %q", persisted)
+			}
+		})
+	}
+}
+
+func assertPostGISRuntimeImageMatchesDockerArchitecture(t *testing.T, ctx context.Context, mgr *Manager, db api.DBInstance) string {
+	t.Helper()
+	architecture, err := mgr.dockerArchitecture(ctx)
+	if err != nil {
+		t.Fatalf("inspect Docker architecture through Engine API: %v", err)
+	}
+	container, exists, err := mgr.inspectContainer(ctx, db.ContainerName)
+	if err != nil {
+		t.Fatalf("inspect PostGIS runtime container through Engine API: %v", err)
+	}
+	if !exists {
+		t.Fatalf("PostGIS runtime container %s disappeared", db.ContainerName)
+	}
+	want, err := postGISImageForArchitecture(db.PostgresVersion, architecture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := container.Image; got != want {
+		t.Fatalf("unexpected PostGIS image %q for Docker architecture %q, want %q", got, architecture, want)
+	}
+	return architecture
+}
+
 func requireDockerE2E(t *testing.T) {
 	t.Helper()
 	if testing.Short() {
@@ -236,14 +366,10 @@ func requireDockerE2E(t *testing.T) {
 	if strings.TrimSpace(os.Getenv("DEVFLOW_E2E_DOCKER")) != "1" {
 		t.Skip("set DEVFLOW_E2E_DOCKER=1 to enable Docker-backed integration tests")
 	}
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skipf("docker not installed: %v", err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "docker", "info").CombinedOutput()
-	if err != nil {
-		t.Skipf("docker daemon not ready: %s", strings.TrimSpace(string(out)))
+	if err := New().pingDocker(ctx); err != nil {
+		t.Skipf("Docker Engine not ready through the Go API: %v", err)
 	}
 }
 
@@ -271,6 +397,21 @@ func e2eDBInstanceOnPort(t *testing.T, role, database string, hostPort int) api.
 		User:         "devflow",
 		Password:     "devflow",
 		SnapshotRoot: t.TempDir(),
+	})
+}
+
+func e2ePostGISDBInstance(t *testing.T, postgresVersion int) api.DBInstance {
+	t.Helper()
+	mgr := New()
+	instanceID := fmt.Sprintf("e2epostgis%x", time.Now().UnixNano())
+	return mgr.Desired(instanceID, Config{
+		Flavor:          FlavorPostGIS,
+		PostgresVersion: postgresVersion,
+		HostPort:        freePortExcluding(t, DefaultContainerPort),
+		Database:        "devflow_postgis_e2e",
+		User:            "devflow",
+		Password:        "devflow",
+		SnapshotRoot:    t.TempDir(),
 	})
 }
 
@@ -303,9 +444,21 @@ func freePortExcluding(t *testing.T, excluded ...int) int {
 	return 0
 }
 
+func dockerArchitectureMatchesHost(hostArchitecture, dockerArchitecture string) bool {
+	hostArchitecture = strings.ToLower(strings.TrimSpace(hostArchitecture))
+	dockerArchitecture = strings.ToLower(strings.TrimSpace(dockerArchitecture))
+	switch hostArchitecture {
+	case "amd64":
+		return dockerArchitecture == "amd64" || dockerArchitecture == "x86_64"
+	case "arm64":
+		return dockerArchitecture == "arm64" || dockerArchitecture == "aarch64"
+	default:
+		return hostArchitecture == dockerArchitecture
+	}
+}
+
 func runPostgresContainerSQL(ctx context.Context, db api.DBInstance, query string, tuplesOnly bool) (string, error) {
 	args := []string{
-		"exec", db.ContainerName,
 		"psql", "-X", "-v", "ON_ERROR_STOP=1",
 		"-U", db.User,
 		"-d", db.Name,
@@ -314,35 +467,29 @@ func runPostgresContainerSQL(ctx context.Context, db api.DBInstance, query strin
 		args = append(args, "-At")
 	}
 	args = append(args, "-c", query)
-	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+	out, err := New().execContainer(ctx, dockerDataTimeout, db.ContainerName, args)
 	if err != nil {
-		return "", fmt.Errorf("run SQL in %s: %w: %s", db.ContainerName, err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("run SQL in %s through Docker Engine API: %w: %s", db.ContainerName, err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
-func writeVolumeMarker(ctx context.Context, volumeName, value string) error {
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm",
-		"-e", "MARKER="+value,
-		"-v", volumeName+":/data",
-		DefaultSidecarImage,
-		"sh", "-c", `printf '%s' "$MARKER" > /data/devflow-e2e-marker.txt`,
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("write volume marker: %s", strings.TrimSpace(string(out)))
+func writeVolumeMarker(ctx context.Context, db api.DBInstance, value string) error {
+	markerPath := postgresVolumeMount(db) + "/devflow-e2e-marker.txt"
+	out, err := New().execContainer(ctx, dockerControlTimeout, db.ContainerName, []string{
+		"sh", "-c", `printf '%s' "$1" > "$2"`, "devflow-marker", value, markerPath,
+	})
+	if err != nil {
+		return fmt.Errorf("write volume marker through Docker Engine API: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-func readVolumeMarker(ctx context.Context, volumeName string) (string, error) {
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm",
-		"-v", volumeName+":/data",
-		DefaultSidecarImage,
-		"sh", "-c", `cat /data/devflow-e2e-marker.txt`,
-	)
-	out, err := cmd.CombinedOutput()
+func readVolumeMarker(ctx context.Context, db api.DBInstance) (string, error) {
+	markerPath := postgresVolumeMount(db) + "/devflow-e2e-marker.txt"
+	out, err := New().execContainer(ctx, dockerControlTimeout, db.ContainerName, []string{"cat", markerPath})
 	if err != nil {
-		return "", fmt.Errorf("read volume marker: %s", strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("read volume marker through Docker Engine API: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
 }

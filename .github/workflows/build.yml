@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -76,7 +76,7 @@ jobs:
             binary: devflow
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -112,7 +112,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -123,3 +123,43 @@ jobs:
 
       - name: Run race detector
         run: go test -race -count=1 ./...
+
+  database-docker:
+    name: database Docker e2e (${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.x"
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Verify native architecture
+        shell: bash
+        run: |
+          actual="$(go env GOHOSTARCH)"
+          if [[ "$actual" != "${{ matrix.arch }}" ]]; then
+            echo "expected ${{ matrix.arch }}, got $actual"
+            exit 1
+          fi
+
+      - name: Install PostgreSQL clients
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Run database Docker integration tests
+        env:
+          DEVFLOW_E2E_DOCKER: "1"
+        run: go test -count=1 -timeout=40m ./pkg/database -run 'TestDocker(EngineArchitectureMatchesHost|PostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPort|PostGISRuntimeSpatialQuery)E2E' -v

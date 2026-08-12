@@ -120,7 +120,10 @@ func InspectMigrationState(worktree, migrationsDir string, basePaths []string) (
 }
 
 func SaveMigrationSnapshot(root, key string, state *MigrationState) (*MigrationSnapshot, error) {
-	snapshotDir := filepath.Join(root, key)
+	snapshotDir, err := databaseSnapshotDir(root, key)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -140,8 +143,12 @@ func SaveMigrationSnapshot(root, key string, state *MigrationState) (*MigrationS
 }
 
 func LoadMigrationSnapshot(root, key string) (*MigrationSnapshot, error) {
+	snapshotDir, err := databaseSnapshotDir(root, key)
+	if err != nil {
+		return nil, err
+	}
 	var meta MigrationSnapshot
-	if err := jsonutil.ReadFile(filepath.Join(root, key, "migrations.json"), &meta); err != nil {
+	if err := jsonutil.ReadFile(filepath.Join(snapshotDir, "migrations.json"), &meta); err != nil {
 		return nil, err
 	}
 	return &meta, nil

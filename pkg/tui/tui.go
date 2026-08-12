@@ -1077,7 +1077,19 @@ func renderDatabasePanel(snap snapshot) []string {
 		return lines
 	}
 	lines = append(lines, "managed postgres:")
-	lines = append(lines, fmt.Sprintf("name=%s host=%s port=%d user=%s image=%s", db.Name, db.Host, db.Port, db.User, db.Image))
+	flavor := db.Flavor
+	if flavor == "" {
+		flavor = database.FlavorPostgres
+	}
+	image := db.Image
+	if image == "" {
+		image = "auto"
+	}
+	databaseRuntime := fmt.Sprintf("flavor=%s", flavor)
+	if db.PostgresVersion > 0 {
+		databaseRuntime += fmt.Sprintf(" postgres=%d", db.PostgresVersion)
+	}
+	lines = append(lines, fmt.Sprintf("name=%s host=%s port=%d user=%s %s image=%s", db.Name, db.Host, db.Port, db.User, databaseRuntime, image))
 	lines = append(lines, fmt.Sprintf("container=%s volume=%s", db.ContainerName, db.VolumeName))
 	if db.SnapshotRoot != "" {
 		lines = append(lines, fmt.Sprintf("snapshotRoot=%s", db.SnapshotRoot))

@@ -13,16 +13,18 @@ import (
 )
 
 type PostgresComponent struct {
-	name          string
-	image         string
-	sidecarImage  string
-	host          string
-	containerPort int
-	user          string
-	password      string
-	databaseName  string
-	snapshotRoot  string
-	portName      string
+	name            string
+	flavor          string
+	postgresVersion int
+	image           string
+	sidecarImage    string
+	host            string
+	containerPort   int
+	user            string
+	password        string
+	databaseName    string
+	snapshotRoot    string
+	portName        string
 
 	bound bool
 }
@@ -50,12 +52,20 @@ func Postgres(name string) *PostgresComponent {
 	}
 	return &PostgresComponent{
 		name:         name,
+		flavor:       FlavorPostgres,
 		host:         "127.0.0.1",
 		user:         "devflow",
 		password:     "devflow",
 		databaseName: name,
 		portName:     name,
 	}
+}
+
+func PostGIS(name string, postgresVersion int) *PostgresComponent {
+	p := Postgres(name)
+	p.flavor = FlavorPostGIS
+	p.postgresVersion = postgresVersion
+	return p
 }
 
 func (p *PostgresComponent) Image(image string) *PostgresComponent {
@@ -189,7 +199,7 @@ func (p *PrismaComponent) Migrations(b *project.Builder) *project.TaskBuilder {
 			_ = rt.EmitJSONLine(p.name+"_migrations result", SummarizePrismaDevDatabase(result))
 			return nil
 		})
-	p.migrationsTask.RequiredCLIs(append([]string{"docker", "npx"}, p.sourceRequiredCLIs()...)...)
+	p.migrationsTask.RequiredCLIs(append([]string{"npx"}, p.sourceRequiredCLIs()...)...)
 	return p.migrationsTask
 }
 
@@ -238,7 +248,7 @@ func (p *PrismaComponent) NewMigration(b *project.Builder) *project.TaskBuilder 
 			rt.EmitLogLine("stdout", fmt.Sprintf("created Prisma migration %q", name))
 			return nil
 		})
-	p.newMigrationTask.RequiredCLIs(append([]string{"docker", "npx"}, p.sourceRequiredCLIs()...)...)
+	p.newMigrationTask.RequiredCLIs(append([]string{"npx"}, p.sourceRequiredCLIs()...)...)
 	p.registerMigrationAction(b)
 	return p.newMigrationTask
 }
@@ -324,10 +334,14 @@ func (p *PostgresComponent) bind(b *project.Builder) {
 		return
 	}
 	p.bound = true
-	b.RequiredCLIs("docker")
 	b.Port(p.portName)
 	cfg := *p
 	b.Finalize(func(inst *api.Instance) error {
+		if cfg.flavor == FlavorPostGIS {
+			if _, err := postGISRuntimeForVersion(cfg.postgresVersion); err != nil {
+				return err
+			}
+		}
 		manager := New()
 		snapshotRoot := cfg.snapshotRoot
 		if snapshotRoot == "" {
@@ -338,15 +352,17 @@ func (p *PostgresComponent) bind(b *project.Builder) {
 			databaseName = cfg.name
 		}
 		db := manager.Desired(inst.ID, Config{
-			Image:         cfg.image,
-			SidecarImage:  cfg.sidecarImage,
-			Host:          cfg.host,
-			HostPort:      inst.Ports[cfg.portName],
-			ContainerPort: cfg.containerPort,
-			Database:      sanitizeDBName(databaseName + "_" + inst.ID),
-			User:          firstNonEmptyDatabase(cfg.user, "devflow"),
-			Password:      firstNonEmptyDatabase(cfg.password, "devflow"),
-			SnapshotRoot:  snapshotRoot,
+			Flavor:          cfg.flavor,
+			PostgresVersion: cfg.postgresVersion,
+			Image:           cfg.image,
+			SidecarImage:    cfg.sidecarImage,
+			Host:            cfg.host,
+			HostPort:        inst.Ports[cfg.portName],
+			ContainerPort:   cfg.containerPort,
+			Database:        sanitizeDBName(databaseName + "_" + inst.ID),
+			User:            firstNonEmptyDatabase(cfg.user, "devflow"),
+			Password:        firstNonEmptyDatabase(cfg.password, "devflow"),
+			SnapshotRoot:    snapshotRoot,
 		})
 		inst.DB = db
 		inst.Env = mergeEnvMaps(inst.Env, map[string]string{

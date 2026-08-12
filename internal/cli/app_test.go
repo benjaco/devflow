@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1743,9 +1745,6 @@ func TestStopAllStopsDetachedSupervisorExecutorAndStaleStatusProcesses(t *testin
 }
 
 func TestStopAllStopsManagedDatabaseContainer(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-based fake docker test is Unix-only")
-	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	worktree := t.TempDir()
@@ -1753,11 +1752,28 @@ func TestStopAllStopsManagedDatabaseContainer(t *testing.T) {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	dockerLog := filepath.Join(worktree, "docker.log")
-	if err := os.WriteFile(filepath.Join(binDir, "docker"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+shellQuote(dockerLog)+"\n"), 0o755); err != nil {
-		t.Fatal(err)
+
+	type engineRequest struct {
+		method string
+		path   string
+		query  string
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	requests := make(chan engineRequest, 1)
+	engineServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests <- engineRequest{method: request.Method, path: request.URL.Path, query: request.URL.RawQuery}
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer engineServer.Close()
+
+	// Keep PATH intentionally free of a docker executable: the daemon must use
+	// the Engine API endpoint directly, including on Windows.
+	t.Setenv("PATH", binDir)
+	t.Setenv("DOCKER_CONFIG", filepath.Join(home, ".docker"))
+	t.Setenv("DOCKER_HOST", "tcp://"+engineServer.Listener.Addr().String())
+	t.Setenv("DOCKER_API_VERSION", "1.55")
+	t.Setenv("DOCKER_CONTEXT", "")
+	t.Setenv("DOCKER_CERT_PATH", "")
+	t.Setenv("DOCKER_TLS_VERIFY", "")
 
 	inst, err := instance.Resolve(worktree, "test")
 	if err != nil {
@@ -1784,12 +1800,13 @@ func TestStopAllStopsManagedDatabaseContainer(t *testing.T) {
 	if !stopped["database"] {
 		t.Fatalf("expected managed database in stopped payload: %v", payload["stopped"])
 	}
-	data, err := os.ReadFile(dockerLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(string(data)) != "stop -t 10 devflow-pg-test" {
-		t.Fatalf("unexpected docker command log %q", string(data))
+	select {
+	case request := <-requests:
+		if request.method != http.MethodPost || !strings.HasSuffix(request.path, "/containers/devflow-pg-test/stop") || request.query != "t=10" {
+			t.Fatalf("unexpected Docker Engine request: %+v", request)
+		}
+	default:
+		t.Fatal("expected a Docker Engine stop request")
 	}
 }
 

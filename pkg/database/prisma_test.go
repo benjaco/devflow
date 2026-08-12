@@ -112,7 +112,7 @@ func TestPreparePrismaBaseEmitsDatabaseProgress(t *testing.T) {
 			key("docker", "volume", "rm", "-f", "devflow-pgdata-abc"): {err: errors.New("Error: No such volume: devflow-pgdata-abc")},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	var lines []string
 	_, err := mgr.PreparePrismaBase(context.Background(), api.DBInstance{
 		ContainerName: "devflow-pg-abc",
@@ -193,7 +193,7 @@ func TestRestoreNearestPrismaSnapshotUsesSelectedSnapshot(t *testing.T) {
 			key("docker", "run", "--rm", "-v", "devflow-pgdata-abc:/to", "-v", filepath.Join(root, "schema_v1")+":/from", DefaultSidecarImage, "sh", "-c", "cd /to && tar xzf /from/volume.tgz"): {},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	db := api.DBInstance{
 		ContainerName: "devflow-pg-abc",
 		VolumeName:    "devflow-pgdata-abc",
@@ -259,7 +259,7 @@ func TestPreparePrismaBaseUsesSnapshotWithoutApplyingSource(t *testing.T) {
 			key("docker", "run", "--rm", "-v", "devflow-pgdata-abc:/to", "-v", filepath.Join(root, "schema_v1")+":/from", DefaultSidecarImage, "sh", "-c", "cd /to && tar xzf /from/volume.tgz"): {},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	db := api.DBInstance{
 		ContainerName: "devflow-pg-abc",
 		VolumeName:    "devflow-pgdata-abc",
@@ -304,7 +304,7 @@ func TestPreparePrismaBaseRecreatesAndAppliesSourceOnMiss(t *testing.T) {
 			key("docker", "stop", "-t", "10", "devflow-pg-abc"):                                        {},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	db := api.DBInstance{
 		Name:          "app_wt_abc",
 		Port:          55432,
@@ -362,7 +362,7 @@ func TestPreparePrismaBaseRecreatesEmptyVolumeWithoutSourcePolicy(t *testing.T) 
 			key("docker", "volume", "rm", "-f", "devflow-pgdata-abc"): {err: errors.New("Error: No such volume: devflow-pgdata-abc")},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	db := api.DBInstance{
 		ContainerName: "devflow-pg-abc",
 		VolumeName:    "devflow-pgdata-abc",
@@ -402,7 +402,7 @@ generator client {
 	snapshotRoot := t.TempDir()
 	finalKey := PrismaSnapshotKey(state)
 	runner := &fakeRunner{responses: prismaRuntimeResponses(snapshotRoot, finalKey)}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 
 	result, err := mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
 		Worktree:      worktree,
@@ -478,7 +478,7 @@ func TestEnsurePrismaDevDatabaseRestoresPrefixDeploysAndSnapshots(t *testing.T) 
 			key("docker", "run", "--rm", "-v", "devflow-pgdata-abc:/from", "-v", filepath.Join(snapshotRoot, finalKey)+":/to", DefaultSidecarImage, "sh", "-c", "cd /from && tar czf /to/volume.tgz ."): {},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	db := api.DBInstance{
 		Name:          "app_wt_abc",
 		Port:          55432,
@@ -544,7 +544,7 @@ func TestEnsurePrismaDevDatabaseSnapshotsEachPrismaMigrationPrefix(t *testing.T)
 			key("docker", "run", "--rm", "-v", "devflow-pgdata-abc:/from", "-v", filepath.Join(snapshotRoot, finalKey)+":/to", DefaultSidecarImage, "sh", "-c", "cd /from && tar czf /to/volume.tgz ."): {},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	db := api.DBInstance{
 		Name:          "app_wt_abc",
 		Port:          55432,
@@ -686,7 +686,7 @@ func TestApplyPrismaMilestonesSnapshotsUncommittedBoundariesAndFinal(t *testing.
 	skippedKey := PrismaSnapshotKey(prismaStatePrefix(state, 3))
 	snapshotRoot := t.TempDir()
 	runner := &fakeRunner{responses: prismaRuntimeResponses(snapshotRoot, stableBoundaryKey, uncommittedBoundaryKey, finalKey)}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	appliedPrefixes := make([]int, 0, 3)
 	lines := make([]string, 0, 4)
 
@@ -760,7 +760,7 @@ func TestApplyPrismaMilestonesCommittedTailSnapshotsFinalOnly(t *testing.T) {
 	partialKey := PrismaSnapshotKey(prismaStatePrefix(state, 7))
 	snapshotRoot := t.TempDir()
 	runner := &fakeRunner{responses: prismaRuntimeResponses(snapshotRoot, finalKey)}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	appliedPrefixes := make([]int, 0, 1)
 
 	snapshot, err := mgr.applyAndSnapshotPrismaMigrationMilestones(context.Background(), PrismaDevDatabaseOptions{
@@ -828,7 +828,7 @@ func TestEnsurePrismaDevDatabaseReusesExactSnapshotWithoutApplying(t *testing.T)
 			key("docker", "exec", "devflow-pg-abc", "pg_isready", "-U", "devflow", "-d", "app_wt_abc"): {},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	result, err := mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
 		Worktree:      worktree,
 		DB:            migrationTestDB(snapshotRoot),
@@ -872,7 +872,7 @@ func TestEnsurePrismaDevDatabaseNewMigrationRestoresExistingPrefix(t *testing.T)
 	responses := prismaRuntimeResponses(snapshotRoot, finalKey)
 	addPrismaRestoreResponse(responses, snapshotRoot, prefixKey)
 	runner := &fakeRunner{responses: responses}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	applied := make([]string, 0, 1)
 
 	result, err := mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
@@ -923,7 +923,7 @@ func TestEnsurePrismaDevDatabaseMultipleNewMigrationsApplyTailInOrder(t *testing
 	responses := prismaRuntimeResponses(snapshotRoot, secondKey, finalKey)
 	addPrismaRestoreResponse(responses, snapshotRoot, prefixKey)
 	runner := &fakeRunner{responses: responses}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	applied := make([]string, 0, 2)
 
 	result, err := mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
@@ -1000,7 +1000,7 @@ func TestEnsurePrismaDevDatabaseChangedLatestMigrationAppliesOnlyTail(t *testing
 			key("docker", "run", "--rm", "-v", "devflow-pgdata-abc:/from", "-v", filepath.Join(snapshotRoot, finalKey)+":/to", DefaultSidecarImage, "sh", "-c", "cd /from && tar czf /to/volume.tgz ."): {},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	applied := make([]string, 0, 1)
 	result, err := mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
 		Worktree:      worktree,
@@ -1054,7 +1054,7 @@ func TestEnsurePrismaDevDatabaseDeletedLatestMigrationRestoresOlderExactSnapshot
 	responses := prismaRuntimeResponses(snapshotRoot)
 	addPrismaRestoreResponse(responses, snapshotRoot, firstKey)
 	runner := &fakeRunner{responses: responses}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 
 	result, err := mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
 		Worktree:      worktree,
@@ -1098,7 +1098,7 @@ func TestEnsurePrismaDevDatabaseChangedOlderMigrationRebuildsFromSource(t *testi
 	firstKey := PrismaSnapshotKey(prismaStatePrefix(current, 1))
 	finalKey := PrismaSnapshotKey(current)
 	runner := &fakeRunner{responses: prismaRuntimeResponses(snapshotRoot, firstKey, finalKey)}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	sourceCalled := false
 	applied := make([]string, 0, 2)
 
@@ -1143,7 +1143,7 @@ func TestEnsurePrismaDevDatabaseMigrationFailureDoesNotSnapshot(t *testing.T) {
 	}
 	snapshotRoot := t.TempDir()
 	runner := &fakeRunner{responses: prismaRuntimeResponses(snapshotRoot)}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 
 	_, err = mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
 		Worktree:      worktree,
@@ -1204,7 +1204,7 @@ func TestEnsurePrismaDevDatabaseRejectsSchemaChangeWithoutMigration(t *testing.T
 			key("docker", "exec", "devflow-pg-abc", "pg_isready", "-U", "devflow", "-d", "app_wt_abc"): {},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	db := api.DBInstance{
 		Name:          "app_wt_abc",
 		Port:          55432,
@@ -1250,7 +1250,7 @@ model User {
 }
 `)
 	snapshotRoot := t.TempDir()
-	mgr := NewWithRunner(&fakeRunner{})
+	mgr := newTestManager(&fakeRunner{})
 	_, err := mgr.EnsurePrismaDevDatabase(context.Background(), PrismaDevDatabaseOptions{
 		Worktree:      worktree,
 		DB:            migrationTestDB(snapshotRoot),
@@ -1291,7 +1291,7 @@ func TestPreparePrismaMigrationAuthoringDatabaseAllowsSchemaDriftForNewMigration
 	responses := prismaRuntimeResponses(snapshotRoot)
 	addPrismaRestoreResponse(responses, snapshotRoot, oldKey)
 	runner := &fakeRunner{responses: responses}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 
 	result, err := mgr.PreparePrismaMigrationAuthoringDatabase(context.Background(), PrismaMigrationAuthoringOptions{
 		Worktree:      worktree,
@@ -1334,7 +1334,7 @@ model User {
 `)
 	snapshotRoot := t.TempDir()
 	runner := &fakeRunner{responses: prismaRuntimeResponses(snapshotRoot)}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 
 	result, err := mgr.PreparePrismaMigrationAuthoringDatabase(context.Background(), PrismaMigrationAuthoringOptions{
 		Worktree:      worktree,
@@ -1378,7 +1378,7 @@ func TestPreparePrismaMigrationAuthoringDatabaseReplaysChangedLatestTail(t *test
 	responses := prismaRuntimeResponses(snapshotRoot)
 	addPrismaRestoreResponse(responses, snapshotRoot, prefixKey)
 	runner := &fakeRunner{responses: responses}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	applied := make([]string, 0, 1)
 
 	result, err := mgr.PreparePrismaMigrationAuthoringDatabase(context.Background(), PrismaMigrationAuthoringOptions{
@@ -1415,7 +1415,7 @@ func TestPreparePrismaMigrationAuthoringDatabaseSourcePolicyAppliesAllMigrations
 	mustWrite(t, filepath.Join(worktree, "prisma", "migrations", "002_role", "migration.sql"), "alter table users add column role text;\n")
 	snapshotRoot := t.TempDir()
 	runner := &fakeRunner{responses: prismaRuntimeResponses(snapshotRoot)}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	sourceCalled := false
 	applied := make([]string, 0, 2)
 
@@ -1464,7 +1464,7 @@ func TestPreparePrismaMigrationAuthoringDatabaseExactSnapshotIsNoOp(t *testing.T
 	responses := prismaRuntimeResponses(snapshotRoot)
 	addPrismaRestoreResponse(responses, snapshotRoot, key)
 	runner := &fakeRunner{responses: responses}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 
 	result, err := mgr.PreparePrismaMigrationAuthoringDatabase(context.Background(), PrismaMigrationAuthoringOptions{
 		Worktree:      worktree,

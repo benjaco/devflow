@@ -160,7 +160,7 @@ Build check:
 go build -o "$(mktemp -d)/devflow" ./cmd/devflow
 ```
 
-Docker-backed database integration tests are opt-in:
+The full Docker-backed database integration suite is opt-in locally; it talks directly to the Engine API and does not invoke the `docker` executable. GitHub Actions separately requires the non-default-port remote Postgres clone and focused PostgreSQL 16/17/18 PostGIS spatial-and-persistence cases on native Linux amd64 and Linux arm64 (hosted macOS runners cannot run Docker Desktop):
 
 ```bash
 DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run Docker -v

@@ -5,14 +5,25 @@ Last updated: 2026-08-12
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: the August 2026 repository health and Apple Silicon portability reviews are complete; the per-worktree daemon remains the mutable dev/watch/operator control plane while `run --ci` remains direct and finite
-- Confidence: native `darwin/arm64` default/database/example tests, real ARM64 Docker/Postgres snapshot/restore e2e, shuffled tests, race detection, vet, Staticcheck, vulnerability scanning, the Go 1.25 minimum toolchain, and foreign-platform compilation pass; the new real remote-clone case is locally environment-blocked by a stopped Docker daemon and missing host Postgres clients, while real-Delve app readiness remains blocked by disabled macOS Developer Tools security
+- State: the August 2026 repository health, Apple Silicon/PostGIS portability, and managed-database Docker Engine API reviews are complete; the per-worktree daemon remains the mutable dev/watch/operator control plane while `run --ci` remains direct and finite
+- Confidence: native `darwin/arm64` default/database/example tests, real native-ARM64 Docker/Postgres snapshot/restore and PostgreSQL 16/17/18 PostGIS spatial/persistence e2e, the full race suite, vet, Staticcheck, govulncheck, clean module metadata, the Go 1.25 minimum toolchain, and complete Linux amd64/arm64 plus Windows amd64/arm64 compilation pass; the real remote-clone case remains locally blocked by missing host Postgres clients, while real-Delve app readiness remains blocked by disabled macOS Developer Tools security
 
 ## In Progress
 
 - None.
 
 ## Completed
+
+- Managed-database Docker Engine API migration:
+  - replaced every `pkg/database` Docker CLI spawn with the official Go Engine client and a narrow package-owned interface; there is no `docker` executable fallback or managed-component CLI requirement
+  - resolved `DOCKER_HOST`, `DOCKER_CONTEXT`, Docker config `currentContext`, and platform defaults in-process while retaining Unix socket, Windows named-pipe, TCP/TLS, and SSH context transports plus Docker credential-helper authentication
+  - implemented structured image/container/volume/exec/build operations and moved physical snapshot/restore transfer to Docker's archive API, avoiding host bind mounts and shell/path quoting assumptions
+  - rejected absolute, nested, and parent-relative snapshot keys before Engine calls or destructive filesystem work
+  - added API request, context precedence, build-context, cancellation/timeout, CLI-stop integration, and Windows default-named-pipe tests; the CLI integration test deliberately removes `docker` from `PATH`
+  - passed `go test ./...`, `go test -race ./...`, vet, Staticcheck, govulncheck, clean tidy/format/diff checks, and full repository compilation for Linux and Windows on amd64 and arm64
+  - reran native Apple ARM Docker architecture and real PostGIS 16/17/18 spatial/persistence coverage successfully, and kept those cases required on native Linux amd64/arm64 GitHub runners
+  - promoted the real non-default-port Postgres schema/data clone test into the same Linux amd64/arm64 Docker matrix with explicit `pg_dump`/`psql` installation
+  - refreshed GitHub Actions to current `actions/checkout@v7` and `actions/setup-go@v7`
 
 - Apple Silicon and managed-database portability pass:
   - ran the repository natively on macOS 26 `arm64` with CGO enabled and passed the full default suite plus focused database race coverage
@@ -25,6 +36,14 @@ Last updated: 2026-08-12
   - made Postgres DSNs escape credentials/database paths correctly and support IPv6 hosts
   - ran the opt-in Docker suite successfully against native `linux/arm64` Postgres and Alpine images, covering real runtime readiness plus volume and Prisma snapshot/restore; cleaned the interrupted test volume afterward
   - added an opt-in real remote Postgres clone e2e that uses distinct non-default source/destination ports, seeds a schema plus rows, runs the production `pg_dump`/`psql` policy, and verifies the cloned data
+  - added the `database.PostGIS(...)` flavor with persisted flavor metadata, Docker-engine architecture resolution, the maintained `postgis/postgis:16-3.5` image on amd64, and a cached native package-based `postgres:16-bookworm` build on arm64
+  - made PostGIS readiness idempotently activate the extension, versioned the local arm64 image recipe, reconciled resolved-image changes, and rejected cross-image physical snapshot restores before destructive work
+  - added deterministic amd64/arm64/custom/cached-image and extension-readiness tests plus a real spatial Docker test; GitHub Actions runs that test on native Ubuntu amd64 and arm64 because hosted macOS runners cannot run Docker Desktop
+  - changed the PostGIS component API to `database.PostGIS(name, postgresVersion)` with explicit support and early validation for PostgreSQL 16, 17, and 18
+  - derived amd64 upstream tags and arm64 base/local-image/package selection from the requested major, including the PostGIS 3.6 upstream tag for PostgreSQL 18
+  - isolated physical data volumes by PostgreSQL major, used `/var/lib/postgresql` for PostgreSQL 18 while retaining `/var/lib/postgresql/data` for 16/17, and reconciled stale volume destinations
+  - recorded the PostgreSQL major in snapshot manifest v3 and rejected missing/mismatched version metadata before destructive physical restores
+  - expanded the real cross-architecture GitHub Actions PostGIS test to all three majors, actual server/version checks, spatial SQL, and container-recreation persistence; passed all three native `aarch64` cases locally through Docker Desktop
 
 - August 2026 repository health and modernization pass:
   - raised the supported module/toolchain floor from unsupported Go 1.23 to Go 1.25 and updated project-local bootstrap modules accordingly
@@ -678,5 +697,5 @@ Last updated: 2026-08-12
 
 - Round-1 release flow deliberately has no binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable
 - Fine-grained detached per-service restart is not fully implemented yet
-- The example adapter still uses a deterministic fake-DB path in normal tests; real Docker-backed coverage now exists as an opt-in module-level e2e layer rather than being part of default `go test ./...`
+- The example adapter still uses a deterministic fake-DB path in normal tests; the full real Docker-backed module suite remains opt-in, while the focused PostGIS case is required in CI on native Linux amd64/arm64
 - The `embedded-web-app` adapter is now manually validated against a local repo for build, DB prep, detached runtime, health, and shutdown flows; remaining gaps are automated Docker-backed coverage and richer control UX

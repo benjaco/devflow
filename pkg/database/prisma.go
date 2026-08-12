@@ -135,7 +135,10 @@ func InspectPrismaDevelopmentStatus(worktree, schemaPath, migrationsDir string, 
 }
 
 func SavePrismaSnapshot(root, key string, state *PrismaState) (*PrismaSnapshot, error) {
-	snapshotDir := filepath.Join(root, key)
+	snapshotDir, err := databaseSnapshotDir(root, key)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -156,8 +159,12 @@ func SavePrismaSnapshot(root, key string, state *PrismaState) (*PrismaSnapshot, 
 }
 
 func LoadPrismaSnapshot(root, key string) (*PrismaSnapshot, error) {
+	snapshotDir, err := databaseSnapshotDir(root, key)
+	if err != nil {
+		return nil, err
+	}
 	var meta PrismaSnapshot
-	if err := jsonutil.ReadFile(filepath.Join(root, key, "prisma.json"), &meta); err != nil {
+	if err := jsonutil.ReadFile(filepath.Join(snapshotDir, "prisma.json"), &meta); err != nil {
 		return nil, err
 	}
 	return &meta, nil

@@ -75,7 +75,7 @@ func init() {
         b.Name("bikecoach")
         b.DefaultTarget("up")
         b.DotEnv(".env")
-        b.RequiredCLIs("go", "npm", "npx", "sqlc", "docker")
+        b.RequiredCLIs("go", "npm", "npx", "sqlc")
 
         db := database.Postgres("prisma")
         prisma := database.Prisma("prisma").
@@ -398,11 +398,21 @@ Recommended shape:
 db := database.Postgres("prisma")
 ```
 
+For a spatial database, use the PostGIS flavor with the same component API:
+
+```go
+db := database.PostGIS("geo", 16)
+```
+
+The second argument is the PostgreSQL major version; supported values are `16`, `17`, and `18`. The PostGIS flavor is architecture-aware. On Docker amd64 it pulls `postgis/postgis:16-3.5`, `postgis/postgis:17-3.5`, or `postgis/postgis:18-3.6`. On Docker arm64/aarch64, where those upstream images are unavailable, Devflow builds and caches a version-specific image from `postgres:<major>-bookworm` with Debian's matching `postgresql-<major>-postgis-3` packages. Subsequent starts reuse the local image. Devflow enables `CREATE EXTENSION IF NOT EXISTS postgis` in the instance database as part of readiness, so a PostGIS runtime is not reported ready until spatial SQL is usable. A custom `Image(...)` still takes precedence when an adapter deliberately supplies its own compatible image, but the required version argument must match that image.
+
+Each PostGIS major uses a distinct `-pg<major>` Docker volume. PostgreSQL 16 and 17 mount it at `/var/lib/postgresql/data`; PostgreSQL 18 mounts it at `/var/lib/postgresql`, matching the official image's changed persistent-data layout. Changing the component from one major to another therefore creates a fresh local cluster instead of attempting an unsafe in-place major upgrade. Move data between major versions with `pg_dump`/`pg_restore` or an explicit `pg_upgrade` workflow.
+
 The underlying runtime uses host-visible readiness, not only in-container readiness. The app connects through the mapped host port, so Devflow waits until Postgres is ready inside Docker and the host port accepts connections.
 
-`EnsureRuntime` preserves the data volume, but recreates a stale container when its published host/container port mapping or configured Postgres image does not match the current Devflow instance. Avoid unconditional container removal in normal startup paths. The default `postgres:16.14` runtime and `alpine:3.24.1` snapshot sidecar are official multi-architecture images, so Docker selects `linux/arm64` natively on Apple Silicon. Custom images must publish the architecture they are expected to run on; adapters should not force `linux/amd64` unless emulation is an intentional project requirement. The high-level component exposes `Image(...)`, `SidecarImage(...)`, and `ContainerPort(...)` for compatible custom runtimes.
+`EnsureRuntime` preserves the data volume, but recreates a stale container when its published host/container port mapping or resolved Postgres image does not match the current Devflow instance. Avoid unconditional container removal in normal startup paths. The default `postgres:16.14` runtime and `alpine:3.24.1` snapshot sidecar are official multi-architecture images, so Docker selects `linux/arm64` natively on Apple Silicon. Custom images must publish the architecture they are expected to run on; adapters should not force `linux/amd64` unless emulation is an intentional project requirement. The high-level component exposes `Image(...)`, `SidecarImage(...)`, and `ContainerPort(...)` for compatible custom runtimes.
 
-Snapshot archives contain physical Postgres cluster files. Their manifests record the source image platform; managed migration restore ignores legacy manifests with no platform and manifests from a different architecture, rebuilding from source/migrations instead. This intentionally invalidates old Intel snapshot caches after a move to Apple Silicon rather than relying on raw cluster portability. Project data that must move between machines should use a logical `pg_dump`, not `.devflow/db-snapshots` as a transport format.
+Snapshot archives contain physical Postgres cluster files. Their manifests record the source image platform and configured PostgreSQL major; managed migration restore ignores manifests with missing required metadata or a different architecture/version, rebuilding from source/migrations instead. This intentionally invalidates old Intel snapshot caches after a move to Apple Silicon and prevents physical clusters from crossing PostgreSQL majors. Project data that must move between machines or versions should use a logical `pg_dump`, not `.devflow/db-snapshots` as a transport format.
 
 For a Prisma project, the high-level path is:
 

@@ -2,6 +2,8 @@ package database
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/benjaco/devflow/pkg/api"
@@ -40,10 +42,13 @@ func TestPrismaComponentDefinesCommonTasksAndInstanceDB(t *testing.T) {
 	if migrations.Cache {
 		t.Fatal("database migration tasks should not be task-cacheable")
 	}
-	for _, cli := range []string{"docker", "npx", "pg_dump", "psql"} {
+	for _, cli := range []string{"npx", "pg_dump", "psql"} {
 		if !stringSliceContainsDatabaseTest(migrations.RequiredCLIs, cli) {
 			t.Fatalf("expected migrations required CLIs to include %q, got %+v", cli, migrations.RequiredCLIs)
 		}
+	}
+	if stringSliceContainsDatabaseTest(migrations.RequiredCLIs, "docker") {
+		t.Fatalf("Docker executable must not be required by Engine API tasks: %+v", migrations.RequiredCLIs)
 	}
 	newMigration := taskByName(tasks, "prisma_new_migration")
 	if newMigration.Cache {
@@ -52,10 +57,13 @@ func TestPrismaComponentDefinesCommonTasksAndInstanceDB(t *testing.T) {
 	if len(newMigration.Outputs.Paths) != 1 || newMigration.Outputs.Paths[0] != "prisma/migrations" {
 		t.Fatalf("unexpected new migration outputs: %+v", newMigration.Outputs)
 	}
-	for _, cli := range []string{"docker", "npx", "pg_dump", "psql"} {
+	for _, cli := range []string{"npx", "pg_dump", "psql"} {
 		if !stringSliceContainsDatabaseTest(newMigration.RequiredCLIs, cli) {
 			t.Fatalf("expected migration authoring required CLIs to include %q, got %+v", cli, newMigration.RequiredCLIs)
 		}
+	}
+	if stringSliceContainsDatabaseTest(newMigration.RequiredCLIs, "docker") {
+		t.Fatalf("Docker executable must not be required by Engine API tasks: %+v", newMigration.RequiredCLIs)
 	}
 	for _, key := range []string{"DEVFLOW_MIGRATION_NAME", "DATABASE_URL", "DEV_DATABASE_URL"} {
 		if !stringSliceContainsDatabaseTest(newMigration.Inputs.Env, key) {
@@ -147,10 +155,13 @@ func TestPayloadCMSComponentDefinesMigrationTasks(t *testing.T) {
 			t.Fatalf("expected new migration input env to include %q, got %+v", key, newMigration.Inputs.Env)
 		}
 	}
-	for _, cli := range []string{"docker", "npm"} {
+	for _, cli := range []string{"npm"} {
 		if !stringSliceContainsDatabaseTest(newMigration.RequiredCLIs, cli) {
 			t.Fatalf("expected new migration required CLIs to include %q, got %+v", cli, newMigration.RequiredCLIs)
 		}
+	}
+	if stringSliceContainsDatabaseTest(newMigration.RequiredCLIs, "docker") {
+		t.Fatalf("Docker executable must not be required by Engine API tasks: %+v", newMigration.RequiredCLIs)
 	}
 	action := actionByIDDatabaseTest(project.Actions(p), "payload.migration.create")
 	if action.Kind != ActionMigrationCreate {
@@ -210,6 +221,64 @@ func TestPostgresComponentPreservesCustomRuntimeImagesAndPort(t *testing.T) {
 	}
 	if inst.DB.Image != "example/postgres:arm-ready" || inst.DB.SidecarImage != "example/tar:stable" || inst.DB.ContainerPort != 6432 {
 		t.Fatalf("unexpected custom database runtime: %+v", inst.DB)
+	}
+}
+
+func TestPostGISComponentPersistsFlavorAndDefersArchitectureImageSelection(t *testing.T) {
+	for _, postgresVersion := range []int{16, 17, 18} {
+		t.Run(strconv.Itoa(postgresVersion), func(t *testing.T) {
+			p := project.Define(func(ctx context.Context, b *project.Builder) error {
+				b.Name("postgis-demo")
+				db := PostGIS("geo", postgresVersion)
+				prisma := Prisma("prisma").Database(db)
+				b.Target("setup", prisma.Migrations(b))
+				return nil
+			})
+			cfg, err := p.ConfigureInstance(context.Background(), t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			inst := &api.Instance{
+				ID:       "abc123",
+				Worktree: t.TempDir(),
+				Ports:    map[string]int{"geo": 15432},
+				Env:      map[string]string{},
+			}
+			if err := cfg.Finalize(inst); err != nil {
+				t.Fatal(err)
+			}
+			if inst.DB.Flavor != FlavorPostGIS || inst.DB.PostgresVersion != postgresVersion {
+				t.Fatalf("unexpected database flavor/version: %+v", inst.DB)
+			}
+			if inst.DB.Image != "" {
+				t.Fatalf("expected runtime to select the default PostGIS image from Docker architecture, got %q", inst.DB.Image)
+			}
+			wantVolume := "devflow-pgdata-abc123-pg" + strconv.Itoa(postgresVersion)
+			if inst.DB.ContainerName != "devflow-pg-abc123" || inst.DB.VolumeName != wantVolume {
+				t.Fatalf("unexpected PostGIS runtime identity: %+v", inst.DB)
+			}
+		})
+	}
+}
+
+func TestPostGISComponentRejectsUnsupportedPostgresVersionDuringFinalization(t *testing.T) {
+	p := project.Define(func(ctx context.Context, b *project.Builder) error {
+		b.Name("invalid-postgis-version")
+		db := PostGIS("geo", 15)
+		b.Target("setup", Prisma("prisma").Database(db).Migrations(b))
+		return nil
+	})
+	cfg, err := p.ConfigureInstance(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cfg.Finalize(&api.Instance{
+		ID:       "abc123",
+		Worktree: t.TempDir(),
+		Ports:    map[string]int{"geo": 15432},
+	})
+	if err == nil || !strings.Contains(err.Error(), "supported versions are 16, 17, and 18") {
+		t.Fatalf("expected unsupported PostGIS version error, got %v", err)
 	}
 }
 

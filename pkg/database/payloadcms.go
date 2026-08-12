@@ -237,9 +237,6 @@ func (p *PayloadCMSComponent) requiredCLIs(task *project.TaskBuilder) {
 	if p.commandName != "" {
 		task.RequiredCLIs(p.commandName)
 	}
-	if p.db != nil {
-		task.RequiredCLIs("docker")
-	}
 }
 
 func (p *PayloadCMSComponent) ensureRuntime(ctx context.Context, rt *project.Runtime) error {

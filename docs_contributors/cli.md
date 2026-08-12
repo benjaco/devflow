@@ -203,7 +203,7 @@ The first slice includes:
 - selected-task metadata
 - live tail of the selected task log
 - toggle to the daemon/supervisor log
-- `d` toggles a database/Prisma panel with managed Postgres identity and recent cached Prisma migration-prefix snapshots; `F2` is a backup key
+- `d` toggles a database/Prisma panel with managed Postgres identity, persisted flavor (`postgres` or `postgis`), the selected PostgreSQL major when configured, configured/automatic image selection, and recent cached Prisma migration-prefix snapshots; `F2` is a backup key
 - the database/Prisma panel flags schema/migration drift and `m` asks for a migration name, then sends a daemon action with kind `devflow.database.migration.create` through the daemon-owned engine and relaunches the previously detached target; `F4` is a backup key
 - while the TUI creates a Prisma migration, the footer status reports target/task state and the latest task output line
 - global shortcuts are disabled while text-input popups are focused, so migration names can contain normal letters

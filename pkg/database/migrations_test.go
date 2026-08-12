@@ -108,7 +108,7 @@ func TestEnsureMigratedDatabaseReusesExactSnapshotWithoutApplying(t *testing.T) 
 			key("docker", "exec", "devflow-pg-abc", "pg_isready", "-U", "devflow", "-d", "app_wt_abc"): {},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	db := migrationTestDB(snapshotRoot)
 	result, err := mgr.EnsureMigratedDatabase(context.Background(), ManagedMigrationOptions{
 		Worktree:      worktree,
@@ -179,7 +179,7 @@ func TestEnsureMigratedDatabaseRestoresPrefixAppliesAndSnapshots(t *testing.T) {
 			key("docker", "run", "--rm", "-v", "devflow-pgdata-abc:/from", "-v", filepath.Join(snapshotRoot, finalKey)+":/to", DefaultSidecarImage, "sh", "-c", "cd /from && tar czf /to/volume.tgz ."): {},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	db := api.DBInstance{
 		Name:          "app_wt_abc",
 		Port:          55432,
@@ -267,7 +267,7 @@ func TestEnsureMigratedDatabaseChangedLatestMigrationAppliesOnlyTail(t *testing.
 			key("docker", "run", "--rm", "-v", "devflow-pgdata-abc:/from", "-v", filepath.Join(snapshotRoot, finalKey)+":/to", DefaultSidecarImage, "sh", "-c", "cd /from && tar czf /to/volume.tgz ."): {},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	applied := make([]string, 0, 1)
 	result, err := mgr.EnsureMigratedDatabase(context.Background(), ManagedMigrationOptions{
 		Worktree:      worktree,
@@ -314,7 +314,7 @@ func TestEnsureMigratedDatabaseCanSnapshotEachMigrationPoint(t *testing.T) {
 			key("docker", "run", "--rm", "-v", "devflow-pgdata-abc:/from", "-v", filepath.Join(snapshotRoot, finalKey)+":/to", DefaultSidecarImage, "sh", "-c", "cd /from && tar czf /to/volume.tgz ."): {},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	db := api.DBInstance{
 		Name:          "app_wt_abc",
 		Port:          55432,
@@ -383,7 +383,7 @@ func TestEnsureMigratedDatabaseUsesSourcePolicyWhenBaseChanged(t *testing.T) {
 			key("docker", "run", "--rm", "-v", "devflow-pgdata-abc:/from", "-v", filepath.Join(snapshotRoot, finalKey)+":/to", DefaultSidecarImage, "sh", "-c", "cd /from && tar czf /to/volume.tgz ."): {},
 		},
 	}
-	mgr := NewWithRunner(runner)
+	mgr := newTestManager(runner)
 	sourceCalled := false
 	applied := make([]string, 0, 1)
 	result, err := mgr.EnsureMigratedDatabase(context.Background(), ManagedMigrationOptions{

@@ -81,7 +81,7 @@ Useful TUI keys:
 
 The selected log keeps its current scroll position while it refreshes. Switching to another task, the supervisor log, or the database panel starts that newly selected view from the top.
 
-The database/Prisma panel shows managed Postgres identity, cached Prisma migration-prefix snapshots, and schema/migration drift when Prisma metadata is available. Migration authoring is explicit; normal startup does not secretly generate migrations. When you create a migration from the TUI, Devflow sends a daemon action with kind `devflow.database.migration.create`, streams task progress in the footer immediately, surfaces any declared confirmation prompts, and then relaunches the previously detached target so services come back through the graph. The same `m` action can drive non-Prisma components such as PayloadCMS when the adapter registers a migration-create action.
+The database/Prisma panel shows managed Postgres identity, the persisted `postgres`/`postgis` flavor and configured/automatic image choice, cached Prisma migration-prefix snapshots, and schema/migration drift when Prisma metadata is available. Migration authoring is explicit; normal startup does not secretly generate migrations. When you create a migration from the TUI, Devflow sends a daemon action with kind `devflow.database.migration.create`, streams task progress in the footer immediately, surfaces any declared confirmation prompts, and then relaunches the previously detached target so services come back through the graph. The same `m` action can drive non-Prisma components such as PayloadCMS when the adapter registers a migration-create action.
 
 The same action is available from the CLI:
 
@@ -149,6 +149,8 @@ devflow clis status --target up --json
 ```
 
 Target-scoped required CLI checks only include commands attached to the selected target and its task closure, so unrelated tools do not block normal work.
+
+Managed Postgres is an Engine service prerequisite rather than a CLI prerequisite. Devflow connects through the Docker Engine Go API and reports a connection error when the selected target first needs the database; it does not require or invoke the `docker` command. On Windows, start Docker Desktop in Linux-container mode; on macOS, start Docker Desktop normally.
 
 Install missing tools when the adapter provides install scripts:
 
