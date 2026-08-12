@@ -8,6 +8,7 @@ It gives a project a small Go-defined task graph with:
 - service readiness checks
 - detached watch/dev supervisors
 - file-change cascades through the task graph
+- sandboxed input/output and exhaustive valid-order pipeline validation
 - `devflow flush --json` as an AI readiness gate
 - stable JSON output for humans, CI, and coding agents
 
@@ -128,6 +129,7 @@ devflow version --json
 devflow doctor --json
 devflow graph list --json
 devflow graph show up --json
+devflow validate build --mode all --json
 devflow run up --json
 devflow watch up --detach --json
 devflow flush up --json

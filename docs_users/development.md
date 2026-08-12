@@ -48,6 +48,22 @@ For finite check/test targets that depend on services such as Postgres or a loca
 
 For AI-assisted development, prefer `watch --detach` plus `flush` over an attached service `run`. Attached runs are useful for a human terminal, but they are not a clean "start and return when ready" automation interface.
 
+## Pipeline Validation
+
+When changing task inputs, outputs, or dependencies, validate a finite target before trusting its cache behavior:
+
+```bash
+devflow validate build --mode artifacts --json
+devflow validate build --mode orders --max-orders 1000 --json
+devflow validate build --mode all --json
+```
+
+Artifact validation gives each task only its declared worktree inputs and upstream declared outputs, then reports undeclared writes and missing outputs. Order validation runs every legal topological order sequentially and requires identical final declared artifacts. A failed order usually identifies a missing dependency edge; an output mismatch means nominally independent tasks still affect each other.
+
+Order validation is genuinely exhaustive within `--max-orders`. If the graph has more orders than the bound, it returns `complete=false` and runs no permutations. Raise the limit only when the repeated task executions are acceptable.
+
+Validation uses disposable worktree sandboxes, bypasses caches/stamps, and rejects service/debug-service targets. `.git` and `.devflow` are not copied. External effects such as databases, networks, global caches, absolute paths, and unregistered background processes are outside that filesystem sandbox, so use a finite target that is safe to repeat.
+
 ## Go Debugging
 
 If the adapter exposes a debug target with `GoDebugService`, start it like any other dev target:

@@ -49,6 +49,7 @@ Core packages:
 - `pkg/ports`: shared port allocation
 - `pkg/engine`: scheduling, run/watch execution, service readiness, flush health
 - `pkg/watch`: polling file watcher
+- `pkg/validation`: disposable artifact-contract and exhaustive valid-order runner for finite targets
 - `pkg/database`: optional Docker/Postgres helpers
 - `pkg/tui`: terminal operator UI
 

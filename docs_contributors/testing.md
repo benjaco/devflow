@@ -15,6 +15,7 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 ## Unit Tests
 
 - graph validation and closures
+- exhaustive topological-order enumeration with explicit combinatorial bounds
 - fingerprint determinism, including custom callback fingerprints that remain executable rather than being JSON-serialized and task-signature normalization that does not mutate adapter task definitions
 - filtered file-content fingerprints, including semantic no-op edits, Go `@` comments, Go struct declarations with doc comments, in-memory filtered-hash reuse for unchanged files, and engine-level cache behavior where irrelevant edits restore cache while relevant filtered edits rerun the task
 - cache snapshot and restore semantics
@@ -47,6 +48,7 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - PayloadCMS/Postgres example coverage for project detection, graph shape, migration apply command wiring, watch pickup for collection/global module edits, and deleted-field schema edits that create a migration only after a confirmation prompt using a fake Payload/npm command
 - dotenv parsing and merged runtime-env coverage with devflow-managed DB overrides
 - CLI JSON output shape, including command-level lifecycle coverage for `run`, `status`, `logs`, `instances`, `doctor`, and `stop`
+- validation sandbox coverage for declared-input sufficiency, transitive dependency-output materialization, undeclared/missing outputs, output-owner collisions, service rejection, every dependency-valid sequential order, missing dependency edges, cross-order artifact mismatches, order-limit refusal, real-worktree non-mutation, and stable CLI JSON on success and validation failure; the compiled-CLI bootstrap test must also load a project-local adapter and prove both artifact and missing-order-dependency findings end to end
 - scoped docs command coverage for `devflow docs setup`, `devflow docs development`, and the bare `devflow docs` usage error
 - CLI help coverage for important `run` flags such as `--ci`, `--detach`, and `--watch`
 - Go-first release command coverage for `version` and `upgrade`, with `upgrade` tested through a fake `go` executable on `PATH`

@@ -164,6 +164,29 @@ Entries are namespaced by project. By default the namespace is `Project.Name()`.
 b.CacheNamespace("company-my-app")
 ```
 
+## Validate Inputs, Outputs, And Task Ordering
+
+After a finite build/codegen/test target works normally, use validation mode to check that its graph contract is strong enough for caching and future edits:
+
+```bash
+devflow validate build --mode artifacts --json
+devflow validate build --mode orders --max-orders 1000 --json
+```
+
+Artifact mode runs each task in a disposable projected worktree. That worktree contains only the task's declared file inputs and declared outputs from upstream dependencies. It then checks that the task produced its declared outputs and did not leave other changed files behind. This catches common mistakes such as reading an undeclared config file, generating into a directory that was not listed in `Outputs(...)`, or forgetting an output entirely.
+
+Order mode runs every dependency-valid task order, one task at a time, from the same clean source state. All orders must succeed and leave identical declared artifacts. If one order fails, the usual cause is a missing `DependsOn(...)` edge or an undeclared shared side effect. If two orders succeed but return different artifact digests, the tasks are order-dependent even though the DAG says they are independent.
+
+Use both checks together with:
+
+```bash
+devflow validate build --mode all --json
+```
+
+The default exhaustive bound is 1000 orders. Devflow does not silently sample a larger graph: it returns `complete=false` without running permutations, and you can raise `--max-orders` deliberately. Validate finite targets only; service/debug-service targets are rejected because they do not finish one by one.
+
+Validation copies ordinary worktree files into temporary sandboxes and never uses task cache hits or stamps. It deliberately omits `.git` and `.devflow`. It proves that declared worktree inputs are sufficient for the observed execution, but not that every declared input is necessary, and it cannot sandbox databases, networks, global tool caches, absolute paths, or unregistered background processes. Choose targets whose external effects are safe to repeat.
+
 ## Services And Readiness
 
 Service tasks start long-running processes:

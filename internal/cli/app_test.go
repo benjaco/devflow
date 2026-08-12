@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,6 +34,7 @@ type depsCLIProject struct{}
 type targetDepsCLIProject struct{}
 type graphExplainCLIProject struct{}
 type actionCLIProject struct{}
+type validationCLIProject struct{}
 
 func (failCLIProject) Name() string { return "cli-fail-project" }
 
@@ -253,6 +255,53 @@ func (actionCLIProject) Actions() []project.Action {
 	}
 }
 
+func (validationCLIProject) Name() string { return "cli-validation-project" }
+
+func (validationCLIProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
+	_ = ctx
+	_ = worktree
+	return project.InstanceConfig{Label: "cli-validation"}, nil
+}
+
+func (validationCLIProject) Tasks() []project.Task {
+	writeFromSource := func(name string) project.Task {
+		return project.Task{
+			Name:    name,
+			Kind:    project.KindOnce,
+			Inputs:  project.Inputs{Files: []string{"source.txt"}},
+			Outputs: project.Outputs{Files: []string{name + ".txt"}},
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				data, err := os.ReadFile(rt.Abs("source.txt"))
+				if err != nil {
+					return err
+				}
+				return project.WriteFile(rt, name+".txt", append(data, name...), 0o644)
+			},
+		}
+	}
+	return []project.Task{
+		writeFromSource("a"),
+		writeFromSource("b"),
+		{
+			Name:    "bad",
+			Kind:    project.KindOnce,
+			Outputs: project.Outputs{Files: []string{"expected.txt"}},
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_ = ctx
+				return project.WriteFile(rt, "surprise.txt", []byte("unexpected"), 0o644)
+			},
+		},
+	}
+}
+
+func (validationCLIProject) Targets() []project.Target {
+	return []project.Target{
+		{Name: "build", RootTasks: []string{"a", "b"}},
+		{Name: "bad", RootTasks: []string{"bad"}},
+	}
+}
+
 func init() {
 	daemon.SetStartDaemonFuncForTest(func(worktree, instanceID, projectName string) error {
 		logPath := filepath.Join(worktree, ".devflow", "logs", instanceID, "daemon.log")
@@ -267,6 +316,7 @@ func init() {
 	project.Register(targetDepsCLIProject{})
 	project.Register(graphExplainCLIProject{})
 	project.Register(actionCLIProject{})
+	project.Register(validationCLIProject{})
 }
 
 func TestGraphListJSON(t *testing.T) {
@@ -395,6 +445,81 @@ func TestRunHelpDescribesOperationalFlags(t *testing.T) {
 	}
 }
 
+func TestValidateAllJSON(t *testing.T) {
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "source.txt"), []byte("source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run([]string{
+		"validate", "build",
+		"--mode", "all",
+		"--max-orders", "10",
+		"--json",
+		"--project", "cli-validation-project",
+		"--worktree", worktree,
+	}); err != nil {
+		t.Fatalf("validate failed: %v\n%s", err, stderr.String())
+	}
+	var result api.ValidationResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode validation JSON: %v\n%s", err, stdout.String())
+	}
+	if !result.Success || result.Mode != api.ValidationModeAll {
+		t.Fatalf("unexpected validation result: %+v", result)
+	}
+	if result.Artifacts == nil || len(result.Artifacts.Tasks) != 2 {
+		t.Fatalf("unexpected artifact result: %+v", result.Artifacts)
+	}
+	if result.Orders == nil || !result.Orders.Complete || result.Orders.TotalOrders != 2 || len(result.Orders.Runs) != 2 {
+		t.Fatalf("unexpected order result: %+v", result.Orders)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "a.txt")); !os.IsNotExist(err) {
+		t.Fatalf("validation changed the real worktree: %v", err)
+	}
+}
+
+func TestValidateFailureStillEmitsJSON(t *testing.T) {
+	worktree := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	err := app.Run([]string{
+		"validate", "bad",
+		"--mode", "artifacts",
+		"--json",
+		"--project", "cli-validation-project",
+		"--worktree", worktree,
+	})
+	if err == nil {
+		t.Fatalf("expected validation command failure")
+	}
+	var result api.ValidationResult
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+		t.Fatalf("decode validation failure JSON: %v\n%s", decodeErr, stdout.String())
+	}
+	if result.Success || result.Artifacts == nil || result.Artifacts.Success {
+		t.Fatalf("unexpected validation failure result: %+v", result)
+	}
+	if len(result.Issues) == 0 || result.Issues[0].Kind == "" {
+		t.Fatalf("expected aggregated validation issues: %+v", result.Issues)
+	}
+	task := result.Artifacts.Tasks[0]
+	if len(task.UndeclaredWrites) != 1 || task.UndeclaredWrites[0] != "surprise.txt" {
+		t.Fatalf("unexpected undeclared writes: %+v", task)
+	}
+}
+
+func TestValidateRejectsNonPositiveMaxOrders(t *testing.T) {
+	app := &App{Stdout: io.Discard, Stderr: io.Discard}
+	err := app.Run([]string{"validate", "build", "--max-orders", "0", "--project", "cli-validation-project", "--worktree", t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "--max-orders must be positive") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestVersionJSON(t *testing.T) {
 	stdout := &bytes.Buffer{}
 	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
@@ -441,6 +566,9 @@ func TestDocsSetupPrintsSetupMarkdownOnly(t *testing.T) {
 		"<!-- docs_users/adapter-guide.md -->",
 		"# Adapter Guide",
 	})
+	if !strings.Contains(output, "devflow validate build --mode all --json") {
+		t.Fatalf("setup docs did not include pipeline validation guidance")
+	}
 	for _, forbidden := range []string{
 		"<!-- docs_users/development.md -->",
 		"# Devflow Development Docs",
@@ -467,6 +595,9 @@ func TestDocsDevelopmentPrintsDevelopmentMarkdownOnly(t *testing.T) {
 		"<!-- docs_users/agent-integration.md -->",
 		"# Agent Integration",
 	})
+	if !strings.Contains(output, "devflow validate build --mode all --json") {
+		t.Fatalf("development docs did not include pipeline validation guidance")
+	}
 	for _, forbidden := range []string{
 		"<!-- docs_users/setup.md -->",
 		"# Devflow Setup Docs",

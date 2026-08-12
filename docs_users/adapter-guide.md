@@ -591,6 +591,32 @@ devflow graph affected --files internal/storage/sqlc/users.sql.go --explain --js
 
 This gives you a standard way to compile helper binaries once, cache them by input hash, and run the restored artifact later from downstream tasks.
 
+### Validation Mode
+
+Use the finite validation runner while tuning an adapter:
+
+```bash
+devflow validate build --mode artifacts --json
+devflow validate build --mode orders --max-orders 1000 --json
+```
+
+Artifact mode projects the filesystem separately for every task. Explicit `Inputs(...)`, file/dir/glob/filtered inputs, and normal ignore rules select source files. Declared outputs from every transitive dependency are also materialized, so a consumer does not need to duplicate its producer's output path as a file input merely to receive the dependency artifact. Only declared outputs are archived for downstream tasks.
+
+After the task returns, validation compares filesystem snapshots. A final changed file outside `Outputs(...)`, `OutputFiles(...)`, or `OutputDirs(...)` is an `undeclared_output`; a missing or wrong-kind declaration is a `missing_output`. If the task cannot run in the projected worktree, it is reported as `task_failed_with_projected_inputs`. That failure can still be an ordinary command failure, so inspect its captured log before assuming the absent declaration is the only cause.
+
+Order mode starts each permutation with all ordinary worktree source files, but removes `.git`, `.devflow`, and declared generated outputs. It runs each topological order sequentially with caches and stamps bypassed. Producer outputs that are also that producer's inputs are restored for in-place transformations. All permutations must produce the same final declared-output snapshot.
+
+Adapter rules exposed by validation:
+
+- a target closure must be finite; services and debug services are not permutation-testable
+- different tasks must not own overlapping output paths
+- input/output declarations must be worktree-relative and cannot point into `.git` or `.devflow`
+- the worktree root cannot be an output
+- worktree-local symlinks are dereferenced; external symlinks are rejected
+- `Runtime.Mode` is `api.ModeValidation`, with `DEVFLOW_VALIDATION=1` and `DEVFLOW_VALIDATION_MODE` set for commands that need safe validation-specific behavior
+
+The sandbox covers worktree-relative filesystem access. It does not virtualize databases, network APIs, absolute paths, global tool caches, or background processes that a task starts without registering. Keep validation targets finite and externally safe to repeat. Artifact success proves explicit worktree input sufficiency for that run; it does not prove the declared input set is minimal.
+
 ### Filtered Inputs
 
 Some tools only care about a slice of each input file. For example, a Swagger generator may only need Go `@...` comment annotations plus public struct declarations, not every function body edit in the package.

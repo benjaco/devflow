@@ -28,6 +28,7 @@ Implemented commands:
 - `devflow graph list`
 - `devflow graph show <target>`
 - `devflow graph affected --files ...`
+- `devflow validate <target>`
 
 All implemented commands support `--json` except `devflow docs setup` and `devflow docs development`, which intentionally print plain bundled user Markdown only.
 
@@ -74,6 +75,35 @@ The watcher is scoped to declared inputs in the selected target closure plus Dev
 Watch cascades respect dependency barriers. If an intermediate task in the affected slice is not allowed to run in watch mode, downstream tasks past that intermediate are not run in that cycle.
 
 `graph affected --files a,b --explain --json` reports why changed files do or do not affect tasks. Explanations include direct file matches, directory matches, glob matches, filtered matches, ignored paths, and unmatched files. This is the primary debugging tool for generated-output watch loops.
+
+`validate` hardens finite task graphs without changing the real worktree:
+
+```bash
+devflow validate build --mode artifacts --json
+devflow validate build --mode orders --max-orders 1000 --json
+devflow validate build --mode all --json
+```
+
+`--mode all` is the default. `permutations` is accepted as an alias for `orders`, and `--max-permutations` is an alias for `--max-orders`.
+
+Artifact mode resets a disposable sandbox before each task, copies only the task's declared worktree inputs plus declared outputs from transitive dependencies, executes the task with caches and stamps bypassed, and reports:
+
+- the actual input files and dependency-output files materialized
+- the declared output paths that exist after the task
+- final observed file writes
+- writes outside declared outputs
+- declared outputs that are missing or have the wrong file/directory type
+- a capped task log when execution fails
+
+This is a sufficiency check: a successful task proves it can run with the declared worktree inputs and dependency outputs for that execution. It does not prove that all declared inputs are necessary.
+
+Order mode enumerates every dependency-respecting topological order and runs each order one task at a time in the same logical, freshly reset sandbox. Declared outputs are removed from the initial source copy unless they are also in-place inputs of their producing task. Every order must succeed, produce every declared output, and produce the same final declared-artifact snapshot. The result includes each order, its output digest, its failed task/error when applicable, and paths that differ from the first successful order.
+
+The default `--max-orders` is 1000. Devflow first enumerates up to the bound. When more valid orders exist, JSON returns `orders.complete=false`, `orders.runs=[]`, and an `order_limit_exceeded` issue; the command exits non-zero instead of validating only a sample. Raise the bound explicitly when exhaustive execution is intentional.
+
+Both modes are direct and finite. Service/debug-service closures, overlapping output ownership, absolute/escaping artifact paths, `.git`/`.devflow` declarations, and worktree-root outputs fail preflight. The disposable sandbox isolates ordinary worktree-relative reads and writes, but it cannot isolate task-defined databases, network calls, global caches, absolute paths, or unregistered background processes. Select a finite, side-effect-safe target. Git metadata is deliberately not copied.
+
+`validate --json` returns `ValidationResult` with `project`, `target`, `worktree`, normalized `mode`, `success`, `durationMs`, optional `artifacts` and `orders` results, and structured issues. Validation findings still emit the complete JSON result and then exit non-zero. Tasks see `Runtime.Mode` as `validation`, `DEVFLOW_VALIDATION=1`, and `DEVFLOW_VALIDATION_MODE=artifacts|orders`.
 
 `Inputs.Ignore` uses the same path-matching model for fingerprinting and watch matching:
 - exact or glob matches use slash-normalized paths
