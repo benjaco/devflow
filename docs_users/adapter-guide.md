@@ -132,6 +132,47 @@ Important details:
 - `unit.NoCache()` keeps tests as a live check even though they have declared inputs.
 - `database.Postgres("prisma")` defaults the snapshot directory; set `SnapshotRoot(...)` only when the default is wrong.
 
+## Commands That Must Produce Files
+
+Some generators incorrectly exit with code zero before producing their files. Use `project.CommandOutputTasklet` when command success must converge on specific filesystem outputs:
+
+```go
+generate := project.CommandOutputTasklet{
+    Command: process.CommandSpec{
+        Name: "npm",
+        Args: []string{"run", "generate"},
+    },
+    RequiredFiles: []string{
+        "src/generated/payload-types.ts",
+        "src/app/**/importMap.js",
+    },
+    MaxAttempts: 5,
+    RetryDelay:  250 * time.Millisecond,
+}
+
+generated := b.Task("payload_codegen").
+    Inputs("package.json", "package-lock.json", "src/payload.config.ts").
+    Outputs("src/generated", "src/app/(payload)/admin").
+    Run(generate.Run)
+```
+
+Every `RequiredFiles` path or Devflow glob must match at least one regular file. The command always runs once. After a zero exit, the tasklet checks the files, waits for the retry delay, checks again for delayed writes, and only then reruns the command. A non-zero exit fails immediately. Defaults are five attempts and a 250 ms delay.
+
+Use `RequireNewFiles: true` when pre-existing matches must not satisfy the run. This is useful for authoring commands that must add a file to an existing folder.
+
+For fully generated directories, cleanup is opt-in:
+
+```go
+generate.OutputDirs = []string{"src/generated", "src/app/(payload)/admin"}
+generate.OutputHashFiles = []string{".cache/payload-types.hash", ".cache/import-map.hash"}
+generate.CleanOutputDirs = true
+generate.RequireNewFiles = true
+```
+
+Cleanup happens once before the first attempt, not between retries, so a partially successful attempt can still converge. `OutputHashFiles` lists exact hash/marker files maintained by the generator; they are removed in the same cleanup phase whenever `CleanOutputDirs` removes the outputs and cannot be configured independently. Devflow validates all directory and hash targets before deleting anything, then removes hashes first so a directory-removal failure cannot leave a stale hash claiming the output is current.
+
+Paths must be worktree-relative; every cleaned directory must contain at least one required pattern, and cleanup rejects escaping paths, globs, Git/Devflow state paths, non-file hash targets, and symlink traversal. Only enable it for disposable generated directories and their corresponding hashes. `CommandOutputTasklet` verifies runtime behavior but does not declare graph outputs automatically, so keep using `Outputs`, `OutputFiles`, or `OutputDirs` on the task builder as appropriate.
+
 ## PayloadCMS/Postgres Component
 
 PayloadCMS projects can use the same builder style:
@@ -172,7 +213,7 @@ By default, the component uses `npx payload migrate` and `npx payload migrate:cr
 payload.Command("npm", "run", "payload", "--")
 ```
 
-Payload migration creation may ask for confirmations around destructive changes. The component declares those prompts so the TUI and daemon can ask the user. Normal boot/watch targets should depend on `payload.Migrations(b)`, not `payload.NewMigration(b)`.
+Payload migration creation may ask for confirmations around destructive changes. The component declares those prompts so the TUI and daemon can ask the user. It also requires a newly created regular file under the configured migration directory: a zero exit without a new migration is retried instead of reported as success. Existing migrations are preserved; the component never enables output-directory cleanup for migration authoring. Normal boot/watch targets should depend on `payload.Migrations(b)`, not `payload.NewMigration(b)`.
 
 ## Required CLI Installation
 

@@ -14,6 +14,14 @@ Last updated: 2026-08-13
 
 ## Completed
 
+- Reliable command output convergence:
+  - added generic `project.CommandOutputTasklet` support for exact/globbed regular-file requirements, optional new-file semantics, delayed-write settling, bounded successful-command retries, immediate command-failure propagation, and context cancellation
+  - added opt-in one-time cleanup for disposable output directories and their explicit `OutputHashFiles`; all targets are validated before mutation, hashes are deleted before output directories in the same cleanup phase, and hash cleanup cannot run independently
+  - cleanup validation enforces required-pattern ownership and rejects worktree traversal, malformed/globbed cleanup paths, Git/Devflow state, symlink traversal, non-file hash targets, and file-valued directory targets
+  - changed PayloadCMS migration authoring to require a newly created file under the configured migration directory and retry zero-exit/no-file results without deleting existing migration history
+  - added deterministic tasklet coverage for retries, exact/glob requirements, delayed files, new-file checks, cleanup-once behavior, coupled hash invalidation, cleanup prevalidation/order, cancellation, exhaustion, non-zero exits, and cleanup safety plus a fake Payload integration regression that succeeds only on its second file-producing invocation
+  - documented the generic adapter API and durable Payload convergence contract across user, architecture, testing, and agent-memory docs
+  - verified with focused default/race tests, the full default/race suites, vet, clean module metadata/format/diff checks, normal and Linux/Windows amd64 builds, and the version JSON smoke command
 - Finite pipeline validation modes:
   - added `devflow validate <target> --mode artifacts|orders|all --json` as a direct, finite command with `api.ModeValidation`, stable result types, top-level structured issues, and non-zero exits on validation findings
   - artifact mode now resets a disposable worktree per task, materializes declared worktree inputs plus transitive dependency outputs, bypasses caches/stamps, reports declared/materialized inputs and produced outputs, and detects undeclared filesystem changes or missing/wrong-kind outputs

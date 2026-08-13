@@ -246,6 +246,48 @@ func TestPayloadCMSNewMigrationForDeletedFieldRequiresConfirmation(t *testing.T)
 	}
 }
 
+func TestPayloadCMSNewMigrationRetriesSuccessfulCommandWithoutFiles(t *testing.T) {
+	isolatePayloadUserCache(t)
+	worktree := seededPayloadWorktree(t)
+	fakeBin := installFakeNPM(t)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DEVFLOW_MIGRATION_NAME", "retry output")
+	t.Setenv("DEVFLOW_FAKE_MIGRATION_TIMESTAMP", "20260519020202")
+	t.Setenv("DEVFLOW_FAKE_PAYLOAD_SKIP_CREATE_SUCCESSES", "1")
+	recordPath := filepath.Join(worktree, ".devflow", "fake-npm-record.txt")
+	t.Setenv("DEVFLOW_FAKE_NPM_RECORD", recordPath)
+
+	execProject, target, err := project.ResolveExecutionProject(testPayloadProjectWithoutManagedDB(), "payload_new_migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, err := engine.New(execProject, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	outcome, err := eng.Run(ctx, engine.Request{
+		Target:      target,
+		Worktree:    worktree,
+		Mode:        api.ModeCI,
+		MaxParallel: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.Result.Success {
+		t.Fatalf("expected success, got %+v", outcome.Result)
+	}
+	if got := payloadRecordCount(recordPath, "npm run payload -- migrate:create retry output"); got != 2 {
+		t.Fatalf("expected Payload migration creation to run twice, got %d\nrecord:\n%s", got, readFilePayloadTest(t, recordPath))
+	}
+	migrationPath := filepath.Join(worktree, "src", "migrations", "20260519020202_retry_output.ts")
+	if _, err := os.Stat(migrationPath); err != nil {
+		t.Fatalf("expected migration file %s after retry: %v", migrationPath, err)
+	}
+}
+
 func testPayloadProjectWithoutManagedDB() project.Project {
 	return project.Define(func(ctx context.Context, b *project.Builder) error {
 		_ = ctx

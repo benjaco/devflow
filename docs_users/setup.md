@@ -333,6 +333,8 @@ Payload schema inputs default to `src/collections` and `src/globals` in addition
 
 `payload.NewMigration(b)` registers the explicit authoring action. It reads the action input `name` through `DEVFLOW_MIGRATION_NAME`, runs Payload migration creation, writes into the configured migration directory, and is intentionally not task-cacheable. Payload can prompt for confirmations when a migration may be destructive, for example after deleting a field. Devflow models those prompts as explicit interactive events, so the TUI or daemon client can ask the user instead of hiding a hanging subprocess in watch mode.
 
+Payload has been observed returning success without writing a migration. Devflow therefore requires a newly created regular file under the configured migration directory, waits briefly for delayed filesystem writes, and retries a zero-exit/no-file command up to five attempts. A non-zero exit still fails immediately. Existing migration history is never deleted by this retry path.
+
 By default the component runs:
 
 ```bash

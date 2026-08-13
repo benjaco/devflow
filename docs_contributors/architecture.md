@@ -4,7 +4,7 @@
 
 `cmd/devflow` is thin CLI wiring over the packages in `pkg/`.
 
-- `pkg/project`: task, target, runtime, and adapter interfaces
+- `pkg/project`: task, target, runtime, adapter interfaces, and generic tasklets such as output-converging finite commands
 - `pkg/graph`: validation, topo ordering, closures, and affected-task calculation
 - `pkg/fingerprint`: deterministic file, directory, env, and task-key hashing
 - `pkg/cache`: manifest, snapshot, restore, and cache lookup
@@ -394,7 +394,9 @@ Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`
 
 `PostgresDumpSourcePolicy` must fail when `pg_dump` fails. It writes through an owner-only temporary dump file instead of an unchecked shell pipeline so `psql` cannot mask a failed clone with an empty successful restore. It invokes `pg_dump` and `psql` as separate commands without a Unix shell, and Prisma components using that policy declare both host clients as target-scoped required CLIs.
 
-PayloadCMS follows the same operator rule as Prisma: normal `up`/watch paths apply existing migrations non-interactively through `payload.Migrations(b)`, while migration creation belongs to an explicit action registered by `payload.NewMigration(b)`. Payload can ask for confirmations when changes may be destructive; those prompts flow through the generic interactive prompt path instead of being handled with Payload-specific TUI logic. Payload schema module paths are part of the component input contract, not only app-service inputs: by default the component includes `src/collections` and `src/globals`, and adapters can override them with `SchemaInputs(...)`.
+PayloadCMS follows the same operator rule as Prisma: normal `up`/watch paths apply existing migrations non-interactively through `payload.Migrations(b)`, while migration creation belongs to an explicit action registered by `payload.NewMigration(b)`. Payload can ask for confirmations when changes may be destructive; those prompts flow through the generic interactive prompt path instead of being handled with Payload-specific TUI logic. Payload schema module paths are part of the component input contract, not only app-service inputs: by default the component includes `src/collections` and `src/globals`, and adapters can override them with `SchemaInputs(...)`. Migration authoring uses `project.CommandOutputTasklet` with new-file semantics over the configured migration directory, because Payload can return zero without writing a migration. It retries only successful missing-output attempts, preserves non-zero failures, and never cleans the migration directory.
+
+`project.CommandOutputTasklet` is the generic finite-command convergence boundary. Required paths/globs are worktree-relative and every pattern must match a regular file. It can require matches created during the current run, rechecks after a bounded settle delay before rerunning, and honors context cancellation. Optional cleanup is restricted to explicit worktree-relative output directories that contain required patterns and exact `OutputHashFiles`. Hash cleanup cannot run independently: every directory and hash path is validated before mutation, then hashes are removed before output directories in the same one-time pre-attempt phase so a directory-removal failure cannot leave stale validity state. Cleanup rejects escaping, globbed, Git/Devflow-state, non-file hash, or symlink-traversing paths. Graph output declarations remain owned by `project.Task`; the tasklet does not infer cache artifacts.
 
 Managed Postgres target pattern:
 - preserve the Docker volume unless an explicit restore/rebuild path owns the destruction

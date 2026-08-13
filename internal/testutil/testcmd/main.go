@@ -30,7 +30,7 @@ func main() {
 		return
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: testcmd <emit|write|serve>")
+		fmt.Fprintln(os.Stderr, "usage: testcmd <emit|write|write-after|write-if-missing|serve>")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -54,11 +54,84 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+	case "write-after":
+		runWriteAfter()
+	case "write-if-missing":
+		runWriteIfMissing()
 	case "serve":
 		runServe()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown testcmd command %q\n", os.Args[1])
 		os.Exit(2)
+	}
+}
+
+func runWriteAfter() {
+	if len(os.Args) != 6 {
+		fmt.Fprintln(os.Stderr, "usage: testcmd write-after <counter-path> <attempt> <output-path> <contents>")
+		os.Exit(2)
+	}
+	wantAttempt, err := strconv.Atoi(os.Args[3])
+	if err != nil || wantAttempt < 1 {
+		fmt.Fprintln(os.Stderr, "write-after attempt must be a positive integer")
+		os.Exit(2)
+	}
+	attempt := 0
+	if data, readErr := os.ReadFile(os.Args[2]); readErr == nil {
+		attempt, err = strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	} else if !os.IsNotExist(readErr) {
+		fmt.Fprintln(os.Stderr, readErr)
+		os.Exit(1)
+	}
+	attempt++
+	if err := os.MkdirAll(filepath.Dir(os.Args[2]), 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(os.Args[2], []byte(strconv.Itoa(attempt)), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if attempt < wantAttempt {
+		fmt.Printf("successful attempt %d without output\n", attempt)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(os.Args[4]), 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(os.Args[4], []byte(os.Args[5]), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("wrote output on attempt %d\n", attempt)
+}
+
+func runWriteIfMissing() {
+	if len(os.Args) != 6 {
+		fmt.Fprintln(os.Stderr, "usage: testcmd write-if-missing <missing-path-1> <missing-path-2> <output-path> <contents>")
+		os.Exit(2)
+	}
+	for _, path := range os.Args[2:4] {
+		if _, err := os.Lstat(path); err == nil {
+			fmt.Fprintf(os.Stderr, "expected %s to be missing\n", path)
+			os.Exit(1)
+		} else if !os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(os.Args[4]), 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(os.Args[4], []byte(os.Args[5]), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
@@ -230,6 +303,10 @@ func runFakePayload(args []string) {
 			fmt.Fprintln(os.Stderr, "migration name is required")
 			os.Exit(2)
 		}
+		if fakePayloadSkipsMigrationCreate() {
+			fmt.Println("Payload migrate:create exited successfully without writing a migration")
+			return
+		}
 		if fakePayloadNeedsDestructiveConfirmation() && !hasArg(args[2:], "--force-accept-warning") {
 			reader := bufio.NewReader(os.Stdin)
 			fmt.Print("DATA LOSS WARNING: dropping a field may delete data. Accept warnings and create migration? [y/N]: ")
@@ -265,6 +342,22 @@ func runFakePayload(args []string) {
 		fmt.Fprintf(os.Stderr, "fake payload unsupported command: %s\n", strings.Join(args, " "))
 		os.Exit(2)
 	}
+}
+
+func fakePayloadSkipsMigrationCreate() bool {
+	skip, err := strconv.Atoi(os.Getenv("DEVFLOW_FAKE_PAYLOAD_SKIP_CREATE_SUCCESSES"))
+	if err != nil || skip < 1 {
+		return false
+	}
+	recordPath := os.Getenv("DEVFLOW_FAKE_NPM_RECORD")
+	if recordPath == "" {
+		return false
+	}
+	data, err := os.ReadFile(recordPath)
+	if err != nil {
+		return false
+	}
+	return strings.Count(string(data), "migrate:create") <= skip
 }
 
 func fakePayloadNeedsDestructiveConfirmation() bool {

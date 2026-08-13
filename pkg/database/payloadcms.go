@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -170,7 +172,12 @@ func (p *PayloadCMSComponent) NewMigration(b *project.Builder) *project.TaskBuil
 			spec := p.commandSpec(args...)
 			spec.Interactive = len(p.prompts) > 0
 			spec.Prompts = append([]process.PromptSpec(nil), p.prompts...)
-			if err := rt.RunCmdSpec(ctx, spec); err != nil {
+			runner := project.CommandOutputTasklet{
+				Command:         spec,
+				RequiredFiles:   []string{path.Join(filepath.ToSlash(p.migrationsDir), "**", "*")},
+				RequireNewFiles: true,
+			}
+			if err := runner.Run(ctx, rt); err != nil {
 				rt.EmitLogLine("stderr", p.name+"_new_migration failed: "+err.Error())
 				return err
 			}
