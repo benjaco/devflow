@@ -164,6 +164,15 @@ Entries are namespaced by project. By default the namespace is `Project.Name()`.
 b.CacheNamespace("company-my-app")
 ```
 
+For CI cache configuration, do not reconstruct OS-specific paths or target keys manually:
+
+```bash
+devflow cache path --json
+devflow cache key --target build --json
+```
+
+The first command returns the global root and project namespace path. The second returns one aggregate target key plus the real per-task keys used by cacheable and stamped tasks.
+
 ## Validate Inputs, Outputs, And Task Ordering
 
 After a finite build/codegen/test target works normally, use validation mode to check that its graph contract is strong enough for caching and future edits:
@@ -185,7 +194,7 @@ devflow validate build --mode all --json
 
 The default exhaustive bound is 1000 orders. Devflow does not silently sample a larger graph: it returns `complete=false` without running permutations, and you can raise `--max-orders` deliberately. Validate finite targets only; service/debug-service targets are rejected because they do not finish one by one.
 
-Validation copies ordinary worktree files into temporary sandboxes and never uses task cache hits or stamps. It deliberately omits `.git` and `.devflow`. It proves that declared worktree inputs are sufficient for the observed execution, but not that every declared input is necessary, and it cannot sandbox databases, networks, global tool caches, absolute paths, or unregistered background processes. Choose targets whose external effects are safe to repeat.
+Validation copies ordinary worktree files into temporary sandboxes and never uses task cache hits or stamps. It deliberately omits `.git` and `.devflow`. Safe internal relative symlinks are preserved instead of dereferenced, while absolute or externally resolving symlinks are rejected; projection size is also bounded. It proves that declared worktree inputs are sufficient for the observed execution, but not that every declared input is necessary, and it cannot sandbox databases, networks, global tool caches, absolute paths, or unregistered background processes. Choose targets whose external effects are safe to repeat.
 
 ## Services And Readiness
 
@@ -275,7 +284,7 @@ prisma := database.Prisma("prisma").
 	Schema("prisma/schema.prisma").
 	MigrationDir("prisma/migrations").
 	Database(db).
-	CloneFromEnv("DEV_DATABASE_URL")
+	CloneFromEnvContainerized("DEV_DATABASE_URL")
 
 app := b.Service("app").
 	Command("npx", "tsx", "src/server.ts").
@@ -290,7 +299,9 @@ prisma.NewMigration(b)
 
 `prisma.Migrations(b)` restores the best cached migration-prefix database state, applies only the missing tail, snapshots the final state, and reports migration-needed states when `schema.prisma` and `prisma/migrations` are out of sync. When the migration folder is in a Git worktree, Devflow only adds intermediate prefix snapshots around migration folders with uncommitted Git changes, including newly added or edited local migrations. If Git is unavailable, Devflow falls back to the final snapshot only. This keeps committed history fast while preserving the local workflow where you edit an in-progress migration and need to restore the previous prefix.
 
-`CloneFromEnv(...)` uses the host `pg_dump` and `psql` executables. Devflow declares both tools in target-scoped doctor output and runs them directly without a Unix shell, so the clone path is portable across macOS, Linux, and Windows. On Apple Silicon with Homebrew, `brew install libpq` installs both; because the formula can be keg-only, add `$(brew --prefix libpq)/bin` to `PATH`. Match the `pg_dump` major version to the remote Postgres server.
+`CloneFromEnvContainerized(...)` uses `pg_dump` and `psql` from the managed Postgres image, so a reachable Docker Engine is sufficient and host libpq clients are not required. Passwords are delivered through Docker exec stdin, not command arguments or inspectable exec environment. The remote database hostname must be reachable from inside the container; host `localhost` is not the container's localhost. The bundled client major follows the managed image and must be compatible with the remote server; select a compatible image or use host clients when another version is needed.
+
+Use `CloneFromEnv(...)` when you deliberately want host clients. Devflow declares `pg_dump` and `psql` in target-scoped doctor output, invokes them directly without a Unix shell, and uses an owner-only temporary `PGPASSFILE` with password-free command URLs. On Apple Silicon with Homebrew, `brew install libpq` installs both; because the formula can be keg-only, add `$(brew --prefix libpq)/bin` to `PATH`. Match the `pg_dump` major version to the remote Postgres server.
 
 `prisma.NewMigration(b)` registers an explicit authoring action. It reads the action input `name` through `DEVFLOW_MIGRATION_NAME`, reconciles the managed database to the best compatible migration-prefix state, creates a Prisma migration, and is intentionally not task-cacheable. This keeps edited latest migrations usable: Devflow restores the prior prefix and reapplies the changed tail before Prisma authors the next migration.
 
@@ -358,11 +369,12 @@ The component task names are `prisma_client`, `prisma_migrations`, and `prisma_n
 Adapters can load `.env` files and then layer Devflow-managed values on top.
 
 Recommended precedence:
-1. `.env`
-2. adapter defaults
-3. Devflow-managed runtime values such as ports and DB URLs
+1. persisted instance values as a recovery baseline
+2. `.env` and adapter defaults
+3. explicitly set invoking-process/CI values for project-declared env keys
+4. Devflow-managed runtime values such as ports and DB URLs
 
-With the builder API, use `b.DotEnv(".env")` and `b.Env(...)` instead of hand-rolling env parsing.
+With the builder API, use `b.DotEnv(".env")` and `b.Env(...)` instead of hand-rolling env parsing. Process values are selected only for keys the project references through configured env, `InputEnv`, or `RequiredEnv`; Devflow does not persist the whole caller environment.
 
 Runtime env is persisted under `.devflow/state` for daemon-owned runs, status, and relaunches. Keep `.devflow/` ignored, avoid storing long-lived production secrets in runtime env, and override service-specific values such as `PORT` for test commands when needed.
 
@@ -395,6 +407,21 @@ devflow doctor --target up --json
 ```
 
 `devflow clis install --target up` runs platform-specific install scripts only for missing required CLIs, then re-checks that each installed command is available on `PATH`.
+
+Declare required non-empty environment values with project- or task-level metadata:
+
+```go
+b.RequiredEnv("SHARED_API_TOKEN")
+deploy.RequiredEnv("DEPLOY_TOKEN")
+```
+
+Then make prerequisite failures actionable in CI:
+
+```bash
+devflow doctor --target deploy --strict --json
+```
+
+The JSON result includes `requiredEnv` entries with their set state and source. `--strict` still writes that complete result, then exits nonzero when a required CLI or env value is missing. Prisma clone components automatically require the key passed to `CloneFromEnv(...)` or `CloneFromEnvContainerized(...)`.
 
 ## What To Commit
 

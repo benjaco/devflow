@@ -2,8 +2,11 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -14,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/benjaco/devflow/internal/fsutil"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/cache"
 	"github.com/benjaco/devflow/pkg/event"
@@ -48,14 +52,16 @@ type Engine struct {
 }
 
 type runState struct {
-	mu        sync.Mutex
-	req       Request
-	inst      *api.Instance
-	status    map[string]api.NodeStatus
-	depKeys   map[string]string
-	cacheHits []string
-	services  map[string]project.ServiceHandle
-	publish   func(api.Event)
+	mu          sync.Mutex
+	req         Request
+	inst        *api.Instance
+	status      map[string]api.NodeStatus
+	depKeys     map[string]string
+	cacheHits   []string
+	cacheMisses []string
+	nodeStarted map[string]time.Time
+	services    map[string]project.ServiceHandle
+	publish     func(api.Event)
 }
 
 type taskResult struct {
@@ -96,6 +102,52 @@ func (e *Engine) Graph() *graph.Graph {
 
 func (e *Engine) SubscribeEvents() <-chan api.Event {
 	return e.events.Subscribe()
+}
+
+func (e *Engine) CacheKey(ctx context.Context, req Request) (*api.CacheKeyResult, error) {
+	inst, _, baseRT, err := e.prepareExecution(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	order, err := e.graph.TargetClosure(req.Target)
+	if err != nil {
+		return nil, err
+	}
+	keys := map[string]string{}
+	taskKeys := make([]api.TaskCacheKey, 0)
+	for _, name := range order {
+		task := e.graph.Tasks[name]
+		if !task.Cache && !task.Stamp {
+			continue
+		}
+		depKeys := make([]string, 0, len(task.Deps))
+		for _, dep := range task.Deps {
+			if key := keys[dep]; key != "" {
+				depKeys = append(depKeys, key)
+			}
+		}
+		rt := baseRT.WithTask(name, instance.LogPath(req.Worktree, inst.ID, name))
+		rt.DepKeys = append([]string(nil), depKeys...)
+		key, err := e.taskKey(ctx, rt, task, depKeys)
+		if err != nil {
+			return nil, fmt.Errorf("compute cache key for task %q: %w", name, err)
+		}
+		keys[name] = key
+		taskKeys = append(taskKeys, api.TaskCacheKey{Task: name, Key: key, Stamp: task.Stamp})
+	}
+	hash := sha256.New()
+	_, _ = fmt.Fprintf(hash, "devflow-target-cache-v1\x00%s\x00%s\x00", project.CacheNamespace(e.project), req.Target)
+	for _, item := range taskKeys {
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%t\x00", item.Task, item.Key, item.Stamp)
+	}
+	return &api.CacheKeyResult{
+		Project:    e.project.Name(),
+		Target:     req.Target,
+		InstanceID: inst.ID,
+		Namespace:  project.CacheNamespace(e.project),
+		Key:        hex.EncodeToString(hash.Sum(nil)),
+		TaskKeys:   taskKeys,
+	}, nil
 }
 
 func (e *Engine) Watch(ctx context.Context, req Request) error {
@@ -268,34 +320,34 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 	})
 
 	if err := e.runReadyQueue(runCtx, cancel, baseRT, state, order); err != nil {
-		result.FailedNode = state.failedNode()
 		result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 		result.DurationMs = time.Since(started).Milliseconds()
+		finalizeRunResult(&result, state, err)
 		e.publishRunFinished(result, req.Worktree, err.Error())
 		return &Outcome{Result: result, Instance: inst}, err
 	}
 
 	result.Success = true
-	result.CacheHits = state.snapshotCacheHits()
-
 	services := state.snapshotServices()
 	if len(services) > 0 {
 		if req.Mode == api.ModeCI {
 			state.stopServices(req, sortedHandles(services))
 		} else {
-			waitErr := e.waitForServices(ctx, req, inst, state.statusSnapshot(), services)
+			waitErr := e.waitForServices(ctx, req, inst, state, services)
 			if waitErr != nil && !errors.Is(waitErr, context.Canceled) {
 				result.Success = false
 				result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 				result.DurationMs = time.Since(started).Milliseconds()
+				finalizeRunResult(&result, state, waitErr)
 				e.publishRunFinished(result, req.Worktree, waitErr.Error())
-				return nil, waitErr
+				return &Outcome{Result: result, Instance: inst}, waitErr
 			}
 		}
 	}
 
 	result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 	result.DurationMs = time.Since(started).Milliseconds()
+	finalizeRunResult(&result, state, nil)
 	if err := instance.SaveStatus(req.Worktree, inst.ID, req.Target, req.Mode, state.statusSnapshot()); err != nil {
 		return nil, err
 	}
@@ -315,7 +367,7 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 	}
 	inst.Label = cfg.Label
 	inst.DB = cfg.DB
-	inst.Env = mergeInstanceEnv(inst.Env, cfg.Env, map[string]string{
+	inst.Env = mergeInstanceEnv(inst.Env, cfg.Env, selectedProcessEnv(e.project, cfg.Env, inst.Env), map[string]string{
 		"DEVFLOW_INSTANCE_ID": inst.ID,
 		"DEVFLOW_WORKTREE":    inst.Worktree,
 	})
@@ -340,12 +392,13 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 	}
 
 	state := &runState{
-		req:      req,
-		inst:     inst,
-		status:   map[string]api.NodeStatus{},
-		depKeys:  map[string]string{},
-		services: map[string]project.ServiceHandle{},
-		publish:  e.publish,
+		req:         req,
+		inst:        inst,
+		status:      map[string]api.NodeStatus{},
+		depKeys:     map[string]string{},
+		nodeStarted: map[string]time.Time{},
+		services:    map[string]project.ServiceHandle{},
+		publish:     e.publish,
 	}
 	for _, name := range order {
 		task := e.graph.Tasks[name]
@@ -546,6 +599,10 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 }
 
 func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.Runtime, task project.Task, depKeys []string) taskResult {
+	if err := truncateTaskLog(rt); err != nil {
+		state.setErrorState(task.Name, ctx, "", err, 0)
+		return taskResult{name: task.Name, err: err}
+	}
 	if task.Stamp {
 		// Stamps are local install/setup markers; never use the global cache to skip or restore them.
 		key, err := e.taskKey(ctx, rt, task, depKeys)
@@ -581,13 +638,24 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 	}
 
 	if task.Cache {
+		keyStarted := time.Now()
 		key, err := e.taskKey(ctx, rt, task, depKeys)
+		keyDuration := elapsedMilliseconds(keyStarted)
 		if err != nil {
 			state.setErrorState(task.Name, ctx, "", err, 0)
 			return taskResult{name: task.Name, err: err}
 		}
 		state.setLastRunKey(task.Name, key)
-		if ok, restoreErr := e.cache.Restore(rt.Worktree, task.Name, key); restoreErr == nil && ok {
+		restoreStarted := time.Now()
+		ok, restoreErr := e.cache.RestoreContext(ctx, rt.Worktree, task.Name, key, cacheCopyProgress(rt, "restore"))
+		readDuration := elapsedMilliseconds(restoreStarted)
+		if restoreErr == nil && ok {
+			state.setCacheTiming(task.Name, api.CacheTiming{
+				Outcome:         "hit",
+				KeyDurationMs:   keyDuration,
+				ReadDurationMs:  readDuration,
+				TotalDurationMs: keyDuration + readDuration,
+			})
 			state.publishEvent(api.Event{
 				TS:         process.NowRFC3339Nano(),
 				Type:       api.EventCacheHit,
@@ -601,6 +669,13 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			state.setNodeState(task.Name, api.StateCached, key, "", 0)
 			return taskResult{name: task.Name, key: key, cached: true}
 		}
+		state.addCacheMiss(task.Name)
+		state.setCacheTiming(task.Name, api.CacheTiming{
+			Outcome:         "miss",
+			KeyDurationMs:   keyDuration,
+			ReadDurationMs:  readDuration,
+			TotalDurationMs: keyDuration + readDuration,
+		})
 		state.publishEvent(api.Event{
 			TS:         process.NowRFC3339Nano(),
 			Type:       api.EventCacheMiss,
@@ -615,10 +690,19 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			state.setErrorState(task.Name, ctx, key, err, 0)
 			return taskResult{name: task.Name, key: key, err: err}
 		}
-		if _, err := e.cache.Snapshot(rt.Worktree, task, key); err != nil {
+		writeStarted := time.Now()
+		if _, err := e.cache.SnapshotContext(ctx, rt.Worktree, task, key, cacheCopyProgress(rt, "snapshot")); err != nil {
 			state.setErrorState(task.Name, ctx, key, err, 0)
 			return taskResult{name: task.Name, key: key, err: err}
 		}
+		writeDuration := elapsedMilliseconds(writeStarted)
+		state.setCacheTiming(task.Name, api.CacheTiming{
+			Outcome:         "miss",
+			KeyDurationMs:   keyDuration,
+			ReadDurationMs:  readDuration,
+			WriteDurationMs: writeDuration,
+			TotalDurationMs: keyDuration + readDuration + writeDuration,
+		})
 		state.setNodeState(task.Name, api.StateDone, key, "", 0)
 		return taskResult{name: task.Name, key: key}
 	}
@@ -690,9 +774,6 @@ func runTask(ctx context.Context, task project.Task, rt *project.Runtime) error 
 	if task.Run == nil {
 		return nil
 	}
-	if err := truncateTaskLog(rt); err != nil {
-		return err
-	}
 	return task.Run(ctx, rt)
 }
 
@@ -703,11 +784,42 @@ func truncateTaskLog(rt *project.Runtime) error {
 	if err := os.MkdirAll(filepath.Dir(rt.LogPath), 0o755); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(rt.LogPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(rt.LogPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return err
+	}
 	return file.Close()
+}
+
+func cacheCopyProgress(rt *project.Runtime, operation string) func(fsutil.CopyProgress) {
+	if rt == nil {
+		return nil
+	}
+	var lastFiles, lastBytes int64
+	return func(progress fsutil.CopyProgress) {
+		if !progress.Done && progress.Files-lastFiles < 1000 && progress.Bytes-lastBytes < 100<<20 {
+			return
+		}
+		lastFiles = progress.Files
+		lastBytes = progress.Bytes
+		rt.EmitLogLine("stderr", fmt.Sprintf("cache %s: files=%d bytes=%d", operation, progress.Files, progress.Bytes))
+	}
+}
+
+func elapsedMilliseconds(started time.Time) int64 {
+	elapsed := time.Since(started)
+	if elapsed <= 0 {
+		return 0
+	}
+	ms := elapsed.Milliseconds()
+	if ms == 0 {
+		return 1
+	}
+	return ms
 }
 
 func declaredOutputsExist(worktree string, outputs project.Outputs) (bool, error) {
@@ -827,7 +939,7 @@ func (e *Engine) taskKey(ctx context.Context, rt *project.Runtime, task project.
 	})
 }
 
-func (e *Engine) waitForServices(parent context.Context, req Request, inst *api.Instance, status map[string]api.NodeStatus, services map[string]project.ServiceHandle) error {
+func (e *Engine) waitForServices(parent context.Context, req Request, inst *api.Instance, state *runState, services map[string]project.ServiceHandle) error {
 	ctx, cancel := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -844,103 +956,39 @@ func (e *Engine) waitForServices(parent context.Context, req Request, inst *api.
 
 	select {
 	case <-ctx.Done():
-		for _, name := range sortedHandles(services) {
-			_ = services[name].Stop()
-			node := status[name]
-			prev := node.State
-			node.State = api.StateStopped
-			status[name] = node
-			e.publish(api.Event{
-				TS:            process.NowRFC3339Nano(),
-				Type:          api.EventTaskState,
-				InstanceID:    inst.ID,
-				Worktree:      req.Worktree,
-				Target:        req.Target,
-				Task:          name,
-				Mode:          req.Mode,
-				State:         api.StateStopped,
-				PreviousState: prev,
-				PID:           node.PID,
-			})
-			e.publish(api.Event{
-				TS:         process.NowRFC3339Nano(),
-				Type:       api.EventProcessExited,
-				InstanceID: inst.ID,
-				Worktree:   req.Worktree,
-				Target:     req.Target,
-				Task:       name,
-				Mode:       req.Mode,
-				PID:        node.PID,
-			})
-		}
+		state.stopServices(req, sortedHandles(services))
 		return ctx.Err()
 	case ex := <-exits:
-		node := status[ex.task]
+		node := state.statusSnapshot()[ex.task]
 		prev := node.State
+		state.removeService(ex.task)
 		if ex.err != nil {
-			node.State = classifyTaskError(ctx, ex.err)
-			node.LastError = displayTaskError(ctx, ex.err)
+			state.setErrorState(ex.task, ctx, node.LastRunKey, ex.err, 0)
 		} else {
-			node.State = api.StateStopped
+			state.setNodeState(ex.task, api.StateStopped, node.LastRunKey, "", 0)
 		}
-		status[ex.task] = node
-		_ = instance.SaveStatus(req.Worktree, inst.ID, req.Target, req.Mode, status)
+		updated := state.statusSnapshot()[ex.task]
 		e.publish(api.Event{
 			TS:            process.NowRFC3339Nano(),
-			Type:          api.EventTaskState,
+			Type:          api.EventProcessExited,
 			InstanceID:    inst.ID,
 			Worktree:      req.Worktree,
 			Target:        req.Target,
 			Task:          ex.task,
 			Mode:          req.Mode,
-			State:         node.State,
-			PreviousState: prev,
 			PID:           node.PID,
-			Error:         node.LastError,
+			State:         updated.State,
+			PreviousState: prev,
+			Error:         updated.LastError,
 		})
-		e.publish(api.Event{
-			TS:         process.NowRFC3339Nano(),
-			Type:       api.EventProcessExited,
-			InstanceID: inst.ID,
-			Worktree:   req.Worktree,
-			Target:     req.Target,
-			Task:       ex.task,
-			Mode:       req.Mode,
-			PID:        node.PID,
-			Error:      node.LastError,
-		})
-		for task, handle := range services {
-			if task == ex.task {
-				continue
+		remaining := make([]string, 0, len(services)-1)
+		for task := range services {
+			if task != ex.task {
+				remaining = append(remaining, task)
 			}
-			_ = handle.Stop()
-			node := status[task]
-			prev := node.State
-			node.State = api.StateStopped
-			status[task] = node
-			e.publish(api.Event{
-				TS:            process.NowRFC3339Nano(),
-				Type:          api.EventTaskState,
-				InstanceID:    inst.ID,
-				Worktree:      req.Worktree,
-				Target:        req.Target,
-				Task:          task,
-				Mode:          req.Mode,
-				State:         api.StateStopped,
-				PreviousState: prev,
-				PID:           node.PID,
-			})
-			e.publish(api.Event{
-				TS:         process.NowRFC3339Nano(),
-				Type:       api.EventProcessExited,
-				InstanceID: inst.ID,
-				Worktree:   req.Worktree,
-				Target:     req.Target,
-				Task:       task,
-				Mode:       req.Mode,
-				PID:        node.PID,
-			})
 		}
+		sort.Strings(remaining)
+		state.stopServices(req, remaining)
 		if ex.err != nil {
 			return fmt.Errorf("service %q exited: %w", ex.task, ex.err)
 		}
@@ -951,6 +999,7 @@ func (e *Engine) waitForServices(parent context.Context, req Request, inst *api.
 func (s *runState) setNodeState(name string, state api.NodeState, lastRunKey, lastError string, pid int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := time.Now()
 	node := s.status[name]
 	prev := node.State
 	prevPID := node.PID
@@ -967,6 +1016,18 @@ func (s *runState) setNodeState(name string, state api.NodeState, lastRunKey, la
 	if pid != 0 {
 		node.PID = pid
 	}
+	if state == api.StateReady || state == api.StateRunning {
+		if s.nodeStarted[name].IsZero() || terminalNodeState(prev) {
+			s.nodeStarted[name] = now
+			node.DurationMs = 0
+			node.Cache = nil
+		}
+	}
+	if terminalNodeState(state) {
+		if started := s.nodeStarted[name]; !started.IsZero() {
+			node.DurationMs = durationMilliseconds(now.Sub(started))
+		}
+	}
 	s.status[name] = node
 	s.saveLocked()
 	if s.publish != nil && (prev != node.State || prevPID != node.PID || prevError != node.LastError) {
@@ -981,10 +1042,30 @@ func (s *runState) setNodeState(name string, state api.NodeState, lastRunKey, la
 			State:         node.State,
 			PreviousState: prev,
 			CacheKey:      node.LastRunKey,
+			DurationMs:    node.DurationMs,
 			PID:           node.PID,
 			Error:         node.LastError,
 		})
 	}
+}
+
+func terminalNodeState(state api.NodeState) bool {
+	switch state {
+	case api.StateCached, api.StateDone, api.StateFailed, api.StateMigrationNeeded, api.StateCanceled, api.StateStopped, api.StateSkipped:
+		return true
+	default:
+		return false
+	}
+}
+
+func durationMilliseconds(duration time.Duration) int64 {
+	if duration <= 0 {
+		return 0
+	}
+	if ms := duration.Milliseconds(); ms > 0 {
+		return ms
+	}
+	return 1
 }
 
 func (s *runState) setErrorState(name string, ctx context.Context, lastRunKey string, err error, pid int) {
@@ -1058,6 +1139,22 @@ func (s *runState) addCacheHit(name string) {
 	s.cacheHits = append(s.cacheHits, name)
 }
 
+func (s *runState) addCacheMiss(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cacheMisses = append(s.cacheMisses, name)
+}
+
+func (s *runState) setCacheTiming(name string, timing api.CacheTiming) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	node := s.status[name]
+	timingCopy := timing
+	node.Cache = &timingCopy
+	s.status[name] = node
+	s.saveLocked()
+}
+
 func (s *runState) publishEvent(evt api.Event) {
 	if s.publish == nil {
 		return
@@ -1116,6 +1213,14 @@ func (s *runState) snapshotCacheHits() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := append([]string(nil), s.cacheHits...)
+	sort.Strings(out)
+	return out
+}
+
+func (s *runState) snapshotCacheMisses() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := append([]string(nil), s.cacheMisses...)
 	sort.Strings(out)
 	return out
 }
@@ -1224,6 +1329,35 @@ func mergeInstanceEnv(current map[string]string, overlays ...map[string]string) 
 	}
 	for _, overlay := range overlays {
 		for key, value := range overlay {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func selectedProcessEnv(p project.Project, maps ...map[string]string) map[string]string {
+	keys := map[string]bool{}
+	for _, values := range maps {
+		for key := range values {
+			keys[key] = true
+		}
+	}
+	if p != nil {
+		for _, task := range p.Tasks() {
+			for _, key := range task.Inputs.Env {
+				keys[key] = true
+			}
+			for _, key := range task.RequiredEnv {
+				keys[key] = true
+			}
+		}
+		for _, key := range project.RequiredEnvsFor(p) {
+			keys[key] = true
+		}
+	}
+	out := map[string]string{}
+	for key := range keys {
+		if value, ok := os.LookupEnv(key); ok {
 			out[key] = value
 		}
 	}
@@ -1685,6 +1819,85 @@ func (e *Engine) stopAllServices(req Request, inst *api.Instance, state *runStat
 
 func (e *Engine) publish(evt api.Event) {
 	e.events.Publish(evt)
+}
+
+func finalizeRunResult(result *api.RunResult, state *runState, runErr error) {
+	if result == nil || state == nil {
+		return
+	}
+	result.CacheHits = state.snapshotCacheHits()
+	result.CacheMisses = state.snapshotCacheMisses()
+	result.Nodes = state.resultNodes()
+	if runErr == nil {
+		return
+	}
+	result.Error = runErr.Error()
+	if result.FailedNode == "" {
+		result.FailedNode = state.failedNode()
+	}
+	for _, node := range result.Nodes {
+		if node.Name != result.FailedNode {
+			continue
+		}
+		result.FailedNodeLogPath = node.LogPath
+		result.LogTail = boundedLogTail(node.LogPath, 50, 32*1024)
+		break
+	}
+}
+
+func (s *runState) resultNodes() []api.NodeStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	names := sortedNodeNames(s.status)
+	nodes := make([]api.NodeStatus, 0, len(names))
+	for _, name := range names {
+		node := s.status[name]
+		if node.Cache != nil {
+			cacheCopy := *node.Cache
+			node.Cache = &cacheCopy
+		}
+		nodes = append(nodes, node)
+	}
+	return nodes
+}
+
+func boundedLogTail(path string, maxLines int, maxBytes int64) []string {
+	if path == "" || maxLines <= 0 || maxBytes <= 0 {
+		return nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil
+	}
+	start := info.Size() - maxBytes
+	if start < 0 {
+		start = 0
+	}
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return nil
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes))
+	if err != nil {
+		return nil
+	}
+	if start > 0 {
+		if newline := strings.IndexByte(string(data), '\n'); newline >= 0 {
+			data = data[newline+1:]
+		}
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\r\n"), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return nil
+	}
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return lines
 }
 
 func (e *Engine) publishRunFinished(result api.RunResult, worktree, errText string) {

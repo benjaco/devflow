@@ -137,6 +137,8 @@ devflow status --json
 devflow logs <task>
 devflow stop --all --json
 devflow cache status --json
+devflow cache path --json
+devflow cache key --target build --json
 ```
 
 All user-facing commands are expected to keep stable JSON output except `devflow docs setup` and `devflow docs development`, which intentionally print scoped plain user Markdown.

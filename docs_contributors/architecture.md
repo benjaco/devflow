@@ -97,6 +97,8 @@ This split keeps runtime logs and instance state local to the worktree, keeps ta
 
 Structured state files and `runtime.env` are replaced through unique temporary files in the same directory so a failed or concurrent write cannot expose a partially truncated destination. Same-destination replacements are serialized within a process. On Windows, the final `MoveFileEx(..., REPLACE_EXISTING)` operation also retries bounded transient access, sharing, and lock violations because concurrent processes and file scanners can briefly open the destination without delete sharing. The existing destination is never removed first, so readers still see either the old complete file or the new complete file. On Unix-like systems these persisted files are owner-readable/writable only (`0600`), because instance JSON and runtime env can contain local database credentials or other sensitive development values. This is local hardening, not encryption.
 
+Task, daemon, and event-stream log files are also created and repaired to owner-only `0600` permissions on Unix-like systems. They can contain command output derived from runtime configuration and must not default to group/world-readable files.
+
 Flush coordination is per instance:
 - `flush/requests/<request-id>.json` records the requested sync point
 - `flush/sync/<request-id>.sync` is the file-watcher sentinel
@@ -106,15 +108,17 @@ Flush coordination is per instance:
 ## Runtime Env
 
 Instance env is now explicit and layered:
-- optional `.env` file values loaded by the adapter
-- adapter-defined static env
-- devflow-managed instance overrides such as ports and database connection values
+- persisted values from the prior instance state as a recovery baseline
+- optional `.env` values and adapter defaults from `ConfigureInstance`
+- values from the invoking process for env keys explicitly used by the project
+- devflow-managed instance overrides such as IDs, ports, and database connection values
 
 The important rule is precedence:
-- dotenv values are the base
-- devflow-managed runtime values win
+- dotenv/adapter values are defaults
+- an explicitly set CI or shell value wins for declared task input env, required env, or another project-configured env key
+- devflow-managed runtime values win last
 
-That allows projects to keep normal local app settings in `.env` while still ensuring the launched frontend/backend processes point at the correct per-instance Postgres runtime and leased ports.
+Devflow deliberately selects only project-relevant process variables instead of persisting the entire caller environment. That allows projects to keep normal local app settings in `.env`, lets CI override those defaults, and still ensures launched processes point at the correct per-instance Postgres runtime and leased ports.
 
 Instance env is persisted under `.devflow/state` so detached supervisors, status, and relaunches can recover the same runtime configuration. Do not treat it as encrypted secret storage. Adapters should avoid storing long-lived production secrets there, avoid logging full env maps, and override runtime values such as `PORT` for unit-test tasks when those tests should not inherit the service runtime port.
 
@@ -196,7 +200,7 @@ Order validation enumerates every topological ordering of the selected target cl
 
 Exhaustiveness is a contract, not a best-effort label. The command enumerates up to `--max-orders` (default 1000) before running permutations. If the graph has more valid orders, it runs none of them, returns `complete=false`, and asks the caller to raise the bound. It never reports a sampled prefix as successful exhaustive validation.
 
-Validation only accepts target closures without service or debug-service tasks because those tasks do not finish one by one. `.git` and `.devflow` are reserved sandbox paths, absolute/escaping declarations and worktree-root outputs are rejected, and overlapping outputs from different tasks are rejected as ambiguous ownership. Worktree-local symlinks are dereferenced into the sandbox; symlinks that resolve outside the worktree are rejected. Task-defined effects outside `Runtime.Worktree`—databases, networks, absolute paths, global tool caches, and processes not registered as services—are not isolated, so users should validate finite, side-effect-safe targets.
+Validation only accepts target closures without service or debug-service tasks because those tasks do not finish one by one. `.git` and `.devflow` are reserved sandbox paths, absolute/escaping declarations and worktree-root outputs are rejected, and overlapping outputs from different tasks are rejected as ambiguous ownership. The shared projection copier preserves relative symlinks whose fully resolved targets remain inside the selected source projection and rejects absolute, escaping, or externally resolving symlinks; it never expands a pnpm-style internal link graph by dereferencing it. Directories remain writable while children are copied and receive their source permissions only after the subtree is complete. Copy operations have shared finite entry/byte limits and progress callbacks, and cleanup first repairs restrictive copied permissions without following symlinks. Task-defined effects outside `Runtime.Worktree`—databases, networks, absolute paths, global tool caches, and processes not registered as services—are not isolated, so users should validate finite, side-effect-safe targets.
 
 ## Interactive Commands
 
@@ -280,6 +284,7 @@ type Task struct {
 type Target struct {
     RootTasks    []string
     RequiredCLIs []string
+	RequiredEnv  []string
 }
 ```
 
@@ -292,6 +297,9 @@ Semantics:
 - `clis install` only runs installers for commands that are currently missing
 - after an installer runs, Devflow re-checks that the command now resolves
 - install scripts are selected by platform (`darwin`, `linux`, `windows`, or `unix`)
+- `Builder.RequiredEnv(...)`, `TaskBuilder.RequiredEnv(...)`, and target `RequiredEnv` metadata declare values that must be non-empty
+- target-scoped doctor checks only required env from the target/task closure, plus project-wide requirements
+- `doctor --strict` prints the normal text or JSON result and exits nonzero when a CLI or env check fails
 
 This keeps required CLI policy adapter-defined while giving the core CLI a stable install surface for humans, CI, and agents.
 
@@ -392,7 +400,9 @@ Migration authoring prep intentionally differs from normal DB prep: it restores/
 
 Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`. `Migrate` is an all-at-once command and only snapshots the final state; `MigrateEach` preserves the exhaustive per-prefix cache contract.
 
-`PostgresDumpSourcePolicy` must fail when `pg_dump` fails. It writes through an owner-only temporary dump file instead of an unchecked shell pipeline so `psql` cannot mask a failed clone with an empty successful restore. It invokes `pg_dump` and `psql` as separate commands without a Unix shell, and Prisma components using that policy declare both host clients as target-scoped required CLIs.
+`PostgresDumpSourcePolicy` must fail when `pg_dump` fails. In its default host-client strategy it writes through an owner-only temporary dump file instead of an unchecked shell pipeline so `psql` cannot mask a failed clone with an empty successful restore. It invokes `pg_dump` and `psql` as separate commands without a Unix shell. Passwords are supplied through a temporary owner-only `PGPASSFILE`; command arguments and inherited PostgreSQL URL variables are sanitized, and `PGPASSWORD` is cleared.
+
+The opt-in `PostgresClientContainer` strategy runs the clients already bundled in the managed Postgres image. `PrismaComponent.CloneFromEnvContainerized(...)` selects it and removes host `pg_dump`/`psql` requirements, making a reachable Docker Engine sufficient for most remote-clone workflows. The Docker exec command and env contain only password-free URLs; the two pgpass records are sent through exec stdin into owner-only temporary files that are trapped for cleanup. A remote URL using host-local `localhost` is not automatically reachable from inside the managed container and must use a container-reachable hostname. The client major follows the selected managed image and must be compatible with the remote server; adapters that need another client major should select a compatible managed image or retain the host-client strategy.
 
 PayloadCMS follows the same operator rule as Prisma: normal `up`/watch paths apply existing migrations non-interactively through `payload.Migrations(b)`, while migration creation belongs to an explicit action registered by `payload.NewMigration(b)`. Payload can ask for confirmations when changes may be destructive; those prompts flow through the generic interactive prompt path instead of being handled with Payload-specific TUI logic. Payload schema module paths are part of the component input contract, not only app-service inputs: by default the component includes `src/collections` and `src/globals`, and adapters can override them with `SchemaInputs(...)`. Migration authoring uses `project.CommandOutputTasklet` with new-file semantics over the configured migration directory, because Payload can return zero without writing a migration. It retries only successful missing-output attempts, preserves non-zero failures, and never cleans the migration directory.
 
@@ -418,6 +428,8 @@ The default cache key is derived automatically from:
 - selected filtered file-content hashes
 - selected env values
 - custom fingerprint outputs
+
+`devflow cache key --target <target> --json` evaluates the same task-key path without executing tasks and returns an aggregate target key plus each cacheable/stamped task key. It resolves normal instance env, ports, and finalizers so keys match a real run. `devflow cache path --json` exposes the OS cache root and selected namespace path for CI cache integrations without requiring callers to reconstruct platform-specific paths.
 
 Custom fingerprint callbacks are executable adapter behavior, so the function values themselves are never JSON-serialized into the normalized task signature. The engine evaluates each callback and includes its returned value in the task key. Adapter authors should keep those values deterministic and use the task's explicit `Signature` when changing task behavior that cannot be represented by declared inputs. Signature normalization works on cloned slices so calculating a cache key cannot reorder the adapter's task definition in memory.
 
@@ -541,7 +553,7 @@ The engine now emits a typed in-process event stream for live consumers. Event c
 - process exited
 - interaction requested / answered / cancelled
 
-The daemon subscribes to engine events, persists them, and fans them out over its JSON-line socket to live consumers such as the TUI. Direct `run --ci` still uses the engine in-process and writes only the command result unless a future CI event surface is added.
+The daemon subscribes to engine events, persists them, and fans them out over its JSON-line socket to live consumers such as the TUI. Direct `run --ci --json` subscribes in-process too: task state, cache, and log progress streams to stderr while stdout remains a single final JSON result suitable for parsers.
 
 For watch cycles specifically:
 - `files` now carries the raw changed worktree-relative file paths from the watcher batch

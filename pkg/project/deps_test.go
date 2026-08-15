@@ -96,6 +96,21 @@ func TestRequiredCLIsForTargetRejectsUnknownCLI(t *testing.T) {
 	}
 }
 
+func TestRequiredEnvsForTargetUsesOnlyTargetClosure(t *testing.T) {
+	p := cliScopeProjectWithTasks([]Task{
+		{Name: "base", Kind: KindOnce, RequiredEnv: []string{"BASE_URL"}},
+		{Name: "build", Kind: KindOnce, Deps: []string{"base"}, RequiredEnv: []string{"BUILD_TOKEN"}},
+		{Name: "unrelated", Kind: KindOnce, RequiredEnv: []string{"UNRELATED_SECRET"}},
+	})
+	env, err := RequiredEnvsForTarget(p, "up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(env, ","); got != "BASE_URL,BUILD_TOKEN" {
+		t.Fatalf("unexpected target required env: %s", got)
+	}
+}
+
 func TestInstallMissingRequiredCLIsRunsPlatformScriptOnlyForMissingCommands(t *testing.T) {
 	workdir := t.TempDir()
 	marker := filepath.Join(workdir, "installed.txt")

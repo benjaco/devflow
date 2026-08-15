@@ -189,7 +189,7 @@ func TestSDKDockerEngineExecCancellationClosesHijackedStream(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := engine.Exec(ctx, "devflow-pg-test", []string{"pg_isready"})
+		_, err := engine.Exec(ctx, "devflow-pg-test", dockerExecSpec{Command: []string{"pg_isready"}})
 		done <- err
 	}()
 	select {
@@ -205,6 +205,75 @@ func TestSDKDockerEngineExecCancellationClosesHijackedStream(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Engine exec did not stop after context cancellation")
+	}
+}
+
+func TestSDKDockerEngineExecSendsEnvironmentAndStdin(t *testing.T) {
+	createRequest := make(chan containertypes.ExecCreateRequest, 1)
+	stdinPayload := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/containers/devflow-pg-test/exec"):
+			var created containertypes.ExecCreateRequest
+			if err := json.NewDecoder(request.Body).Decode(&created); err != nil {
+				t.Errorf("decode exec create request: %v", err)
+			}
+			createRequest <- created
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"Id":"exec-id"}`)
+		case strings.HasSuffix(request.URL.Path, "/exec/exec-id/start"):
+			connection, _, err := response.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack exec stream: %v", err)
+				return
+			}
+			defer connection.Close()
+			if _, err := fmt.Fprint(connection, "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\nConnection: Upgrade\r\n\r\n"); err != nil {
+				t.Errorf("write exec upgrade response: %v", err)
+				return
+			}
+			payload, err := io.ReadAll(connection)
+			if err != nil {
+				t.Errorf("read exec stdin: %v", err)
+				return
+			}
+			stdinPayload <- string(payload)
+			writeDockerLogFrame(t, connection, stdcopy.Stdout, "ok\n")
+		case strings.HasSuffix(request.URL.Path, "/exec/exec-id/json"):
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"Running":false,"ExitCode":0}`)
+		default:
+			http.Error(response, "unexpected Engine API request", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := mobyclient.New(
+		mobyclient.WithHost("tcp://"+server.Listener.Addr().String()),
+		mobyclient.WithAPIVersion("1.55"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	engine := &sdkDockerEngine{client: client}
+	output, err := engine.Exec(context.Background(), "devflow-pg-test", dockerExecSpec{
+		Command: []string{"sh", "-c", "cat >/tmp/pass"},
+		Env:     []string{"DATABASE_URL=postgres://user@db/app"},
+		Stdin:   []byte("secret-on-stdin\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(output) != "ok\n" {
+		t.Fatalf("exec output = %q", output)
+	}
+	created := <-createRequest
+	if !created.AttachStdin || !slices.Equal(created.Cmd, []string{"sh", "-c", "cat >/tmp/pass"}) || !slices.Equal(created.Env, []string{"DATABASE_URL=postgres://user@db/app"}) {
+		t.Fatalf("unexpected exec create request: %+v", created)
+	}
+	if got := <-stdinPayload; got != "secret-on-stdin\n" {
+		t.Fatalf("exec stdin = %q", got)
 	}
 }
 

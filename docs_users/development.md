@@ -36,7 +36,7 @@ Use the lifecycle command that matches the job:
 
 - Dev/watch/operator commands use one daemon per worktree. The daemon owns file watching, services, status, and live TUI updates. Sibling worktrees get separate daemons but still share the global task cache.
 - `devflow run up` is foreground/attached through that daemon. It starts the target closure, waits for service readiness, then keeps the terminal attached while services run. Interrupt it from that terminal when you are done.
-- `devflow run up --ci --json` is a readiness probe for CI-style validation and does not use the daemon. If the target contains services, Devflow starts them, waits for readiness, stops them, and returns a finite result. It is not a background dev environment.
+- `devflow run up --ci --json` is a readiness probe for CI-style validation and does not use the daemon. If the target contains services, Devflow starts them, waits for readiness, stops them, and returns a finite result. Progress and task output stream to stderr while stdout remains one final JSON document. It is not a background dev environment.
 - `devflow run up --detach --json` asks the daemon to start the target and returns after launch. It does not prove the whole target is healthy; use `status`, `logs`, or a watch `flush` workflow when readiness matters.
 - `devflow watch up --detach --json` asks the daemon to start the recommended dev loop for humans and agents.
 - `devflow flush up --json` is the readiness gate for daemon-owned watch mode. It waits for file-change work to settle and checks in-chain services.
@@ -153,6 +153,8 @@ devflow logs app
 devflow logs supervisor
 ```
 
+A failed `run --ci --json` already includes `error`, `failedNode`, `failedNodeLogPath`, a bounded `logTail`, every selected node's final run snapshot, and cache hit/miss lists. Each node reports duration and cache timing when applicable. Use the referenced full log only when the bounded tail is insufficient. Task, daemon, and event logs are owner-only on Unix-like systems.
+
 For flush failures, start with the JSON `issues`, then inspect the referenced task logs. Do not rerun downstream tests until the relevant flush target reports `success=true`.
 
 ## Required CLIs And Doctor
@@ -161,10 +163,11 @@ For prerequisite checks, prefer the same target scope you will execute:
 
 ```bash
 devflow doctor --target up --json
+devflow doctor --target up --strict --json
 devflow clis status --target up --json
 ```
 
-Target-scoped required CLI checks only include commands attached to the selected target and its task closure, so unrelated tools do not block normal work.
+Target-scoped doctor checks only include commands and required environment metadata attached to the selected target and its task closure, plus project-wide required env. The result's `requiredEnv` array shows whether each key came from the invoking process or project configuration. Use `--strict` in CI to retain the full report but exit nonzero when any check fails. Unrelated tools and task-only env keys do not block normal work.
 
 Managed Postgres is an Engine service prerequisite rather than a CLI prerequisite. Devflow connects through the Docker Engine Go API and reports a connection error when the selected target first needs the database; it does not require or invoke the `docker` command. On Windows, start Docker Desktop in Linux-container mode; on macOS, start Docker Desktop normally.
 
@@ -180,9 +183,13 @@ Most cache behavior is automatic. Use manual cache commands when generated artif
 
 ```bash
 devflow cache status --json
+devflow cache path --json
+devflow cache key --target build --json
 devflow cache invalidate --task backend_build --json
 devflow cache gc --json
 ```
+
+`cache path` returns the supported OS-specific cache root and project namespace path. `cache key` returns an aggregate target key plus each cacheable/stamped task key, which is suitable for a CI cache key without duplicating Devflow's fingerprint logic.
 
 The TUI `i` action is usually faster for targeted local invalidation because it invalidates the selected downstream slice and relaunches the active target.
 

@@ -77,6 +77,7 @@ type Task struct {
 	// RequiredCLIs names entries from the project RequiredCLIs catalog.
 	// They are external command prerequisites, not task graph edges.
 	RequiredCLIs              []string
+	RequiredEnv               []string
 	Inputs                    Inputs
 	Outputs                   Outputs
 	Run                       RunFunc
@@ -112,6 +113,7 @@ type Target struct {
 	RootTasks []string
 	// RequiredCLIs names external command prerequisites for this target.
 	RequiredCLIs []string
+	RequiredEnv  []string
 	Description  string
 }
 
@@ -228,7 +230,8 @@ func (rt *Runtime) EmitLogLine(stream, line string) {
 	}
 	if rt.LogPath != "" {
 		_ = os.MkdirAll(filepath.Dir(rt.LogPath), 0o755)
-		if file, err := os.OpenFile(rt.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+		if file, err := os.OpenFile(rt.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			_ = file.Chmod(0o600)
 			_, _ = fmt.Fprintf(file, "%s: %s\n", stream, line)
 			_ = file.Close()
 		}

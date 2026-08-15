@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,6 +39,56 @@ func TestRunCapturesStdoutAndStderr(t *testing.T) {
 	}
 	if len(lines["stderr"]) != 1 || lines["stderr"][0] != "err" {
 		t.Fatalf("stderr lines = %v", lines["stderr"])
+	}
+}
+
+func TestRunCapturesLongOutputLineAndUsesPrivateLogPermissions(t *testing.T) {
+	root := t.TempDir()
+	logPath := filepath.Join(root, "long-line.log")
+	testcmd := testutil.BuildTestCommand(t)
+	wantBytes := 256 * 1024
+	lines := 0
+	_, err := Run(context.Background(), CommandSpec{
+		Name:    testcmd,
+		Args:    []string{"long-line", fmt.Sprint(wantBytes)},
+		LogPath: logPath,
+		OnLine: func(stream, line string) {
+			if stream != "stdout" || len(line) != wantBytes {
+				t.Errorf("unexpected long line stream=%s bytes=%d", stream, len(line))
+			}
+			lines++
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines != 1 {
+		t.Fatalf("captured long lines = %d, want 1", lines)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("task log permissions = %03o, want 600", got)
+		}
+	}
+}
+
+func TestRunPropagatesOversizedOutputScannerErrorWithoutStalling(t *testing.T) {
+	testcmd := testutil.BuildTestCommand(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := Run(ctx, CommandSpec{
+		Name: testcmd,
+		Args: []string{"long-line", fmt.Sprint(MaxOutputLineBytes + 1024)},
+	})
+	if err == nil || !strings.Contains(err.Error(), "scan stdout output") || !strings.Contains(err.Error(), "token too long") {
+		t.Fatalf("expected propagated scanner error, got %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("oversized output stalled until timeout: %v", ctx.Err())
 	}
 }
 

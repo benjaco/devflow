@@ -394,21 +394,24 @@ func PostgresMigrationFileApplier(fileName string) MigrationApplyFunc {
 		if fileName != "" {
 			migrationPath = filepath.Join(migrationPath, fileName)
 		}
-		spec := process.CommandSpec{
-			Name: "sh",
-			Args: []string{"-c", `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$DEVFLOW_MIGRATION_PATH"`},
-			Dir:  opts.Worktree,
-			Env: mergeStringMaps(opts.Env, mergeStringMaps(databaseEnv(db), map[string]string{
-				"DEVFLOW_MIGRATION_NAME":  migration.Name,
-				"DEVFLOW_MIGRATION_PATH":  migrationPath,
-				"DEVFLOW_MIGRATION_INDEX": fmt.Sprintf("%d", opts.Index),
-			})),
-			LogPath:   opts.LogPath,
-			AppendLog: true,
-			OnLine:    opts.OnLine,
-		}
-		_, err := process.Run(ctx, spec)
-		return err
+		baseEnv := mergeStringMaps(opts.Env, mergeStringMaps(databaseEnv(db), map[string]string{
+			"DEVFLOW_MIGRATION_NAME":  migration.Name,
+			"DEVFLOW_MIGRATION_PATH":  migrationPath,
+			"DEVFLOW_MIGRATION_INDEX": fmt.Sprintf("%d", opts.Index),
+		}))
+		return withPostgresCommandCredentials(db.URL, db, baseEnv, func(env map[string]string, sanitizedURL string) error {
+			spec := process.CommandSpec{
+				Name:      "psql",
+				Args:      []string{sanitizedURL, "-v", "ON_ERROR_STOP=1", "-f", migrationPath},
+				Dir:       opts.Worktree,
+				Env:       env,
+				LogPath:   opts.LogPath,
+				AppendLog: true,
+				OnLine:    opts.OnLine,
+			}
+			_, err := process.Run(ctx, spec)
+			return err
+		})
 	}
 }
 

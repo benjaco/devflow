@@ -820,8 +820,12 @@ func (m *Manager) removeContainer(ctx context.Context, name string, force bool) 
 }
 
 func (m *Manager) execContainer(ctx context.Context, timeout time.Duration, containerName string, command []string) ([]byte, error) {
+	return m.execContainerSpec(ctx, timeout, containerName, dockerExecSpec{Command: command})
+}
+
+func (m *Manager) execContainerSpec(ctx context.Context, timeout time.Duration, containerName string, spec dockerExecSpec) ([]byte, error) {
 	return dockerValue(m, ctx, timeout, "execute command in Docker container "+containerName, func(ctx context.Context, engine dockerEngine) ([]byte, error) {
-		return engine.Exec(ctx, containerName, command)
+		return engine.Exec(ctx, containerName, spec)
 	})
 }
 

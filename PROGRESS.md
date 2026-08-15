@@ -1,18 +1,30 @@
 # Progress
 
-Last updated: 2026-08-13
+Last updated: 2026-08-15
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: the August 2026 repository health, Apple Silicon/PostGIS portability, managed-database Docker Engine API, and adapter-owned Docker supervision reviews are complete; the per-worktree daemon remains the mutable dev/watch/operator control plane while `run --ci` remains direct and finite
-- Confidence: native `darwin/arm64` default/database/example tests, real native-ARM64 Docker/Postgres service lifecycle and snapshot/restore, PostgreSQL 16/17/18 PostGIS spatial/persistence e2e, the full race suite, vet, Staticcheck, govulncheck, clean module metadata, the Go 1.25 minimum toolchain, and complete Linux amd64/arm64 plus Windows amd64/arm64 compilation pass; the real remote-clone case remains locally blocked by missing host Postgres clients, while real-Delve app readiness remains blocked by disabled macOS Developer Tools security
+- State: real-project adoption hardening is complete across filesystem projection/cache copying, PostgreSQL client security, actionable CI JSON/progress, prerequisite/env handling, cache introspection, long-line output, and containerized remote cloning; the per-worktree daemon remains the mutable dev/watch/operator control plane while `run --ci` remains direct and finite
+- Confidence: the full default and race suites, all example tests, vet, clean module metadata, formatting, and diff checks pass on native `darwin/arm64`; prior real native-ARM64 Docker/Postgres service, snapshot/restore, and PostgreSQL 16/17/18 PostGIS coverage remains current, while the new containerized clone path has deterministic Docker Engine API coverage without exposing credentials
 
 ## In Progress
 
 - None.
 
 ## Completed
+
+- Real-project adoption hardening:
+  - replaced cache and validation copy implementations with one bounded, progress-reporting copier that preserves projection-internal relative symlinks, rejects external links/special files, stages directories writable before restoring final permissions, handles existing read-only parents, and repairs restrictive trees before cleanup
+  - added read-only Go module and pnpm `.pnpm`-style symlink regressions plus cache/validation, external-link, limit, progress, and cleanup coverage
+  - moved host `pg_dump`, `psql`, and per-migration `psql` credentials into temporary owner-only `PGPASSFILE`s with password-free URLs/PG env, ambient PostgreSQL URL sanitization, no shell migration invocation, and direct leak-audit tests
+  - made task, validation, database, daemon, and event logs owner-only; raised noninteractive line scanning to 4 MiB, propagated scanner errors, and drained oversized streams so children cannot stall
+  - enriched final run JSON with error text, failed-node log path, a bounded log tail, deterministic per-node state/duration, cache hit/miss lists, and cache timing; `run --ci --json` now streams state/cache/log progress to stderr while reserving stdout for the final JSON document
+  - added project/task/target required-env metadata, target-scoped doctor reporting and `doctor --strict`, plus explicit persisted defaults < project dotenv/static env < selected invoking-process env < Devflow-managed identity/port/database precedence
+  - added `devflow cache key --target ...` with task keys and `devflow cache path --json` for official cache integration points
+  - added `CloneFromEnvContainerized(...)`/`PostgresClientContainer`, which runs managed-image clients through the Docker Engine API and sends pgpass records only over exec stdin; documented reachability and client-major compatibility
+  - deliberately deferred publishing maintained multi-architecture PostGIS images because it requires a registry/release/provenance/patch-cadence policy outside this repository-only implementation
+  - verified with `go test ./...`, `go test -race ./...`, `go vet ./...`, `go mod tidy -diff`, formatting, and diff checks
 
 - Reliable command output convergence:
   - added generic `project.CommandOutputTasklet` support for exact/globbed regular-file requirements, optional new-file semantics, delayed-write settling, bounded successful-command retries, immediate command-failure propagation, and context cancellation
@@ -737,6 +749,7 @@ Last updated: 2026-08-13
 
 ## Deferred / Known Gaps
 
+- Publishing maintained multi-architecture PostGIS images remains deferred until the project defines a registry, image provenance/signing, PostgreSQL/PostGIS patch cadence, and release ownership; native arm64 local builds remain the supported fallback
 - Round-1 release flow deliberately has no binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable
 - Fine-grained detached per-service restart is not fully implemented yet
 - The example adapter still uses a deterministic fake-DB path in normal tests; the full real Docker-backed module suite remains opt-in, while the focused PostGIS case is required in CI on native Linux amd64/arm64

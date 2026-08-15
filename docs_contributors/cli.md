@@ -12,6 +12,8 @@ Implemented commands:
 - `devflow action run <action-id>`
 - `devflow migration create <name>`
 - `devflow cache status`
+- `devflow cache key`
+- `devflow cache path`
 - `devflow cache invalidate`
 - `devflow cache gc`
 - `devflow status`
@@ -52,6 +54,7 @@ Service lifecycle contract:
 - attached non-CI `devflow run <target>` connects to the per-worktree daemon, waits for service readiness, and then keeps supervised services alive until interrupted or until a service exits
 - if a service exits during attached `run`, the command returns a service-exited error
 - `devflow run <target> --ci --json` is finite and deliberately bypasses the daemon; service tasks are started, readiness is checked, services are stopped, and status records those services as `stopped`
+- in that CI/JSON mode, task state, cache hit/miss, and task-log progress streams to stderr while stdout remains exactly one final JSON document
 - `devflow run <target> --detach --json` returns after asking the daemon to launch the target; it is not a health/readiness gate
 - use `devflow watch <target> --detach --json` plus `devflow flush <target> --json` when automation needs a detached environment that is proven settled and healthy
 - finite check/test targets with service dependencies should generally use `devflow run <target> --ci --json`
@@ -65,6 +68,8 @@ Implemented `run` flags include:
 - `--worktree`
 - `--project`
 - `--max-parallel`
+
+The final `RunResult` includes top-level failure text, failed-node name and log path, an optional bounded tail of that log, cache hit/miss lists, and the final run snapshot of every selected node (including pending downstream nodes after an upstream failure). Each node includes `durationMs`; cacheable nodes also include cache outcome plus key/read/write/total timing. This lets a CI caller diagnose the first failure without making a second `logs` call while retaining the full log path for deeper inspection.
 
 `watch` connects to the per-worktree daemon, runs an initial watch-mode cycle, then keeps polling for changes and reruns only the affected downstream slice. In attached JSON mode it emits the typed event stream line-by-line.
 
@@ -201,7 +206,7 @@ Bare `docs` is intentionally a usage error so agents and users do not accidental
 
 `stop` is daemon-backed; if no daemon is running, it may start a short-lived daemon to reconcile persisted runtime state. It terminates persisted service PIDs for a selected task. With `--all`, it reconciles all known runtime process groups for the instance: active daemon-owned work, legacy supervisor/executor PIDs and their process-tree descendants, tracked service tasks, and PID-bearing status nodes. It then clears persisted process refs, updates nonterminal node state to `stopped`, stops the managed database container, and shuts down the daemon after sending the response.
 
-`doctor` supports `--target <target>`. Without a target it checks the full adapter required CLI catalog. With a target it resolves the target or task name and checks only required CLIs attached through `RequiredCLIs` to that target and its task closure. JSON includes `project`, `target`, and `cliScope`.
+`doctor` supports `--target <target>` and `--strict`. Without a target it checks the full adapter required CLI catalog and project/task required-env metadata. With a target it resolves the target or task name and checks only `RequiredCLIs` and `RequiredEnv` attached to that target and its task closure, plus project-wide required env. JSON includes `project`, `target`, `cliScope`, `checksPassed`, and `requiredEnv` entries with `name`, `set`, and the detected source. Normal doctor remains report-only; `--strict` emits the same complete text/JSON result and exits nonzero when any check fails.
 
 `clis status` reports adapter-defined required CLIs, whether they are already installed, and whether a platform install script is available. `clis status --target <target>` uses the same CLI scope as target-scoped doctor. JSON includes `requiredCLIs`; the older `dependencies` field is still emitted for compatibility.
 
@@ -225,7 +230,7 @@ Task states now distinguish:
 
 `logs` supports task logs as before and also accepts `supervisor` to read the daemon/supervisor log directly.
 
-Task log files now represent the current run attempt for that task. The engine truncates the log at task-attempt start before adapter code can emit progress, and subprocess output appends within that attempt. Older successful, failed, or canceled output must not stay mixed into a newer running attempt.
+Task log files now represent the current run attempt for that task. The engine truncates the log at task-attempt start before adapter code can emit progress, and subprocess output appends within that attempt. Older successful, failed, or canceled output must not stay mixed into a newer running attempt. Task, daemon, and event-stream logs are owner-only (`0600`) on Unix-like systems.
 
 `tui` now opens a live operator console connected to the per-worktree daemon. Without `--instance`, `devflow tui` follows the same default launch path as bare `devflow`: resolve the default target, ensure the per-worktree daemon is running it in watch mode, wait for a matching non-empty status snapshot, then render. With `--instance`, `tui` is attach-only and does not start or retarget work.
 
@@ -254,3 +259,7 @@ Implemented `tui` flags include:
 - `--instance`
 
 `cache status` lists entries for the selected project cache namespace, `cache invalidate` removes entries for that namespace globally or per task, and `cache gc` keeps only the newest N entries per task in that namespace. Task cache storage is physically global under the OS user cache directory, but entries are grouped by project namespace.
+
+`cache key --target <target>` prints the aggregate key for all cacheable/stamped tasks in the selected closure. Its JSON form returns `project`, `target`, `instanceId`, `namespace`, `key`, and `taskKeys`; each task item includes its real task key and whether it is a local stamp. It computes keys with the normal resolved instance environment and finalizers but does not execute target tasks.
+
+`cache path` prints the selected namespace's physical entry path. Its JSON form returns `project`, `namespace`, `cacheRoot`, and `namespacePath`, which is the supported surface for GitHub Actions or other CI cache configuration.

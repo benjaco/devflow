@@ -273,6 +273,23 @@ func TestBuilderConfigureInstanceLoadsDotEnvAndPorts(t *testing.T) {
 	}
 }
 
+func TestBuilderRequiredEnvMetadata(t *testing.T) {
+	p := Define(func(ctx context.Context, b *Builder) error {
+		b.Name("required-env")
+		b.RequiredEnv("GLOBAL_TOKEN")
+		task := b.Task("deploy").RequiredEnv("DEV_DATABASE_URL", "DEV_DATABASE_URL")
+		b.Target("deploy", task)
+		return nil
+	})
+	env, err := RequiredEnvsForTarget(p, "deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(env, ","); got != "DEV_DATABASE_URL,GLOBAL_TOKEN" {
+		t.Fatalf("unexpected builder required env: %s", got)
+	}
+}
+
 func taskByNameForTest(tasks []Task, name string) Task {
 	for _, task := range tasks {
 		if task.Name == name {

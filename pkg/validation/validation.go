@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/benjaco/devflow/internal/fsutil"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/graph"
 	"github.com/benjaco/devflow/pkg/process"
@@ -132,7 +133,7 @@ func (v *Validator) Run(ctx context.Context, req Request) (*api.ValidationResult
 	if err != nil {
 		return nil, fmt.Errorf("create validation root: %w", err)
 	}
-	defer os.RemoveAll(tempRoot)
+	defer fsutil.RemoveAllWritable(tempRoot)
 
 	if req.Mode == api.ValidationModeAll || req.Mode == api.ValidationModeArtifacts {
 		artifacts, runErr := v.validateArtifacts(ctx, req, template, order, filepath.Join(tempRoot, "artifacts"))
@@ -247,7 +248,7 @@ func (r *executionRuntime) runTask(ctx context.Context, task project.Task, logPa
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
 		return "", err
 	}
 	rt := r.base.WithTask(task.Name, logPath)

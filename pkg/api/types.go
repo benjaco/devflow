@@ -104,11 +104,43 @@ type NodeStatus struct {
 	Name       string       `json:"name"`
 	Kind       string       `json:"kind"`
 	State      NodeState    `json:"state"`
+	DurationMs int64        `json:"durationMs"`
 	LastRunKey string       `json:"lastRunKey,omitempty"`
 	LastError  string       `json:"lastError,omitempty"`
 	PID        int          `json:"pid,omitempty"`
 	LogPath    string       `json:"logPath,omitempty"`
+	Cache      *CacheTiming `json:"cache,omitempty"`
 	Debug      *DebugStatus `json:"debug,omitempty"`
+}
+
+type CacheTiming struct {
+	Outcome         string `json:"outcome"`
+	KeyDurationMs   int64  `json:"keyDurationMs"`
+	ReadDurationMs  int64  `json:"readDurationMs"`
+	WriteDurationMs int64  `json:"writeDurationMs,omitempty"`
+	TotalDurationMs int64  `json:"totalDurationMs"`
+}
+
+type CacheKeyResult struct {
+	Project    string         `json:"project"`
+	Target     string         `json:"target"`
+	InstanceID string         `json:"instanceId"`
+	Namespace  string         `json:"namespace"`
+	Key        string         `json:"key"`
+	TaskKeys   []TaskCacheKey `json:"taskKeys"`
+}
+
+type TaskCacheKey struct {
+	Task  string `json:"task"`
+	Key   string `json:"key"`
+	Stamp bool   `json:"stamp,omitempty"`
+}
+
+type CachePathResult struct {
+	Project       string `json:"project"`
+	Namespace     string `json:"namespace"`
+	CacheRoot     string `json:"cacheRoot"`
+	NamespacePath string `json:"namespacePath"`
 }
 
 type DebugStatus struct {
@@ -134,15 +166,20 @@ type DebugAttachConfig struct {
 }
 
 type RunResult struct {
-	Target     string   `json:"target"`
-	Mode       RunMode  `json:"mode"`
-	InstanceID string   `json:"instanceId"`
-	Success    bool     `json:"success"`
-	DurationMs int64    `json:"durationMs"`
-	FailedNode string   `json:"failedNode,omitempty"`
-	CacheHits  []string `json:"cacheHits"`
-	StartedAt  string   `json:"startedAt"`
-	FinishedAt string   `json:"finishedAt"`
+	Target            string       `json:"target"`
+	Mode              RunMode      `json:"mode"`
+	InstanceID        string       `json:"instanceId"`
+	Success           bool         `json:"success"`
+	DurationMs        int64        `json:"durationMs"`
+	Error             string       `json:"error,omitempty"`
+	FailedNode        string       `json:"failedNode,omitempty"`
+	FailedNodeLogPath string       `json:"failedNodeLogPath,omitempty"`
+	LogTail           []string     `json:"logTail,omitempty"`
+	Nodes             []NodeStatus `json:"nodes"`
+	CacheHits         []string     `json:"cacheHits"`
+	CacheMisses       []string     `json:"cacheMisses"`
+	StartedAt         string       `json:"startedAt"`
+	FinishedAt        string       `json:"finishedAt"`
 }
 
 type ValidationResult struct {
@@ -305,14 +342,21 @@ type InstanceSummary struct {
 }
 
 type DoctorResult struct {
-	Worktree     string   `json:"worktree"`
-	InstanceID   string   `json:"instanceId,omitempty"`
-	Project      string   `json:"project,omitempty"`
-	Target       string   `json:"target,omitempty"`
-	CLIScope     string   `json:"cliScope,omitempty"`
-	ChecksPassed bool     `json:"checksPassed"`
-	Checks       []string `json:"checks"`
-	Warnings     []string `json:"warnings,omitempty"`
+	Worktree     string            `json:"worktree"`
+	InstanceID   string            `json:"instanceId,omitempty"`
+	Project      string            `json:"project,omitempty"`
+	Target       string            `json:"target,omitempty"`
+	CLIScope     string            `json:"cliScope,omitempty"`
+	ChecksPassed bool              `json:"checksPassed"`
+	Checks       []string          `json:"checks"`
+	RequiredEnv  []DoctorEnvStatus `json:"requiredEnv,omitempty"`
+	Warnings     []string          `json:"warnings,omitempty"`
+}
+
+type DoctorEnvStatus struct {
+	Name   string `json:"name"`
+	Set    bool   `json:"set"`
+	Source string `json:"source,omitempty"`
 }
 
 type VersionResult struct {

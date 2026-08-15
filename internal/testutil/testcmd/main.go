@@ -41,6 +41,17 @@ func main() {
 		if len(os.Args) > 3 && os.Args[3] != "" {
 			fmt.Fprintln(os.Stderr, os.Args[3])
 		}
+	case "long-line":
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: testcmd long-line <bytes>")
+			os.Exit(2)
+		}
+		size, err := strconv.Atoi(os.Args[2])
+		if err != nil || size < 0 {
+			fmt.Fprintln(os.Stderr, "invalid long-line size")
+			os.Exit(2)
+		}
+		_, _ = fmt.Fprintln(os.Stdout, strings.Repeat("x", size))
 	case "write":
 		if len(os.Args) != 4 {
 			fmt.Fprintln(os.Stderr, "usage: testcmd write <path> <contents>")
@@ -136,6 +147,7 @@ func runWriteIfMissing() {
 }
 
 func runFakePGDump() {
+	auditFakePostgresClient("pg_dump")
 	if os.Getenv("DEVFLOW_FAKE_PG_DUMP_FAIL") != "" {
 		fmt.Fprintln(os.Stderr, "version mismatch")
 		os.Exit(42)
@@ -163,6 +175,7 @@ func runFakePGDump() {
 }
 
 func runFakePSQL() {
+	auditFakePostgresClient("psql")
 	if marker := os.Getenv("DEVFLOW_FAKE_PSQL_RECORD"); marker != "" {
 		if err := os.WriteFile(marker, []byte("ran\n"), 0o644); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -193,6 +206,34 @@ func runFakePSQL() {
 	if err := os.WriteFile(output+".url", []byte(os.Getenv("DATABASE_URL")), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+func auditFakePostgresClient(name string) {
+	path := os.Getenv("DEVFLOW_FAKE_PG_AUDIT")
+	if path == "" {
+		return
+	}
+	mode := "missing"
+	size := int64(-1)
+	if info, err := os.Stat(os.Getenv("PGPASSFILE")); err == nil {
+		mode = fmt.Sprintf("%03o", info.Mode().Perm())
+		size = info.Size()
+	}
+	line := fmt.Sprintf("%s|args=%s|database=%s|dev_database=%s|devflow_remote=%s|pgpassword=%s|pgpass_mode=%s|pgpass_size=%d\n",
+		name,
+		strings.Join(os.Args[1:], " "),
+		os.Getenv("DATABASE_URL"),
+		os.Getenv("DEV_DATABASE_URL"),
+		os.Getenv("DEVFLOW_REMOTE_DATABASE_URL"),
+		os.Getenv("PGPASSWORD"),
+		mode,
+		size,
+	)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err == nil {
+		_, _ = file.WriteString(line)
+		_ = file.Close()
 	}
 }
 

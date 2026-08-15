@@ -30,14 +30,15 @@ type PostgresComponent struct {
 }
 
 type PrismaComponent struct {
-	name          string
-	schemaPath    string
-	migrationsDir string
-	basePaths     []string
-	db            *PostgresComponent
-	sourcePolicy  SourcePolicy
-	sourceEnv     string
-	readyTimeout  time.Duration
+	name           string
+	schemaPath     string
+	migrationsDir  string
+	basePaths      []string
+	db             *PostgresComponent
+	sourcePolicy   SourcePolicy
+	sourceEnv      string
+	sourceStrategy PostgresClientStrategy
+	readyTimeout   time.Duration
 
 	clientTask       *project.TaskBuilder
 	migrationsTask   *project.TaskBuilder
@@ -159,6 +160,14 @@ func (p *PrismaComponent) CloneFromEnv(key string) *PrismaComponent {
 	return p
 }
 
+// CloneFromEnvContainerized clones through pg_dump and psql bundled in the
+// managed Postgres image, so the host only needs a working Docker Engine.
+func (p *PrismaComponent) CloneFromEnvContainerized(key string) *PrismaComponent {
+	p.sourceEnv = key
+	p.sourceStrategy = PostgresClientContainer
+	return p
+}
+
 func (p *PrismaComponent) ReadyTimeout(timeout time.Duration) *PrismaComponent {
 	p.readyTimeout = timeout
 	return p
@@ -200,6 +209,9 @@ func (p *PrismaComponent) Migrations(b *project.Builder) *project.TaskBuilder {
 			return nil
 		})
 	p.migrationsTask.RequiredCLIs(append([]string{"npx"}, p.sourceRequiredCLIs()...)...)
+	if p.sourceEnv != "" {
+		p.migrationsTask.RequiredEnv(p.sourceEnv)
+	}
 	return p.migrationsTask
 }
 
@@ -249,6 +261,9 @@ func (p *PrismaComponent) NewMigration(b *project.Builder) *project.TaskBuilder 
 			return nil
 		})
 	p.newMigrationTask.RequiredCLIs(append([]string{"npx"}, p.sourceRequiredCLIs()...)...)
+	if p.sourceEnv != "" {
+		p.newMigrationTask.RequiredEnv(p.sourceEnv)
+	}
 	p.registerMigrationAction(b)
 	return p.newMigrationTask
 }
@@ -299,10 +314,21 @@ func (p *PrismaComponent) bind(b *project.Builder) {
 
 func (p *PrismaComponent) sourceRequiredCLIs() []string {
 	if p.sourceEnv != "" {
+		if p.sourceStrategy == PostgresClientContainer {
+			return nil
+		}
 		return []string{"pg_dump", "psql"}
 	}
-	switch p.sourcePolicy.(type) {
-	case PostgresDumpSourcePolicy, *PostgresDumpSourcePolicy:
+	switch policy := p.sourcePolicy.(type) {
+	case PostgresDumpSourcePolicy:
+		if policy.ClientStrategy == PostgresClientContainer {
+			return nil
+		}
+		return []string{"pg_dump", "psql"}
+	case *PostgresDumpSourcePolicy:
+		if policy != nil && policy.ClientStrategy == PostgresClientContainer {
+			return nil
+		}
 		return []string{"pg_dump", "psql"}
 	default:
 		return nil
@@ -324,8 +350,9 @@ func (p *PrismaComponent) sourcePolicyForRuntime(rt *project.Runtime) SourcePoli
 		return nil
 	}
 	return PostgresDumpSourcePolicy{
-		PolicyName: "clone-" + strings.ToLower(p.name),
-		RemoteURL:  remote,
+		PolicyName:     "clone-" + strings.ToLower(p.name),
+		RemoteURL:      remote,
+		ClientStrategy: p.sourceStrategy,
 	}
 }
 

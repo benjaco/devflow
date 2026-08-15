@@ -47,14 +47,17 @@ For prerequisite checks, prefer the same target scope the agent will use for exe
 
 ```bash
 devflow doctor --target up --json
+devflow doctor --target up --strict --json
 devflow clis status --target up --json
 ```
 
-Target-scoped required CLI checks only include `RequiredCLIs` attached to the selected target and its task closure, so agents are not blocked by tools needed only for unrelated targets.
+Target-scoped checks include `RequiredCLIs` and `RequiredEnv` attached to the selected target and its task closure, plus project-wide required env, so agents are not blocked by prerequisites needed only for unrelated targets. Use `--strict` when a missing prerequisite should fail the agent step; Devflow still emits the complete JSON report before exiting nonzero.
 
 Avoid using attached `devflow run <service-target>` as an agent readiness gate. Attached service runs keep the terminal occupied until interrupted or until a service exits. For background development, use `devflow watch <target> --detach --json` and then `devflow flush <target> --json`; both talk to the worktree daemon. `devflow run <target> --ci --json` is finite and does not use the daemon; service tasks are started through readiness and then stopped before the command returns.
 
 For finite test/check targets that depend on services, use `devflow run <target> --ci --json` rather than plain `run`. Plain attached `run` is for keeping services alive in an operator terminal.
+
+In `--ci --json` mode, progress and task log lines stream to stderr and stdout remains exactly one final `RunResult`. On failure, inspect `error`, `failedNode`, `failedNodeLogPath`, and the bounded `logTail` first. The `nodes` array supplies every selected node's final run state and duration, including downstream nodes left pending after an upstream failure; cacheable nodes include hit/miss and key/read/write timing. A second `devflow logs` call is only needed when the tail is insufficient.
 
 When an agent changes `devflow.project.go` inputs, outputs, or dependency edges for a finite target, use the dedicated hardening surface:
 
@@ -69,3 +72,10 @@ Validation bypasses caches/stamps and runs tasks repeatedly in disposable worktr
 `AGENTS.md` documents repository rules for coding agents. Future milestones can add project skills under `agents/skills/`.
 
 For agents contributing to this repository, `docs_contributors/agent-memory.md` is shared long-term project memory. Read it before substantial work and update it when durable project context, mental models, or recurring constraints change.
+
+For CI cache integration, use the supported introspection commands instead of reconstructing keys or platform cache paths:
+
+```bash
+devflow cache path --json
+devflow cache key --target build --json
+```

@@ -2,8 +2,7 @@ package fsutil
 
 import (
 	"bytes"
-	"io"
-	"io/fs"
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,76 +13,17 @@ func Realpath(path string) (string, error) {
 }
 
 func RemoveIfExists(path string) error {
-	if _, err := os.Stat(path); err == nil {
-		return os.RemoveAll(path)
-	} else if os.IsNotExist(err) {
-		return nil
-	} else {
-		return err
-	}
+	return RemoveAllWritable(path)
 }
 
 func CopyFile(src, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	info, err := in.Stat()
-	if err != nil {
-		return err
-	}
-
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode())
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	if _, err := io.Copy(out, in); err != nil {
-		return err
-	}
-	return out.Close()
+	copier := NewCopier(CopyOptions{})
+	return copier.Copy(context.Background(), filepath.Dir(src), src, dst)
 }
 
 func CopyDir(src, dst string) error {
-	paths := make([]string, 0)
-	if err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		paths = append(paths, path)
-		return nil
-	}); err != nil {
-		return err
-	}
-	sort.Strings(paths)
-
-	for _, path := range paths {
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dst, rel)
-		info, err := os.Lstat(path)
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			if err := os.MkdirAll(target, info.Mode()); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := CopyFile(path, target); err != nil {
-			return err
-		}
-	}
-	return nil
+	copier := NewCopier(CopyOptions{})
+	return copier.Copy(context.Background(), src, src, dst)
 }
 
 func WriteEnvFile(path string, env map[string]string) error {

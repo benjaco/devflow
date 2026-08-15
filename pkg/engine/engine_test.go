@@ -62,6 +62,61 @@ func (testProject) Targets() []project.Target {
 	return []project.Target{{Name: "build", RootTasks: []string{"gen"}}}
 }
 
+type envPrecedenceProject struct{}
+
+func (envPrecedenceProject) Name() string { return "env-precedence-project" }
+
+func (envPrecedenceProject) ConfigureInstance(context.Context, string) (project.InstanceConfig, error) {
+	return project.InstanceConfig{
+		Label: "env-precedence",
+		Env: map[string]string{
+			"APP_VALUE":    "dotenv-default",
+			"DATABASE_URL": "postgres://dotenv/default",
+		},
+		Finalize: func(inst *api.Instance) error {
+			inst.Env["DATABASE_URL"] = "postgres://managed/runtime"
+			inst.Env["DEVFLOW_MANAGED"] = "managed"
+			return nil
+		},
+	}, nil
+}
+
+func (envPrecedenceProject) Tasks() []project.Task {
+	return []project.Task{{
+		Name:        "check",
+		Kind:        project.KindOnce,
+		RequiredEnv: []string{"APP_VALUE"},
+		Inputs:      project.Inputs{Env: []string{"DATABASE_URL"}},
+	}}
+}
+
+func (envPrecedenceProject) Targets() []project.Target {
+	return []project.Target{{Name: "check", RootTasks: []string{"check"}}}
+}
+
+func TestProcessEnvOverridesDefaultsAndManagedEnvWinsLast(t *testing.T) {
+	worktree := t.TempDir()
+	t.Setenv("APP_VALUE", "ci-process")
+	t.Setenv("DATABASE_URL", "postgres://ci/process")
+	eng, err := New(envPrecedenceProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := eng.Run(context.Background(), Request{Target: "check", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := outcome.Instance.Env["APP_VALUE"]; got != "ci-process" {
+		t.Fatalf("process env did not override dotenv/default value: %q", got)
+	}
+	if got := outcome.Instance.Env["DATABASE_URL"]; got != "postgres://managed/runtime" {
+		t.Fatalf("managed database URL did not win last: %q", got)
+	}
+	if got := outcome.Instance.Env["DEVFLOW_MANAGED"]; got != "managed" {
+		t.Fatalf("missing managed runtime value: %q", got)
+	}
+}
+
 func TestRunUsesCacheOnSecondExecution(t *testing.T) {
 	isolateEngineUserCache(t)
 	worktree := t.TempDir()
@@ -79,12 +134,50 @@ func TestRunUsesCacheOnSecondExecution(t *testing.T) {
 	if len(first.Result.CacheHits) != 0 {
 		t.Fatalf("unexpected cache hits on first run: %v", first.Result.CacheHits)
 	}
+	if len(first.Result.CacheMisses) != 1 || first.Result.CacheMisses[0] != "gen" || len(first.Result.Nodes) != 1 {
+		t.Fatalf("unexpected first-run cache result: %+v", first.Result)
+	}
+	if timing := first.Result.Nodes[0].Cache; timing == nil || timing.Outcome != "miss" || timing.TotalDurationMs <= 0 || first.Result.Nodes[0].State != api.StateDone || first.Result.Nodes[0].DurationMs <= 0 {
+		t.Fatalf("missing first-run node/cache timing: %+v", first.Result.Nodes[0])
+	}
 	second, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(second.Result.CacheHits) != 1 || second.Result.CacheHits[0] != "gen" {
 		t.Fatalf("unexpected cache hits on second run: %v", second.Result.CacheHits)
+	}
+	if len(second.Result.CacheMisses) != 0 || len(second.Result.Nodes) != 1 {
+		t.Fatalf("unexpected second-run cache result: %+v", second.Result)
+	}
+	if timing := second.Result.Nodes[0].Cache; timing == nil || timing.Outcome != "hit" || timing.TotalDurationMs <= 0 || second.Result.Nodes[0].State != api.StateCached || second.Result.Nodes[0].DurationMs <= 0 {
+		t.Fatalf("missing second-run node/cache timing: %+v", second.Result.Nodes[0])
+	}
+}
+
+func TestCacheKeyMatchesExecutionTaskKey(t *testing.T) {
+	isolateEngineUserCache(t)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := New(testProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyResult, err := eng.CacheKey(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keyResult.Key == "" || len(keyResult.TaskKeys) != 1 || keyResult.TaskKeys[0].Task != "gen" {
+		t.Fatalf("unexpected target cache key: %+v", keyResult)
+	}
+	outcome, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outcome.Result.Nodes) != 1 || outcome.Result.Nodes[0].LastRunKey != keyResult.TaskKeys[0].Key {
+		t.Fatalf("planned key does not match execution: planned=%+v run=%+v", keyResult, outcome.Result.Nodes)
 	}
 }
 

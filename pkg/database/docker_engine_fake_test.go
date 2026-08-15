@@ -17,6 +17,7 @@ import (
 type fakeDockerEngine struct {
 	runner        *fakeRunner
 	imageInspects map[string]int
+	execs         []dockerExecSpec
 }
 
 func newTestManager(runner *fakeRunner) *Manager {
@@ -133,8 +134,12 @@ func (e *fakeDockerEngine) WatchContainer(ctx context.Context, name string, onLi
 	return err
 }
 
-func (e *fakeDockerEngine) Exec(ctx context.Context, container string, command []string) ([]byte, error) {
-	return e.runner.CombinedOutput(ctx, "docker", append([]string{"exec", container}, command...)...)
+func (e *fakeDockerEngine) Exec(ctx context.Context, container string, spec dockerExecSpec) ([]byte, error) {
+	spec.Command = append([]string(nil), spec.Command...)
+	spec.Env = append([]string(nil), spec.Env...)
+	spec.Stdin = append([]byte(nil), spec.Stdin...)
+	e.execs = append(e.execs, spec)
+	return e.runner.CombinedOutput(ctx, "docker", append([]string{"exec", container}, spec.Command...)...)
 }
 
 func (e *fakeDockerEngine) InspectVolume(ctx context.Context, name string) (bool, error) {

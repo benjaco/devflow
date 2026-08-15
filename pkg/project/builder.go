@@ -22,8 +22,10 @@ type Builder struct {
 	defaultTarget  string
 	cacheNamespace string
 
-	requiredCLIs []RequiredCLI
-	requiredSeen map[string]bool
+	requiredCLIs    []RequiredCLI
+	requiredSeen    map[string]bool
+	requiredEnv     []string
+	requiredEnvSeen map[string]bool
 
 	env       map[string]string
 	dotenv    []string
@@ -79,12 +81,27 @@ func Define(fn ConfigureFunc) Project {
 
 func NewBuilder() *Builder {
 	return &Builder{
-		requiredSeen: map[string]bool{},
-		env:          map[string]string{},
-		portSeen:     map[string]bool{},
-		taskMap:      map[string]*TaskBuilder{},
-		actionMap:    map[string]*ActionBuilder{},
+		requiredSeen:    map[string]bool{},
+		requiredEnvSeen: map[string]bool{},
+		env:             map[string]string{},
+		portSeen:        map[string]bool{},
+		taskMap:         map[string]*TaskBuilder{},
+		actionMap:       map[string]*ActionBuilder{},
 	}
+}
+
+// RequiredEnv declares project-wide environment inputs. Prefer task-level
+// RequiredEnv when only a target subset needs a value.
+func (b *Builder) RequiredEnv(keys ...string) *Builder {
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" || b.requiredEnvSeen[key] {
+			continue
+		}
+		b.requiredEnv = append(b.requiredEnv, key)
+		b.requiredEnvSeen[key] = true
+	}
+	return b
 }
 
 func (b *Builder) Name(name string) *Builder {
@@ -238,6 +255,7 @@ func (b *Builder) Project() (Project, error) {
 		defaultTarget:  b.defaultTarget,
 		cacheNamespace: b.cacheNamespace,
 		requiredCLIs:   append([]RequiredCLI(nil), b.requiredCLIs...),
+		requiredEnv:    append([]string(nil), b.requiredEnv...),
 		dotenv:         append([]string(nil), b.dotenv...),
 		env:            cloneStringMap(b.env),
 		portNames:      append([]string(nil), b.portNames...),
@@ -430,6 +448,11 @@ func (t *TaskBuilder) RequiredCLIs(names ...string) *TaskBuilder {
 	return t
 }
 
+func (t *TaskBuilder) RequiredEnv(keys ...string) *TaskBuilder {
+	t.task.RequiredEnv = append(t.task.RequiredEnv, keys...)
+	return t
+}
+
 func (t *TaskBuilder) Inputs(items ...any) *TaskBuilder {
 	for _, item := range items {
 		t.addInput(item)
@@ -578,6 +601,7 @@ func (t *TaskBuilder) build(requiredCatalog map[string]bool) Task {
 	task := t.task
 	task.Deps = uniqueStrings(task.Deps)
 	task.RequiredCLIs = uniqueStrings(task.RequiredCLIs)
+	task.RequiredEnv = uniqueStrings(task.RequiredEnv)
 	if t.command.Name != "" {
 		if requiredCatalog[t.command.Name] {
 			task.RequiredCLIs = uniqueStrings(append(task.RequiredCLIs, t.command.Name))
@@ -642,6 +666,7 @@ type builtProject struct {
 	defaultTarget  string
 	cacheNamespace string
 	requiredCLIs   []RequiredCLI
+	requiredEnv    []string
 	dotenv         []string
 	env            map[string]string
 	portNames      []string
@@ -665,6 +690,10 @@ func (p builtProject) CacheNamespace() string {
 
 func (p builtProject) RequiredCLIs() []RequiredCLI {
 	return append([]RequiredCLI(nil), p.requiredCLIs...)
+}
+
+func (p builtProject) RequiredEnvs() []string {
+	return append([]string(nil), p.requiredEnv...)
 }
 
 func (p builtProject) Tasks() []Task {

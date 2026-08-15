@@ -78,6 +78,12 @@ type dockerBuildSpec struct {
 	Labels     map[string]string
 }
 
+type dockerExecSpec struct {
+	Command []string
+	Env     []string
+	Stdin   []byte
+}
+
 // dockerEngine is deliberately smaller than mobyclient.APIClient. Keeping SDK
 // types behind this boundary makes database behavior deterministic to unit
 // test and prevents the rest of the package from depending on Docker internals.
@@ -90,7 +96,7 @@ type dockerEngine interface {
 	StopContainer(context.Context, string, int) error
 	RemoveContainer(context.Context, string, bool) error
 	WatchContainer(context.Context, string, func(string, string)) error
-	Exec(context.Context, string, []string) ([]byte, error)
+	Exec(context.Context, string, dockerExecSpec) ([]byte, error)
 	InspectVolume(context.Context, string) (bool, error)
 	CreateVolume(context.Context, string) error
 	RemoveVolume(context.Context, string, bool) error
@@ -457,11 +463,13 @@ func (w *dockerLogLineWriter) emit(line []byte) {
 	}
 }
 
-func (e *sdkDockerEngine) Exec(ctx context.Context, containerName string, command []string) ([]byte, error) {
+func (e *sdkDockerEngine) Exec(ctx context.Context, containerName string, spec dockerExecSpec) ([]byte, error) {
 	created, err := e.client.ExecCreate(ctx, containerName, mobyclient.ExecCreateOptions{
+		AttachStdin:  spec.Stdin != nil,
 		AttachStdout: true,
 		AttachStderr: true,
-		Cmd:          append([]string(nil), command...),
+		Env:          append([]string(nil), spec.Env...),
+		Cmd:          append([]string(nil), spec.Command...),
 	})
 	if err != nil {
 		return nil, err
@@ -471,6 +479,19 @@ func (e *sdkDockerEngine) Exec(ctx context.Context, containerName string, comman
 		return nil, err
 	}
 	defer attached.Close()
+
+	stdinDone := make(chan error, 1)
+	if spec.Stdin != nil {
+		go func() {
+			_, writeErr := attached.Conn.Write(spec.Stdin)
+			if closeErr := attached.CloseWrite(); writeErr == nil {
+				writeErr = closeErr
+			}
+			stdinDone <- writeErr
+		}()
+	} else {
+		stdinDone <- nil
+	}
 
 	copyDone := make(chan struct{})
 	go func() {
@@ -484,8 +505,12 @@ func (e *sdkDockerEngine) Exec(ctx context.Context, containerName string, comman
 	var stderr bytes.Buffer
 	_, copyErr := stdcopy.StdCopy(&stdout, &stderr, attached.Reader)
 	close(copyDone)
+	stdinErr := <-stdinDone
 	if ctx.Err() != nil {
 		return combinedDockerOutput(stdout.Bytes(), stderr.Bytes()), ctx.Err()
+	}
+	if stdinErr != nil {
+		return combinedDockerOutput(stdout.Bytes(), stderr.Bytes()), fmt.Errorf("write Docker exec stdin: %w", stdinErr)
 	}
 	if copyErr != nil {
 		return combinedDockerOutput(stdout.Bytes(), stderr.Bytes()), copyErr
@@ -498,7 +523,7 @@ func (e *sdkDockerEngine) Exec(ctx context.Context, containerName string, comman
 	if inspected.ExitCode != 0 {
 		return output, &dockerExecError{
 			container: containerName,
-			command:   append([]string(nil), command...),
+			command:   append([]string(nil), spec.Command...),
 			exitCode:  inspected.ExitCode,
 			output:    output,
 		}

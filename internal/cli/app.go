@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -307,12 +308,24 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	if err != nil {
 		return err
 	}
-	outcome, runErr := eng.Run(context.Background(), engine.Request{
+	runCtx := context.Background()
+	progressCtx, stopProgress := context.WithCancel(context.Background())
+	var progressWG sync.WaitGroup
+	if mode == api.ModeCI && jsonOut {
+		progressWG.Add(1)
+		go func() {
+			defer progressWG.Done()
+			streamCIProgress(progressCtx, a.Stderr, eng.SubscribeEvents())
+		}()
+	}
+	outcome, runErr := eng.Run(runCtx, engine.Request{
 		Target:      resolvedTarget,
 		Worktree:    root,
 		Mode:        mode,
 		MaxParallel: maxParallel,
 	})
+	stopProgress()
+	progressWG.Wait()
 	if outcome != nil {
 		if jsonOut {
 			if err := writeJSON(a.Stdout, outcome.Result); err != nil {
@@ -323,6 +336,50 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 		_, _ = fmt.Fprintf(a.Stdout, "target=%s instance=%s success=%v cache_hits=%d\n", outcome.Result.Target, outcome.Result.InstanceID, outcome.Result.Success, len(outcome.Result.CacheHits))
 	}
 	return runErr
+}
+
+func streamCIProgress(ctx context.Context, out io.Writer, events <-chan api.Event) {
+	write := func(evt api.Event) {
+		switch evt.Type {
+		case api.EventRunStarted:
+			_, _ = fmt.Fprintf(out, "[devflow] run %s started\n", evt.Target)
+		case api.EventTaskState:
+			if evt.Error != "" {
+				_, _ = fmt.Fprintf(out, "[devflow] task %s: %s: %s\n", evt.Task, evt.State, evt.Error)
+			} else {
+				_, _ = fmt.Fprintf(out, "[devflow] task %s: %s\n", evt.Task, evt.State)
+			}
+		case api.EventCacheHit:
+			_, _ = fmt.Fprintf(out, "[devflow] cache %s: hit\n", evt.Task)
+		case api.EventCacheMiss:
+			_, _ = fmt.Fprintf(out, "[devflow] cache %s: miss\n", evt.Task)
+		case api.EventLogLine:
+			_, _ = fmt.Fprintf(out, "[devflow] %s %s: %s\n", evt.Task, evt.Stream, evt.Line)
+		case api.EventRunFinished:
+			_, _ = fmt.Fprintf(out, "[devflow] run %s finished success=%t\n", evt.Target, evt.Success != nil && *evt.Success)
+		}
+	}
+	for {
+		select {
+		case evt, ok := <-events:
+			if !ok {
+				return
+			}
+			write(evt)
+		case <-ctx.Done():
+			for {
+				select {
+				case evt, ok := <-events:
+					if !ok {
+						return
+					}
+					write(evt)
+				default:
+					return
+				}
+			}
+		}
+	}
 }
 
 func (a *App) runViaDaemon(target string, jsonOut bool, worktreeFlag, projectName string, detach bool, maxParallel int) error {
@@ -793,18 +850,93 @@ func (a *App) runAction(actionID, kind, component string, inputs map[string]stri
 
 func (a *App) cacheCmd(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: devflow cache <status|invalidate|gc>")
+		return fmt.Errorf("usage: devflow cache <status|key|path|invalidate|gc>")
 	}
 	switch args[0] {
 	case "status":
 		return a.cacheStatusCmd(args[1:])
+	case "key":
+		return a.cacheKeyCmd(args[1:])
+	case "path":
+		return a.cachePathCmd(args[1:])
 	case "invalidate":
 		return a.cacheInvalidateCmd(args[1:])
 	case "gc":
 		return a.cacheGCCmd(args[1:])
 	default:
-		return fmt.Errorf("usage: devflow cache <status|invalidate|gc>")
+		return fmt.Errorf("usage: devflow cache <status|key|path|invalidate|gc>")
 	}
+}
+
+func (a *App) cacheKeyCmd(args []string) error {
+	fs := flag.NewFlagSet("cache key", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	jsonOut := fs.Bool("json", false, "emit stable JSON output")
+	worktree := fs.String("worktree", "", "project worktree path")
+	projectName := fs.String("project", "", "project adapter name")
+	target := fs.String("target", "", "target or task whose cache key should be computed")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*target) == "" {
+		return fmt.Errorf("cache key requires --target")
+	}
+	root, err := resolveWorktree(*worktree)
+	if err != nil {
+		return err
+	}
+	p, err := resolvedProject(*projectName, root)
+	if err != nil {
+		return err
+	}
+	executionProject, resolvedTarget, err := project.ResolveExecutionProject(p, *target)
+	if err != nil {
+		return err
+	}
+	eng, err := engine.New(executionProject, root)
+	if err != nil {
+		return err
+	}
+	result, err := eng.CacheKey(context.Background(), engine.Request{Target: resolvedTarget, Worktree: root, Mode: api.ModeCI})
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return writeJSON(a.Stdout, result)
+	}
+	_, _ = fmt.Fprintln(a.Stdout, result.Key)
+	return nil
+}
+
+func (a *App) cachePathCmd(args []string) error {
+	fs := flag.NewFlagSet("cache path", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	jsonOut := fs.Bool("json", false, "emit stable JSON output")
+	worktree := fs.String("worktree", "", "project worktree path")
+	projectName := fs.String("project", "", "project adapter name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	root, err := resolveWorktree(*worktree)
+	if err != nil {
+		return err
+	}
+	p, err := resolvedProject(*projectName, root)
+	if err != nil {
+		return err
+	}
+	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p))
+	result := api.CachePathResult{
+		Project:       p.Name(),
+		Namespace:     store.Namespace,
+		CacheRoot:     instance.CacheRoot(),
+		NamespacePath: store.EntriesRoot(),
+	}
+	if *jsonOut {
+		return writeJSON(a.Stdout, result)
+	}
+	_, _ = fmt.Fprintln(a.Stdout, result.NamespacePath)
+	return nil
 }
 
 func (a *App) cacheStatusCmd(args []string) error {
@@ -1099,6 +1231,7 @@ func (a *App) doctorCmd(args []string) error {
 	worktree := fs.String("worktree", "", "")
 	projectName := fs.String("project", defaultProject(), "")
 	target := fs.String("target", "", "")
+	strict := fs.Bool("strict", false, "return a nonzero exit when any doctor check fails")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1117,10 +1250,15 @@ func (a *App) doctorCmd(args []string) error {
 	cliScope := "project"
 	resolvedTarget := ""
 	requiredCLIs := project.RequiredCLIsFor(p)
+	requiredEnv := project.RequiredEnvsFor(p)
 	executionProject := p
 	if strings.TrimSpace(*target) != "" {
 		cliScope = "target"
 		executionProject, resolvedTarget, requiredCLIs, err = requiredCLIsForTargetScope(p, *target)
+		if err != nil {
+			return err
+		}
+		requiredEnv, err = project.RequiredEnvsForTarget(executionProject, resolvedTarget)
 		if err != nil {
 			return err
 		}
@@ -1169,14 +1307,49 @@ func (a *App) doctorCmd(args []string) error {
 	} else if cliScope == "target" {
 		result.Checks = append(result.Checks, "required_clis: ok (0)")
 	}
+	if len(requiredEnv) > 0 {
+		cfg, cfgErr := executionProject.ConfigureInstance(context.Background(), root)
+		if cfgErr != nil {
+			return cfgErr
+		}
+		missing := make([]string, 0)
+		for _, key := range requiredEnv {
+			status := api.DoctorEnvStatus{Name: key}
+			if value, ok := os.LookupEnv(key); ok {
+				status.Source = "process"
+				status.Set = strings.TrimSpace(value) != ""
+			} else if strings.TrimSpace(cfg.Env[key]) != "" {
+				status.Source = "project"
+				status.Set = true
+			}
+			if !status.Set {
+				result.ChecksPassed = false
+				missing = append(missing, key)
+			}
+			result.RequiredEnv = append(result.RequiredEnv, status)
+		}
+		if len(missing) == 0 {
+			result.Checks = append(result.Checks, fmt.Sprintf("required_env: ok (%d)", len(requiredEnv)))
+		} else {
+			result.Warnings = append(result.Warnings, "missing required env: "+strings.Join(missing, ", "))
+		}
+	} else if cliScope == "target" {
+		result.Checks = append(result.Checks, "required_env: ok (0)")
+	}
 	if *jsonOut {
-		return writeJSON(a.Stdout, result)
+		if err := writeJSON(a.Stdout, result); err != nil {
+			return err
+		}
+	} else {
+		for _, check := range result.Checks {
+			_, _ = fmt.Fprintln(a.Stdout, check)
+		}
+		for _, warning := range result.Warnings {
+			_, _ = fmt.Fprintln(a.Stdout, "warning: "+warning)
+		}
 	}
-	for _, check := range result.Checks {
-		_, _ = fmt.Fprintln(a.Stdout, check)
-	}
-	for _, warning := range result.Warnings {
-		_, _ = fmt.Fprintln(a.Stdout, "warning: "+warning)
+	if *strict && !result.ChecksPassed {
+		return fmt.Errorf("doctor checks failed")
 	}
 	return nil
 }

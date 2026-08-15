@@ -82,7 +82,7 @@ func init() {
             Schema("prisma/schema.prisma").
             MigrationDir("prisma/migrations").
             Database(db).
-            CloneFromEnv("DEV_DATABASE_URL")
+            CloneFromEnvContainerized("DEV_DATABASE_URL")
 
         sqlc := b.Task("sqlc").
             Command("sqlc", "generate").
@@ -131,6 +131,7 @@ Important details:
 - Install/setup tasks such as `npm_install` should use `Stamp()` with local outputs like `node_modules` when they must run once per lockfile key without copying dependency folders into Devflow's global cache.
 - `unit.NoCache()` keeps tests as a live check even though they have declared inputs.
 - `database.Postgres("prisma")` defaults the snapshot directory; set `SnapshotRoot(...)` only when the default is wrong.
+- `CloneFromEnvContainerized(...)` uses the clients bundled in the managed Postgres image, so this example needs a reachable Docker Engine but not host `pg_dump`/`psql` binaries.
 
 ## Commands That Must Produce Files
 
@@ -262,6 +263,18 @@ Rules:
 - install scripts should be platform-specific and idempotent when practical
 - installers should leave the command actually available on `PATH`, because Devflow re-checks the command after install
 
+Declare required environment inputs separately from CLI tools:
+
+```go
+b.RequiredEnv("SHARED_API_TOKEN")
+
+deploy := b.Task("deploy").
+    RequiredEnv("DEPLOY_TOKEN").
+    Command("go", "run", "./cmd/deploy")
+```
+
+Project-wide requirements apply to every doctor scope. Task requirements apply only when that task is in the selected target closure. `devflow doctor --target deploy --strict --json` reports each required key with `set` and `source`, emits the complete JSON even when a key is missing, and exits nonzero on failed checks. `InputEnv(...)` still controls fingerprints/watch semantics; use `RequiredEnv(...)` when absence itself should be diagnosed before execution. Prisma `CloneFromEnv(...)` and `CloneFromEnvContainerized(...)` add their source URL key automatically.
+
 ## Dotenv Loading
 
 Adapters can load `.env` files through the builder.
@@ -299,11 +312,12 @@ return rt.RunCmdSpec(ctx, process.CommandSpec{
 This is important when a service target leases a dynamic runtime `PORT`, but unit tests expect a fixed port or no app server port at all.
 
 Recommended precedence:
-- `.env`
-- adapter defaults
+- persisted instance values as a recovery baseline
+- `.env` and adapter defaults
+- explicitly set invoking-process/CI values for project-declared env keys
 - devflow-owned runtime overrides
 
-Use dotenv values for normal app configuration, but keep leased ports, instance IDs, and per-instance DB URLs under devflow control.
+Use dotenv values for normal app configuration, but let CI/shell values override defaults. Devflow selects only keys referenced by project env, task `InputEnv`/`RequiredEnv`, or project-wide `RequiredEnv` rather than persisting the caller's entire environment. Leased ports, instance IDs, and per-instance DB URLs remain under devflow control and win last.
 
 ## Explicit Interactive Actions
 
@@ -426,6 +440,16 @@ policy := database.PostgresDumpSourcePolicy{
 ```
 
 The policy writes the dump to an owner-only temporary file and only invokes `psql` after `pg_dump` succeeds, so a `pg_dump` version mismatch is surfaced as a Devflow task failure instead of being masked by an empty successful restore. It executes both clients directly rather than through `sh`, keeping this path portable on macOS, Linux, and Windows. `CloneFromEnv(...)` adds `pg_dump` and `psql` to target-scoped required-CLI checks. In practice, use a host `pg_dump` whose major version matches the remote Postgres server; on Apple Silicon Homebrew installs the clients with `brew install libpq`, and `$(brew --prefix libpq)/bin` may need to be added to `PATH`.
+
+Both host commands receive password-free URLs plus PostgreSQL connection variables and a temporary owner-only `PGPASSFILE`; passwords do not appear in process arguments, and inherited PostgreSQL URL variables are sanitized. To avoid installing host libpq clients, select the clients bundled in the managed Postgres image:
+
+```go
+prisma := database.Prisma("prisma").
+    Database(database.Postgres("prisma")).
+    CloneFromEnvContainerized("DEV_DATABASE_URL")
+```
+
+The equivalent low-level policy sets `ClientStrategy: database.PostgresClientContainer`. It sends pgpass records only over Docker exec stdin and puts password-free URLs in exec metadata. This usually makes a running Docker Desktop/Engine sufficient. The remote hostname must be reachable from inside the managed container; a source URL pointing at host `localhost` needs a container-reachable hostname such as the platform's host gateway. Its `pg_dump` major follows the selected managed image, so choose an image compatible with the remote server or use the host-client strategy when another client version is required.
 
 It is not a "reset DB" operator action. The goal is to reuse the best compatible local state or rebuild a new base automatically.
 
@@ -653,7 +677,8 @@ Adapter rules exposed by validation:
 - different tasks must not own overlapping output paths
 - input/output declarations must be worktree-relative and cannot point into `.git` or `.devflow`
 - the worktree root cannot be an output
-- worktree-local symlinks are dereferenced; external symlinks are rejected
+- safe relative symlinks are preserved when their resolved target stays inside the source projection; absolute and external symlinks are rejected
+- projected/cache copies are bounded by entry and byte limits, so unexpectedly large trees fail with a path-specific error instead of expanding indefinitely
 - `Runtime.Mode` is `api.ModeValidation`, with `DEVFLOW_VALIDATION=1` and `DEVFLOW_VALIDATION_MODE` set for commands that need safe validation-specific behavior
 
 The sandbox covers worktree-relative filesystem access. It does not virtualize databases, network APIs, absolute paths, global tool caches, or background processes that a task starts without registering. Keep validation targets finite and externally safe to repeat. Artifact success proves explicit worktree input sufficiency for that run; it does not prove the declared input set is minimal.

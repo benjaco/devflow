@@ -58,6 +58,8 @@ type Result struct {
 	ExitCode int
 }
 
+const MaxOutputLineBytes = 4 << 20
+
 type Handle struct {
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
@@ -100,20 +102,32 @@ func Run(ctx context.Context, spec CommandSpec) (Result, error) {
 	}
 
 	var wg sync.WaitGroup
+	var scanErrs [2]error
 	wg.Add(2)
-	go scanStream(&wg, stdout, "stdout", writer, spec.OnLine)
-	go scanStream(&wg, stderr, "stderr", writer, spec.OnLine)
+	go func() {
+		defer wg.Done()
+		scanErrs[0] = scanStream(stdout, "stdout", writer, spec.OnLine)
+	}()
+	go func() {
+		defer wg.Done()
+		scanErrs[1] = scanStream(stderr, "stderr", writer, spec.OnLine)
+	}()
 
 	wg.Wait()
-	err = cmd.Wait()
+	waitErr := cmd.Wait()
+	streamErr := errors.Join(scanErrs[0], scanErrs[1])
+	err = waitErr
 	if err != nil {
 		if ctx.Err() != nil {
 			return Result{ExitCode: -1}, ctx.Err()
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return Result{ExitCode: exitErr.ExitCode()}, fmt.Errorf("%s exited with code %d", spec.Name, exitErr.ExitCode())
+			return Result{ExitCode: exitErr.ExitCode()}, errors.Join(fmt.Errorf("%s exited with code %d", spec.Name, exitErr.ExitCode()), streamErr)
 		}
-		return Result{}, err
+		return Result{}, errors.Join(err, streamErr)
+	}
+	if streamErr != nil {
+		return Result{}, streamErr
 	}
 	return Result{}, nil
 }
@@ -145,9 +159,16 @@ func Start(ctx context.Context, spec CommandSpec) (*Handle, error) {
 
 	waitCh := make(chan error, 1)
 	var wg sync.WaitGroup
+	var scanErrs [2]error
 	wg.Add(2)
-	go scanStream(&wg, stdout, "stdout", writer, spec.OnLine)
-	go scanStream(&wg, stderr, "stderr", writer, spec.OnLine)
+	go func() {
+		defer wg.Done()
+		scanErrs[0] = scanStream(stdout, "stdout", writer, spec.OnLine)
+	}()
+	go func() {
+		defer wg.Done()
+		scanErrs[1] = scanStream(stderr, "stderr", writer, spec.OnLine)
+	}()
 
 	handle := &Handle{
 		cmd:   cmd,
@@ -156,9 +177,10 @@ func Start(ctx context.Context, spec CommandSpec) (*Handle, error) {
 	}
 	go func() {
 		wg.Wait()
-		err := cmd.Wait()
+		waitErr := normalizeStopError(handle.stopRequestedValue(), cmd.Wait())
+		err := errors.Join(waitErr, scanErrs[0], scanErrs[1])
 		_ = closeWriter()
-		waitCh <- normalizeStopError(handle.stopRequestedValue(), err)
+		waitCh <- err
 		close(waitCh)
 	}()
 
@@ -241,9 +263,9 @@ func (h *Handle) WriteString(value string) error {
 	return err
 }
 
-func scanStream(wg *sync.WaitGroup, input io.Reader, stream string, writer io.Writer, onLine func(string, string)) {
-	defer wg.Done()
+func scanStream(input io.Reader, stream string, writer io.Writer, onLine func(string, string)) error {
 	scanner := bufio.NewScanner(input)
+	scanner.Buffer(make([]byte, 64*1024), MaxOutputLineBytes)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if onLine != nil {
@@ -253,6 +275,13 @@ func scanStream(wg *sync.WaitGroup, input io.Reader, stream string, writer io.Wr
 			_, _ = io.WriteString(writer, stream+": "+line+"\n")
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		// Scanner stops consuming after an oversized token. Drain the pipe so a
+		// verbose child cannot block forever while its parent waits for exit.
+		_, _ = io.Copy(io.Discard, input)
+		return fmt.Errorf("scan %s output: %w", stream, err)
+	}
+	return nil
 }
 
 func runInteractive(ctx context.Context, spec CommandSpec) (Result, error) {
@@ -541,8 +570,12 @@ func logWriter(path string, appendLog bool) (io.Writer, func() error, error) {
 	} else {
 		flags |= os.O_TRUNC
 	}
-	file, err := os.OpenFile(path, flags, 0o644)
+	file, err := os.OpenFile(path, flags, 0o600)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
 		return nil, nil, err
 	}
 	return &lockedWriter{w: file}, file.Close, nil

@@ -4,11 +4,70 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 
+	"github.com/benjaco/devflow/internal/fsutil"
 	"github.com/benjaco/devflow/pkg/project"
 )
+
+func TestSnapshotRestorePreservesReadOnlyPNPMDirectorySymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink fixture requires developer-mode symlink support")
+	}
+	worktree := t.TempDir()
+	t.Cleanup(func() { _ = fsutil.RemoveAllWritable(filepath.Join(worktree, "node_modules")) })
+	modules := filepath.Join(worktree, "node_modules")
+	pkg := filepath.Join(modules, ".pnpm", "pkg@1.0.0", "node_modules", "pkg")
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "index.js"), []byte("module.exports = 1\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(".pnpm", "pkg@1.0.0", "node_modules", "pkg"), filepath.Join(modules, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(pkg, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	task := project.Task{
+		Name:    "install",
+		Kind:    project.KindOnce,
+		Outputs: project.Outputs{Dirs: []string{"node_modules"}},
+	}
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	t.Cleanup(func() { _ = fsutil.RemoveAllWritable(cacheRoot) })
+	store := New(cacheRoot)
+	if _, err := store.Snapshot(worktree, task, "key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(modules); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := store.Restore(worktree, task.Name, "key"); err != nil || !ok {
+		t.Fatalf("restore ok=%v err=%v", ok, err)
+	}
+	info, err := os.Lstat(filepath.Join(modules, "pkg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("restored pnpm link was expanded: mode=%s", info.Mode())
+	}
+	if got, err := os.ReadFile(filepath.Join(modules, "pkg", "index.js")); err != nil || string(got) != "module.exports = 1\n" {
+		t.Fatalf("read restored linked package: %q, %v", got, err)
+	}
+	if info, err := os.Stat(filepath.Join(modules, ".pnpm", "pkg@1.0.0", "node_modules", "pkg")); err != nil {
+		t.Fatal(err)
+	} else if got := info.Mode().Perm(); got != 0o555 {
+		t.Fatalf("restored read-only package mode = %03o, want 555", got)
+	}
+}
 
 func TestSnapshotRestoreReplacesDeclaredOutputsOnly(t *testing.T) {
 	worktree := t.TempDir()

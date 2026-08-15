@@ -31,6 +31,7 @@ type Event struct {
 	Stream        string    `json:"stream,omitempty"`
 	Line          string    `json:"line,omitempty"`
 	CacheKey      string    `json:"cacheKey,omitempty"`
+	DurationMs    int64     `json:"durationMs,omitempty"`
 	PID           int       `json:"pid,omitempty"`
 	Files         []string  `json:"files,omitempty"`
 	AffectedTasks []string  `json:"affectedTasks,omitempty"`

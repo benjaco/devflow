@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/benjaco/devflow/internal/fsutil"
 	"github.com/benjaco/devflow/internal/pathspec"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/graph"
@@ -269,7 +270,7 @@ func hasPathPrefix(candidate, parent string) bool {
 }
 
 func clearSandbox(sandbox string) error {
-	if err := os.RemoveAll(sandbox); err != nil {
+	if err := fsutil.RemoveAllWritable(sandbox); err != nil {
 		return err
 	}
 	return os.MkdirAll(sandbox, 0o755)
@@ -281,6 +282,24 @@ func materializeTaskInputs(ctx context.Context, sourceRoot, sandbox string, task
 
 func materializeTaskInputsMatching(ctx context.Context, sourceRoot, sandbox string, task project.Task, accept func(string) bool) ([]string, error) {
 	materialized := map[string]bool{}
+	activeInputBase := ""
+	var include func(fsutil.CopyEntry) bool
+	include = func(entry fsutil.CopyEntry) bool {
+		rel := cleanSlash(entry.Path)
+		if rel == "" {
+			return true
+		}
+		dirRelative := ""
+		if activeInputBase != "" && rel != activeInputBase && hasPathPrefix(rel, activeInputBase) {
+			dirRelative = strings.TrimPrefix(rel, activeInputBase+"/")
+		}
+		included := !isReservedValidationPath(rel) && !ignoredInputPath(task.Inputs.Ignore, rel, dirRelative)
+		if included && !entry.Info.IsDir() {
+			materialized[rel] = true
+		}
+		return included
+	}
+	copier := fsutil.NewCopier(fsutil.CopyOptions{Include: include})
 	copyInput := func(value, inputBase string) error {
 		cleaned, err := cleanRelativePath(value)
 		if err != nil {
@@ -296,17 +315,8 @@ func materializeTaskInputsMatching(ctx context.Context, sourceRoot, sandbox stri
 			}
 			return err
 		}
-		filter := func(rel string, info fs.FileInfo) bool {
-			if isReservedValidationPath(rel) {
-				return false
-			}
-			dirRelative := ""
-			if inputBase != "" && rel != inputBase && hasPathPrefix(rel, inputBase) {
-				dirRelative = strings.TrimPrefix(rel, inputBase+"/")
-			}
-			return !ignoredInputPath(task.Inputs.Ignore, rel, dirRelative)
-		}
-		return copyPathRecursive(ctx, sourceRoot, full, filepath.Join(sandbox, filepath.FromSlash(cleaned)), cleaned, filter, materialized, 0)
+		activeInputBase = inputBase
+		return copier.Copy(ctx, sourceRoot, full, filepath.Join(sandbox, filepath.FromSlash(cleaned)))
 	}
 	for _, value := range task.Inputs.Paths {
 		if err := copyInput(value, cleanSlash(value)); err != nil {
@@ -382,23 +392,13 @@ func copyWorktreeForOrders(ctx context.Context, sourceRoot, sandbox string, outp
 	if err := clearSandbox(sandbox); err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(sourceRoot)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		rel := cleanSlash(entry.Name())
-		if isReservedValidationPath(rel) || anyOutputMatches(outputs, rel) {
-			continue
-		}
-		filter := func(candidate string, _ fs.FileInfo) bool {
-			return !isReservedValidationPath(candidate) && !anyOutputMatches(outputs, candidate)
-		}
-		if err := copyPathRecursive(ctx, sourceRoot, filepath.Join(sourceRoot, entry.Name()), filepath.Join(sandbox, entry.Name()), rel, filter, nil, 0); err != nil {
-			return err
-		}
-	}
-	return nil
+	copier := fsutil.NewCopier(fsutil.CopyOptions{
+		Include: func(entry fsutil.CopyEntry) bool {
+			candidate := cleanSlash(entry.Path)
+			return candidate == "" || !isReservedValidationPath(candidate) && !anyOutputMatches(outputs, candidate)
+		},
+	})
+	return copier.Copy(ctx, sourceRoot, sourceRoot, sandbox)
 }
 
 func materializeInPlaceInputs(ctx context.Context, sourceRoot, sandbox string, g *graph.Graph, order []string) error {
@@ -420,104 +420,24 @@ func materializeInPlaceInputs(ctx context.Context, sourceRoot, sandbox string, g
 
 func copyDirectoryContents(ctx context.Context, sourceRoot, destinationRoot string) ([]string, error) {
 	materialized := map[string]bool{}
-	entries, err := os.ReadDir(sourceRoot)
-	if err != nil {
+	if _, err := os.Stat(sourceRoot); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	for _, entry := range entries {
-		rel := cleanSlash(entry.Name())
-		if err := copyPathRecursive(ctx, sourceRoot, filepath.Join(sourceRoot, entry.Name()), filepath.Join(destinationRoot, entry.Name()), rel, nil, materialized, 0); err != nil {
-			return nil, err
-		}
+	copier := fsutil.NewCopier(fsutil.CopyOptions{
+		Include: func(entry fsutil.CopyEntry) bool {
+			if rel := cleanSlash(entry.Path); rel != "" && !entry.Info.IsDir() {
+				materialized[rel] = true
+			}
+			return true
+		},
+	})
+	if err := copier.Copy(ctx, sourceRoot, sourceRoot, destinationRoot); err != nil {
+		return nil, err
 	}
 	return sortedSet(materialized), nil
-}
-
-func copyPathRecursive(ctx context.Context, allowedRoot, source, destination, logicalRel string, include func(string, fs.FileInfo) bool, materialized map[string]bool, depth int) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if depth > 64 {
-		return fmt.Errorf("symlink recursion exceeded at %q", logicalRel)
-	}
-	info, err := os.Lstat(source)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		resolved, err := filepath.EvalSymlinks(source)
-		if err != nil {
-			return fmt.Errorf("resolve symlink %q: %w", logicalRel, err)
-		}
-		inside, err := pathInsideRoot(allowedRoot, resolved)
-		if err != nil {
-			return err
-		}
-		if !inside {
-			return fmt.Errorf("symlink %q resolves outside the worktree; validation will not copy external targets", logicalRel)
-		}
-		return copyPathRecursive(ctx, allowedRoot, resolved, destination, logicalRel, include, materialized, depth+1)
-	}
-	if include != nil && !include(logicalRel, info) {
-		return nil
-	}
-	if info.IsDir() {
-		if existing, err := os.Lstat(destination); err == nil && !existing.IsDir() {
-			if err := os.RemoveAll(destination); err != nil {
-				return err
-			}
-		}
-		if err := os.MkdirAll(destination, info.Mode().Perm()); err != nil {
-			return err
-		}
-		entries, err := os.ReadDir(source)
-		if err != nil {
-			return err
-		}
-		for _, entry := range entries {
-			childRel := cleanSlash(path.Join(logicalRel, entry.Name()))
-			if err := copyPathRecursive(ctx, allowedRoot, filepath.Join(source, entry.Name()), filepath.Join(destination, entry.Name()), childRel, include, materialized, depth); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("validation cannot copy special file %q (%s)", logicalRel, info.Mode())
-	}
-	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-		return err
-	}
-	if existing, err := os.Lstat(destination); err == nil && existing.IsDir() {
-		if err := os.RemoveAll(destination); err != nil {
-			return err
-		}
-	}
-	in, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(out, in)
-	closeErr := out.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	_ = os.Chtimes(destination, info.ModTime(), info.ModTime())
-	if materialized != nil {
-		materialized[logicalRel] = true
-	}
-	return nil
 }
 
 func pathInsideRoot(root, candidate string) (bool, error) {
@@ -684,12 +604,13 @@ func missingDeclaredOutputs(worktree string, task project.Task) ([]string, error
 }
 
 func archiveTaskOutputs(ctx context.Context, worktree, archiveRoot string, task project.Task) error {
-	if err := os.RemoveAll(archiveRoot); err != nil {
+	if err := fsutil.RemoveAllWritable(archiveRoot); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(archiveRoot, 0o755); err != nil {
 		return err
 	}
+	copier := fsutil.NewCopier(fsutil.CopyOptions{})
 	for _, spec := range taskOutputSpecs(task) {
 		source := filepath.Join(worktree, filepath.FromSlash(spec.path))
 		if _, err := os.Lstat(source); err != nil {
@@ -698,7 +619,7 @@ func archiveTaskOutputs(ctx context.Context, worktree, archiveRoot string, task 
 			}
 			return err
 		}
-		if err := copyPathRecursive(ctx, worktree, source, filepath.Join(archiveRoot, filepath.FromSlash(spec.path)), spec.path, nil, nil, 0); err != nil {
+		if err := copier.Copy(ctx, worktree, source, filepath.Join(archiveRoot, filepath.FromSlash(spec.path))); err != nil {
 			return err
 		}
 	}

@@ -155,6 +155,13 @@ func (p syntheticTargetProject) RequiredCLIs() []RequiredCLI {
 	}
 	return legacy.Dependencies()
 }
+func (p syntheticTargetProject) RequiredEnvs() []string {
+	provider, ok := p.base.(RequiredEnvProvider)
+	if !ok {
+		return nil
+	}
+	return provider.RequiredEnvs()
+}
 func (p syntheticTargetProject) Actions() []Action {
 	return Actions(p.base)
 }

@@ -248,6 +248,53 @@ func TestArtifactValidationMaterializesGlobsAndAppliesDirectoryIgnores(t *testin
 	}
 }
 
+func TestArtifactValidationPreservesInternalPNPMSymlinkGraph(t *testing.T) {
+	worktree := t.TempDir()
+	modules := filepath.Join(worktree, "node_modules")
+	pkg := filepath.Join(modules, ".pnpm", "pkg@1.0.0", "node_modules", "pkg")
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeValidationFile(t, pkg, "index.js", "module.exports = 1\n")
+	if err := os.Symlink(filepath.Join(".pnpm", "pkg@1.0.0", "node_modules", "pkg"), filepath.Join(modules, "pkg")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	p := validationTestProject{
+		name: "artifact-pnpm-symlinks",
+		tasks: []project.Task{{
+			Name:    "inspect",
+			Kind:    project.KindOnce,
+			Inputs:  project.Inputs{Dirs: []string{"node_modules"}},
+			Outputs: project.Outputs{Files: []string{"out.txt"}},
+			Run: func(_ context.Context, rt *project.Runtime) error {
+				info, err := os.Lstat(rt.Abs("node_modules/pkg"))
+				if err != nil {
+					return err
+				}
+				if info.Mode()&os.ModeSymlink == 0 {
+					return errors.New("pnpm package symlink was dereferenced")
+				}
+				data, err := os.ReadFile(rt.Abs("node_modules/pkg/index.js"))
+				if err != nil {
+					return err
+				}
+				return project.WriteFile(rt, "out.txt", data, 0o644)
+			},
+		}},
+		targets: []project.Target{{Name: "build", RootTasks: []string{"inspect"}}},
+	}
+	result := runValidation(t, p, worktree, api.ValidationModeArtifacts, DefaultMaxOrders)
+	if !result.Success {
+		t.Fatalf("expected pnpm projection success, got %+v", result)
+	}
+	if got := result.Artifacts.Tasks[0].MaterializedInputs; !reflect.DeepEqual(got, []string{
+		"node_modules/.pnpm/pkg@1.0.0/node_modules/pkg/index.js",
+		"node_modules/pkg",
+	}) {
+		t.Fatalf("unexpected materialized pnpm projection: %v", got)
+	}
+}
+
 func TestOrderValidationRunsEveryValidOrder(t *testing.T) {
 	worktree := t.TempDir()
 	p := independentOutputProject()

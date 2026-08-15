@@ -105,6 +105,28 @@ func TestPrismaComponentDefinesCommonTasksAndInstanceDB(t *testing.T) {
 	}
 }
 
+func TestPrismaComponentContainerizedCloneDoesNotRequireHostPostgresClients(t *testing.T) {
+	p := project.Define(func(ctx context.Context, b *project.Builder) error {
+		b.Name("demo")
+		prisma := Prisma("prisma").CloneFromEnvContainerized("DEV_DATABASE_URL")
+		migrations := prisma.Migrations(b)
+		b.Target("migrate", migrations)
+		return nil
+	})
+	task := taskByName(p.Tasks(), "prisma_migrations")
+	if !stringSliceContainsDatabaseTest(task.RequiredCLIs, "npx") {
+		t.Fatalf("expected Prisma CLI requirement, got %+v", task.RequiredCLIs)
+	}
+	for _, cli := range []string{"pg_dump", "psql", "docker"} {
+		if stringSliceContainsDatabaseTest(task.RequiredCLIs, cli) {
+			t.Fatalf("containerized clone must not require host %q executable: %+v", cli, task.RequiredCLIs)
+		}
+	}
+	if !stringSliceContainsDatabaseTest(task.RequiredEnv, "DEV_DATABASE_URL") {
+		t.Fatalf("expected source URL requirement, got %+v", task.RequiredEnv)
+	}
+}
+
 func TestPayloadCMSComponentDefinesMigrationTasks(t *testing.T) {
 	p := project.Define(func(ctx context.Context, b *project.Builder) error {
 		b.Name("payload-demo")

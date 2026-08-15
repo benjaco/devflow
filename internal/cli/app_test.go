@@ -51,7 +51,7 @@ func (failCLIProject) Tasks() []project.Task {
 			Kind: project.KindOnce,
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				_ = ctx
-				_ = rt
+				rt.EmitLogLine("stderr", "implementator failure details")
 				return fmt.Errorf("boom")
 			},
 		},
@@ -155,13 +155,13 @@ func (targetDepsCLIProject) Name() string { return "cli-target-deps-project" }
 func (targetDepsCLIProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
 	_ = ctx
 	_ = worktree
-	return project.InstanceConfig{Label: "cli-target-deps"}, nil
+	return project.InstanceConfig{Label: "cli-target-deps", Env: map[string]string{"UP_TOKEN": "dotenv-up"}}, nil
 }
 
 func (targetDepsCLIProject) Tasks() []project.Task {
 	return []project.Task{
-		{Name: "serve", Kind: project.KindOnce, RequiredCLIs: []string{"shell"}},
-		{Name: "deploy", Kind: project.KindOnce, RequiredCLIs: []string{"deploy-tool"}},
+		{Name: "serve", Kind: project.KindOnce, RequiredCLIs: []string{"shell"}, RequiredEnv: []string{"UP_TOKEN"}},
+		{Name: "deploy", Kind: project.KindOnce, RequiredCLIs: []string{"deploy-tool"}, RequiredEnv: []string{"DEV_DATABASE_URL"}},
 	}
 }
 
@@ -788,10 +788,29 @@ func TestUpgradePathWarningSkipsWhenInstalledBinaryIsOnPath(t *testing.T) {
 }
 
 func TestRunJSONStillReturnsExecutionError(t *testing.T) {
-	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: stderr}
 	err := app.Run([]string{"run", "build", "--json", "--ci", "--project", "cli-fail-project", "--worktree", t.TempDir()})
 	if err == nil {
 		t.Fatal("expected run command to return task failure even with --json")
+	}
+	var result api.RunResult
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+		t.Fatalf("decode failure JSON: %v\nstdout=%s\nstderr=%s", decodeErr, stdout.String(), stderr.String())
+	}
+	if result.Success || result.Error != "boom" || result.FailedNode != "fail" || result.FailedNodeLogPath == "" {
+		t.Fatalf("failure JSON lacks actionable details: %+v", result)
+	}
+	if len(result.Nodes) != 1 || result.Nodes[0].State != api.StateFailed || result.Nodes[0].DurationMs <= 0 {
+		t.Fatalf("failure JSON lacks per-node state/duration: %+v", result.Nodes)
+	}
+	if !strings.Contains(strings.Join(result.LogTail, "\n"), "implementator failure details") {
+		t.Fatalf("failure JSON lacks bounded log tail: %+v", result.LogTail)
+	}
+	progress := stderr.String()
+	if !strings.Contains(progress, "[devflow] run build started") || !strings.Contains(progress, "[devflow] task fail: failed: boom") || !strings.Contains(progress, "implementator failure details") {
+		t.Fatalf("CI JSON progress was not streamed to stderr: %s", progress)
 	}
 }
 
@@ -1026,6 +1045,9 @@ func TestDoctorTargetScopesDependencyChecks(t *testing.T) {
 	if !up.ChecksPassed || up.Target != "up" || up.CLIScope != "target" {
 		t.Fatalf("unexpected up doctor result: %+v", up)
 	}
+	if len(up.RequiredEnv) != 1 || up.RequiredEnv[0].Name != "UP_TOKEN" || !up.RequiredEnv[0].Set || up.RequiredEnv[0].Source != "project" {
+		t.Fatalf("unexpected up required env status: %+v", up.RequiredEnv)
+	}
 	if strings.Contains(strings.Join(up.Warnings, ","), "deploy-tool") || strings.Contains(strings.Join(up.Warnings, ","), "cloud") {
 		t.Fatalf("target-scoped doctor reported unrelated dependencies: %+v", up.Warnings)
 	}
@@ -1043,8 +1065,17 @@ func TestDoctorTargetScopesDependencyChecks(t *testing.T) {
 		t.Fatalf("expected deploy doctor to fail: %+v", deploy)
 	}
 	warnings := strings.Join(deploy.Warnings, "\n")
-	if !strings.Contains(warnings, "cloud") || !strings.Contains(warnings, "deploy-tool") || strings.Contains(warnings, "shell") {
+	if !strings.Contains(warnings, "cloud") || !strings.Contains(warnings, "deploy-tool") || !strings.Contains(warnings, "DEV_DATABASE_URL") || strings.Contains(warnings, "shell") || strings.Contains(warnings, "UP_TOKEN") {
 		t.Fatalf("unexpected deploy warnings: %+v", deploy.Warnings)
+	}
+	strictOut := &bytes.Buffer{}
+	app = &App{Stdout: strictOut, Stderr: &bytes.Buffer{}}
+	if strictErr := app.Run([]string{"doctor", "--strict", "--json", "--project", "cli-target-deps-project", "--target", "deploy", "--worktree", worktree}); strictErr == nil || !strings.Contains(strictErr.Error(), "doctor checks failed") {
+		t.Fatalf("expected strict doctor to exit nonzero after writing JSON, got %v", strictErr)
+	}
+	var strictResult api.DoctorResult
+	if err := json.Unmarshal(strictOut.Bytes(), &strictResult); err != nil || strictResult.ChecksPassed {
+		t.Fatalf("strict doctor did not preserve failure JSON: result=%+v err=%v", strictResult, err)
 	}
 }
 
@@ -1745,6 +1776,40 @@ func TestCacheStatusJSON(t *testing.T) {
 	}
 	if got := payload["namespace"]; got != "cli-task-target-project" {
 		t.Fatalf("unexpected cache namespace: %v", got)
+	}
+}
+
+func TestCacheKeyAndPathJSON(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "LocalAppData"))
+	worktree := t.TempDir()
+
+	keyOut := &bytes.Buffer{}
+	app := &App{Stdout: keyOut, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"cache", "key", "--target", "build", "--json", "--project", "cli-task-target-project", "--worktree", worktree}); err != nil {
+		t.Fatal(err)
+	}
+	var keyResult api.CacheKeyResult
+	if err := json.Unmarshal(keyOut.Bytes(), &keyResult); err != nil {
+		t.Fatal(err)
+	}
+	if keyResult.Key == "" || keyResult.Target != "build" || len(keyResult.TaskKeys) != 1 || keyResult.TaskKeys[0].Task != "gen" {
+		t.Fatalf("unexpected cache key result: %+v", keyResult)
+	}
+
+	pathOut := &bytes.Buffer{}
+	app = &App{Stdout: pathOut, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"cache", "path", "--json", "--project", "cli-task-target-project", "--worktree", worktree}); err != nil {
+		t.Fatal(err)
+	}
+	var pathResult api.CachePathResult
+	if err := json.Unmarshal(pathOut.Bytes(), &pathResult); err != nil {
+		t.Fatal(err)
+	}
+	if pathResult.CacheRoot != instance.CacheRoot() || pathResult.Namespace != "cli-task-target-project" || !strings.HasPrefix(pathResult.NamespacePath, pathResult.CacheRoot) {
+		t.Fatalf("unexpected cache path result: %+v", pathResult)
 	}
 }
 

@@ -30,6 +30,10 @@
 - GitHub Actions build/test workflow
 - supported Go 1.25 baseline with current-stable Linux compatibility, cross-platform quality/security checks, a Linux race-detector gate, and monthly dependency update checks
 - finite pipeline validation with projected input/output sandboxes and exhaustive dependency-valid sequential order execution
+- shared bounded cache/validation filesystem projection with read-only directory handling and safe internal symlink preservation
+- credential-safe host and containerized PostgreSQL clone clients
+- CI stderr progress plus self-contained failure JSON with node/cache timings and bounded log tails
+- target-scoped required-env doctor checks, explicit env precedence, cache key/path introspection, and long-line scanner hardening
 
 ## Next Milestones
 
@@ -63,8 +67,12 @@ The BikeCoach real-project integration moved the next focus from generic operato
 - Completed from Prisma/Postgres adoption test: Prisma migration inspection ignores `migration_lock.toml`, fresh schemas with models fail before smoke tests when no migrations exist, remote clone failures from `pg_dump` are not masked, `stop --all` stops the managed DB container, and first task errors are preserved over sibling cancellation noise.
 - Completed from Prisma/Postgres clean retry: first `flush` after `watch --detach` now periodically rewrites the sync sentinel while waiting so watcher startup scan races do not cause false ack timeouts.
 - Completed from reworked Prisma/Postgres setup feedback: the builder/component API is the preferred adapter shape, `prisma.NewMigration(b)` now reconciles the managed database before authoring so edited latest migrations do not force a manual reset, and docs clarify component task names, consumer-owned target names, `pg_dump` major-version compatibility, and stopped database metadata.
+- Completed from real-project CI/cache feedback: cache and validation now share a bounded copier that preserves safe relative links without expanding pnpm graphs, repairs read-only cleanup, and reports copy progress; CI JSON runs stream progress to stderr and return failure text/log context plus node/cache timing; scanner errors are propagated with a 4 MiB line bound.
+- Completed from real-project security/config feedback: PostgreSQL host clients use owner-only pgpass files and password-free arguments, containerized clients are available through `CloneFromEnvContainerized`, task/daemon/event logs are private, process env overrides dotenv defaults for declared keys while managed runtime values win last, and `RequiredEnv` plus `doctor --strict` makes missing inputs actionable.
+- Completed from real-project cache integration feedback: `cache key --target ... --json` and `cache path --json` expose the supported aggregate fingerprint and physical namespace path.
 - Completed from Delve research: first-class `GoDebugService` builds a stable debug binary with `go build -gcflags=all=-N -l`, runs `dlv exec` headless on a stable local debug port, exposes debug attach metadata in status JSON, participates in daemon/watch stop-rebuild-relaunch, and has fake `go`/`dlv` lifecycle coverage plus real Delve CI-mode smoke coverage installed in the OS matrix.
 - Accepted as immediate roadmap input: complete script-convergence docs, a full managed Postgres example, and fixed-port examples.
 - Reframed: "service target `run` returns after readiness" should not silently change attached `run` semantics. The current automation path is `watch --detach` plus `flush`; CI mode can probe readiness but stops services before returning.
 - Reframed: a fixed-port HTTP readiness helper should probably be part of broader env-aware readiness patterns rather than a BikeCoach-specific helper.
 - Deferred behind reliability work: fine-grained service restart/control, TUI restart/stop actions, MCP wrapper, and richer installer channels.
+- Optional publishing of Devflow-maintained multi-architecture PostGIS images remains deferred. The architecture-aware native arm64 build is correct and cached locally; publishing images adds registry ownership, release automation, provenance, and patch cadence that should be designed as a separate release concern.
