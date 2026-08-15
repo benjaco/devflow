@@ -14,6 +14,12 @@ Last updated: 2026-08-15
 
 ## Completed
 
+- CI portability follow-up for the adoption hardening:
+  - resolved Staticcheck S1021 in validation input projection
+  - registered CI progress subscriptions synchronously before execution so fast Linux targets cannot publish `run_started` before the subscriber exists
+  - made the fake Docker Engine parse Moby's exec-start JSON framing before attached stdin instead of relying on TCP packet timing
+  - passed both timing-sensitive regressions 100 consecutive times, focused race tests, the exact Staticcheck v0.7.0 command, and the full default/race/vet suites
+
 - Real-project adoption hardening:
   - replaced cache and validation copy implementations with one bounded, progress-reporting copier that preserves projection-internal relative symlinks, rejects external links/special files, stages directories writable before restoring final permissions, handles existing read-only parents, and repairs restrictive trees before cleanup
   - added read-only Go module and pnpm `.pnpm`-style symlink regressions plus cache/validation, external-link, limit, progress, and cleanup coverage

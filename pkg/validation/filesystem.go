@@ -283,8 +283,7 @@ func materializeTaskInputs(ctx context.Context, sourceRoot, sandbox string, task
 func materializeTaskInputsMatching(ctx context.Context, sourceRoot, sandbox string, task project.Task, accept func(string) bool) ([]string, error) {
 	materialized := map[string]bool{}
 	activeInputBase := ""
-	var include func(fsutil.CopyEntry) bool
-	include = func(entry fsutil.CopyEntry) bool {
+	include := func(entry fsutil.CopyEntry) bool {
 		rel := cleanSlash(entry.Path)
 		if rel == "" {
 			return true

@@ -222,17 +222,35 @@ func TestSDKDockerEngineExecSendsEnvironmentAndStdin(t *testing.T) {
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(response, `{"Id":"exec-id"}`)
 		case strings.HasSuffix(request.URL.Path, "/exec/exec-id/start"):
-			connection, _, err := response.(http.Hijacker).Hijack()
+			connection, buffered, err := response.(http.Hijacker).Hijack()
 			if err != nil {
 				t.Errorf("hijack exec stream: %v", err)
 				return
 			}
 			defer connection.Close()
-			if _, err := fmt.Fprint(connection, "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\nConnection: Upgrade\r\n\r\n"); err != nil {
+			// Moby writes the exec-start JSON on the connection being upgraded.
+			// Parse that value through the hijacker's buffered reader before
+			// treating the remaining bytes as attached stdin; TCP packet timing
+			// must not decide whether the JSON is mistaken for stdin.
+			decoder := json.NewDecoder(buffered.Reader)
+			var started containertypes.ExecStartRequest
+			if err := decoder.Decode(&started); err != nil {
+				t.Errorf("decode exec start request: %v", err)
+				return
+			}
+			if started.Detach || started.Tty {
+				t.Errorf("unexpected exec start request: %+v", started)
+				return
+			}
+			if _, err := fmt.Fprint(buffered.Writer, "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\nConnection: Upgrade\r\n\r\n"); err != nil {
 				t.Errorf("write exec upgrade response: %v", err)
 				return
 			}
-			payload, err := io.ReadAll(connection)
+			if err := buffered.Writer.Flush(); err != nil {
+				t.Errorf("flush exec upgrade response: %v", err)
+				return
+			}
+			payload, err := io.ReadAll(io.MultiReader(decoder.Buffered(), buffered.Reader))
 			if err != nil {
 				t.Errorf("read exec stdin: %v", err)
 				return

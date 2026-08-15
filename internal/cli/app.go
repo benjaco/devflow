@@ -312,10 +312,13 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	progressCtx, stopProgress := context.WithCancel(context.Background())
 	var progressWG sync.WaitGroup
 	if mode == api.ModeCI && jsonOut {
+		// Subscribe synchronously so a fast run cannot publish run_started
+		// before the progress goroutine has been scheduled.
+		progressEvents := eng.SubscribeEvents()
 		progressWG.Add(1)
 		go func() {
 			defer progressWG.Done()
-			streamCIProgress(progressCtx, a.Stderr, eng.SubscribeEvents())
+			streamCIProgress(progressCtx, a.Stderr, progressEvents)
 		}()
 	}
 	outcome, runErr := eng.Run(runCtx, engine.Request{
