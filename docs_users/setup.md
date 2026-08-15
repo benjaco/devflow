@@ -10,7 +10,7 @@ devflow docs development
 
 ## Prerequisites
 
-Install Go 1.25 or newer first. Devflow needs Go because project graph definitions are Go code.
+Install Go 1.26.6 or newer first. Devflow needs Go because project graph definitions are Go code.
 
 ```bash
 go install github.com/benjaco/devflow/cmd/devflow@latest

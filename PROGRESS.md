@@ -1,18 +1,24 @@
 # Progress
 
-Last updated: 2026-08-15
+Last updated: 2026-08-16
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: real-project adoption hardening is complete across filesystem projection/cache copying, PostgreSQL client security, actionable CI JSON/progress, prerequisite/env handling, cache introspection, long-line output, and containerized remote cloning; the per-worktree daemon remains the mutable dev/watch/operator control plane while `run --ci` remains direct and finite
-- Confidence: the full default and race suites, all example tests, vet, clean module metadata, formatting, and diff checks pass on native `darwin/arm64`; prior real native-ARM64 Docker/Postgres service, snapshot/restore, and PostgreSQL 16/17/18 PostGIS coverage remains current, while the new containerized clone path has deterministic Docker Engine API coverage without exposing credentials
+- State: real-project adoption hardening and the Go 1.26.6 security/toolchain upgrade are complete; the per-worktree daemon remains the mutable dev/watch/operator control plane while `run --ci` remains direct and finite
+- Confidence: under Go 1.26.6 the exact govulncheck v1.6.0 command reports no reachable vulnerabilities, and the full default/race suites, all example tests, vet, Staticcheck, clean module metadata, formatting, and diff checks pass on native `darwin/arm64`; prior real native-ARM64 Docker/Postgres service, snapshot/restore, and PostgreSQL 16/17/18 PostGIS coverage remains current
 
 ## In Progress
 
 - None.
 
 ## Completed
+
+- Go 1.26.6 security/toolchain upgrade:
+  - raised the module and generated project-local bootstrap minimum from Go 1.25 to Go 1.26.6
+  - pinned quality, cross-platform build/test, race, Docker e2e, and tag verification jobs to exact Go 1.26.6 while retaining the rolling stable compatibility lane
+  - updated contributor/user requirements and recorded the invariant that standard-library security gates require an explicit fixed patch rather than a floating patch selector
+  - confirmed the previously failing govulncheck v1.6.0 command reports no vulnerabilities, then passed the full default/race suites, vet, Staticcheck v0.7.0, tidy/format/diff checks, and builds under Go 1.26.6
 
 - CI portability follow-up for the adoption hardening:
   - resolved Staticcheck S1021 in validation input projection
@@ -750,7 +756,7 @@ Last updated: 2026-08-15
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
 - Convert bundled example adapters to the builder/component API so source examples match the new user-facing shape
 - Expand user docs/examples for script-to-Devflow convergence and fixed-port service guidance
-- Revisit the Go 1.25 minimum and pinned Delve line when the next stable Go release changes the supported-version window
+- Revisit the Go 1.26.6 minimum and pinned Delve line when Go 1.27 becomes the supported stable baseline
 - Add binary artifacts, npm/Homebrew/Scoop installers, or richer update channels later only if Go install stops being enough
 
 ## Deferred / Known Gaps

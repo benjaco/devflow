@@ -20,7 +20,7 @@ Read these first:
 
 ## Local Setup
 
-Devflow is a Go 1.25 project. Use the latest supported Go 1.25 patch release or newer.
+Devflow is a Go 1.26.6 project. Use Go 1.26.6 or newer.
 
 ```bash
 go test ./...
@@ -202,4 +202,4 @@ Update:
 devflow upgrade
 ```
 
-Push and pull-request validation runs quality/security checks, a Linux race-detector pass, Go 1.25 tests on Linux amd64, macOS 15 arm64, and Windows amd64, and a current-stable Go compatibility run on Linux. The matrix verifies its native architecture explicitly, making Apple Silicon a maintained CI target. Tag validation repeats the test/build workflow on all three operating systems. No binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable are part of round 1.
+Push and pull-request validation runs quality/security checks, a Linux race-detector pass, Go 1.26.6 tests on Linux amd64, macOS 15 arm64, and Windows amd64, and a rolling current-stable Go compatibility run on Linux. The matrix verifies its native architecture explicitly, making Apple Silicon a maintained CI target. Tag validation repeats the test/build workflow on all three operating systems. No binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable are part of round 1.

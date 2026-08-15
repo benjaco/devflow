@@ -25,7 +25,7 @@ Keep these separate when adding docs. Project adopters should not need contribut
 
 ## Install
 
-Devflow requires Go 1.25 or newer because project graph definitions are Go code.
+Devflow requires Go 1.26.6 or newer because project graph definitions are Go code.
 
 ```bash
 go install github.com/benjaco/devflow/cmd/devflow@latest
