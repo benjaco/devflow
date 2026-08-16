@@ -4,20 +4,39 @@ This is the adapter API guide for project owners who already understand the adop
 
 If you are adding Devflow to a project for the first time, start with `devflow docs setup`. If you are changing Devflow itself, use `docs_contributors/README.md`.
 
-Projects integrate with Devflow through the builder API in a project-local `devflow.project.go`.
+Projects integrate with Devflow through the builder API in project-root Go adapter sources.
 
 Current runtime model:
+
 - the project repo owns `./devflow.project.go`
-- `devflow` compiles that file together with the core CLI into a worktree-local binary
+- `devflow.project.go` is the mandatory marker and entrypoint
+- regular root-level files matching `devflow_*.go` are optional companion sources
+- every `devflow_*_test.go` file is excluded from the runtime build and remains an ordinary Go test
+- `devflow` compiles the discovered adapter sources together with the core CLI into a worktree-local binary
 - `devflow` then transfers execution into that local binary
 - there is currently no built-in adapter fallback
 
-Current first-version constraint:
-- `devflow.project.go` must be self-contained
-- use `package main`
+Adapter source contract:
+
+- use `package main` in the entrypoint and every companion
 - register the project in `init()`
 - importing `github.com/benjaco/devflow/pkg/...` and standard library packages is supported
-- arbitrary companion Go files from the project repo are not loaded yet
+- companions are opt-in by the exact `devflow_*.go` filename convention and must stay beside the entrypoint at the worktree root
+- nested files, arbitrary sibling Go files, symlinks, directories, and special files are not loaded
+- existing adapters containing only `devflow.project.go` continue unchanged
+
+Recommended larger-adapter layout:
+
+```text
+devflow.project.go       # small required entrypoint and project registration
+devflow_shared.go        # shared constants, environment, helpers
+devflow_frontend.go      # frontend tasks and services
+devflow_backend.go       # backend and database tasks
+devflow_ci.go            # CI, deployment, and E2E targets
+devflow_watch_test.go    # normal Go test; excluded from runtime bootstrap
+```
+
+Filenames participate in the local CLI content key. Adding, removing, renaming, or editing a companion rebuilds the CLI; timestamp-only changes do not. Changes to excluded tests or unrelated root Go files also do not rebuild it.
 
 An adapter defines:
 - tasks and services

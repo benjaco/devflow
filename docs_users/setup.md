@@ -32,7 +32,7 @@ For testing a freshly pushed commit before the public Go proxy catches up, use `
 
 ## Setup Mental Model
 
-Devflow runs a Go-defined development graph that lives in the project repo as `devflow.project.go`.
+Devflow runs a Go-defined development graph whose required entrypoint is the project-root `devflow.project.go`.
 
 The project owns:
 - task names and commands
@@ -50,7 +50,7 @@ Devflow owns:
 - flush readiness coordination
 - instance state, logs, ports, and JSON surfaces
 
-Keep project-specific behavior in `devflow.project.go`. Do not add project-specific paths or framework assumptions to Devflow core packages.
+Keep project-specific behavior in `devflow.project.go` and optional project-root `devflow_*.go` companions. Do not add project-specific paths or framework assumptions to Devflow core packages.
 
 ## Add Devflow To A Repo
 
@@ -88,6 +88,19 @@ func init() {
 ```
 
 Replace the `check` command with a real project command once the bootstrap works.
+
+Existing single-file adapters require no migration. When the adapter grows, split it using the explicit companion convention:
+
+```text
+devflow.project.go       # small required entrypoint and project registration
+devflow_shared.go        # shared constants, environment, helpers
+devflow_frontend.go      # frontend tasks and services
+devflow_backend.go       # backend and database tasks
+devflow_ci.go            # CI, deployment, and E2E targets
+devflow_watch_test.go    # normal Go test; excluded from runtime bootstrap
+```
+
+All runtime adapter files must use `package main` and stay in the worktree root. Devflow loads only the required entrypoint plus regular root files named `devflow_*.go`; it excludes every `devflow_*_test.go`, does not scan subdirectories, and does not include unrelated sibling Go files.
 
 ## Design The Graph
 
@@ -428,7 +441,10 @@ The JSON result includes `requiredEnv` entries with their set state and source. 
 ## What To Commit
 
 Commit:
+
 - `devflow.project.go`
+- optional root-level `devflow_*.go` adapter companions
+- ordinary `devflow_*_test.go` adapter tests when the project uses them
 - project files referenced by task inputs
 - generated source only if your project normally commits it
 - docs explaining your project targets

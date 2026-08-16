@@ -1689,11 +1689,11 @@ func TestBootstrapFailedRebuildKeepsPreviousBinary(t *testing.T) {
 }
 
 func TestEnsureLocalProjectBinarySerializesConcurrentBuilds(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake go helper uses a POSIX shell script")
-	}
 	worktree := t.TempDir()
 	writeLocalProjectFile(t, worktree, localProjectSource("local-concurrent-project", "up"))
+	if err := os.WriteFile(filepath.Join(worktree, "devflow_shared.go"), []byte("package main\n\nconst localConcurrentCompanion = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	repoRoot, err := repoRoot()
 	if err != nil {
 		t.Fatal(err)

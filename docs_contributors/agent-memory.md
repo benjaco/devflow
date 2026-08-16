@@ -39,7 +39,7 @@ Use this memory together with the subsystem docs. When a change affects one of t
 
 ## Working Mindset
 
-- Keep the core generic. Project-specific behavior belongs in adapters, examples, or project-local `devflow.project.go` files.
+- Keep the core generic. Project-specific behavior belongs in adapters, examples, or project-local `devflow.project.go` plus explicitly named `devflow_*.go` companion files.
 - Keep documentation split into contributor docs and scoped user docs. User docs are further split into setup/pipeline context and day-to-day development/operator context so agents do not have to ingest both.
 - Preserve stable JSON output for every user-facing command except `devflow docs setup` and `devflow docs development`, which intentionally print scoped plain bundled user Markdown only. Bare `devflow docs` should stay a usage error to prevent context-heavy all-doc dumps.
 - Treat worktrees as the isolation boundary.
@@ -49,7 +49,8 @@ Use this memory together with the subsystem docs. When a change affects one of t
 - Go 1.26.6 is the supported minimum. Default CI pins Go 1.26.6 on Linux amd64, macOS 15 arm64, and Windows amd64, asserts each native host architecture, retains a rolling current-stable compatibility lane on Linux, runs the race detector on Linux, and enforces formatting, tidy module metadata, vet, Staticcheck, and govulncheck. Pin the supported patch rather than using `1.26.x`: security scans analyze the selected standard library, and a floating selector can lag a newly fixed patch in the setup-go manifest/cache. Keep tests and helpers portable by default: use generated Go helper binaries instead of Unix shell-script fake tools, add `.exe` to built helper paths on Windows, put platform-specific process/lock behavior behind build-tagged files, and use structured encoders for JSON fixtures containing filesystem paths.
 - On Windows, every copied or generated executable path under `.devflow/bin` must include the `.exe` suffix, including worktree-local `devflow-local` and daemon helper binaries. Building a PE file to an extensionless path is not enough for reliable `os/exec` startup.
 - Cross-platform tests that assert cache miss/hit counts must isolate all OS cache env vars they depend on: `HOME`, `XDG_CACHE_HOME`, and `LOCALAPPDATA`. Windows `os.UserCacheDir()` uses `LOCALAPPDATA`, so setting only `HOME` can leak task cache state between tests or CI attempts.
-- Source-local bootstrap must not require a project `devflow.project.go` to be relative to the Devflow source checkout. On Windows, temp worktrees can be on a different volume than the repo, so local build hashing needs a stable external source label instead of failing `filepath.Rel`.
+- Source-local bootstrap must not require project adapter sources to be relative to the Devflow source checkout. On Windows, temp worktrees can be on a different volume than the repo, so local build hashing needs a stable external source label instead of failing `filepath.Rel`.
+- Multi-file adapter bootstrap is intentionally filename-scoped, not Go-package discovery: require `devflow.project.go`, then include only sorted regular root-level `devflow_*.go` files, excluding every `_test.go`. Hash both source labels and contents, rediscover after `localbuild.lock`, and copy that exact set into the reconstructed module. Never recursively scan, follow matching symlinks, or absorb unrelated root Go files.
 - Windows cannot replace the current process with `syscall.Exec`. Local-project bootstrap on Windows must run the worktree-local binary as a child and exit with the child's code, while Unix can keep using process replacement.
 - Windows process cleanup must terminate process trees, not only the immediate parent process. Service tasks and `go run`-style helpers can leave children holding stdout/stderr pipes and task log files open if only the parent is killed, which breaks watch settling and temp-dir cleanup.
 - Keep instance env explicit, layered, and persisted. Persisted state is a recovery baseline, project dotenv/static env supplies defaults, explicitly declared invoking-process values override those defaults, and Devflow-managed IDs/ports/database URLs win last. Select only project-relevant process keys (`InputEnv`, `RequiredEnv`, or configured env); never persist the caller's whole environment.
@@ -88,8 +89,10 @@ Use this memory together with the subsystem docs. When a change affects one of t
 Devflow is now beyond the initial bootstrap. The core includes graph validation, fingerprinting, snapshot caching, process supervision, instance and port state, bounded parallel engine scheduling, typed events, finite artifact/order pipeline validation, a per-worktree daemon, polling watch mode, flush readiness coordination, required CLI checks/installers, interactive prompt plumbing, a TUI, first-class Go debug services, and Docker-backed Postgres runtime helpers.
 
 Runtime adapters are project-local:
+
 - installed `devflow` or the repo-level source launcher builds/uses the bootstrap binary
 - a selected worktree must contain `devflow.project.go`
+- optional regular root-level `devflow_*.go` companions compile with the entrypoint as `package main`; `devflow_*_test.go` and unrelated Go files stay outside the runtime adapter
 - the bootstrap CLI compiles `<worktree>/.devflow/bin/devflow-local`
 - project-local binary stale checks and rebuilds are serialized by `<worktree>/.devflow/localbuild.lock`
 - the repo-local launcher rebuilds its source binary from a content build key rather than file mtimes

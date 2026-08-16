@@ -12,7 +12,7 @@ It gives a project a small Go-defined task graph with:
 - `devflow flush --json` as an AI readiness gate
 - stable JSON output for humans, CI, and coding agents
 
-Devflow stays generic. Project-specific behavior belongs in the project-owned `devflow.project.go` file or in example adapters, not in the core packages.
+Devflow stays generic. Project-specific behavior belongs in the project-owned Go adapter sources or in example adapters, not in the core packages.
 
 ## Documentation
 
@@ -53,7 +53,7 @@ There are no release binaries, npm package, Homebrew tap, or installer scripts y
 
 This is the short path for adding Devflow to another project. The longer setup guide is available through `devflow docs setup`.
 
-In the project you want Devflow to run, add a self-contained `devflow.project.go` file:
+In the project you want Devflow to run, add `devflow.project.go`:
 
 ```go
 package main
@@ -79,6 +79,17 @@ func init() {
 
 Replace the `check` task command with the project command you actually want, such as `go test ./...`, `npm test`, or a service start command.
 
+Small adapters can remain in that one file. Larger adapters may opt into root-level `devflow_*.go` companions, all using `package main`:
+
+```text
+devflow.project.go       # small required entrypoint and project registration
+devflow_shared.go        # shared constants, environment, helpers
+devflow_frontend.go      # frontend tasks and services
+devflow_backend.go       # backend and database tasks
+devflow_ci.go            # CI, deployment, and E2E targets
+devflow_watch_test.go    # normal Go test; excluded from runtime bootstrap
+```
+
 Then run:
 
 ```bash
@@ -100,10 +111,11 @@ Bare `devflow` inside a project worktree starts the default target detached when
 ## Project Model
 
 Current project-local constraints:
+
 - the project repo owns `./devflow.project.go`
-- the file must use `package main`
-- the file must register a project in `init()`
-- the file must be self-contained; arbitrary companion Go files are not loaded yet
+- `devflow.project.go` remains the mandatory marker and normally registers the project in `init()`
+- root-level `devflow_*.go` files are optional companions; every adapter source must use `package main`
+- `devflow_*_test.go`, unrelated sibling Go files, nested directories, and symlinks are not loaded into the runtime adapter
 - importing `github.com/benjaco/devflow/pkg/...` and standard library packages is supported
 
 When Devflow sees `devflow.project.go`, it compiles a worktree-local CLI into:
@@ -118,7 +130,7 @@ Generated build modules live under:
 <worktree>/.devflow/localbuild/<hash>/
 ```
 
-Commit `devflow.project.go`. Do not commit `.devflow/`.
+Commit `devflow.project.go` and any `devflow_*.go` companions. Keep ordinary `devflow_*_test.go` adapter tests in the repo as usual. Do not commit `.devflow/`.
 
 ## Common Commands
 

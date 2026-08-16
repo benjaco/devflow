@@ -5,7 +5,7 @@ Last updated: 2026-08-16
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: Windows timing accounting and structured detached-flush failure hardening are complete
+- State: deterministic multi-file worktree-local Go project adapters are complete
 - Confidence: under Go 1.26.6 the full default/race suites, focused copier/database/cache/engine/validation/CLI suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, and Linux/Windows amd64/arm64 builds pass on `darwin/arm64`; Docker-backed database tests were invoked but skipped because Docker Desktop was not running
 
 ## In Progress
@@ -13,6 +13,13 @@ Last updated: 2026-08-16
 - None.
 
 ## Completed
+
+- Multi-file project-local Go adapters:
+  - added one deterministic discovery contract that requires regular `devflow.project.go`, returns it first, includes sorted regular root-level `devflow_*.go` companions, excludes `_test.go` and unrelated/nested Go files, and rejects matching directories, symlinks, and special files with path-specific errors
+  - bound every included filename and content to both pre-lock and post-lock build-key calculations, then copied the exact post-lock source set into a reconstructed generated module without weakening localbuild locking, stale checks, atomic binary publication, failed-build preservation, or Windows suffix behavior
+  - added compiled-bootstrap coverage for a graph assembled across entry/shared/frontend/backend/CI files, companion edit/add/remove/rename rebuilds, timestamp/excluded-file reuse, generated-source cleanup, failed companion compilation, external worktrees, and portable concurrent callers plus focused non-regular discovery tests
+  - documented the recommended adapter layout and exact filename/package/test contract across the README, setup, adapter, architecture, testing, and shared agent-memory docs
+  - passed focused tests 50 times, compiled-bootstrap lifecycle tests five times, focused and full race coverage, full default and shuffled CLI suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean formatting/tidy/diff/workflow checks, Windows test compilation, version smoke, and Linux/Windows amd64/arm64 builds
 
 - Windows cache-manifest timing and detached-flush diagnostics:
   - completed zero-tick and sub-millisecond measurements now report 1 ms, preserving zero for negative/invalid durations and preventing coarse Windows clocks from erasing manifest-validation timing

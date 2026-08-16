@@ -53,7 +53,7 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - scoped docs command coverage for `devflow docs setup`, `devflow docs development`, and the bare `devflow docs` usage error
 - CLI help coverage for important `run` flags such as `--ci`, `--detach`, and `--watch`
 - Go-first release command coverage for `version` and `upgrade`, with `upgrade` tested through a delayed fake `go` executable on `PATH` to prove child output is observable before completion and JSON stdout stays machine-clean
-- installed/source bootstrap coverage for generated local modules, source `replace` directives, project-file rebuilds, stable binary reuse, and concurrent localbuild serialization
+- installed/source bootstrap coverage for generated local modules, source `replace` directives, single- and multi-file project adapters, deterministic companion discovery/copying, add/edit/remove/rename build-key invalidation, timestamp/test/unrelated-file exclusions, rejected non-regular matches, failed-build binary preservation, external-worktree/Windows paths, and portable concurrent localbuild serialization
 - global cache coverage for the single OS user cache root and project cache namespaces
 - required CLI detection, target-scoped required CLI selection, project/task required-env selection, doctor source reporting/strict failure, and platform-script install coverage in `pkg/project` and `internal/cli`
 - engine-level interactive prompt event plus answer-file integration coverage

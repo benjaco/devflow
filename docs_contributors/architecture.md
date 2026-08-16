@@ -24,11 +24,15 @@
 Runtime project configuration is now project-local.
 
 Flow:
+
 - the installed `devflow` binary, or the repo-level `devflow` launcher during source development, looks for `./devflow.project.go` in the selected project worktree
 - if the file is missing, the command fails
-- if the file exists, the bootstrap CLI compiles a worktree-local full CLI binary
+- if the file exists, the bootstrap CLI discovers it first plus lexically sorted, regular root-level `devflow_*.go` companions; `devflow_*_test.go`, unrelated Go files, nested files, and non-regular matches are excluded or rejected as appropriate
+- the bootstrap CLI compiles that ordered source set into a worktree-local full CLI binary
 - stale checks and rebuilds are guarded by a per-worktree lock at `<worktree>/.devflow/localbuild.lock`; commands that waited for another builder re-check the build key before compiling
 - execution is then transferred into that compiled local binary for all normal commands
+
+`localProjectSourceFiles` owns the adapter discovery contract. Every adapter filename/source label and its contents participate in the content key along with the existing Devflow version/bootstrap inputs. Discovery happens again after acquiring the localbuild lock, and that exact post-lock ordered adapter set is copied into the reconstructed generated module. This preserves add/remove/rename invalidation, stable timestamp-only reuse, serialized builds, and removal of stale companions.
 
 The worktree does not have to live under the Devflow source checkout. Source-local bootstrap hashes repo sources relative to the checkout when possible, and hashes external project files with stable external labels so Windows temp worktrees on another drive still build.
 
@@ -51,10 +55,12 @@ replace github.com/benjaco/devflow => <devflow-source-root>
 
 in that generated module, preserving fast local iteration without requiring a released tag for every source change.
 
-Current first-version constraint:
-- `devflow.project.go` is compiled as a self-contained `package main` file
-- the project should register itself in `init()`
-- this version does not yet load arbitrary companion adapter Go files from the project repo
+Project-source constraint:
+
+- `devflow.project.go` remains the required marker and normally registers the project in `init()`
+- it and every optional root-level `devflow_*.go` companion compile together as `package main`
+- `_test.go` companions remain normal project tests and are not copied into the runtime adapter module
+- arbitrary sibling Go files and recursive adapter directories are deliberately outside the loader contract
 
 This model intentionally avoids:
 - built-in runtime adapter registries

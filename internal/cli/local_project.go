@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/benjaco/devflow/internal/lock"
@@ -41,8 +42,10 @@ func shouldExecLocalProject(args []string) bool {
 	if err != nil {
 		return false
 	}
-	info, err := os.Stat(filepath.Join(worktree, localProjectFile))
-	return err == nil && !info.IsDir()
+	// Any filesystem object at the marker path enters bootstrap validation so a
+	// directory, symlink, or special file produces the precise source error.
+	_, err = os.Lstat(filepath.Join(worktree, localProjectFile))
+	return err == nil
 }
 
 func (a *App) execLocalProject(args []string) error {
@@ -90,17 +93,6 @@ func worktreeFromArgs(args []string) (string, error) {
 
 func ensureLocalProjectBinary(bootstrapRoot, worktree string) (string, error) {
 	projectPath := filepath.Join(worktree, localProjectFile)
-	info, err := os.Stat(projectPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("%s not found in %s", localProjectFile, worktree)
-		}
-		return "", err
-	}
-	if info.IsDir() {
-		return "", fmt.Errorf("%s in %s is a directory, expected a Go source file", localProjectFile, worktree)
-	}
-
 	target := filepath.Join(worktree, ".devflow", "bin", "devflow-local"+localProjectBinarySuffix())
 	buildKey, err := localBuildKey(bootstrapRoot, projectPath)
 	if err != nil {
@@ -118,7 +110,7 @@ func ensureLocalProjectBinary(bootstrapRoot, worktree string) (string, error) {
 		return "", err
 	}
 	defer lockFile.Release()
-	buildKey, err = localBuildKey(bootstrapRoot, projectPath)
+	buildKey, projectSources, err := localBuildKeyForBuild(bootstrapRoot, projectPath)
 	if err != nil {
 		return "", err
 	}
@@ -129,7 +121,7 @@ func ensureLocalProjectBinary(bootstrapRoot, worktree string) (string, error) {
 	if !needsBuild {
 		return target, nil
 	}
-	if err := buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target, buildKey); err != nil {
+	if err := buildLocalProjectBinary(bootstrapRoot, worktree, projectSources, target, buildKey); err != nil {
 		return "", err
 	}
 	return target, nil
@@ -160,10 +152,71 @@ func localBinaryNeedsBuild(target, buildKey string) (bool, error) {
 	return false, nil
 }
 
-func localBuildSources(bootstrapRoot, projectPath string) ([]string, error) {
-	sources := []string{
-		projectPath,
+func localProjectSourceFiles(projectPath string) ([]string, error) {
+	// Keep project detection anchored to the explicit marker. This is intentionally
+	// narrower than loading a Go package: unrelated root Go files and adapter tests
+	// must not become part of the runtime CLI by accident.
+	projectPath = filepath.Clean(projectPath)
+	projectDir := filepath.Dir(projectPath)
+	if err := validateLocalProjectSource(projectPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%s not found in %s", localProjectFile, projectDir)
+		}
+		return nil, err
 	}
+
+	entries, err := os.ReadDir(projectDir)
+	if err != nil {
+		return nil, fmt.Errorf("discover local project sources in %s: %w", projectDir, err)
+	}
+	companions := make([]string, 0)
+	seen := map[string]struct{}{projectPath: {}}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, "devflow_") || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		path := filepath.Join(projectDir, name)
+		if _, duplicate := seen[path]; duplicate {
+			continue
+		}
+		if err := validateLocalProjectSource(path); err != nil {
+			return nil, err
+		}
+		seen[path] = struct{}{}
+		companions = append(companions, path)
+	}
+	sort.Strings(companions)
+	return append([]string{projectPath}, companions...), nil
+}
+
+func validateLocalProjectSource(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	switch {
+	case info.Mode()&os.ModeSymlink != 0:
+		return fmt.Errorf("local project source %s is a symlink, expected a regular Go source file", path)
+	case info.IsDir():
+		return fmt.Errorf("local project source %s is a directory, expected a regular Go source file", path)
+	case !info.Mode().IsRegular():
+		return fmt.Errorf("local project source %s has mode %s, expected a regular Go source file", path, info.Mode())
+	default:
+		return nil
+	}
+}
+
+func localBuildSources(bootstrapRoot, projectPath string) ([]string, error) {
+	projectSources, err := localProjectSourceFiles(projectPath)
+	if err != nil {
+		return nil, err
+	}
+	return localBuildSourcesForProject(bootstrapRoot, projectSources)
+}
+
+func localBuildSourcesForProject(bootstrapRoot string, projectSources []string) ([]string, error) {
+	sources := append([]string(nil), projectSources...)
 	if bootstrapRoot == "" {
 		return sources, nil
 	}
@@ -197,6 +250,28 @@ func localBuildKey(bootstrapRoot, projectPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return localBuildKeyFromSources(bootstrapRoot, sources)
+}
+
+func localBuildKeyForBuild(bootstrapRoot, projectPath string) (string, []string, error) {
+	// Rediscover after taking localbuild.lock, then use this exact ordered source
+	// set for both the content key and generated module.
+	projectSources, err := localProjectSourceFiles(projectPath)
+	if err != nil {
+		return "", nil, err
+	}
+	sources, err := localBuildSourcesForProject(bootstrapRoot, projectSources)
+	if err != nil {
+		return "", nil, err
+	}
+	key, err := localBuildKeyFromSources(bootstrapRoot, sources)
+	if err != nil {
+		return "", nil, err
+	}
+	return key, projectSources, nil
+}
+
+func localBuildKeyFromSources(bootstrapRoot string, sources []string) (string, error) {
 	hash := sha256.New()
 	if _, err := hash.Write([]byte(version.Current().Version)); err != nil {
 		return "", err
@@ -242,7 +317,11 @@ func localBuildSourceLabel(bootstrapRoot, path string) string {
 	return "external/" + filepath.ToSlash(path)
 }
 
-func buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target, buildKey string) error {
+func buildLocalProjectBinary(bootstrapRoot, worktree string, projectSources []string, target, buildKey string) error {
+	if len(projectSources) == 0 {
+		return fmt.Errorf("cannot build local devflow binary without %s", localProjectFile)
+	}
+	projectPath := projectSources[0]
 	buildDir := localBuildDir(worktree)
 	if err := os.RemoveAll(buildDir); err != nil {
 		return err
@@ -274,12 +353,21 @@ func buildLocalProjectBinary(bootstrapRoot, worktree, projectPath, target, build
 			return err
 		}
 	}
-	data, err := os.ReadFile(projectPath)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(buildDir, localProjectFile), data, 0o644); err != nil {
-		return err
+	for _, sourcePath := range projectSources {
+		if err := validateLocalProjectSource(sourcePath); err != nil {
+			return err
+		}
+		name := filepath.Base(sourcePath)
+		if name == "main.go" || name == "go.mod" || name == "go.sum" {
+			return fmt.Errorf("local project source %s conflicts with generated local-build file %s", sourcePath, name)
+		}
+		data, err := os.ReadFile(sourcePath)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(buildDir, name), data, 0o644); err != nil {
+			return err
+		}
 	}
 	cmd := exec.Command("go", "build", "-mod=mod", "-o", tmpTarget, ".")
 	cmd.Dir = buildDir
