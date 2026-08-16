@@ -1045,6 +1045,27 @@ func TestFlushAutoStartsDetachedWatchJSON(t *testing.T) {
 	}
 }
 
+func TestPreserveFlushCallErrorAddsStructuredContext(t *testing.T) {
+	result := preserveFlushCallError(
+		api.FlushResult{},
+		fmt.Errorf("daemon transport detail"),
+		"/project",
+		"instance-1",
+		"project-1",
+		"up",
+		0,
+	)
+	if result.Worktree != "/project" || result.InstanceID != "instance-1" || result.Project != "project-1" || result.Target != "up" || result.Mode != api.ModeWatch {
+		t.Fatalf("flush fallback lost invocation context: %+v", result)
+	}
+	if result.DurationMs != 1 || result.UpdatedAt.IsZero() {
+		t.Fatalf("flush fallback lost timing context: %+v", result)
+	}
+	if len(result.Issues) != 1 || result.Issues[0].Kind != "daemon_error" || result.Issues[0].Message != "daemon transport detail" {
+		t.Fatalf("flush fallback lost daemon error: %+v", result.Issues)
+	}
+}
+
 func TestFlushNoTargetUsesPreferredTarget(t *testing.T) {
 	worktree := t.TempDir()
 	writeLocalProjectFile(t, worktree, localProjectSource("local-flush-default-project", "up"))

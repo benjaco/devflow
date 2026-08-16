@@ -1136,7 +1136,7 @@ func (s *Server) flush(ctx context.Context, projectName, target string, timeout 
 		}
 		watchStartedAt := time.Now().UTC()
 		if _, err := s.startActive(ctx, projectName, resolvedTarget, api.ModeWatch, maxParallel); err != nil {
-			return api.FlushResult{}, err
+			return s.flushFailure(requestID, projectName, resolvedTarget, startedAt, false, "watch_start_error", err)
 		}
 		startedWatch = true
 		if !waitForWatchReady(s.worktree, s.instanceID, watchStartedAt, time.Until(startedAt.Add(timeout))) {
@@ -1153,17 +1153,17 @@ func (s *Server) flush(ctx context.Context, projectName, target string, timeout 
 		SyncPath:  instance.FlushSyncPath(s.worktree, s.instanceID, requestID),
 	}
 	if err := instance.WriteFlushRequest(s.worktree, s.instanceID, req); err != nil {
-		return api.FlushResult{}, err
+		return s.flushFailure(requestID, projectName, resolvedTarget, startedAt, startedWatch, "request_write_error", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(req.SyncPath), 0o755); err != nil {
-		return api.FlushResult{}, err
+		return s.flushFailure(requestID, projectName, resolvedTarget, startedAt, startedWatch, "sync_prepare_error", err)
 	}
 	if err := os.WriteFile(req.SyncPath, []byte(requestID+"\n"), 0o644); err != nil {
-		return api.FlushResult{}, err
+		return s.flushFailure(requestID, projectName, resolvedTarget, startedAt, startedWatch, "sync_write_error", err)
 	}
 	result, ok, err := waitForFlushAck(s.worktree, s.instanceID, requestID, req.SyncPath, time.Until(startedAt.Add(timeout)))
 	if err != nil {
-		return api.FlushResult{}, err
+		return s.flushFailure(requestID, projectName, resolvedTarget, startedAt, startedWatch, "ack_read_error", err)
 	}
 	if !ok {
 		result = newFlushResult(requestID, s.worktree, s.instanceID, projectName, resolvedTarget, startedAt)
@@ -1279,6 +1279,19 @@ func newFlushResult(requestID, worktree, instanceID, projectName, target string,
 		DurationMs: now.Sub(startedAt).Milliseconds(),
 		UpdatedAt:  now,
 	}
+}
+
+func (s *Server) flushFailure(requestID, projectName, target string, startedAt time.Time, started bool, kind string, cause error) (api.FlushResult, error) {
+	// FlushResult is the automation-facing diagnostic surface. Returning only the
+	// Go error here would make the daemon protocol serialize an all-zero result.
+	result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, target, startedAt)
+	result.Started = started
+	result.Issues = append(result.Issues, api.FlushIssue{
+		Kind:    kind,
+		Message: cause.Error(),
+		LogPath: s.logPath,
+	})
+	return result, fmt.Errorf("flush failed: %w", cause)
 }
 
 func waitForFlushAck(worktree, instanceID, requestID, syncPath string, timeout time.Duration) (api.FlushResult, bool, error) {

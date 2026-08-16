@@ -5,7 +5,7 @@ Last updated: 2026-08-16
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: follow-up real-project hardening and live `devflow upgrade` progress/output streaming are complete
+- State: Windows timing accounting and structured detached-flush failure hardening are complete
 - Confidence: under Go 1.26.6 the full default/race suites, focused copier/database/cache/engine/validation/CLI suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, and Linux/Windows amd64/arm64 builds pass on `darwin/arm64`; Docker-backed database tests were invoked but skipped because Docker Desktop was not running
 
 ## In Progress
@@ -13,6 +13,12 @@ Last updated: 2026-08-16
 - None.
 
 ## Completed
+
+- Windows cache-manifest timing and detached-flush diagnostics:
+  - completed zero-tick and sub-millisecond measurements now report 1 ms, preserving zero for negative/invalid durations and preventing coarse Windows clocks from erasing manifest-validation timing
+  - daemon watch-start, request/sync-write, and acknowledgement-read failures now return contextual phase-specific `FlushResult` issues; upgraded CLIs also repair empty failure payloads from older still-running daemons
+  - added comments for both non-obvious compatibility rules plus deterministic timing, daemon-filesystem-failure, and older-daemon regressions
+  - passed the reported tests 20 consecutive times, focused race coverage, full default/race suites, vet, Staticcheck v0.7.0, govulncheck v1.6.0, formatting/tidy/diff/workflow checks, version smoke, and Linux/Windows amd64/arm64 builds
 
 - Live upgrade progress:
   - replaced buffered `go install` execution with immediate start/finish progress and live child stdout/stderr streaming in text mode

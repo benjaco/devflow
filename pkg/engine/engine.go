@@ -829,15 +829,7 @@ func cacheCopyProgress(rt *project.Runtime, operation string) func(fsutil.CopyPr
 }
 
 func elapsedMilliseconds(started time.Time) int64 {
-	elapsed := time.Since(started)
-	if elapsed <= 0 {
-		return 0
-	}
-	ms := elapsed.Milliseconds()
-	if ms == 0 {
-		return 1
-	}
-	return ms
+	return durationMilliseconds(time.Since(started))
 }
 
 func declaredOutputsExist(worktree string, outputs project.Outputs) (bool, error) {
@@ -1053,9 +1045,11 @@ func terminalNodeState(state api.NodeState) bool {
 }
 
 func durationMilliseconds(duration time.Duration) int64 {
-	if duration <= 0 {
+	if duration < 0 {
 		return 0
 	}
+	// Windows and other coarse clocks can report an exact zero tick for completed
+	// work. Keep zero/sub-millisecond measurements distinguishable from "not run".
 	if ms := duration.Milliseconds(); ms > 0 {
 		return ms
 	}

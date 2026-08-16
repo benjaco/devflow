@@ -625,13 +625,13 @@ func (a *App) flushCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	_ = id
 	client, _, err := daemon.Ensure(context.Background(), root, *projectName)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout+5*time.Second)
 	defer cancel()
+	callStarted := time.Now()
 	resp, callErr := client.Call(ctx, daemon.Request{
 		Action:      daemon.ActionFlush,
 		Project:     *projectName,
@@ -640,9 +640,45 @@ func (a *App) flushCmd(args []string) error {
 		MaxParallel: *maxParallel,
 	})
 	if resp.Flush != nil {
-		return a.finishFlush(*resp.Flush, *jsonOut)
+		result := preserveFlushCallError(*resp.Flush, callErr, root, id, *projectName, target, time.Since(callStarted))
+		return a.finishFlush(result, *jsonOut)
 	}
 	return callErr
+}
+
+func preserveFlushCallError(result api.FlushResult, callErr error, worktree, instanceID, projectName, target string, elapsed time.Duration) api.FlushResult {
+	if callErr == nil || result.Success || len(result.Issues) > 0 {
+		return result
+	}
+	// A newly upgraded CLI can still be connected to an older daemon. Older
+	// daemons returned an empty FlushResult for some low-level failures, so retain
+	// the transport error and invocation context until that daemon is restarted.
+	if result.Worktree == "" {
+		result.Worktree = worktree
+	}
+	if result.InstanceID == "" {
+		result.InstanceID = instanceID
+	}
+	if result.Project == "" {
+		result.Project = projectName
+	}
+	if result.Target == "" {
+		result.Target = target
+	}
+	if result.Mode == "" {
+		result.Mode = api.ModeWatch
+	}
+	if result.DurationMs == 0 && elapsed >= 0 {
+		result.DurationMs = max(elapsed.Milliseconds(), 1)
+	}
+	if result.UpdatedAt.IsZero() {
+		result.UpdatedAt = time.Now().UTC()
+	}
+	result.Issues = append(result.Issues, api.FlushIssue{
+		Kind:    "daemon_error",
+		Message: callErr.Error(),
+	})
+	return result
 }
 
 func (a *App) internalDaemonCmd(args []string) error {

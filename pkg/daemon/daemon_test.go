@@ -117,6 +117,56 @@ func TestWaitForFlushAckRetouchesSyncSentinel(t *testing.T) {
 	<-done
 }
 
+func TestFlushRequestWriteFailureReturnsStructuredContext(t *testing.T) {
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const projectName = "daemon-flush-write-error"
+	project.Register(daemonTestProject{
+		name: projectName,
+		tasks: []project.Task{{
+			Name: "noop",
+			Kind: project.KindOnce,
+			Run: func(context.Context, *project.Runtime) error {
+				return nil
+			},
+		}},
+		targets: []project.Target{{Name: "up", RootTasks: []string{"noop"}}},
+	})
+	flushRoot := instance.FlushRoot(worktree, inst.ID)
+	if err := os.MkdirAll(filepath.Dir(flushRoot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(flushRoot, []byte("blocks the flush directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(worktree, "daemon.log")
+	s := &Server{
+		worktree:    worktree,
+		instanceID:  inst.ID,
+		projectName: projectName,
+		logPath:     logPath,
+		active: &activeRun{
+			projectName: projectName,
+			target:      "up",
+			mode:        api.ModeWatch,
+		},
+	}
+
+	result, err := s.flush(context.Background(), projectName, "up", time.Second, 1)
+	if err == nil || !strings.Contains(err.Error(), "flush failed") {
+		t.Fatalf("expected contextual flush failure, got %v", err)
+	}
+	if result.RequestID == "" || result.Worktree != worktree || result.InstanceID != inst.ID || result.Project != projectName || result.Target != "up" || result.Mode != api.ModeWatch || result.UpdatedAt.IsZero() {
+		t.Fatalf("flush failure lost request context: %+v", result)
+	}
+	if len(result.Issues) != 1 || result.Issues[0].Kind != "request_write_error" || result.Issues[0].Message == "" || result.Issues[0].LogPath != logPath {
+		t.Fatalf("flush failure lost the underlying issue: %+v", result.Issues)
+	}
+}
+
 func TestEnsureSerializesDaemonStartup(t *testing.T) {
 	worktree := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())

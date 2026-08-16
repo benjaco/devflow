@@ -29,6 +29,27 @@ import (
 
 type testProject struct{}
 
+func TestDurationMillisecondsRecordsCompletedSubTickWork(t *testing.T) {
+	tests := []struct {
+		name     string
+		duration time.Duration
+		want     int64
+	}{
+		{name: "negative", duration: -time.Nanosecond, want: 0},
+		{name: "zero", duration: 0, want: 1},
+		{name: "sub-millisecond", duration: time.Nanosecond, want: 1},
+		{name: "one millisecond", duration: time.Millisecond, want: 1},
+		{name: "whole milliseconds", duration: 2*time.Millisecond + 500*time.Microsecond, want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := durationMilliseconds(tt.duration); got != tt.want {
+				t.Fatalf("durationMilliseconds(%s) = %d, want %d", tt.duration, got, tt.want)
+			}
+		})
+	}
+}
+
 func (testProject) Name() string { return "test-project" }
 
 func (testProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
