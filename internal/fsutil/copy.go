@@ -27,6 +27,18 @@ type CopyProgress struct {
 	Done  bool   `json:"done,omitempty"`
 }
 
+type CopyReservation struct {
+	Path  string
+	Files int64
+	Bytes int64
+}
+
+type CopyStored struct {
+	Path             string
+	AllocatedBytes   int64
+	PhysicalMeasured bool
+}
+
 type CopyOptions struct {
 	// MaxFiles and MaxBytes default to conservative finite limits when zero.
 	// Set either value below zero only for a caller that deliberately wants no
@@ -35,6 +47,8 @@ type CopyOptions struct {
 	MaxBytes   int64
 	Include    func(CopyEntry) bool
 	OnProgress func(CopyProgress)
+	Reserve    func(CopyReservation) error
+	OnStored   func(CopyStored)
 }
 
 type Copier struct {
@@ -124,7 +138,7 @@ func (c *Copier) copyPath(ctx context.Context, projectionRoot, source, destinati
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("cannot copy special file %q (%s)", rel, info.Mode())
 	}
-	return c.copyRegularFile(source, destination, rel, info)
+	return c.copyRegularFile(ctx, source, destination, rel, info)
 }
 
 func (c *Copier) copyDirectory(ctx context.Context, projectionRoot, source, destination, rel string, info fs.FileInfo) error {
@@ -161,6 +175,14 @@ func (c *Copier) copyDirectory(ctx context.Context, projectionRoot, source, dest
 		return err
 	}
 	_ = os.Chtimes(destination, info.ModTime(), info.ModTime())
+	if c.options.OnStored != nil {
+		storedInfo, statErr := os.Stat(destination)
+		if statErr != nil {
+			return statErr
+		}
+		allocated, measured := AllocatedFileBytes(destination, storedInfo)
+		c.options.OnStored(CopyStored{Path: rel, AllocatedBytes: allocated, PhysicalMeasured: measured})
+	}
 	c.report(rel, false)
 	return nil
 }
@@ -199,7 +221,7 @@ func (c *Copier) copySymlink(projectionRoot, source, destination, rel string) er
 	return nil
 }
 
-func (c *Copier) copyRegularFile(source, destination, rel string, info fs.FileInfo) error {
+func (c *Copier) copyRegularFile(ctx context.Context, source, destination, rel string, info fs.FileInfo) error {
 	if err := c.reserveBytes(rel, info.Size()); err != nil {
 		return err
 	}
@@ -220,7 +242,7 @@ func (c *Copier) copyRegularFile(source, destination, rel string, info fs.FileIn
 	if err != nil {
 		return err
 	}
-	written, copyErr := io.Copy(out, in)
+	written, copyErr := io.Copy(out, &copyContextReader{ctx: ctx, reader: in})
 	closeErr := out.Close()
 	if copyErr != nil {
 		_ = RemoveAllWritable(destination)
@@ -242,10 +264,27 @@ func (c *Copier) copyRegularFile(source, destination, rel string, info fs.FileIn
 	return nil
 }
 
+type copyContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *copyContextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
+}
+
 func (c *Copier) reserveFile(rel string) error {
 	next := c.files + 1
 	if c.options.MaxFiles >= 0 && next > c.options.MaxFiles {
 		return fmt.Errorf("copy file-count limit exceeded at %q: limit %d", rel, c.options.MaxFiles)
+	}
+	if c.options.Reserve != nil {
+		if err := c.options.Reserve(CopyReservation{Path: rel, Files: 1}); err != nil {
+			return err
+		}
 	}
 	c.files = next
 	return nil
@@ -258,6 +297,11 @@ func (c *Copier) reserveBytes(rel string, size int64) error {
 	next := c.bytes + size
 	if next < c.bytes || c.options.MaxBytes >= 0 && next > c.options.MaxBytes {
 		return fmt.Errorf("copy byte limit exceeded at %q: limit %d bytes", rel, c.options.MaxBytes)
+	}
+	if c.options.Reserve != nil {
+		if err := c.options.Reserve(CopyReservation{Path: rel, Bytes: size}); err != nil {
+			return err
+		}
 	}
 	c.bytes = next
 	return nil
@@ -300,6 +344,59 @@ func prepareDestinationParent(destination string) (func() error, error) {
 		return nil, err
 	}
 	return func() error { return os.Chmod(parent, originalMode) }, nil
+}
+
+// MovePathWritable renames one path without following it, temporarily making
+// restrictive source and destination parents owner-writable. Source and
+// destination must be on the same filesystem. Validation uses this to transfer
+// ownership of disposable projected artifacts without allocating a second
+// expanded tree.
+func MovePathWritable(source, destination string) error {
+	sourceInfo, err := os.Lstat(source)
+	if err != nil {
+		return err
+	}
+	var (
+		restoreSourceMode bool
+		moved             bool
+	)
+	if sourceInfo.IsDir() {
+		writableMode := sourceInfo.Mode() | 0o700
+		if writableMode != sourceInfo.Mode() {
+			if err := os.Chmod(source, writableMode); err != nil {
+				return err
+			}
+			restoreSourceMode = true
+		}
+	}
+	defer func() {
+		if !restoreSourceMode {
+			return
+		}
+		path := source
+		if moved {
+			path = destination
+		}
+		_ = os.Chmod(path, sourceInfo.Mode())
+	}()
+	restoreSource, err := prepareDestinationParent(source)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = restoreSource() }()
+	restoreDestination, err := prepareDestinationParent(destination)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = restoreDestination() }()
+	if err := RemoveAllWritable(destination); err != nil {
+		return err
+	}
+	if err := os.Rename(source, destination); err != nil {
+		return fmt.Errorf("move %q to %q: %w", source, destination, err)
+	}
+	moved = true
+	return nil
 }
 
 func relativeCopyPath(root, source string) string {

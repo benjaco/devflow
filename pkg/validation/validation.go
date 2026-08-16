@@ -29,10 +29,18 @@ const (
 var ErrValidationFailed = errors.New("validation failed")
 
 type Request struct {
-	Target    string
-	Worktree  string
-	Mode      api.ValidationMode
-	MaxOrders int
+	Target                 string
+	Worktree               string
+	Mode                   api.ValidationMode
+	Details                api.ValidationDetails
+	MaxOrders              int
+	MaxListedPaths         int
+	MaxListedBytes         int64
+	MaxFiles               int64
+	MaxBytes               int64
+	MaxTemporaryBytes      int64
+	DiskSafetyReserveBytes int64
+	OnEvent                func(api.Event)
 }
 
 type Validator struct {
@@ -102,22 +110,76 @@ func (v *Validator) Run(ctx context.Context, req Request) (*api.ValidationResult
 	if req.MaxOrders <= 0 {
 		req.MaxOrders = DefaultMaxOrders
 	}
+	if req.Details == "" {
+		// Library callers historically received exhaustive path lists. The CLI
+		// explicitly selects its bounded default; preserving this zero-value
+		// behavior avoids silently changing embedded validator integrations.
+		req.Details = api.ValidationDetailsFull
+	}
+	if req.Details != api.ValidationDetailsSummary && req.Details != api.ValidationDetailsIssues && req.Details != api.ValidationDetailsFull {
+		return nil, fmt.Errorf("unknown validation details %q (want summary, issues, or full)", req.Details)
+	}
+	if req.MaxListedPaths <= 0 {
+		req.MaxListedPaths = DefaultMaxListedPaths
+	}
+	if req.MaxListedBytes <= 0 {
+		req.MaxListedBytes = DefaultMaxListedBytes
+	}
+	if req.MaxFiles == 0 {
+		req.MaxFiles = DefaultValidationMaxFiles
+	}
+	if req.MaxBytes == 0 {
+		req.MaxBytes = DefaultValidationMaxBytes
+	}
+	if req.MaxTemporaryBytes == 0 {
+		req.MaxTemporaryBytes = DefaultValidationMaxTemp
+	}
+	if req.DiskSafetyReserveBytes == 0 {
+		req.DiskSafetyReserveBytes = DefaultValidationDiskReserve
+	}
+	if req.DiskSafetyReserveBytes < 0 {
+		req.DiskSafetyReserveBytes = 0
+	}
 
 	order, err := v.graph.TargetClosure(req.Target)
 	if err != nil {
 		return nil, err
 	}
 	result := &api.ValidationResult{
-		Project:  v.project.Name(),
-		Target:   req.Target,
-		Worktree: req.Worktree,
-		Mode:     req.Mode,
+		Project:        v.project.Name(),
+		Target:         req.Target,
+		Worktree:       req.Worktree,
+		Mode:           req.Mode,
+		Details:        req.Details,
+		MaxListedPaths: req.MaxListedPaths,
+	}
+	tempRoot, err := os.MkdirTemp("", "devflow-validation-*")
+	if err != nil {
+		return nil, fmt.Errorf("create validation root: %w", err)
+	}
+	cleaned := false
+	defer func() {
+		if !cleaned {
+			_ = fsutil.RemoveAllWritable(tempRoot)
+		}
+	}()
+	budget := newValidationBudget(tempRoot, req)
+	progress := newValidationProgress(req, budget)
+	if err := progress.start(ctx, phasePreparing, false); err != nil {
+		return nil, err
 	}
 
 	preflight := v.preflight(order)
 	result.Issues = append(result.Issues, preflight...)
+	progress.setIssues(len(result.Issues))
 	if hasErrorIssues(preflight) {
+		if err := finishValidationCleanup(ctx, tempRoot, budget, progress); err != nil {
+			return nil, err
+		}
+		cleaned = true
 		result.DurationMs = time.Since(started).Milliseconds()
+		result.Metrics = budget.snapshot()
+		applyValidationDetails(result, req)
 		return result, nil
 	}
 
@@ -129,38 +191,74 @@ func (v *Validator) Run(ctx context.Context, req Request) (*api.ValidationResult
 	if err != nil {
 		return nil, err
 	}
-	tempRoot, err := os.MkdirTemp("", "devflow-validation-*")
-	if err != nil {
-		return nil, fmt.Errorf("create validation root: %w", err)
-	}
-	defer fsutil.RemoveAllWritable(tempRoot)
-
+	resourceFailed := false
 	if req.Mode == api.ValidationModeAll || req.Mode == api.ValidationModeArtifacts {
-		artifacts, runErr := v.validateArtifacts(ctx, req, template, order, filepath.Join(tempRoot, "artifacts"))
+		artifacts, runErr := v.validateArtifacts(ctx, req, template, order, filepath.Join(tempRoot, "artifacts"), budget, progress)
 		if runErr != nil {
-			return nil, runErr
+			if !recordValidationResourceFailure(result, runErr) {
+				return nil, runErr
+			}
+			resourceFailed = true
+		} else {
+			result.Artifacts = artifacts
+			result.Issues = append(result.Issues, artifacts.Issues...)
+			progress.setIssues(len(result.Issues))
 		}
-		result.Artifacts = artifacts
-		result.Issues = append(result.Issues, artifacts.Issues...)
 	}
-	if req.Mode == api.ValidationModeAll || req.Mode == api.ValidationModeOrders {
-		orders, runErr := v.validateOrders(ctx, req, template, order, filepath.Join(tempRoot, "orders"))
+	if !resourceFailed && (req.Mode == api.ValidationModeAll || req.Mode == api.ValidationModeOrders) {
+		orders, runErr := v.validateOrders(ctx, req, template, order, filepath.Join(tempRoot, "orders"), budget, progress)
 		if runErr != nil {
-			return nil, runErr
+			if !recordValidationResourceFailure(result, runErr) {
+				return nil, runErr
+			}
+			resourceFailed = true
+		} else {
+			result.Orders = orders
+			result.Issues = append(result.Issues, orders.Issues...)
+			progress.setIssues(len(result.Issues))
 		}
-		result.Orders = orders
-		result.Issues = append(result.Issues, orders.Issues...)
 	}
 
-	result.Success = !hasErrorIssues(result.Issues)
+	result.Success = !resourceFailed && !hasErrorIssues(result.Issues)
 	if result.Artifacts != nil {
 		result.Success = result.Success && result.Artifacts.Success
 	}
 	if result.Orders != nil {
 		result.Success = result.Success && result.Orders.Success
 	}
+	if err := finishValidationCleanup(ctx, tempRoot, budget, progress); err != nil {
+		return nil, err
+	}
+	cleaned = true
 	result.DurationMs = time.Since(started).Milliseconds()
+	result.Metrics = budget.snapshot()
+	applyValidationDetails(result, req)
 	return result, nil
+}
+
+func recordValidationResourceFailure(result *api.ValidationResult, err error) bool {
+	var limitErr *resourceLimitError
+	if !errors.As(err, &limitErr) {
+		return false
+	}
+	failure := limitErr.failure
+	result.ResourceFailure = &failure
+	result.Issues = append(result.Issues, errorIssue("resource_budget_exceeded", "", failure.Path, limitErr.Error()))
+	return true
+}
+
+func finishValidationCleanup(ctx context.Context, tempRoot string, budget *validationBudget, progress *validationProgress) error {
+	if err := progress.start(ctx, phaseCleaning, false); err != nil {
+		return err
+	}
+	if err := fsutil.RemoveAllWritable(tempRoot); err != nil {
+		return fmt.Errorf("clean validation temporary data: %w", err)
+	}
+	if err := budget.refreshTemporary(ctx); err != nil {
+		return err
+	}
+	progress.complete()
+	return nil
 }
 
 func (v *Validator) preflight(order []string) []api.ValidationIssue {

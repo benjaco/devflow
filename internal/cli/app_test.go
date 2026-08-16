@@ -35,6 +35,7 @@ type targetDepsCLIProject struct{}
 type graphExplainCLIProject struct{}
 type actionCLIProject struct{}
 type validationCLIProject struct{}
+type manifestCLIProject struct{}
 
 func (failCLIProject) Name() string { return "cli-fail-project" }
 
@@ -51,6 +52,20 @@ func (failCLIProject) Tasks() []project.Task {
 			Kind: project.KindOnce,
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				_ = ctx
+				for line := 1; line <= 360; line++ {
+					switch line {
+					case 118:
+						rt.EmitLogLine("stderr", "--- FAIL: TestCMNavigatorAssertion (0.01s)")
+					case 121:
+						rt.EmitLogLine("stderr", "expected: 215")
+					case 122:
+						rt.EmitLogLine("stderr", "actual: 229.09458")
+					case 124:
+						rt.EmitLogLine("stderr", "Error: assertion values differ")
+					default:
+						rt.EmitLogLine("stderr", fmt.Sprintf("cleanup or passing package line %03d", line))
+					}
+				}
 				rt.EmitLogLine("stderr", "implementator failure details")
 				return fmt.Errorf("boom")
 			},
@@ -63,6 +78,50 @@ func (failCLIProject) Targets() []project.Target {
 }
 
 func (taskTargetCLIProject) Name() string { return "cli-task-target-project" }
+
+func (manifestCLIProject) Name() string { return "cli-manifest-project" }
+
+func (manifestCLIProject) ConfigureInstance(context.Context, string) (project.InstanceConfig, error) {
+	return project.InstanceConfig{Label: "cli-manifest"}, nil
+}
+
+func (manifestCLIProject) Tasks() []project.Task {
+	return []project.Task{{
+		Name:        "build",
+		Kind:        project.KindOnce,
+		Cache:       true,
+		RequiredEnv: []string{"DEVFLOW_MANIFEST_COUNTER_FILE", "DATABASE_URL"},
+		Inputs: project.Inputs{
+			Files: []string{"input.txt"},
+			Custom: []project.FingerprintFunc{func(context.Context, *project.Runtime) (string, error) {
+				file, err := os.OpenFile(os.Getenv("DEVFLOW_MANIFEST_COUNTER_FILE"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+				if err != nil {
+					return "", err
+				}
+				if _, err := file.WriteString("called\n"); err != nil {
+					_ = file.Close()
+					return "", err
+				}
+				if err := file.Close(); err != nil {
+					return "", err
+				}
+				return os.Getenv("DATABASE_URL"), nil
+			}},
+		},
+		Outputs: project.Outputs{Files: []string{"out.txt"}},
+		Run: func(_ context.Context, rt *project.Runtime) error {
+			data, err := os.ReadFile(rt.Abs("input.txt"))
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(rt.Abs("out.txt"), data, 0o644)
+		},
+	}}
+}
+
+func (manifestCLIProject) Targets() []project.Target {
+	return []project.Target{{Name: "build", RootTasks: []string{"build"}}}
+}
 
 func (taskTargetCLIProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
 	_ = ctx
@@ -317,6 +376,7 @@ func init() {
 	project.Register(graphExplainCLIProject{})
 	project.Register(actionCLIProject{})
 	project.Register(validationCLIProject{})
+	project.Register(manifestCLIProject{})
 }
 
 func TestGraphListJSON(t *testing.T) {
@@ -470,6 +530,12 @@ func TestValidateAllJSON(t *testing.T) {
 	if !result.Success || result.Mode != api.ValidationModeAll {
 		t.Fatalf("unexpected validation result: %+v", result)
 	}
+	if result.Details != api.ValidationDetailsIssues || result.Metrics.TotalFilesProcessed == 0 {
+		t.Fatalf("missing bounded validation details/metrics: %+v", result)
+	}
+	if !strings.Contains(stderr.String(), "phase=Preparing validation") || !strings.Contains(stderr.String(), "phase=Cleaning up") {
+		t.Fatalf("validation progress was not streamed to stderr: %s", stderr.String())
+	}
 	if result.Artifacts == nil || len(result.Artifacts.Tasks) != 2 {
 		t.Fatalf("unexpected artifact result: %+v", result.Artifacts)
 	}
@@ -507,7 +573,7 @@ func TestValidateFailureStillEmitsJSON(t *testing.T) {
 		t.Fatalf("expected aggregated validation issues: %+v", result.Issues)
 	}
 	task := result.Artifacts.Tasks[0]
-	if len(task.UndeclaredWrites) != 1 || task.UndeclaredWrites[0] != "surprise.txt" {
+	if task.UndeclaredWriteCount != 1 || len(result.Artifacts.Samples.UndeclaredWrites) != 1 || result.Artifacts.Samples.UndeclaredWrites[0] != "surprise.txt" {
 		t.Fatalf("unexpected undeclared writes: %+v", task)
 	}
 }
@@ -807,6 +873,15 @@ func TestRunJSONStillReturnsExecutionError(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(result.LogTail, "\n"), "implementator failure details") {
 		t.Fatalf("failure JSON lacks bounded log tail: %+v", result.LogTail)
+	}
+	if strings.Contains(strings.Join(result.LogTail, "\n"), "expected: 215") {
+		t.Fatalf("terminal tail unexpectedly contains the early assertion: %+v", result.LogTail)
+	}
+	if len(result.FailureExcerpts) == 0 || result.FailureExcerpts[0].Reason != "go-test-failure" || !strings.Contains(strings.Join(result.FailureExcerpts[0].Lines, "\n"), "expected: 215") {
+		t.Fatalf("failure JSON lacks the early assertion excerpt: %+v", result.FailureExcerpts)
+	}
+	if len(stdout.Bytes()) > 96*1024 {
+		t.Fatalf("bounded failure JSON unexpectedly large: %d bytes", len(stdout.Bytes()))
 	}
 	progress := stderr.String()
 	if !strings.Contains(progress, "[devflow] run build started") || !strings.Contains(progress, "[devflow] task fail: failed: boom") || !strings.Contains(progress, "implementator failure details") {
@@ -1810,6 +1885,139 @@ func TestCacheKeyAndPathJSON(t *testing.T) {
 	}
 	if pathResult.CacheRoot != instance.CacheRoot() || pathResult.Namespace != "cli-task-target-project" || !strings.HasPrefix(pathResult.NamespacePath, pathResult.CacheRoot) {
 		t.Fatalf("unexpected cache path result: %+v", pathResult)
+	}
+}
+
+func TestCacheKeyManifestCLIReusesSemanticFingerprintWithoutSecretLeaks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "LocalAppData"))
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("input"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	counterPath := filepath.Join(t.TempDir(), "fingerprint-calls.txt")
+	manifestPath := filepath.Join(t.TempDir(), "devflow-cache-manifest.json")
+	const secret = "cli-query-secret"
+	t.Setenv("DEVFLOW_MANIFEST_COUNTER_FILE", counterPath)
+	t.Setenv("DATABASE_URL", "postgresql://user@db.example/app?password="+secret+"&sslmode=require")
+
+	keyStdout := &bytes.Buffer{}
+	keyStderr := &bytes.Buffer{}
+	app := &App{Stdout: keyStdout, Stderr: keyStderr}
+	if err := app.Run([]string{
+		"cache", "key",
+		"--target", "build",
+		"--manifest-out", manifestPath,
+		"--json",
+		"--project", "cli-manifest-project",
+		"--worktree", worktree,
+	}); err != nil {
+		t.Fatalf("cache key failed: %v\nstderr=%s", err, keyStderr)
+	}
+	var keyResult api.CacheKeyResult
+	if err := json.Unmarshal(keyStdout.Bytes(), &keyResult); err != nil {
+		t.Fatalf("cache key JSON: %v\n%s", err, keyStdout)
+	}
+	if keyResult.Key == "" || keyResult.ManifestPath != manifestPath {
+		t.Fatalf("unexpected cache key manifest result: %+v", keyResult)
+	}
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(manifestData), secret) || strings.Contains(string(manifestData), "postgresql://") || strings.Contains(keyStdout.String(), secret) || strings.Contains(keyStderr.String(), secret) {
+		t.Fatalf("secret leaked during cache-key preflight:\nmanifest=%s\nstdout=%s\nstderr=%s", manifestData, keyStdout, keyStderr)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(manifestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("manifest mode = %03o", info.Mode().Perm())
+		}
+	}
+
+	runStdout := &bytes.Buffer{}
+	runStderr := &bytes.Buffer{}
+	app = &App{Stdout: runStdout, Stderr: runStderr}
+	if err := app.Run([]string{
+		"run", "build",
+		"--cache-key-manifest", manifestPath,
+		"--ci", "--json",
+		"--project", "cli-manifest-project",
+		"--worktree", worktree,
+	}); err != nil {
+		t.Fatalf("manifest-backed run failed: %v\nstdout=%s\nstderr=%s", err, runStdout, runStderr)
+	}
+	var runResult api.RunResult
+	if err := json.Unmarshal(runStdout.Bytes(), &runResult); err != nil {
+		t.Fatalf("run JSON: %v\n%s", err, runStdout)
+	}
+	if runResult.CacheKeyManifest == nil || runResult.CacheKeyManifest.ReusedComponents != 1 || len(runResult.CacheKeyManifest.ReusedTasks) != 1 {
+		t.Fatalf("missing cache manifest reuse report: %+v", runResult.CacheKeyManifest)
+	}
+	counterData, err := os.ReadFile(counterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(counterData), "called") != 1 {
+		t.Fatalf("fingerprint callback invocation audit = %q, want exactly once", counterData)
+	}
+	for surface, value := range map[string]string{
+		"manifest":   string(manifestData),
+		"key stdout": keyStdout.String(),
+		"key stderr": keyStderr.String(),
+		"run stdout": runStdout.String(),
+		"run stderr": runStderr.String(),
+	} {
+		if strings.Contains(value, secret) || strings.Contains(value, "postgresql://") {
+			t.Fatalf("secret leaked through %s: %s", surface, value)
+		}
+	}
+}
+
+func TestRunWithInvalidCacheKeyManifestReturnsStructuredJSON(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "LocalAppData"))
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "input.txt"), []byte("input"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(t.TempDir(), "invalid.json")
+	if err := os.WriteFile(manifestPath, []byte(`{"password":"must-not-leak"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEVFLOW_MANIFEST_COUNTER_FILE", filepath.Join(t.TempDir(), "calls.txt"))
+	t.Setenv("DATABASE_URL", "postgresql://user@db.example/app?password=runtime-secret")
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: stderr}
+	err := app.Run([]string{
+		"run", "build",
+		"--cache-key-manifest", manifestPath,
+		"--ci", "--json",
+		"--project", "cli-manifest-project",
+		"--worktree", worktree,
+	})
+	if err == nil {
+		t.Fatal("expected invalid cache-key manifest to fail")
+	}
+	var result api.RunResult
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+		t.Fatalf("invalid-manifest JSON: %v\nstdout=%s\nstderr=%s", decodeErr, stdout, stderr)
+	}
+	if result.Success || result.CacheKeyManifest == nil || result.CacheKeyManifest.Validated || !strings.Contains(result.Error, "cache key manifest rejected") {
+		t.Fatalf("manifest rejection was not structured: %+v", result)
+	}
+	for _, value := range []string{stdout.String(), stderr.String(), err.Error()} {
+		if strings.Contains(value, "must-not-leak") || strings.Contains(value, "runtime-secret") {
+			t.Fatalf("manifest credential leaked through error surface: %s", value)
+		}
 	}
 }
 

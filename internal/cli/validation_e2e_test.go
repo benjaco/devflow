@@ -45,14 +45,37 @@ func TestBootstrapValidateDetectsProjectContractFailures(t *testing.T) {
 			t.Fatalf("expected one validated task, got %+v", result.Artifacts.Tasks)
 		}
 		task := result.Artifacts.Tasks[0]
-		if !stringSliceContains(task.MaterializedInputs, "source.txt") {
-			t.Fatalf("expected declared source input to be materialized, got %+v", task)
+		if task.MaterializedInputCount != 1 || !task.Truncated.MaterializedInputs {
+			t.Fatalf("expected one omitted successful source input, got %+v", task)
 		}
-		if !stringSliceContains(task.UndeclaredWrites, "surprise.txt") {
-			t.Fatalf("expected undeclared output finding, got %+v", task)
+		if task.UndeclaredWriteCount != 1 || !stringSliceContains(result.Artifacts.Samples.UndeclaredWrites, "surprise.txt") {
+			t.Fatalf("expected bounded undeclared output finding, got task=%+v artifacts=%+v", task, result.Artifacts)
 		}
-		if !stringSliceContains(task.MissingOutputs, "file:expected.txt") {
-			t.Fatalf("expected missing output finding, got %+v", task)
+		if task.MissingOutputCount != 1 || !stringSliceContains(result.Artifacts.Samples.MissingOutputs, "file:expected.txt") {
+			t.Fatalf("expected bounded missing output finding, got task=%+v artifacts=%+v", task, result.Artifacts)
+		}
+
+		fullStdout, fullStderr, fullErr := runBootstrapCommandCaptured(
+			t,
+			worktree,
+			"validate", "artifact-contract",
+			"--mode", "artifacts",
+			"--details", "full",
+			"--json",
+		)
+		if fullErr == nil {
+			t.Fatalf("expected exhaustive validation to exit non-zero, stdout:\n%s", fullStdout)
+		}
+		var full api.ValidationResult
+		if decodeErr := json.Unmarshal([]byte(fullStdout), &full); decodeErr != nil {
+			t.Fatalf("decode full validation JSON: %v\nstdout:\n%s\nstderr:\n%s", decodeErr, fullStdout, fullStderr)
+		}
+		if full.Artifacts == nil || len(full.Artifacts.Tasks) != 1 {
+			t.Fatalf("expected exhaustive artifact result, got %+v", full)
+		}
+		fullTask := full.Artifacts.Tasks[0]
+		if !stringSliceContains(fullTask.MaterializedInputs, "source.txt") || !stringSliceContains(fullTask.UndeclaredWrites, "surprise.txt") || !stringSliceContains(fullTask.MissingOutputs, "file:expected.txt") {
+			t.Fatalf("expected full detail arrays, got %+v", fullTask)
 		}
 		assertValidationDidNotWrite(t, worktree, "surprise.txt", "expected.txt")
 	})

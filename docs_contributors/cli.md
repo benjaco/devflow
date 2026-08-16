@@ -68,8 +68,9 @@ Implemented `run` flags include:
 - `--worktree`
 - `--project`
 - `--max-parallel`
+- `--cache-key-manifest` (finite `--ci` runs only)
 
-The final `RunResult` includes top-level failure text, failed-node name and log path, an optional bounded tail of that log, cache hit/miss lists, and the final run snapshot of every selected node (including pending downstream nodes after an upstream failure). Each node includes `durationMs`; cacheable nodes also include cache outcome plus key/read/write/total timing. This lets a CI caller diagnose the first failure without making a second `logs` call while retaining the full log path for deeper inspection.
+The final `RunResult` includes top-level failure text, failed-node name and log path, an optional bounded terminal tail, `failureExcerpts`, cache hit/miss lists, and the final run snapshot of every selected node (including pending downstream nodes after an upstream failure). Each node includes `durationMs`; cacheable nodes also include cache outcome plus key/read/write/manifest/total timing. `failureExcerpts` scans the log as a stream and recognizes Go `--- FAIL:` blocks, panic/fatal output, compiler errors, `AssertionError`, conventional error/failed-test summaries, and process-failure markers. It keeps five context lines before and 30 after, merges nearby windows, and is capped at five windows, 200 total lines, 64 KiB total text, and 8 KiB per line. If no useful marker exists it is `[]` and the terminal `logTail` remains available.
 
 `watch` connects to the per-worktree daemon, runs an initial watch-mode cycle, then keeps polling for changes and reruns only the affected downstream slice. In attached JSON mode it emits the typed event stream line-by-line.
 
@@ -86,10 +87,12 @@ Watch cascades respect dependency barriers. If an intermediate task in the affec
 ```bash
 devflow validate build --mode artifacts --json
 devflow validate build --mode orders --max-orders 1000 --json
-devflow validate build --mode all --json
+devflow validate build --mode all --details issues --max-listed-paths 200 --json
 ```
 
 `--mode all` is the default. `permutations` is accepted as an alias for `orders`, and `--max-permutations` is an alias for `--max-orders`.
+
+`--details summary|issues|full` controls response volume. JSON defaults to `issues`, text output defaults to `summary`, and embedded Go API callers retain the historical exhaustive zero-value behavior unless they set `validation.Request.Details`. `summary` keeps pass/fail, exact counts, timings, byte/resource metrics, and phase data. `issues` adds bounded actionable samples but removes exhaustive successful-path arrays. `full` explicitly requests the legacy exhaustive arrays. `--max-listed-paths` defaults to 200 per issue category; all listed issue/path/log text also shares a 512 KiB default bound, so unusually long paths cannot bypass the count limit.
 
 Artifact mode resets a disposable sandbox before each task, copies only the task's declared worktree inputs plus declared outputs from transitive dependencies, executes the task with caches and stamps bypassed, and reports:
 
@@ -108,7 +111,9 @@ The default `--max-orders` is 1000. Devflow first enumerates up to the bound. Wh
 
 Both modes are direct and finite. Service/debug-service closures, overlapping output ownership, absolute/escaping artifact paths, `.git`/`.devflow` declarations, and worktree-root outputs fail preflight. The disposable sandbox isolates ordinary worktree-relative reads and writes, but it cannot isolate task-defined databases, network calls, global caches, absolute paths, or unregistered background processes. Select a finite, side-effect-safe target. Git metadata is deliberately not copied.
 
-`validate --json` returns `ValidationResult` with `project`, `target`, `worktree`, normalized `mode`, `success`, `durationMs`, optional `artifacts` and `orders` results, and structured issues. Validation findings still emit the complete JSON result and then exit non-zero. Tasks see `Runtime.Mode` as `validation`, `DEVFLOW_VALIDATION=1`, and `DEVFLOW_VALIDATION_MODE=artifacts|orders`.
+`validate --json` returns `ValidationResult` with `project`, `target`, `worktree`, normalized `mode`, `details`, exact counts, `samples`, `truncated`, `metrics`, optional `resourceFailure`, optional `artifacts`/`orders`, and structured issues. Validation findings still emit the complete JSON result and then exit non-zero. Metrics distinguish logical temporary bytes from `temporaryPhysicalBytesCurrent`/`temporaryPhysicalBytesPeak`; `temporaryPhysicalBytesMeasured` is true when Linux/macOS allocation-block data was available and false on the Windows fallback. The default limits are 5,000,000 cumulative files, 20 GiB cumulative logical bytes, 20 GiB validation-specific temporary logical bytes, and a 1 GiB disk safety reserve. They can be changed with `--max-files`, `--max-bytes`, `--max-temporary-bytes`, and `--disk-reserve-bytes`. The budget spans every phase and a failure reports its phase, resource, observed usage, limit, available bytes, reserve, and path before writable cleanup.
+
+Every applicable validation phase emits an immediate start and completion event plus throttled changing counters (at most about once per second) through stderr: preparing, copying, projecting, running, capturing, analyzing, archiving, and cleanup. The event includes elapsed time, files/logical bytes processed, current/peak/remaining temporary bytes, and issue count. Under `--json`, stdout remains exactly one final JSON document. Tasks see `Runtime.Mode` as `validation`, `DEVFLOW_VALIDATION=1`, and `DEVFLOW_VALIDATION_MODE=artifacts|orders`.
 
 `Inputs.Ignore` uses the same path-matching model for fingerprinting and watch matching:
 - exact or glob matches use slash-normalized paths
@@ -261,5 +266,14 @@ Implemented `tui` flags include:
 `cache status` lists entries for the selected project cache namespace, `cache invalidate` removes entries for that namespace globally or per task, and `cache gc` keeps only the newest N entries per task in that namespace. Task cache storage is physically global under the OS user cache directory, but entries are grouped by project namespace.
 
 `cache key --target <target>` prints the aggregate key for all cacheable/stamped tasks in the selected closure. Its JSON form returns `project`, `target`, `instanceId`, `namespace`, `key`, and `taskKeys`; each task item includes its real task key and whether it is a local stamp. It computes keys with the normal resolved instance environment and finalizers but does not execute target tasks.
+
+Use the explicit manifest handoff when that preflight includes expensive semantic fingerprint callbacks:
+
+```bash
+devflow cache key --target ci-backend --manifest-out "$RUNNER_TEMP/devflow-cache-manifest.json" --json
+devflow run ci-backend --cache-key-manifest "$RUNNER_TEMP/devflow-cache-manifest.json" --ci --json
+```
+
+The first JSON still contains the exact aggregate `key` for the external cache action and adds `manifestPath`. Devflow creates the manifest atomically with owner-only permissions. The second command validates its integrity, schema/build, 15-minute expiry, project/namespace/worktree/target, graph/configuration, task signatures, and hashed environment bindings. An explicitly supplied invalid manifest is a structured run failure with `cacheKeyManifest.validated=false` and a redacted `cacheKeyManifest.error`; Devflow does not silently execute the costly callbacks. The run rehashes local inputs and dependency keys, reuses only the semantic component snapshot, and reports reuse under `cacheKeyManifest` plus per-node `cache.manifestComponents`, `manifestValidationMs`, and `localInputsChangedFromManifest`.
 
 `cache path` prints the selected namespace's physical entry path. Its JSON form returns `project`, `namespace`, `cacheRoot`, and `namespacePath`, which is the supported surface for GitHub Actions or other CI cache configuration.

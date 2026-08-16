@@ -8,11 +8,12 @@ import (
 	"sort"
 	"time"
 
+	"github.com/benjaco/devflow/internal/fsutil"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/project"
 )
 
-func (v *Validator) validateArtifacts(ctx context.Context, req Request, template runtimeTemplate, order []string, root string) (*api.ArtifactValidationResult, error) {
+func (v *Validator) validateArtifacts(ctx context.Context, req Request, template runtimeTemplate, order []string, root string, budget *validationBudget, progress *validationProgress) (*api.ArtifactValidationResult, error) {
 	result := &api.ArtifactValidationResult{Success: true, Tasks: []api.ArtifactTaskValidation{}}
 	sandbox := filepath.Join(root, "worktree")
 	archivesRoot := filepath.Join(root, "outputs")
@@ -47,16 +48,19 @@ func (v *Validator) validateArtifacts(ctx context.Context, req Request, template
 			taskResult.InputCheck = "not_applicable"
 		}
 
+		if err := progress.start(ctx, phaseCopying, true); err != nil {
+			return nil, err
+		}
 		if err := clearSandbox(sandbox); err != nil {
 			return nil, fmt.Errorf("reset artifact sandbox for task %q: %w", name, err)
 		}
-		inputs, err := materializeTaskInputs(ctx, req.Worktree, sandbox, task)
-		if err != nil {
-			return nil, fmt.Errorf("materialize inputs for task %q: %w", name, err)
+		if err := budget.refreshTemporary(ctx); err != nil {
+			return nil, err
 		}
-		taskResult.MaterializedInputs = inputs
 
 		dependencyFiles := map[string]bool{}
+		checkedOut := make([]string, 0)
+		excludedInputs := make([]outputSpec, 0)
 		upstream := map[string]bool{}
 		for _, dep := range v.graph.Upstream(task.Deps) {
 			upstream[dep] = true
@@ -69,17 +73,31 @@ func (v *Validator) validateArtifacts(ctx context.Context, req Request, template
 			if archive == "" {
 				continue
 			}
-			files, copyErr := copyDirectoryContents(ctx, archive, sandbox)
-			if copyErr != nil {
-				return nil, fmt.Errorf("materialize dependency outputs from task %q for %q: %w", candidate, name, copyErr)
+			candidateTask := v.graph.Tasks[candidate]
+			files, moveErr := transferDeclaredOutputs(ctx, archive, sandbox, candidateTask, budget, progress)
+			if moveErr != nil {
+				return nil, fmt.Errorf("materialize dependency outputs from task %q for %q: %w", candidate, name, moveErr)
 			}
+			checkedOut = append(checkedOut, candidate)
+			excludedInputs = append(excludedInputs, taskOutputSpecs(candidateTask)...)
 			for _, file := range files {
 				dependencyFiles[file] = true
 			}
 		}
 		taskResult.DependencyOutputs = sortedSet(dependencyFiles)
+		if err := progress.start(ctx, phaseProjecting, true); err != nil {
+			return nil, err
+		}
+		inputs, err := materializeTaskInputs(ctx, req.Worktree, sandbox, task, excludedInputs, budget, progress)
+		if err != nil {
+			return nil, fmt.Errorf("materialize inputs for task %q: %w", name, err)
+		}
+		taskResult.MaterializedInputs = inputs
 
-		before, err := snapshotFilesystem(sandbox, true)
+		if err := progress.start(ctx, phaseCapturing, false); err != nil {
+			return nil, err
+		}
+		before, err := snapshotFilesystem(ctx, sandbox, true, budget, progress)
 		if err != nil {
 			return nil, fmt.Errorf("snapshot task %q inputs: %w", name, err)
 		}
@@ -89,13 +107,25 @@ func (v *Validator) validateArtifacts(ctx context.Context, req Request, template
 		}
 		sort.Strings(depKeys)
 		logPath := filepath.Join(logsRoot, fmt.Sprintf("%04d-%s.log", taskIndex+1, safePathPart(name)))
+		if err := progress.start(ctx, phaseRunning, false); err != nil {
+			return nil, err
+		}
 		logText, runErr := execution.runTask(ctx, task, logPath, depKeys)
 		if symlinkErr := validateSandboxSymlinks(sandbox); symlinkErr != nil && runErr == nil {
 			runErr = symlinkErr
 		}
-		after, err := snapshotFilesystem(sandbox, true)
+		if err := budget.refreshTemporary(ctx); err != nil {
+			return nil, err
+		}
+		if err := progress.start(ctx, phaseCapturing, false); err != nil {
+			return nil, err
+		}
+		after, err := snapshotFilesystem(ctx, sandbox, true, budget, progress)
 		if err != nil {
 			return nil, fmt.Errorf("snapshot task %q outputs: %w", name, err)
+		}
+		if err := progress.start(ctx, phaseAnalyzing, false); err != nil {
+			return nil, err
 		}
 		taskResult.ObservedWrites = changedFiles(before, after)
 		specs := taskOutputSpecs(task)
@@ -149,12 +179,25 @@ func (v *Validator) validateArtifacts(ctx context.Context, req Request, template
 		}
 		result.Issues = append(result.Issues, taskResult.Issues...)
 		result.Tasks = append(result.Tasks, taskResult)
+		progress.setIssues(progress.issueCount + len(taskResult.Issues))
 
-		if runErr != nil {
+		if !taskResult.Success {
 			break
 		}
+		if err := progress.start(ctx, phaseArchiving, false); err != nil {
+			return nil, err
+		}
+		for _, candidate := range checkedOut {
+			archive := archiveByTask[candidate]
+			if _, err := transferDeclaredOutputs(ctx, sandbox, archive, v.graph.Tasks[candidate], budget, progress); err != nil {
+				return nil, fmt.Errorf("return dependency outputs from task %q after %q: %w", candidate, name, err)
+			}
+		}
 		archive := filepath.Join(archivesRoot, fmt.Sprintf("%04d", taskIndex+1))
-		if err := archiveTaskOutputs(ctx, sandbox, archive, task); err != nil {
+		if err := fsutil.RemoveAllWritable(archive); err != nil {
+			return nil, fmt.Errorf("reset output archive for task %q: %w", name, err)
+		}
+		if _, err := transferDeclaredOutputs(ctx, sandbox, archive, task, budget, progress); err != nil {
 			return nil, fmt.Errorf("archive outputs for task %q: %w", name, err)
 		}
 		archiveByTask[name] = archive

@@ -5,14 +5,23 @@ Last updated: 2026-08-16
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: real-project adoption hardening and the Go 1.26.6 security/toolchain upgrade are complete; the per-worktree daemon remains the mutable dev/watch/operator control plane while `run --ci` remains direct and finite
-- Confidence: under Go 1.26.6 the exact govulncheck v1.6.0 command reports no reachable vulnerabilities, and the full default/race suites, all example tests, vet, Staticcheck, clean module metadata, formatting, and diff checks pass on native `darwin/arm64`; prior real native-ARM64 Docker/Postgres service, snapshot/restore, and PostgreSQL 16/17/18 PostGIS coverage remains current
+- State: follow-up real-project hardening is complete across PostgreSQL URL credential handling, CI failure diagnostics, bounded/resource-aware validation, and cache-key manifest reuse; the per-worktree daemon remains the mutable dev/watch/operator control plane while `run --ci` remains direct and finite
+- Confidence: under Go 1.26.6 the full default/race suites, focused copier/database/cache/engine/validation/CLI suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, and Linux/Windows amd64/arm64 builds pass on `darwin/arm64`; Docker-backed database tests were invoked but skipped because Docker Desktop was not running
 
 ## In Progress
 
 - None.
 
 ## Completed
+
+- CM Navigator follow-up hardening:
+  - query-string PostgreSQL passwords now follow libpq precedence, are percent-decoded into owner-only pgpass/stdin transport, and are removed from configured and ambient URLs; unsupported credential query channels are rejected with redacted errors
+  - CI failures retain `logTail` and add streaming marker-focused excerpts bounded to five windows, 200 lines, 64 KiB total, and 8 KiB per line
+  - validation JSON adds `summary|issues|full`, exact counts/samples/truncation, a 200-path/512-KiB bounded default, stderr phase/counter progress, aggregate resource metrics, disk reserve failures, and cross-phase cancellation/cleanup
+  - artifact outputs now move between the active sandbox and holding directories instead of creating a second expanded archive; read-only directory modes are temporarily repaired for APFS rename and restored afterward, with no hardlinks or normal cache writes
+  - cache-key manifests are atomic owner-only 15-minute handoffs bound to build/project/instance/target/graph/config/environment hashes; execution strictly rejects invalid reuse, rehashes local/generated inputs, and reuses semantic callbacks without plaintext values
+  - the 250,000-path fixture measures 49,501,813-byte exhaustive JSON versus 1,821-byte default issues JSON; the pnpm fixture measures 2,048,000 logical/8,192,000 allocated bytes for the one-tree peak versus 4,096,000 logical/16,384,000 allocated bytes for the exact legacy two-tree baseline; preflight plus manifest-backed run invokes the semantic callback exactly once
+  - updated CLI, architecture, adapter, testing, shared agent-memory, and agent-integration docs, including exact CLI and embedded Go API recipes
 
 - Go 1.26.6 security/toolchain upgrade:
   - raised the module and generated project-local bootstrap minimum from Go 1.25 to Go 1.26.6

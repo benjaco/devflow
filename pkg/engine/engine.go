@@ -2,8 +2,6 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -31,10 +29,11 @@ import (
 )
 
 type Request struct {
-	Target      string
-	Worktree    string
-	Mode        api.RunMode
-	MaxParallel int
+	Target               string
+	Worktree             string
+	Mode                 api.RunMode
+	MaxParallel          int
+	CacheKeyManifestPath string
 }
 
 type Outcome struct {
@@ -52,16 +51,18 @@ type Engine struct {
 }
 
 type runState struct {
-	mu          sync.Mutex
-	req         Request
-	inst        *api.Instance
-	status      map[string]api.NodeStatus
-	depKeys     map[string]string
-	cacheHits   []string
-	cacheMisses []string
-	nodeStarted map[string]time.Time
-	services    map[string]project.ServiceHandle
-	publish     func(api.Event)
+	mu            sync.Mutex
+	req           Request
+	inst          *api.Instance
+	status        map[string]api.NodeStatus
+	depKeys       map[string]string
+	cacheHits     []string
+	cacheMisses   []string
+	nodeStarted   map[string]time.Time
+	services      map[string]project.ServiceHandle
+	publish       func(api.Event)
+	manifest      *validatedCacheKeyManifest
+	manifestUsage *api.CacheKeyManifestUsage
 }
 
 type taskResult struct {
@@ -105,49 +106,8 @@ func (e *Engine) SubscribeEvents() <-chan api.Event {
 }
 
 func (e *Engine) CacheKey(ctx context.Context, req Request) (*api.CacheKeyResult, error) {
-	inst, _, baseRT, err := e.prepareExecution(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	order, err := e.graph.TargetClosure(req.Target)
-	if err != nil {
-		return nil, err
-	}
-	keys := map[string]string{}
-	taskKeys := make([]api.TaskCacheKey, 0)
-	for _, name := range order {
-		task := e.graph.Tasks[name]
-		if !task.Cache && !task.Stamp {
-			continue
-		}
-		depKeys := make([]string, 0, len(task.Deps))
-		for _, dep := range task.Deps {
-			if key := keys[dep]; key != "" {
-				depKeys = append(depKeys, key)
-			}
-		}
-		rt := baseRT.WithTask(name, instance.LogPath(req.Worktree, inst.ID, name))
-		rt.DepKeys = append([]string(nil), depKeys...)
-		key, err := e.taskKey(ctx, rt, task, depKeys)
-		if err != nil {
-			return nil, fmt.Errorf("compute cache key for task %q: %w", name, err)
-		}
-		keys[name] = key
-		taskKeys = append(taskKeys, api.TaskCacheKey{Task: name, Key: key, Stamp: task.Stamp})
-	}
-	hash := sha256.New()
-	_, _ = fmt.Fprintf(hash, "devflow-target-cache-v1\x00%s\x00%s\x00", project.CacheNamespace(e.project), req.Target)
-	for _, item := range taskKeys {
-		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%t\x00", item.Task, item.Key, item.Stamp)
-	}
-	return &api.CacheKeyResult{
-		Project:    e.project.Name(),
-		Target:     req.Target,
-		InstanceID: inst.ID,
-		Namespace:  project.CacheNamespace(e.project),
-		Key:        hex.EncodeToString(hash.Sum(nil)),
-		TaskKeys:   taskKeys,
-	}, nil
+	result, _, err := e.CacheKeyWithManifest(ctx, req)
+	return result, err
 }
 
 func (e *Engine) Watch(ctx context.Context, req Request) error {
@@ -290,22 +250,39 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 
 func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 	started := time.Now().UTC()
+	result := api.RunResult{
+		Target:          req.Target,
+		Mode:            req.Mode,
+		Success:         false,
+		FailureExcerpts: []api.FailureExcerpt{},
+		Nodes:           []api.NodeStatus{},
+		CacheHits:       []string{},
+		CacheMisses:     []string{},
+		StartedAt:       started.Format(time.RFC3339),
+	}
 	inst, state, baseRT, err := e.prepareExecution(ctx, req)
 	if err != nil {
+		var manifestErr *CacheKeyManifestError
+		if errors.As(err, &manifestErr) {
+			result.Error = manifestErr.Error()
+			result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+			result.DurationMs = time.Since(started).Milliseconds()
+			result.CacheKeyManifest = &api.CacheKeyManifestUsage{
+				Validated:              false,
+				Error:                  manifestErr.Error(),
+				ValidationDurationMs:   manifestErr.DurationMs,
+				ReusedTasks:            []string{},
+				LocalInputChangedTasks: []string{},
+			}
+			return &Outcome{Result: result}, err
+		}
 		return nil, err
 	}
+	result.InstanceID = inst.ID
 
 	order, err := e.graph.TargetClosure(req.Target)
 	if err != nil {
 		return nil, err
-	}
-
-	result := api.RunResult{
-		Target:     req.Target,
-		Mode:       req.Mode,
-		InstanceID: inst.ID,
-		Success:    false,
-		StartedAt:  started.Format(time.RFC3339),
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -382,23 +359,44 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 			return nil, nil, nil, err
 		}
 	}
-	if err := instance.Save(inst); err != nil {
-		return nil, nil, nil, err
-	}
-
 	order, err := e.graph.TargetClosure(req.Target)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	var manifest *validatedCacheKeyManifest
+	var manifestUsage *api.CacheKeyManifestUsage
+	if req.CacheKeyManifestPath != "" {
+		manifestStarted := time.Now()
+		manifest, err = e.loadAndValidateCacheKeyManifest(req.CacheKeyManifestPath, req, inst, order)
+		manifestDuration := elapsedMilliseconds(manifestStarted)
+		if err != nil {
+			var manifestErr *CacheKeyManifestError
+			if errors.As(err, &manifestErr) {
+				manifestErr.DurationMs = manifestDuration
+			}
+			return nil, nil, nil, err
+		}
+		manifestUsage = &api.CacheKeyManifestUsage{
+			Validated:              true,
+			ValidationDurationMs:   manifestDuration,
+			ReusedTasks:            []string{},
+			LocalInputChangedTasks: []string{},
+		}
+	}
+	if err := instance.Save(inst); err != nil {
+		return nil, nil, nil, err
+	}
 
 	state := &runState{
-		req:         req,
-		inst:        inst,
-		status:      map[string]api.NodeStatus{},
-		depKeys:     map[string]string{},
-		nodeStarted: map[string]time.Time{},
-		services:    map[string]project.ServiceHandle{},
-		publish:     e.publish,
+		req:           req,
+		inst:          inst,
+		status:        map[string]api.NodeStatus{},
+		depKeys:       map[string]string{},
+		nodeStarted:   map[string]time.Time{},
+		services:      map[string]project.ServiceHandle{},
+		publish:       e.publish,
+		manifest:      manifest,
+		manifestUsage: manifestUsage,
 	}
 	for _, name := range order {
 		task := e.graph.Tasks[name]
@@ -605,11 +603,13 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 	}
 	if task.Stamp {
 		// Stamps are local install/setup markers; never use the global cache to skip or restore them.
-		key, err := e.taskKey(ctx, rt, task, depKeys)
+		computation, err := e.computeTaskKey(ctx, rt, task, depKeys, state.manifest)
 		if err != nil {
 			state.setErrorState(task.Name, ctx, "", err, 0)
 			return taskResult{name: task.Name, err: err}
 		}
+		key := computation.key
+		state.recordManifestComputation(task.Name, computation)
 		state.setLastRunKey(task.Name, key)
 		if stamp, ok, loadErr := instance.LoadTaskStamp(rt.Worktree, state.inst.ID, task.Name); loadErr != nil {
 			state.setErrorState(task.Name, ctx, key, loadErr, 0)
@@ -639,22 +639,28 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 
 	if task.Cache {
 		keyStarted := time.Now()
-		key, err := e.taskKey(ctx, rt, task, depKeys)
+		computation, err := e.computeTaskKey(ctx, rt, task, depKeys, state.manifest)
 		keyDuration := elapsedMilliseconds(keyStarted)
 		if err != nil {
 			state.setErrorState(task.Name, ctx, "", err, 0)
 			return taskResult{name: task.Name, err: err}
 		}
+		key := computation.key
+		state.recordManifestComputation(task.Name, computation)
+		manifestDuration, manifestComponents := state.manifestTiming(computation)
 		state.setLastRunKey(task.Name, key)
 		restoreStarted := time.Now()
 		ok, restoreErr := e.cache.RestoreContext(ctx, rt.Worktree, task.Name, key, cacheCopyProgress(rt, "restore"))
 		readDuration := elapsedMilliseconds(restoreStarted)
 		if restoreErr == nil && ok {
 			state.setCacheTiming(task.Name, api.CacheTiming{
-				Outcome:         "hit",
-				KeyDurationMs:   keyDuration,
-				ReadDurationMs:  readDuration,
-				TotalDurationMs: keyDuration + readDuration,
+				Outcome:                        "hit",
+				KeyDurationMs:                  keyDuration,
+				ReadDurationMs:                 readDuration,
+				ManifestValidationMs:           manifestDuration,
+				ManifestComponents:             manifestComponents,
+				LocalInputsChangedFromManifest: computation.localInputsChanged,
+				TotalDurationMs:                keyDuration + readDuration + manifestDuration,
 			})
 			state.publishEvent(api.Event{
 				TS:         process.NowRFC3339Nano(),
@@ -671,10 +677,13 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 		}
 		state.addCacheMiss(task.Name)
 		state.setCacheTiming(task.Name, api.CacheTiming{
-			Outcome:         "miss",
-			KeyDurationMs:   keyDuration,
-			ReadDurationMs:  readDuration,
-			TotalDurationMs: keyDuration + readDuration,
+			Outcome:                        "miss",
+			KeyDurationMs:                  keyDuration,
+			ReadDurationMs:                 readDuration,
+			ManifestValidationMs:           manifestDuration,
+			ManifestComponents:             manifestComponents,
+			LocalInputsChangedFromManifest: computation.localInputsChanged,
+			TotalDurationMs:                keyDuration + readDuration + manifestDuration,
 		})
 		state.publishEvent(api.Event{
 			TS:         process.NowRFC3339Nano(),
@@ -697,11 +706,14 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 		}
 		writeDuration := elapsedMilliseconds(writeStarted)
 		state.setCacheTiming(task.Name, api.CacheTiming{
-			Outcome:         "miss",
-			KeyDurationMs:   keyDuration,
-			ReadDurationMs:  readDuration,
-			WriteDurationMs: writeDuration,
-			TotalDurationMs: keyDuration + readDuration + writeDuration,
+			Outcome:                        "miss",
+			KeyDurationMs:                  keyDuration,
+			ReadDurationMs:                 readDuration,
+			WriteDurationMs:                writeDuration,
+			ManifestValidationMs:           manifestDuration,
+			ManifestComponents:             manifestComponents,
+			LocalInputsChangedFromManifest: computation.localInputsChanged,
+			TotalDurationMs:                keyDuration + readDuration + writeDuration + manifestDuration,
 		})
 		state.setNodeState(task.Name, api.StateDone, key, "", 0)
 		return taskResult{name: task.Name, key: key}
@@ -913,30 +925,6 @@ func (e *Engine) waitForPromptAnswer(ctx context.Context, req Request, instanceI
 			return process.PromptResponse{Value: value}, nil
 		}
 	}
-}
-
-func (e *Engine) taskKey(ctx context.Context, rt *project.Runtime, task project.Task, depKeys []string) (string, error) {
-	if task.CacheKeyOverride != nil {
-		value, err := task.CacheKeyOverride(ctx, rt)
-		if err != nil {
-			return "", err
-		}
-		return fingerprint.TaskKey(fingerprint.TaskKeyInput{
-			Task:     task,
-			Override: value,
-		})
-	}
-	inputHashes, envValues, custom, err := fingerprint.CollectTaskInputsWithCache(ctx, rt.Worktree, task, rt, e.inputs)
-	if err != nil {
-		return "", err
-	}
-	return fingerprint.TaskKey(fingerprint.TaskKeyInput{
-		Task:               task,
-		DepKeys:            depKeys,
-		InputHashes:        inputHashes,
-		EnvValues:          envValues,
-		CustomFingerprints: custom,
-	})
 }
 
 func (e *Engine) waitForServices(parent context.Context, req Request, inst *api.Instance, state *runState, services map[string]project.ServiceHandle) error {
@@ -1153,6 +1141,61 @@ func (s *runState) setCacheTiming(name string, timing api.CacheTiming) {
 	node.Cache = &timingCopy
 	s.status[name] = node
 	s.saveLocked()
+}
+
+func (s *runState) recordManifestComputation(task string, computation taskKeyComputation) {
+	if len(computation.manifestComponents) == 0 && !computation.localInputsChanged {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.manifestUsage == nil {
+		return
+	}
+	if len(computation.manifestComponents) > 0 {
+		s.manifestUsage.ReusedTasks = append(s.manifestUsage.ReusedTasks, task)
+		s.manifestUsage.ReusedComponents += len(computation.manifestComponents)
+	}
+	if computation.localInputsChanged {
+		s.manifestUsage.LocalInputChangedTasks = append(s.manifestUsage.LocalInputChangedTasks, task)
+	}
+}
+
+func (s *runState) manifestTiming(computation taskKeyComputation) (int64, []string) {
+	if len(computation.manifestComponents) == 0 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.manifestUsage == nil {
+		return 0, nil
+	}
+	return s.manifestUsage.ValidationDurationMs, append([]string(nil), computation.manifestComponents...)
+}
+
+func (s *runState) manifestUsageSnapshot() *api.CacheKeyManifestUsage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.manifestUsage == nil {
+		return nil
+	}
+	usage := *s.manifestUsage
+	usage.ReusedTasks = uniqueSortedStrings(usage.ReusedTasks)
+	usage.LocalInputChangedTasks = uniqueSortedStrings(usage.LocalInputChangedTasks)
+	return &usage
+}
+
+func uniqueSortedStrings(values []string) []string {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[value] = true
+	}
+	out := make([]string, 0, len(set))
+	for value := range set {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (s *runState) publishEvent(evt api.Event) {
@@ -1827,7 +1870,11 @@ func finalizeRunResult(result *api.RunResult, state *runState, runErr error) {
 	}
 	result.CacheHits = state.snapshotCacheHits()
 	result.CacheMisses = state.snapshotCacheMisses()
+	result.CacheKeyManifest = state.manifestUsageSnapshot()
 	result.Nodes = state.resultNodes()
+	if result.FailureExcerpts == nil {
+		result.FailureExcerpts = []api.FailureExcerpt{}
+	}
 	if runErr == nil {
 		return
 	}
@@ -1841,6 +1888,7 @@ func finalizeRunResult(result *api.RunResult, state *runState, runErr error) {
 		}
 		result.FailedNodeLogPath = node.LogPath
 		result.LogTail = boundedLogTail(node.LogPath, 50, 32*1024)
+		result.FailureExcerpts = boundedFailureExcerpts(node.LogPath, node.Name)
 		break
 	}
 }

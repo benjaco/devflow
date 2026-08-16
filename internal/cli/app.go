@@ -177,9 +177,15 @@ func (a *App) validateCmd(args []string) error {
 	worktree := fs.String("worktree", "", "project worktree path; defaults to the current directory")
 	projectName := fs.String("project", defaultProject(), "registered project adapter name")
 	mode := fs.String("mode", string(api.ValidationModeAll), "validation mode: artifacts, orders, or all")
+	details := fs.String("details", "", "validation detail level: summary, issues, or full (JSON default: issues)")
+	maxListedPaths := fs.Int("max-listed-paths", validation.DefaultMaxListedPaths, "maximum paths listed per validation issue category")
 	maxOrders := validation.DefaultMaxOrders
 	fs.IntVar(&maxOrders, "max-orders", validation.DefaultMaxOrders, "maximum valid task orders to enumerate exhaustively")
 	fs.IntVar(&maxOrders, "max-permutations", validation.DefaultMaxOrders, "alias for --max-orders")
+	maxFiles := fs.Int64("max-files", validation.DefaultValidationMaxFiles, "validation-wide maximum files processed")
+	maxBytes := fs.Int64("max-bytes", validation.DefaultValidationMaxBytes, "validation-wide maximum logical bytes processed")
+	maxTemporaryBytes := fs.Int64("max-temporary-bytes", validation.DefaultValidationMaxTemp, "maximum validation-specific temporary logical bytes")
+	diskReserveBytes := fs.Int64("disk-reserve-bytes", validation.DefaultValidationDiskReserve, "free-space safety reserve retained during validation")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -194,9 +200,23 @@ func (a *App) validateCmd(args []string) error {
 	if maxOrders <= 0 {
 		return fmt.Errorf("--max-orders must be positive")
 	}
+	if *maxListedPaths <= 0 {
+		return fmt.Errorf("--max-listed-paths must be positive")
+	}
+	if *maxFiles <= 0 || *maxBytes <= 0 || *maxTemporaryBytes <= 0 || *diskReserveBytes < 0 {
+		return fmt.Errorf("validation resource limits must be positive and --disk-reserve-bytes must not be negative")
+	}
 	modeValue := api.ValidationMode(strings.ToLower(strings.TrimSpace(*mode)))
 	if modeValue == "permutations" {
 		modeValue = api.ValidationModeOrders
+	}
+	detailsValue := api.ValidationDetails(strings.ToLower(strings.TrimSpace(*details)))
+	if detailsValue == "" {
+		if *jsonOut {
+			detailsValue = api.ValidationDetailsIssues
+		} else {
+			detailsValue = api.ValidationDetailsSummary
+		}
 	}
 	root, err := resolveWorktree(*worktree)
 	if err != nil {
@@ -217,10 +237,19 @@ func (a *App) validateCmd(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	result, err := validator.Run(ctx, validation.Request{
-		Target:    resolvedTarget,
-		Worktree:  root,
-		Mode:      modeValue,
-		MaxOrders: maxOrders,
+		Target:                 resolvedTarget,
+		Worktree:               root,
+		Mode:                   modeValue,
+		Details:                detailsValue,
+		MaxOrders:              maxOrders,
+		MaxListedPaths:         *maxListedPaths,
+		MaxFiles:               *maxFiles,
+		MaxBytes:               *maxBytes,
+		MaxTemporaryBytes:      *maxTemporaryBytes,
+		DiskSafetyReserveBytes: *diskReserveBytes,
+		OnEvent: func(evt api.Event) {
+			streamValidationProgress(a.Stderr, evt)
+		},
 	})
 	if err != nil {
 		return err
@@ -249,6 +278,54 @@ func (a *App) validateCmd(args []string) error {
 	return nil
 }
 
+func streamValidationProgress(out io.Writer, evt api.Event) {
+	if out == nil || evt.Type != api.EventValidation {
+		return
+	}
+	state := "update"
+	if evt.Done {
+		state = "completed"
+	} else if evt.DurationMs == 0 {
+		state = "started"
+	}
+	_, _ = fmt.Fprintf(
+		out,
+		"[devflow] validation phase=%s state=%s files=%d bytes=%d temp_bytes=%d peak_temp_bytes=%d remaining_temp_bytes=%d issues=%d elapsed_ms=%d\n",
+		validationPhaseLabel(evt.Phase),
+		state,
+		evt.FilesProcessed,
+		evt.LogicalBytes,
+		evt.TemporaryBytes,
+		evt.PeakTemporaryBytes,
+		evt.RemainingBytes,
+		evt.IssueCount,
+		evt.DurationMs,
+	)
+}
+
+func validationPhaseLabel(phase string) string {
+	switch phase {
+	case "preparing":
+		return "Preparing validation"
+	case "projecting-inputs":
+		return "Projecting inputs"
+	case "copying-files":
+		return "Copying files"
+	case "running-target":
+		return "Running the target"
+	case "capturing-writes":
+		return "Capturing writes"
+	case "analyzing-declarations":
+		return "Analyzing declarations"
+	case "creating-archive":
+		return "Creating snapshot/archive"
+	case "cleaning-up":
+		return "Cleaning up"
+	default:
+		return phase
+	}
+}
+
 func (a *App) runCmd(args []string) error {
 	target := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -263,6 +340,7 @@ func (a *App) runCmd(args []string) error {
 	ciMode := fs.Bool("ci", false, "(--ci) run as a finite CI/readiness probe; service tasks start, pass readiness, then stop before returning")
 	detach := fs.Bool("detach", false, "(--detach) launch a detached supervisor and return after it starts; this is not a readiness gate")
 	maxParallel := fs.Int("max-parallel", 0, "maximum parallel tasks; 0 uses the engine default")
+	cacheKeyManifest := fs.String("cache-key-manifest", "", "owner-only cache-key manifest created by devflow cache key --manifest-out")
 	projectName := fs.String("project", defaultProject(), "registered project adapter name")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -283,7 +361,10 @@ func (a *App) runCmd(args []string) error {
 		if *modeWatch {
 			return fmt.Errorf("run --ci is finite and does not support --watch")
 		}
-		return a.runDirect(target, *jsonOut, *worktree, *projectName, api.ModeCI, *maxParallel)
+		return a.runDirect(target, *jsonOut, *worktree, *projectName, api.ModeCI, *maxParallel, *cacheKeyManifest)
+	}
+	if *cacheKeyManifest != "" {
+		return fmt.Errorf("--cache-key-manifest is supported only with run --ci")
 	}
 	if *modeWatch {
 		return a.watchViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel)
@@ -291,7 +372,7 @@ func (a *App) runCmd(args []string) error {
 	return a.runViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel)
 }
 
-func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName string, mode api.RunMode, maxParallel int) error {
+func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName string, mode api.RunMode, maxParallel int, cacheKeyManifest string) error {
 	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
 		return err
@@ -322,10 +403,11 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 		}()
 	}
 	outcome, runErr := eng.Run(runCtx, engine.Request{
-		Target:      resolvedTarget,
-		Worktree:    root,
-		Mode:        mode,
-		MaxParallel: maxParallel,
+		Target:               resolvedTarget,
+		Worktree:             root,
+		Mode:                 mode,
+		MaxParallel:          maxParallel,
+		CacheKeyManifestPath: cacheKeyManifest,
 	})
 	stopProgress()
 	progressWG.Wait()
@@ -878,6 +960,7 @@ func (a *App) cacheKeyCmd(args []string) error {
 	worktree := fs.String("worktree", "", "project worktree path")
 	projectName := fs.String("project", "", "project adapter name")
 	target := fs.String("target", "", "target or task whose cache key should be computed")
+	manifestOut := fs.String("manifest-out", "", "write an owner-only cache-key manifest for immediate run reuse")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -900,9 +983,19 @@ func (a *App) cacheKeyCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	result, err := eng.CacheKey(context.Background(), engine.Request{Target: resolvedTarget, Worktree: root, Mode: api.ModeCI})
+	result, manifest, err := eng.CacheKeyWithManifest(context.Background(), engine.Request{Target: resolvedTarget, Worktree: root, Mode: api.ModeCI})
 	if err != nil {
 		return err
+	}
+	if *manifestOut != "" {
+		manifestPath, err := filepath.Abs(*manifestOut)
+		if err != nil {
+			return fmt.Errorf("resolve cache key manifest path: %w", err)
+		}
+		if err := engine.WriteCacheKeyManifest(manifestPath, manifest); err != nil {
+			return fmt.Errorf("write cache key manifest: %w", err)
+		}
+		result.ManifestPath = manifestPath
 	}
 	if *jsonOut {
 		return writeJSON(a.Stdout, result)

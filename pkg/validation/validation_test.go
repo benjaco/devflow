@@ -2,13 +2,17 @@ package validation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/benjaco/devflow/internal/fsutil"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/graph"
 	"github.com/benjaco/devflow/pkg/project"
@@ -555,4 +559,330 @@ func hasIssueKind(issues []api.ValidationIssue, kind string) bool {
 		}
 	}
 	return false
+}
+
+func TestValidationIssuesDetailsBoundLargeSuccessfulResult(t *testing.T) {
+	const pathCount = 250_000
+	paths := make([]string, pathCount)
+	for index := range paths {
+		paths[index] = fmt.Sprintf("node_modules/.pnpm/package-%06d/node_modules/package/index.js", index)
+	}
+	result := &api.ValidationResult{
+		Project: "large",
+		Target:  "validate",
+		Mode:    api.ValidationModeArtifacts,
+		Details: api.ValidationDetailsIssues,
+		Success: true,
+		Artifacts: &api.ArtifactValidationResult{
+			Success: true,
+			Tasks: []api.ArtifactTaskValidation{{
+				Task:               "pnpm",
+				Success:            true,
+				MaterializedInputs: paths,
+				ProducedOutputs:    paths,
+				ObservedWrites:     paths,
+			}},
+		},
+	}
+	legacyData, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyBytes := len(legacyData)
+	if legacyBytes < 10<<20 {
+		t.Fatalf("exhaustive 250,000-path fixture unexpectedly small: %d bytes", legacyBytes)
+	}
+	req := Request{Details: api.ValidationDetailsIssues, MaxListedPaths: DefaultMaxListedPaths, MaxListedBytes: DefaultMaxListedBytes}
+	applyValidationDetails(result, req)
+	task := result.Artifacts.Tasks[0]
+	if task.MaterializedInputCount != pathCount || task.ProducedPathCount != pathCount || task.ObservedWriteCount != pathCount {
+		t.Fatalf("sampled output lost exact counts: %+v", task)
+	}
+	if !task.Truncated.MaterializedInputs || !task.Truncated.ProducedPaths || !task.Truncated.ObservedWrites {
+		t.Fatalf("missing truncation metadata: %+v", task.Truncated)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) >= 1<<20 {
+		t.Fatalf("default 250,000-path JSON = %d bytes, want below 1 MiB", len(data))
+	}
+	t.Logf("validation JSON bytes: exhaustive=%d bounded-issues=%d", legacyBytes, len(data))
+}
+
+func TestValidationFullDetailsRetainExhaustivePaths(t *testing.T) {
+	paths := []string{"one", "two", "three"}
+	result := &api.ValidationResult{
+		Details: api.ValidationDetailsFull,
+		Artifacts: &api.ArtifactValidationResult{Tasks: []api.ArtifactTaskValidation{{
+			MaterializedInputs: append([]string(nil), paths...),
+			ProducedOutputs:    append([]string(nil), paths...),
+			ObservedWrites:     append([]string(nil), paths...),
+		}}},
+	}
+	applyValidationDetails(result, Request{Details: api.ValidationDetailsFull, MaxListedPaths: 1, MaxListedBytes: 1})
+	if !reflect.DeepEqual(result.Artifacts.Tasks[0].ObservedWrites, paths) || result.Artifacts.Tasks[0].Truncated.ObservedWrites {
+		t.Fatalf("full details were sampled: %+v", result.Artifacts.Tasks[0])
+	}
+}
+
+func TestArtifactValidationLargePNPMProjectionUsesOneExpandedCopy(t *testing.T) {
+	worktree := t.TempDir()
+	packageRoot := filepath.Join(worktree, "node_modules", ".pnpm", "pkg@1.0.0", "node_modules", "pkg")
+	if err := os.MkdirAll(packageRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		fileCount = 2_000
+		fileBytes = 1024
+	)
+	content := strings.Repeat("x", fileBytes)
+	for index := 0; index < fileCount; index++ {
+		writeValidationFile(t, packageRoot, fmt.Sprintf("file-%04d.js", index), content)
+	}
+	for index := 0; index < 50; index++ {
+		target := filepath.Join(".pnpm", "pkg@1.0.0", "node_modules", "pkg")
+		if err := os.Symlink(target, filepath.Join(worktree, "node_modules", fmt.Sprintf("pkg-%02d", index))); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	p := validationTestProject{
+		name: "large-pnpm",
+		tasks: []project.Task{{
+			Name:    "install",
+			Kind:    project.KindOnce,
+			Inputs:  project.Inputs{Dirs: []string{"node_modules"}},
+			Outputs: project.Outputs{Dirs: []string{"node_modules"}},
+			Run: func(_ context.Context, rt *project.Runtime) error {
+				link, err := os.Lstat(rt.Abs("node_modules/pkg-00"))
+				if err != nil || link.Mode()&os.ModeSymlink == 0 {
+					return fmt.Errorf("pnpm link was expanded: %v", err)
+				}
+				return os.WriteFile(rt.Abs("node_modules/.pnpm/pkg@1.0.0/node_modules/pkg/file-0000.js"), []byte("mutated projection"), 0o644)
+			},
+		}},
+		targets: []project.Target{{Name: "install", RootTasks: []string{"install"}}},
+	}
+	validator, err := New(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := validator.Run(context.Background(), Request{
+		Target:                 "install",
+		Worktree:               worktree,
+		Mode:                   api.ValidationModeArtifacts,
+		Details:                api.ValidationDetailsIssues,
+		DiskSafetyReserveBytes: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success {
+		t.Fatalf("large pnpm validation failed: %+v", result)
+	}
+	logicalTreeBytes := int64(fileCount * fileBytes)
+	if result.Metrics.TemporaryBytesPeak >= logicalTreeBytes*3/2 {
+		t.Fatalf("peak temporary bytes show a duplicate expanded tree: peak=%d tree=%d", result.Metrics.TemporaryBytesPeak, logicalTreeBytes)
+	}
+	t.Logf("validation temporary logical bytes: legacy-two-tree=%d one-tree-peak=%d", logicalTreeBytes*2, result.Metrics.TemporaryBytesPeak)
+	if result.Metrics.TemporaryBytesCurrent != 0 {
+		t.Fatalf("validation cleanup retained %d temporary bytes", result.Metrics.TemporaryBytesCurrent)
+	}
+	if result.Metrics.TemporaryPhysicalCurrent != 0 {
+		t.Fatalf("validation cleanup retained %d physically allocated temporary bytes", result.Metrics.TemporaryPhysicalCurrent)
+	}
+	if result.Metrics.TemporaryPhysicalMeasured {
+		sourcePhysical := allocatedTreeBytes(t, packageRoot)
+		if result.Metrics.TemporaryPhysicalPeak >= sourcePhysical*3/2 {
+			t.Fatalf("physical peak shows a duplicate expanded tree: peak=%d source=%d", result.Metrics.TemporaryPhysicalPeak, sourcePhysical)
+		}
+		t.Logf("validation physical bytes: legacy-two-tree=%d one-tree-peak=%d", sourcePhysical*2, result.Metrics.TemporaryPhysicalPeak)
+	}
+	if info, err := os.Lstat(filepath.Join(worktree, "node_modules", "pkg-00")); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("source pnpm link was mutated: %v", err)
+	}
+	original, err := os.ReadFile(filepath.Join(packageRoot, "file-0000.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(original) != content {
+		t.Fatalf("validation projection mutation reached source/cache-like input: %q", original)
+	}
+}
+
+func TestValidationWideBudgetStopsAcrossIndividuallySmallPhases(t *testing.T) {
+	worktree := t.TempDir()
+	for index := 0; index < 8; index++ {
+		writeValidationFile(t, worktree, fmt.Sprintf("inputs/file-%02d.txt", index), "input")
+	}
+	p := validationTestProject{
+		name: "aggregate-budget",
+		tasks: []project.Task{{
+			Name:    "copy",
+			Kind:    project.KindOnce,
+			Inputs:  project.Inputs{Dirs: []string{"inputs"}},
+			Outputs: project.Outputs{Files: []string{"out.txt"}},
+			Run: func(_ context.Context, rt *project.Runtime) error {
+				return project.WriteFile(rt, "out.txt", []byte("ok"), 0o644)
+			},
+		}},
+		targets: []project.Target{{Name: "copy", RootTasks: []string{"copy"}}},
+	}
+	validator, err := New(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := validator.Run(context.Background(), Request{
+		Target:                 "copy",
+		Worktree:               worktree,
+		Mode:                   api.ValidationModeArtifacts,
+		Details:                api.ValidationDetailsIssues,
+		MaxFiles:               15,
+		DiskSafetyReserveBytes: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Success || result.ResourceFailure == nil || result.ResourceFailure.Resource != "files_processed" || !hasIssueKind(result.Issues, "resource_budget_exceeded") {
+		t.Fatalf("expected structured aggregate budget failure: %+v", result)
+	}
+	if result.Metrics.TemporaryBytesCurrent != 0 {
+		t.Fatalf("partial budget output was not cleaned: %+v", result.Metrics)
+	}
+}
+
+func TestValidationCancellationInterruptsProjectionAndCleansReadOnlyPartialTree(t *testing.T) {
+	worktree := t.TempDir()
+	large := filepath.Join(worktree, "large.bin")
+	file, err := os.OpenFile(large, os.O_CREATE|os.O_WRONLY, 0o444)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(64 << 20); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	temporaryRoot := t.TempDir()
+	t.Setenv("TMPDIR", temporaryRoot)
+	t.Setenv("TMP", temporaryRoot)
+	t.Setenv("TEMP", temporaryRoot)
+	p := validationTestProject{
+		name:    "cancel-projection",
+		tasks:   []project.Task{{Name: "copy", Kind: project.KindOnce, Inputs: project.Inputs{Files: []string{"large.bin"}}}},
+		targets: []project.Target{{Name: "copy", RootTasks: []string{"copy"}}},
+	}
+	validator, err := New(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(time.Millisecond, cancel)
+	_, err = validator.Run(ctx, Request{Target: "copy", Worktree: worktree, Mode: api.ValidationModeArtifacts, DiskSafetyReserveBytes: -1})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("projection cancellation error = %v", err)
+	}
+	entries, readErr := os.ReadDir(temporaryRoot)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("canceled validation left temporary data: %v", entries)
+	}
+}
+
+func TestValidationCancellationInterruptsSnapshotAndPartialArtifactTransfer(t *testing.T) {
+	t.Run("snapshot", func(t *testing.T) {
+		root := t.TempDir()
+		for index := 0; index < 100; index++ {
+			writeValidationFile(t, root, fmt.Sprintf("files/%03d.txt", index), "content")
+		}
+		budget := newValidationBudget(root, Request{MaxFiles: -1, MaxBytes: -1, MaxTemporaryBytes: -1})
+		_, err := snapshotFilesystem(&errAfterContext{failAt: 12}, root, true, budget, nil)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("snapshot cancellation error = %v", err)
+		}
+	})
+
+	t.Run("artifact transfer and cleanup", func(t *testing.T) {
+		root := t.TempDir()
+		t.Cleanup(func() { _ = fsutil.RemoveAllWritable(root) })
+		source := filepath.Join(root, "source")
+		destination := filepath.Join(root, "holding")
+		writeValidationFile(t, source, "a/file.txt", "a")
+		writeValidationFile(t, source, "b/file.txt", "b")
+		for _, file := range []string{"a/file.txt", "b/file.txt"} {
+			if err := os.Chmod(filepath.Join(source, filepath.FromSlash(file)), 0o444); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, directory := range []string{"a", "b"} {
+			if err := os.Chmod(filepath.Join(source, directory), 0o555); err != nil {
+				t.Fatal(err)
+			}
+		}
+		budget := newValidationBudget(root, Request{MaxFiles: -1, MaxBytes: -1, MaxTemporaryBytes: -1})
+		task := project.Task{Outputs: project.Outputs{Dirs: []string{"a", "b"}}}
+		_, err := transferDeclaredOutputs(&errAfterContext{failAt: 6}, source, destination, task, budget, nil)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("artifact-transfer cancellation error = %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(destination, "a", "file.txt")); err != nil {
+			t.Fatalf("expected first read-only artifact to be transferred before cancellation: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(source, "b", "file.txt")); err != nil {
+			t.Fatalf("expected second artifact to remain at cancellation: %v", err)
+		}
+		if err := fsutil.RemoveAllWritable(root); err != nil {
+			t.Fatalf("cleanup partial read-only transfer: %v", err)
+		}
+		if _, err := os.Stat(root); !os.IsNotExist(err) {
+			t.Fatalf("partial transfer root survived cleanup: %v", err)
+		}
+	})
+}
+
+type errAfterContext struct {
+	calls  int
+	failAt int
+}
+
+func allocatedTreeBytes(t *testing.T, root string) int64 {
+	t.Helper()
+	var total int64
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		allocated, measured := fsutil.AllocatedFileBytes(path, info)
+		if !measured {
+			return fmt.Errorf("physical allocation is unavailable for %s", path)
+		}
+		total += allocated
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return total
+}
+
+func (c *errAfterContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *errAfterContext) Done() <-chan struct{}       { return nil }
+func (c *errAfterContext) Value(any) any               { return nil }
+func (c *errAfterContext) Err() error {
+	c.calls++
+	if c.calls >= c.failAt {
+		return context.Canceled
+	}
+	return nil
 }

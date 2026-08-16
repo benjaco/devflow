@@ -80,6 +80,41 @@ func TestCopyFileTemporarilyMakesDestinationParentWritable(t *testing.T) {
 	}
 }
 
+func TestMovePathWritableMovesReadOnlyDirectoryAndRestoresMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix directory permission semantics")
+	}
+	root := t.TempDir()
+	t.Cleanup(func() { _ = RemoveAllWritable(root) })
+	source := filepath.Join(root, "source", "readonly")
+	destination := filepath.Join(root, "holding", "readonly")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "file.txt"), []byte("content"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(source, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := MovePathWritable(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("source survived move: %v", err)
+	}
+	info, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o555 {
+		t.Fatalf("destination mode = %03o, want 555", info.Mode().Perm())
+	}
+	if data, err := os.ReadFile(filepath.Join(destination, "file.txt")); err != nil || string(data) != "content" {
+		t.Fatalf("moved read-only content = %q, err=%v", data, err)
+	}
+}
+
 func TestCopierPreservesInternalPNPMSymlinksWithoutExpandingGraph(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink fixture requires developer-mode symlink support")

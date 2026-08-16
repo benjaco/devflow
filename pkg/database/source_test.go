@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -64,7 +65,7 @@ func TestPostgresDumpSourcePolicyClonesRemoteIntoLocalDatabase(t *testing.T) {
 	t.Setenv("DEVFLOW_FAKE_PG_AUDIT", audit)
 	policy := PostgresDumpSourcePolicy{
 		PolicyName: "clone-dev",
-		RemoteURL:  "postgres://remote-user:remote-secret@remote.example:5433/dev?sslmode=require",
+		RemoteURL:  "postgres://remote-user@remote.example:5433/dev?password=remote-secret&sslmode=require",
 	}
 	db := api.DBInstance{
 		Name: "app_wt_abc",
@@ -77,7 +78,7 @@ func TestPostgresDumpSourcePolicyClonesRemoteIntoLocalDatabase(t *testing.T) {
 		Worktree: worktree,
 		Env: map[string]string{
 			"OUT_FILE":         output,
-			"DEV_DATABASE_URL": "postgres://remote-user:remote-secret@remote.example:5433/dev?sslmode=require",
+			"DEV_DATABASE_URL": "postgres://remote-user@remote.example:5433/dev?password=remote-secret&sslmode=require",
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -128,11 +129,153 @@ func TestPostgresCommandConnectionSanitizesURLAndEscapesPGPass(t *testing.T) {
 	}
 }
 
+func TestPostgresCommandConnectionQueryPasswordCases(t *testing.T) {
+	tests := []struct {
+		name            string
+		raw             string
+		wantURL         string
+		wantURLWithUser string
+		wantPassword    string
+	}{
+		{
+			name:            "userinfo",
+			raw:             "postgresql://user:secret@host:5432/db?sslmode=require",
+			wantURL:         "postgresql://host:5432/db?sslmode=require",
+			wantURLWithUser: "postgresql://user@host:5432/db?sslmode=require",
+			wantPassword:    "secret",
+		},
+		{
+			name:            "query",
+			raw:             "postgresql://user@host:5432/db?password=secret&sslmode=require",
+			wantURL:         "postgresql://host:5432/db?sslmode=require",
+			wantURLWithUser: "postgresql://user@host:5432/db?sslmode=require",
+			wantPassword:    "secret",
+		},
+		{
+			name:            "query beats userinfo",
+			raw:             "postgresql://user:userinfo-secret@host/db?password=query-secret",
+			wantURL:         "postgresql://host/db",
+			wantURLWithUser: "postgresql://user@host/db",
+			wantPassword:    "query-secret",
+		},
+		{
+			name:            "encoded query",
+			raw:             "postgresql://user@host/db?password=p%40ss%3Aword",
+			wantURL:         "postgresql://host/db",
+			wantURLWithUser: "postgresql://user@host/db",
+			wantPassword:    "p@ss:word",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			connection, err := parsePostgresCommandConnection(test.raw, api.DBInstance{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if connection.URL != test.wantURL || connection.URLWithUsername != test.wantURLWithUser || connection.Password != test.wantPassword {
+				t.Fatalf("unexpected parsed connection: %+v", connection)
+			}
+			for _, secret := range []string{test.wantPassword, urlQueryEscapeForTest(test.wantPassword)} {
+				if secret != "" && (strings.Contains(connection.URL, secret) || strings.Contains(connection.URLWithUsername, secret)) {
+					t.Fatalf("credential %q leaked into reconstructed URLs: %+v", secret, connection)
+				}
+			}
+		})
+	}
+}
+
+func TestPostgresCommandCredentialsSanitizeAmbientURLsAndOverrideCredentialEnv(t *testing.T) {
+	const (
+		decodedSecret = "p@ss:word"
+		encodedSecret = "p%40ss%3Aword"
+	)
+	t.Setenv("DATABASE_URL", "postgresql://ambient@ambient.example/app?password=ambient-secret&sslmode=require")
+	t.Setenv("APP_POSTGRES_ENDPOINT", "postgres://app@app.example/db?password=app-secret&application_name=devflow")
+	t.Setenv("PGPASSWORD", "ambient-pgpassword")
+	t.Setenv("PGPASSFILE", "/tmp/ambient-passfile")
+	base := map[string]string{
+		"DEV_DATABASE_URL": "postgres://configured@configured.example/db?password=configured-secret&connect_timeout=5",
+	}
+	var captured map[string]string
+	var passContents string
+	err := withPostgresCommandCredentials(
+		"postgresql://user:userinfo-secret@host:5432/db?password="+encodedSecret+"&sslmode=require",
+		api.DBInstance{},
+		base,
+		func(env map[string]string, sanitizedURL string) error {
+			captured = mergeStringMaps(env, nil)
+			data, readErr := os.ReadFile(env["PGPASSFILE"])
+			if readErr != nil {
+				return readErr
+			}
+			passContents = string(data)
+			if runtime.GOOS != "windows" {
+				info, statErr := os.Stat(env["PGPASSFILE"])
+				if statErr != nil {
+					return statErr
+				}
+				if info.Mode().Perm() != 0o600 {
+					t.Fatalf("pgpass mode = %03o", info.Mode().Perm())
+				}
+			}
+			if sanitizedURL != "postgresql://host:5432/db?sslmode=require" {
+				t.Fatalf("sanitized callback URL = %q", sanitizedURL)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if captured["PGPASSWORD"] != "" || captured["PGPASSFILE"] == "/tmp/ambient-passfile" {
+		t.Fatalf("credential environment was not overridden: %+v", captured)
+	}
+	if passContents != "host:5432:db:user:p@ss\\:word\n" {
+		t.Fatalf("pgpass contents = %q", passContents)
+	}
+	encoded, err := json.Marshal(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := string(encoded)
+	for _, secret := range []string{decodedSecret, encodedSecret, "userinfo-secret", "ambient-secret", "app-secret", "configured-secret", "ambient-pgpassword"} {
+		if strings.Contains(metadata, secret) {
+			t.Fatalf("credential %q leaked into sanitized environment JSON: %s", secret, metadata)
+		}
+	}
+	for key, want := range map[string]string{
+		"DATABASE_URL":          "postgresql://host:5432/db?sslmode=require",
+		"APP_POSTGRES_ENDPOINT": "postgres://app.example/db?application_name=devflow",
+		"DEV_DATABASE_URL":      "postgres://configured.example/db?connect_timeout=5",
+	} {
+		if got := captured[key]; got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestPostgresCredentialQueryParametersAreRejectedWithoutLeakingValues(t *testing.T) {
+	for _, parameter := range []string{"sslpassword", "oauth_client_secret", "passfile"} {
+		secret := "never-report-" + parameter
+		raw := "postgresql://user@host/db?" + parameter + "=" + secret + "&sslmode=require"
+		_, err := parsePostgresCommandConnection(raw, api.DBInstance{})
+		if err == nil {
+			t.Fatalf("expected %s to be rejected", parameter)
+		}
+		if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), raw) {
+			t.Fatalf("credential-bearing value leaked in error: %v", err)
+		}
+	}
+}
+
 func TestPostgresURLSanitizationOverridesAmbientCredentialURLs(t *testing.T) {
 	t.Setenv("UNRELATED_DATABASE_URL", "postgres://ambient:ambient-secret@db.example/app")
-	env := sanitizePostgresURLs(map[string]string{
+	env, err := sanitizePostgresURLs(map[string]string{
 		"DEV_DATABASE_URL": "postgres://configured:configured-secret@other.example/app",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := env["UNRELATED_DATABASE_URL"]; got != "postgres://db.example/app" {
 		t.Fatalf("ambient Postgres URL was not sanitized: %q", got)
 	}
@@ -210,8 +353,10 @@ func TestPostgresMigrationFileApplierKeepsCredentialsOutOfProcessMetadata(t *tes
 func TestPostgresDumpSourcePolicyContainerStrategyKeepsCredentialsOutOfExecMetadata(t *testing.T) {
 	runner := &fakeRunner{}
 	engine := &fakeDockerEngine{runner: runner, imageInspects: make(map[string]int)}
+	logPath := filepath.Join(t.TempDir(), "database.log")
+	var eventLines []string
 	policy := PostgresDumpSourcePolicy{
-		RemoteURL:      "postgres://remote-user:remote-secret@db.example:5433/source?sslmode=require",
+		RemoteURL:      "postgres://remote-user:userinfo-remote@db.example:5433/source?password=remote-secret&sslmode=require",
 		ClientStrategy: PostgresClientContainer,
 		manager:        newManagerWithDockerEngine(engine),
 	}
@@ -223,7 +368,12 @@ func TestPostgresDumpSourcePolicyContainerStrategyKeepsCredentialsOutOfExecMetad
 		ContainerPort: 6432,
 		ContainerName: "devflow-pg-abc",
 	}
-	if err := policy.PrepareBase(context.Background(), db, PrepareOptions{}); err != nil {
+	if err := policy.PrepareBase(context.Background(), db, PrepareOptions{
+		LogPath: logPath,
+		OnLine: func(stream, line string) {
+			eventLines = append(eventLines, stream+": "+line)
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if len(engine.execs) != 1 {
@@ -248,6 +398,20 @@ func TestPostgresDumpSourcePolicyContainerStrategyKeepsCredentialsOutOfExecMetad
 	if !strings.Contains(strings.Join(spec.Command, " "), "umask 077") || !strings.Contains(strings.Join(spec.Command, " "), "trap cleanup") {
 		t.Fatalf("expected private temporary files with cleanup, got command: %q", spec.Command)
 	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observable := string(logData) + strings.Join(eventLines, "\n")
+	for _, secret := range []string{"remote-secret", "userinfo-remote", "local-secret"} {
+		if strings.Contains(observable, secret) {
+			t.Fatalf("credential %q leaked into database log/event output: %s", secret, observable)
+		}
+	}
+}
+
+func urlQueryEscapeForTest(value string) string {
+	return strings.NewReplacer("@", "%40", ":", "%3A").Replace(value)
 }
 
 func TestPostgresPassEntryRejectsNewlines(t *testing.T) {
@@ -264,16 +428,37 @@ func TestPostgresDumpSourcePolicyFailsWhenPgDumpFails(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("DEVFLOW_FAKE_PG_DUMP_FAIL", "1")
 	t.Setenv("DEVFLOW_FAKE_PSQL_RECORD", psqlMarker)
-	policy := PostgresDumpSourcePolicy{RemoteURL: "postgres://remote/dev"}
+	const remoteSecret = "failure-query-secret"
+	policy := PostgresDumpSourcePolicy{RemoteURL: "postgres://remote@remote.example/dev?password=" + remoteSecret + "&sslmode=require"}
+	logPath := filepath.Join(worktree, "database.log")
+	var eventLines []string
 	err := policy.PrepareBase(context.Background(), api.DBInstance{
 		Name: "app_wt_abc",
 		URL:  "postgres://devflow:secret@127.0.0.1:55432/app_wt_abc?sslmode=disable",
 		Host: "127.0.0.1",
 		Port: 55432,
 		User: "devflow",
-	}, PrepareOptions{Worktree: worktree})
+	}, PrepareOptions{
+		Worktree: worktree,
+		LogPath:  logPath,
+		OnLine: func(stream, line string) {
+			eventLines = append(eventLines, stream+": "+line)
+		},
+	})
 	if err == nil {
 		t.Fatal("expected pg_dump failure to be returned")
+	}
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	ciJSON, marshalErr := json.Marshal(api.RunResult{Error: err.Error()})
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	observable := err.Error() + string(logData) + strings.Join(eventLines, "\n") + string(ciJSON)
+	if strings.Contains(observable, remoteSecret) || strings.Contains(observable, "password=") {
+		t.Fatalf("query credential leaked into returned failure/log/event output: %s", observable)
 	}
 	if _, statErr := os.Stat(psqlMarker); !os.IsNotExist(statErr) {
 		t.Fatalf("expected psql not to run after pg_dump failure, stat err=%v", statErr)

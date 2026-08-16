@@ -57,25 +57,60 @@ Avoid using attached `devflow run <service-target>` as an agent readiness gate. 
 
 For finite test/check targets that depend on services, use `devflow run <target> --ci --json` rather than plain `run`. Plain attached `run` is for keeping services alive in an operator terminal.
 
-In `--ci --json` mode, progress and task log lines stream to stderr and stdout remains exactly one final `RunResult`. On failure, inspect `error`, `failedNode`, `failedNodeLogPath`, and the bounded `logTail` first. The `nodes` array supplies every selected node's final run state and duration, including downstream nodes left pending after an upstream failure; cacheable nodes include hit/miss and key/read/write timing. A second `devflow logs` call is only needed when the tail is insufficient.
+In `--ci --json` mode, progress and task log lines stream to stderr and stdout remains exactly one final `RunResult`. On failure, inspect `error`, `failedNode`, `failedNodeLogPath`, and `failureExcerpts` before the terminal `logTail`. Excerpts find early test assertions, panic/fatal output, compiler errors, `AssertionError`, conventional errors/summaries, and process-failure markers even when hundreds of cleanup lines follow. They are bounded to five merged windows, 200 lines, 64 KiB total, and 8 KiB per line; `[]` means no useful marker was found. The `nodes` array supplies every selected node's final state and duration, including downstream nodes left pending after an upstream failure; cacheable nodes include hit/miss and key/read/write/manifest timing. Use `devflow logs` only when both bounded diagnostics are insufficient.
 
 When an agent changes `devflow.project.go` inputs, outputs, or dependency edges for a finite target, use the dedicated hardening surface:
 
 ```bash
-devflow validate build --mode all --json
+devflow validate build --mode all --details issues --max-listed-paths 200 --json
 ```
 
-Treat success as meaningful only when `orders.complete=true`. If the valid-order count exceeds the default bound, Devflow runs no permutations and returns an `order_limit_exceeded` issue; raise `--max-orders` explicitly if repeated execution is safe. Artifact results identify projected inputs, dependency outputs, undeclared writes, and missing outputs. Order results identify the exact permutation and failed task or the final artifact paths that differed.
+JSON defaults to `--details issues`: use exact count fields for totals, `samples` for actionable paths, and `truncated` to tell which exhaustive arrays were omitted. Use `--details summary` when only state/count/timing/resource data is needed, or `--details full` only when an exhaustive path list is intentional. Treat success as meaningful only when `orders.complete=true`. If the valid-order count exceeds the default bound, Devflow runs no permutations and returns an `order_limit_exceeded` issue; raise `--max-orders` explicitly if repeated execution is safe. Artifact results identify projected inputs, dependency outputs, undeclared writes, and missing outputs. Order results identify the exact permutation and failed task or the final artifact paths that differed.
 
-Validation bypasses caches/stamps and runs tasks repeatedly in disposable worktree sandboxes. It rejects service/debug-service targets and does not isolate databases, networks, global caches, absolute paths, or unregistered background processes, so agents must choose finite targets with safe external effects.
+Validation bypasses caches/stamps and runs tasks repeatedly in disposable worktree sandboxes. Phase/counter progress goes to stderr while the single final JSON stays on stdout. Check `metrics` for cumulative files/logical bytes, current/peak temporary storage, measured physical allocation where `temporaryPhysicalBytesMeasured=true`, remaining limits, and phase timing. A `resourceFailure` identifies the phase and exceeded budget/disk reserve. It rejects service/debug-service targets and does not isolate databases, networks, global caches, absolute paths, or unregistered background processes, so agents must choose finite targets with safe external effects.
 
 `AGENTS.md` documents repository rules for coding agents. Future milestones can add project skills under `agents/skills/`.
 
 For agents contributing to this repository, `docs_contributors/agent-memory.md` is shared long-term project memory. Read it before substantial work and update it when durable project context, mental models, or recurring constraints change.
 
-For CI cache integration, use the supported introspection commands instead of reconstructing keys or platform cache paths:
+For CI cache integration, use the supported introspection commands instead of reconstructing keys or platform cache paths. When semantic fingerprints are expensive, always pair the manifest-producing preflight with the immediately following run:
 
 ```bash
 devflow cache path --json
-devflow cache key --target build --json
+devflow cache key --target build --manifest-out "$RUNNER_TEMP/devflow-cache-manifest.json" --json
+# Restore the external cache namespace using the returned key, then:
+devflow run build --cache-key-manifest "$RUNNER_TEMP/devflow-cache-manifest.json" --ci --json
+```
+
+The manifest is an owner-only, 15-minute, same-build/project/worktree/target snapshot. It stores environment and semantic values only as hashes. An explicit wrong, changed, corrupt, or expired manifest fails instead of rerunning remote callbacks. The run still recomputes local inputs and dependency keys, so generated-input DAGs remain correct. In the final result, `cacheKeyManifest.reusedComponents` proves reuse and `cacheKeyManifest.localInputChangedTasks` identifies tasks whose cheap local inputs changed after preflight; each node's `cache.manifestComponents` names reused components.
+
+For embedded Go callers, the complete handoff is:
+
+```go
+keyResult, manifest, err := eng.CacheKeyWithManifest(ctx, engine.Request{
+    Target: target, Worktree: worktree, Mode: api.ModeCI,
+})
+if err != nil { /* handle */ }
+
+err = engine.WriteCacheKeyManifest(manifestPath, manifest) // atomic and 0600
+if err != nil { /* handle */ }
+
+outcome, err := eng.Run(ctx, engine.Request{
+    Target: target, Worktree: worktree, Mode: api.ModeCI,
+    CacheKeyManifestPath: manifestPath,
+})
+```
+
+Use `keyResult.Key` for external cache restore. Inspect `outcome.Result.CacheKeyManifest` for reuse. Do not persist or edit the manifest, reuse it across jobs, or trust its preflight final task keys as durable keys; Devflow validates and rebuilds the execution keys.
+
+Embedded validation callers should set bounded details explicitly because the zero value preserves historical exhaustive output:
+
+```go
+result, err := validator.Run(ctx, validation.Request{
+    Target: target, Worktree: worktree,
+    Mode: api.ValidationModeAll,
+    Details: api.ValidationDetailsIssues,
+    MaxListedPaths: validation.DefaultMaxListedPaths,
+    OnEvent: func(event api.Event) { /* validation_progress */ },
+})
 ```

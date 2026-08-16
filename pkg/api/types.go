@@ -19,6 +19,14 @@ const (
 	ValidationModeOrders    ValidationMode = "orders"
 )
 
+type ValidationDetails string
+
+const (
+	ValidationDetailsSummary ValidationDetails = "summary"
+	ValidationDetailsIssues  ValidationDetails = "issues"
+	ValidationDetailsFull    ValidationDetails = "full"
+)
+
 type ValidationIssueSeverity string
 
 const (
@@ -114,26 +122,73 @@ type NodeStatus struct {
 }
 
 type CacheTiming struct {
-	Outcome         string `json:"outcome"`
-	KeyDurationMs   int64  `json:"keyDurationMs"`
-	ReadDurationMs  int64  `json:"readDurationMs"`
-	WriteDurationMs int64  `json:"writeDurationMs,omitempty"`
-	TotalDurationMs int64  `json:"totalDurationMs"`
+	Outcome                        string   `json:"outcome"`
+	KeyDurationMs                  int64    `json:"keyDurationMs"`
+	ReadDurationMs                 int64    `json:"readDurationMs"`
+	WriteDurationMs                int64    `json:"writeDurationMs,omitempty"`
+	ManifestValidationMs           int64    `json:"manifestValidationMs,omitempty"`
+	ManifestComponents             []string `json:"manifestComponents,omitempty"`
+	LocalInputsChangedFromManifest bool     `json:"localInputsChangedFromManifest,omitempty"`
+	TotalDurationMs                int64    `json:"totalDurationMs"`
 }
 
 type CacheKeyResult struct {
-	Project    string         `json:"project"`
-	Target     string         `json:"target"`
-	InstanceID string         `json:"instanceId"`
-	Namespace  string         `json:"namespace"`
-	Key        string         `json:"key"`
-	TaskKeys   []TaskCacheKey `json:"taskKeys"`
+	Project      string         `json:"project"`
+	Target       string         `json:"target"`
+	InstanceID   string         `json:"instanceId"`
+	Namespace    string         `json:"namespace"`
+	Key          string         `json:"key"`
+	TaskKeys     []TaskCacheKey `json:"taskKeys"`
+	ManifestPath string         `json:"manifestPath,omitempty"`
 }
 
 type TaskCacheKey struct {
 	Task  string `json:"task"`
 	Key   string `json:"key"`
 	Stamp bool   `json:"stamp,omitempty"`
+}
+
+type CacheKeyManifest struct {
+	SchemaVersion       int                    `json:"schemaVersion"`
+	Compatibility       string                 `json:"compatibility"`
+	Project             string                 `json:"project"`
+	Namespace           string                 `json:"namespace"`
+	InstanceID          string                 `json:"instanceId"`
+	WorktreeDigest      string                 `json:"worktreeDigest"`
+	Target              string                 `json:"target"`
+	GraphDigest         string                 `json:"graphDigest"`
+	ConfigurationDigest string                 `json:"configurationDigest"`
+	EnvironmentHashes   map[string]string      `json:"environmentHashes"`
+	Tasks               []CacheKeyManifestTask `json:"tasks"`
+	AggregateKey        string                 `json:"aggregateKey"`
+	CreatedAt           string                 `json:"createdAt"`
+	ExpiresAt           string                 `json:"expiresAt"`
+	Integrity           string                 `json:"integrity"`
+}
+
+type CacheKeyManifestTask struct {
+	Task               string                      `json:"task"`
+	Cache              bool                        `json:"cache"`
+	Stamp              bool                        `json:"stamp"`
+	TaskSignature      string                      `json:"taskSignature"`
+	StaticInputDigest  string                      `json:"staticInputDigest,omitempty"`
+	SemanticComponents []CacheKeyManifestComponent `json:"semanticComponents"`
+	PreflightKey       string                      `json:"preflightKey,omitempty"`
+}
+
+type CacheKeyManifestComponent struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
+}
+
+type CacheKeyManifestUsage struct {
+	Path                   string   `json:"path,omitempty"`
+	Validated              bool     `json:"validated"`
+	Error                  string   `json:"error,omitempty"`
+	ValidationDurationMs   int64    `json:"validationDurationMs"`
+	ReusedTasks            []string `json:"reusedTasks"`
+	ReusedComponents       int      `json:"reusedComponents"`
+	LocalInputChangedTasks []string `json:"localInputChangedTasks"`
 }
 
 type CachePathResult struct {
@@ -166,32 +221,84 @@ type DebugAttachConfig struct {
 }
 
 type RunResult struct {
-	Target            string       `json:"target"`
-	Mode              RunMode      `json:"mode"`
-	InstanceID        string       `json:"instanceId"`
-	Success           bool         `json:"success"`
-	DurationMs        int64        `json:"durationMs"`
-	Error             string       `json:"error,omitempty"`
-	FailedNode        string       `json:"failedNode,omitempty"`
-	FailedNodeLogPath string       `json:"failedNodeLogPath,omitempty"`
-	LogTail           []string     `json:"logTail,omitempty"`
-	Nodes             []NodeStatus `json:"nodes"`
-	CacheHits         []string     `json:"cacheHits"`
-	CacheMisses       []string     `json:"cacheMisses"`
-	StartedAt         string       `json:"startedAt"`
-	FinishedAt        string       `json:"finishedAt"`
+	Target            string                 `json:"target"`
+	Mode              RunMode                `json:"mode"`
+	InstanceID        string                 `json:"instanceId"`
+	Success           bool                   `json:"success"`
+	DurationMs        int64                  `json:"durationMs"`
+	Error             string                 `json:"error,omitempty"`
+	FailedNode        string                 `json:"failedNode,omitempty"`
+	FailedNodeLogPath string                 `json:"failedNodeLogPath,omitempty"`
+	LogTail           []string               `json:"logTail,omitempty"`
+	FailureExcerpts   []FailureExcerpt       `json:"failureExcerpts"`
+	CacheKeyManifest  *CacheKeyManifestUsage `json:"cacheKeyManifest,omitempty"`
+	Nodes             []NodeStatus           `json:"nodes"`
+	CacheHits         []string               `json:"cacheHits"`
+	CacheMisses       []string               `json:"cacheMisses"`
+	StartedAt         string                 `json:"startedAt"`
+	FinishedAt        string                 `json:"finishedAt"`
+}
+
+type FailureExcerpt struct {
+	Node      string   `json:"node"`
+	LogPath   string   `json:"logPath"`
+	Reason    string   `json:"reason"`
+	StartLine int      `json:"startLine"`
+	EndLine   int      `json:"endLine"`
+	Lines     []string `json:"lines"`
 }
 
 type ValidationResult struct {
-	Project    string                    `json:"project"`
-	Target     string                    `json:"target"`
-	Worktree   string                    `json:"worktree"`
-	Mode       ValidationMode            `json:"mode"`
-	Success    bool                      `json:"success"`
-	DurationMs int64                     `json:"durationMs"`
-	Artifacts  *ArtifactValidationResult `json:"artifacts,omitempty"`
-	Orders     *OrderValidationResult    `json:"orders,omitempty"`
-	Issues     []ValidationIssue         `json:"issues,omitempty"`
+	Project         string                     `json:"project"`
+	Target          string                     `json:"target"`
+	Worktree        string                     `json:"worktree"`
+	Mode            ValidationMode             `json:"mode"`
+	Details         ValidationDetails          `json:"details"`
+	MaxListedPaths  int                        `json:"maxListedPaths"`
+	Success         bool                       `json:"success"`
+	DurationMs      int64                      `json:"durationMs"`
+	IssueCount      int                        `json:"issueCount"`
+	Artifacts       *ArtifactValidationResult  `json:"artifacts,omitempty"`
+	Orders          *OrderValidationResult     `json:"orders,omitempty"`
+	Issues          []ValidationIssue          `json:"issues,omitempty"`
+	Metrics         ValidationResourceMetrics  `json:"metrics"`
+	ResourceFailure *ValidationResourceFailure `json:"resourceFailure,omitempty"`
+}
+
+type ValidationResourceMetrics struct {
+	TotalFilesProcessed        int64                   `json:"totalFilesProcessed"`
+	TotalLogicalBytesProcessed int64                   `json:"totalLogicalBytesProcessed"`
+	TemporaryBytesCurrent      int64                   `json:"temporaryBytesCurrent"`
+	TemporaryBytesPeak         int64                   `json:"temporaryBytesPeak"`
+	TemporaryPhysicalCurrent   int64                   `json:"temporaryPhysicalBytesCurrent"`
+	TemporaryPhysicalPeak      int64                   `json:"temporaryPhysicalBytesPeak"`
+	TemporaryPhysicalMeasured  bool                    `json:"temporaryPhysicalBytesMeasured"`
+	MaxFiles                   int64                   `json:"maxFiles"`
+	MaxLogicalBytes            int64                   `json:"maxLogicalBytes"`
+	MaxTemporaryBytes          int64                   `json:"maxTemporaryBytes"`
+	RemainingFiles             int64                   `json:"remainingFiles"`
+	RemainingLogicalBytes      int64                   `json:"remainingLogicalBytes"`
+	RemainingTemporaryBytes    int64                   `json:"remainingTemporaryBytes"`
+	DiskSafetyReserveBytes     int64                   `json:"diskSafetyReserveBytes"`
+	Phases                     []ValidationPhaseMetric `json:"phases"`
+}
+
+type ValidationPhaseMetric struct {
+	Phase                 string `json:"phase"`
+	DurationMs            int64  `json:"durationMs"`
+	FilesProcessed        int64  `json:"filesProcessed"`
+	LogicalBytesProcessed int64  `json:"logicalBytesProcessed"`
+	IssueCount            int    `json:"issueCount"`
+}
+
+type ValidationResourceFailure struct {
+	Phase          string `json:"phase"`
+	Resource       string `json:"resource"`
+	Observed       int64  `json:"observed"`
+	Limit          int64  `json:"limit"`
+	AvailableBytes int64  `json:"availableBytes,omitempty"`
+	ReserveBytes   int64  `json:"reserveBytes,omitempty"`
+	Path           string `json:"path,omitempty"`
 }
 
 type ValidationIssue struct {
@@ -203,29 +310,65 @@ type ValidationIssue struct {
 }
 
 type ArtifactValidationResult struct {
-	Success bool                     `json:"success"`
-	Tasks   []ArtifactTaskValidation `json:"tasks"`
-	Issues  []ValidationIssue        `json:"issues,omitempty"`
+	Success              bool                     `json:"success"`
+	Tasks                []ArtifactTaskValidation `json:"tasks"`
+	IssueCount           int                      `json:"issueCount"`
+	ObservedWriteCount   int                      `json:"observedWriteCount"`
+	ProducedPathCount    int                      `json:"producedPathCount"`
+	UndeclaredWriteCount int                      `json:"undeclaredWriteCount"`
+	MissingOutputCount   int                      `json:"missingOutputCount"`
+	Samples              ValidationPathSamples    `json:"samples"`
+	Truncated            ValidationPathTruncation `json:"truncated"`
+	Issues               []ValidationIssue        `json:"issues,omitempty"`
 }
 
 type ArtifactTaskValidation struct {
-	Task               string            `json:"task"`
-	Kind               string            `json:"kind"`
-	Success            bool              `json:"success"`
-	InputCheck         string            `json:"inputCheck"`
-	OutputCheck        string            `json:"outputCheck"`
-	DeclaredInputs     []string          `json:"declaredInputs"`
-	MaterializedInputs []string          `json:"materializedInputs"`
-	DependencyOutputs  []string          `json:"dependencyOutputs"`
-	DeclaredOutputs    []string          `json:"declaredOutputs"`
-	ProducedOutputs    []string          `json:"producedOutputs"`
-	ObservedWrites     []string          `json:"observedWrites"`
-	UndeclaredWrites   []string          `json:"undeclaredWrites"`
-	MissingOutputs     []string          `json:"missingOutputs"`
-	DurationMs         int64             `json:"durationMs"`
-	Error              string            `json:"error,omitempty"`
-	Log                string            `json:"log,omitempty"`
-	Issues             []ValidationIssue `json:"issues,omitempty"`
+	Task                   string                   `json:"task"`
+	Kind                   string                   `json:"kind"`
+	Success                bool                     `json:"success"`
+	InputCheck             string                   `json:"inputCheck"`
+	OutputCheck            string                   `json:"outputCheck"`
+	DeclaredInputs         []string                 `json:"declaredInputs"`
+	MaterializedInputs     []string                 `json:"materializedInputs"`
+	DependencyOutputs      []string                 `json:"dependencyOutputs"`
+	DeclaredOutputs        []string                 `json:"declaredOutputs"`
+	ProducedOutputs        []string                 `json:"producedOutputs"`
+	ObservedWrites         []string                 `json:"observedWrites"`
+	UndeclaredWrites       []string                 `json:"undeclaredWrites"`
+	MissingOutputs         []string                 `json:"missingOutputs"`
+	MaterializedInputCount int                      `json:"materializedInputCount"`
+	DependencyOutputCount  int                      `json:"dependencyOutputCount"`
+	ProducedPathCount      int                      `json:"producedPathCount"`
+	ObservedWriteCount     int                      `json:"observedWriteCount"`
+	UndeclaredWriteCount   int                      `json:"undeclaredWriteCount"`
+	MissingOutputCount     int                      `json:"missingOutputCount"`
+	IssueCount             int                      `json:"issueCount"`
+	Samples                ValidationPathSamples    `json:"samples"`
+	Truncated              ValidationPathTruncation `json:"truncated"`
+	DurationMs             int64                    `json:"durationMs"`
+	Error                  string                   `json:"error,omitempty"`
+	Log                    string                   `json:"log,omitempty"`
+	Issues                 []ValidationIssue        `json:"issues,omitempty"`
+}
+
+type ValidationPathSamples struct {
+	UndeclaredWrites []string `json:"undeclaredWrites"`
+	MissingOutputs   []string `json:"missingOutputs"`
+	RejectedSymlinks []string `json:"rejectedSymlinks"`
+	CopyFailures     []string `json:"copyFailures"`
+	OtherIssues      []string `json:"otherIssues"`
+}
+
+type ValidationPathTruncation struct {
+	MaterializedInputs bool `json:"materializedInputs"`
+	DependencyOutputs  bool `json:"dependencyOutputs"`
+	ProducedPaths      bool `json:"producedPaths"`
+	ObservedWrites     bool `json:"observedWrites"`
+	UndeclaredWrites   bool `json:"undeclaredWrites"`
+	MissingOutputs     bool `json:"missingOutputs"`
+	RejectedSymlinks   bool `json:"rejectedSymlinks"`
+	CopyFailures       bool `json:"copyFailures"`
+	OtherIssues        bool `json:"otherIssues"`
 }
 
 type OrderValidationResult struct {

@@ -22,12 +22,15 @@ import (
 const EngineKeyVersion = "devflow-v1"
 
 type TaskKeyInput struct {
-	Task               project.Task
-	DepKeys            []string
-	InputHashes        []string
-	EnvValues          []string
-	CustomFingerprints []string
-	Override           string
+	Task                     project.Task
+	DepKeys                  []string
+	InputHashes              []string
+	EnvValues                []string
+	StaticInputDigest        string
+	CustomFingerprints       []string
+	CustomFingerprintDigests []string
+	Override                 string
+	OverrideDigest           string
 }
 
 type FilteredContentCache struct {
@@ -135,6 +138,15 @@ func CollectTaskInputs(ctx context.Context, worktree string, task project.Task, 
 }
 
 func CollectTaskInputsWithCache(ctx context.Context, worktree string, task project.Task, rt *project.Runtime, filteredCache *FilteredContentCache) (hashes []string, envValues []string, custom []string, err error) {
+	hashes, envValues, err = CollectTaskStaticInputsWithCache(ctx, worktree, task, rt, filteredCache)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	custom, err = CollectTaskCustomFingerprints(ctx, task, rt)
+	return hashes, envValues, custom, err
+}
+
+func CollectTaskStaticInputsWithCache(ctx context.Context, worktree string, task project.Task, rt *project.Runtime, filteredCache *FilteredContentCache) (hashes []string, envValues []string, err error) {
 	fileSet := map[string]bool{}
 	for _, inputPath := range task.Inputs.Paths {
 		if ignored(cleanInputPath(inputPath), "", task.Inputs.Ignore) {
@@ -209,16 +221,20 @@ func CollectTaskInputsWithCache(ctx context.Context, worktree string, task proje
 	}
 	sort.Strings(hashes)
 	envValues = HashEnv(rt.Env, task.Inputs.Env)
+	return hashes, envValues, nil
+}
+
+func CollectTaskCustomFingerprints(ctx context.Context, task project.Task, rt *project.Runtime) ([]string, error) {
+	custom := make([]string, 0, len(task.Inputs.Custom))
 	for _, fn := range task.Inputs.Custom {
 		value, fnErr := fn(ctx, rt)
 		if fnErr != nil {
-			err = fnErr
-			return
+			return nil, fnErr
 		}
 		custom = append(custom, value)
 	}
 	sort.Strings(custom)
-	return
+	return custom, nil
 }
 
 func TaskSignature(task project.Task) (string, error) {
@@ -254,6 +270,7 @@ func TaskSignature(task project.Task) (string, error) {
 		Kind                      project.Kind          `json:"kind"`
 		Deps                      []string              `json:"deps"`
 		RequiredCLIs              []string              `json:"requiredCLIs"`
+		RequiredEnv               []string              `json:"requiredEnv"`
 		Inputs                    *signatureInputs      `json:"inputs"`
 		Outputs                   project.Outputs       `json:"outputs"`
 		Cache                     bool                  `json:"cache"`
@@ -264,11 +281,14 @@ func TaskSignature(task project.Task) (string, error) {
 		Tags                      []string              `json:"tags"`
 		Description               string                `json:"description"`
 		Signature                 string                `json:"signature"`
+		CustomFingerprintCount    int                   `json:"customFingerprintCount"`
+		HasCacheKeyOverride       bool                  `json:"hasCacheKeyOverride"`
 	}{
 		Name:                      task.Name,
 		Kind:                      task.Kind,
 		Deps:                      append([]string(nil), task.Deps...),
 		RequiredCLIs:              append([]string(nil), task.RequiredCLIs...),
+		RequiredEnv:               append([]string(nil), task.RequiredEnv...),
 		Inputs:                    &inputs,
 		Outputs:                   outputs,
 		Cache:                     task.Cache,
@@ -279,9 +299,12 @@ func TaskSignature(task project.Task) (string, error) {
 		Tags:                      append([]string(nil), task.Tags...),
 		Description:               task.Description,
 		Signature:                 task.Signature,
+		CustomFingerprintCount:    len(task.Inputs.Custom),
+		HasCacheKeyOverride:       task.CacheKeyOverride != nil,
 	}
 	sort.Strings(payload.Deps)
 	sort.Strings(payload.RequiredCLIs)
+	sort.Strings(payload.RequiredEnv)
 	sort.Strings(payload.Tags)
 	sort.Strings(inputs.Paths)
 	sort.Strings(inputs.Files)
@@ -308,10 +331,14 @@ func TaskSignature(task project.Task) (string, error) {
 
 func TaskKey(in TaskKeyInput) (string, error) {
 	if in.Task.CacheKeyOverride != nil {
-		if strings.TrimSpace(in.Override) == "" {
+		overrideDigest := in.OverrideDigest
+		if overrideDigest == "" && strings.TrimSpace(in.Override) == "" {
 			return "", fmt.Errorf("task %q cache key override returned empty value", in.Task.Name)
 		}
-		return OverrideTaskKey(in.Task.Name, in.Override), nil
+		if overrideDigest == "" {
+			overrideDigest = CacheComponentDigest("override", in.Override)
+		}
+		return OverrideTaskKeyFromDigest(in.Task.Name, overrideDigest), nil
 	}
 	sig, err := TaskSignature(in.Task)
 	if err != nil {
@@ -323,14 +350,45 @@ func TaskKey(in TaskKeyInput) (string, error) {
 		sig,
 	}
 	parts = append(parts, cloneSorted(in.DepKeys)...)
-	parts = append(parts, cloneSorted(in.InputHashes)...)
-	parts = append(parts, cloneSorted(in.EnvValues)...)
-	parts = append(parts, cloneSorted(in.CustomFingerprints)...)
+	staticDigest := in.StaticInputDigest
+	if staticDigest == "" {
+		staticDigest = StaticInputDigest(in.InputHashes, in.EnvValues)
+	}
+	parts = append(parts, staticDigest)
+	customDigests := in.CustomFingerprintDigests
+	if len(customDigests) == 0 && len(in.CustomFingerprints) > 0 {
+		customDigests = SemanticFingerprintDigests(in.CustomFingerprints)
+	}
+	parts = append(parts, cloneSorted(customDigests)...)
 	return hashStrings(parts), nil
 }
 
 func OverrideTaskKey(taskName, override string) string {
-	return hashStrings([]string{EngineKeyVersion, taskName, override})
+	return OverrideTaskKeyFromDigest(taskName, CacheComponentDigest("override", override))
+}
+
+func OverrideTaskKeyFromDigest(taskName, overrideDigest string) string {
+	return hashStrings([]string{EngineKeyVersion, taskName, overrideDigest})
+}
+
+func StaticInputDigest(inputHashes, envValues []string) string {
+	parts := []string{"devflow-static-inputs-v1"}
+	parts = append(parts, cloneSorted(inputHashes)...)
+	parts = append(parts, cloneSorted(envValues)...)
+	return hashStrings(parts)
+}
+
+func SemanticFingerprintDigests(values []string) []string {
+	digests := make([]string, 0, len(values))
+	for _, value := range values {
+		digests = append(digests, CacheComponentDigest("custom", value))
+	}
+	sort.Strings(digests)
+	return digests
+}
+
+func CacheComponentDigest(kind, value string) string {
+	return hashStrings([]string{"devflow-cache-component-v1", kind, value})
 }
 
 func collectPathInput(worktree, rel string, ignore []string, fileSet map[string]bool) error {

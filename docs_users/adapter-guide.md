@@ -441,7 +441,7 @@ policy := database.PostgresDumpSourcePolicy{
 
 The policy writes the dump to an owner-only temporary file and only invokes `psql` after `pg_dump` succeeds, so a `pg_dump` version mismatch is surfaced as a Devflow task failure instead of being masked by an empty successful restore. It executes both clients directly rather than through `sh`, keeping this path portable on macOS, Linux, and Windows. `CloneFromEnv(...)` adds `pg_dump` and `psql` to target-scoped required-CLI checks. In practice, use a host `pg_dump` whose major version matches the remote Postgres server; on Apple Silicon Homebrew installs the clients with `brew install libpq`, and `$(brew --prefix libpq)/bin` may need to be added to `PATH`.
 
-Both host commands receive password-free URLs plus PostgreSQL connection variables and a temporary owner-only `PGPASSFILE`; passwords do not appear in process arguments, and inherited PostgreSQL URL variables are sanitized. To avoid installing host libpq clients, select the clients bundled in the managed Postgres image:
+Both host commands receive password-free URLs plus PostgreSQL connection variables and a temporary owner-only `PGPASSFILE`; passwords do not appear in process arguments, and inherited PostgreSQL URL variables are sanitized. A URL may supply its password in userinfo or as `?password=...`; the query password takes precedence, is percent-decoded for pgpass, and every `password` parameter is removed while options such as `sslmode`, `application_name`, and timeouts remain. Devflow rejects `sslpassword`, `oauth_client_secret`, and `passfile` query parameters because it cannot move those credential channels through this transport without exposing them. Rejection errors do not reproduce the credential. To avoid installing host libpq clients, select the clients bundled in the managed Postgres image:
 
 ```go
 prisma := database.Prisma("prisma").
@@ -661,9 +661,11 @@ This gives you a standard way to compile helper binaries once, cache them by inp
 Use the finite validation runner while tuning an adapter:
 
 ```bash
-devflow validate build --mode artifacts --json
-devflow validate build --mode orders --max-orders 1000 --json
+devflow validate build --mode artifacts --details issues --json
+devflow validate build --mode orders --details issues --max-orders 1000 --json
 ```
+
+JSON validation defaults to `issues`, which preserves exact counts and returns bounded actionable samples without listing every successful path. `summary` keeps only state/count/timing/resource information; `full` explicitly restores exhaustive path arrays. `--max-listed-paths` defaults to 200 per issue category, with a separate overall text bound. Live phase/counter progress is written to stderr and the final JSON remains the only stdout document.
 
 Artifact mode projects the filesystem separately for every task. Explicit `Inputs(...)`, file/dir/glob/filtered inputs, and normal ignore rules select source files. Declared outputs from every transitive dependency are also materialized, so a consumer does not need to duplicate its producer's output path as a file input merely to receive the dependency artifact. Only declared outputs are archived for downstream tasks.
 
@@ -679,6 +681,8 @@ Adapter rules exposed by validation:
 - the worktree root cannot be an output
 - safe relative symlinks are preserved when their resolved target stays inside the source projection; absolute and external symlinks are rejected
 - projected/cache copies are bounded by entry and byte limits, so unexpectedly large trees fail with a path-specific error instead of expanding indefinitely
+- the validation-wide budget spans every copy, snapshot, and output-transfer phase; JSON `metrics` reports cumulative files/logical bytes and peak temporary storage, while `resourceFailure` reports limit/disk-reserve exhaustion before writable cleanup
+- dependency artifacts are transferred between the active sandbox and validation-owned holding directories rather than copied into a second expanded tree; no writable hardlinks touch the source or persistent cache
 - `Runtime.Mode` is `api.ModeValidation`, with `DEVFLOW_VALIDATION=1` and `DEVFLOW_VALIDATION_MODE` set for commands that need safe validation-specific behavior
 
 The sandbox covers worktree-relative filesystem access. It does not virtualize databases, network APIs, absolute paths, global tool caches, or background processes that a task starts without registering. Keep validation targets finite and externally safe to repeat. Artifact success proves explicit worktree input sufficiency for that run; it does not prove the declared input set is minimal.

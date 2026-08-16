@@ -276,11 +276,11 @@ func clearSandbox(sandbox string) error {
 	return os.MkdirAll(sandbox, 0o755)
 }
 
-func materializeTaskInputs(ctx context.Context, sourceRoot, sandbox string, task project.Task) ([]string, error) {
-	return materializeTaskInputsMatching(ctx, sourceRoot, sandbox, task, nil)
+func materializeTaskInputs(ctx context.Context, sourceRoot, sandbox string, task project.Task, excluded []outputSpec, budget *validationBudget, progress *validationProgress) ([]string, error) {
+	return materializeTaskInputsMatching(ctx, sourceRoot, sandbox, task, nil, excluded, budget, progress)
 }
 
-func materializeTaskInputsMatching(ctx context.Context, sourceRoot, sandbox string, task project.Task, accept func(string) bool) ([]string, error) {
+func materializeTaskInputsMatching(ctx context.Context, sourceRoot, sandbox string, task project.Task, accept func(string) bool, excluded []outputSpec, budget *validationBudget, progress *validationProgress) ([]string, error) {
 	materialized := map[string]bool{}
 	activeInputBase := ""
 	include := func(entry fsutil.CopyEntry) bool {
@@ -292,19 +292,21 @@ func materializeTaskInputsMatching(ctx context.Context, sourceRoot, sandbox stri
 		if activeInputBase != "" && rel != activeInputBase && hasPathPrefix(rel, activeInputBase) {
 			dirRelative = strings.TrimPrefix(rel, activeInputBase+"/")
 		}
-		included := !isReservedValidationPath(rel) && !ignoredInputPath(task.Inputs.Ignore, rel, dirRelative)
+		included := !isReservedValidationPath(rel) && !anyOutputMatches(excluded, rel) && !ignoredInputPath(task.Inputs.Ignore, rel, dirRelative)
 		if included && !entry.Info.IsDir() {
 			materialized[rel] = true
 		}
 		return included
 	}
-	copier := fsutil.NewCopier(fsutil.CopyOptions{Include: include})
+	copyOptions := budget.copyOptions(progress)
+	copyOptions.Include = include
+	copier := fsutil.NewCopier(copyOptions)
 	copyInput := func(value, inputBase string) error {
 		cleaned, err := cleanRelativePath(value)
 		if err != nil {
 			return err
 		}
-		if accept != nil && !accept(cleaned) {
+		if accept != nil && !accept(cleaned) || anyOutputMatches(excluded, cleaned) {
 			return nil
 		}
 		full := filepath.Join(sourceRoot, filepath.FromSlash(cleaned))
@@ -387,20 +389,23 @@ func matchesInputIgnore(patternValue, candidate string) bool {
 	return candidate == patternValue || hasPathPrefix(candidate, patternValue)
 }
 
-func copyWorktreeForOrders(ctx context.Context, sourceRoot, sandbox string, outputs []outputSpec) error {
+func copyWorktreeForOrders(ctx context.Context, sourceRoot, sandbox string, outputs []outputSpec, budget *validationBudget, progress *validationProgress) error {
 	if err := clearSandbox(sandbox); err != nil {
 		return err
 	}
-	copier := fsutil.NewCopier(fsutil.CopyOptions{
-		Include: func(entry fsutil.CopyEntry) bool {
-			candidate := cleanSlash(entry.Path)
-			return candidate == "" || !isReservedValidationPath(candidate) && !anyOutputMatches(outputs, candidate)
-		},
-	})
+	if err := budget.refreshTemporary(ctx); err != nil {
+		return err
+	}
+	copyOptions := budget.copyOptions(progress)
+	copyOptions.Include = func(entry fsutil.CopyEntry) bool {
+		candidate := cleanSlash(entry.Path)
+		return candidate == "" || !isReservedValidationPath(candidate) && !anyOutputMatches(outputs, candidate)
+	}
+	copier := fsutil.NewCopier(copyOptions)
 	return copier.Copy(ctx, sourceRoot, sourceRoot, sandbox)
 }
 
-func materializeInPlaceInputs(ctx context.Context, sourceRoot, sandbox string, g *graph.Graph, order []string) error {
+func materializeInPlaceInputs(ctx context.Context, sourceRoot, sandbox string, g *graph.Graph, order []string, budget *validationBudget, progress *validationProgress) error {
 	for _, name := range order {
 		task := g.Tasks[name]
 		taskOutputs := taskOutputSpecs(task)
@@ -409,34 +414,12 @@ func materializeInPlaceInputs(ctx context.Context, sourceRoot, sandbox string, g
 		}
 		_, err := materializeTaskInputsMatching(ctx, sourceRoot, sandbox, task, func(input string) bool {
 			return anyOutputRelated(taskOutputs, input)
-		})
+		}, nil, budget, progress)
 		if err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func copyDirectoryContents(ctx context.Context, sourceRoot, destinationRoot string) ([]string, error) {
-	materialized := map[string]bool{}
-	if _, err := os.Stat(sourceRoot); err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	copier := fsutil.NewCopier(fsutil.CopyOptions{
-		Include: func(entry fsutil.CopyEntry) bool {
-			if rel := cleanSlash(entry.Path); rel != "" && !entry.Info.IsDir() {
-				materialized[rel] = true
-			}
-			return true
-		},
-	})
-	if err := copier.Copy(ctx, sourceRoot, sourceRoot, destinationRoot); err != nil {
-		return nil, err
-	}
-	return sortedSet(materialized), nil
 }
 
 func pathInsideRoot(root, candidate string) (bool, error) {
@@ -493,11 +476,14 @@ func validateSandboxSymlinks(root string) error {
 	})
 }
 
-func snapshotFilesystem(root string, includeModTime bool) (filesystemSnapshot, error) {
+func snapshotFilesystem(ctx context.Context, root string, includeModTime bool, budget *validationBudget, progress *validationProgress) (filesystemSnapshot, error) {
 	snapshot := filesystemSnapshot{}
 	err := filepath.WalkDir(root, func(full string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		rel, err := filepath.Rel(root, full)
 		if err != nil {
@@ -518,6 +504,14 @@ func snapshotFilesystem(root string, includeModTime bool) (filesystemSnapshot, e
 			return err
 		}
 		state := fileState{mode: info.Mode().Perm(), size: info.Size()}
+		logicalBytes := int64(0)
+		if entry.Type().IsRegular() {
+			logicalBytes = info.Size()
+		}
+		if err := budget.process(rel, 1, logicalBytes); err != nil {
+			return err
+		}
+		progress.update(false)
 		if includeModTime {
 			state.modTime = info.ModTime().UnixNano()
 		}
@@ -533,7 +527,7 @@ func snapshotFilesystem(root string, includeModTime bool) (filesystemSnapshot, e
 			state.kind = "dir"
 		default:
 			state.kind = "file"
-			digest, err := hashFile(full)
+			digest, err := hashFile(ctx, full)
 			if err != nil {
 				return err
 			}
@@ -602,31 +596,106 @@ func missingDeclaredOutputs(worktree string, task project.Task) ([]string, error
 	return missing, nil
 }
 
-func archiveTaskOutputs(ctx context.Context, worktree, archiveRoot string, task project.Task) error {
-	if err := fsutil.RemoveAllWritable(archiveRoot); err != nil {
-		return err
+// transferDeclaredOutputs moves disposable validation artifacts between the
+// active projection and per-task holding directories. Both locations live
+// under the same validation root, so rename transfers ownership without a
+// second expanded copy and without hardlinking mutable source/cache data.
+func transferDeclaredOutputs(ctx context.Context, sourceRoot, destinationRoot string, task project.Task, budget *validationBudget, progress *validationProgress) ([]string, error) {
+	specs := taskOutputSpecs(task)
+	paths, err := inspectDeclaredOutputs(ctx, sourceRoot, specs, budget, progress)
+	if err != nil {
+		return nil, err
 	}
-	if err := os.MkdirAll(archiveRoot, 0o755); err != nil {
-		return err
+	if err := os.MkdirAll(destinationRoot, 0o755); err != nil {
+		return nil, err
 	}
-	copier := fsutil.NewCopier(fsutil.CopyOptions{})
-	for _, spec := range taskOutputSpecs(task) {
-		source := filepath.Join(worktree, filepath.FromSlash(spec.path))
+	for _, spec := range topLevelOutputSpecs(specs) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		source := filepath.Join(sourceRoot, filepath.FromSlash(spec.path))
 		if _, err := os.Lstat(source); err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return err
+			return nil, err
 		}
-		if err := copier.Copy(ctx, worktree, source, filepath.Join(archiveRoot, filepath.FromSlash(spec.path))); err != nil {
-			return err
+		destination := filepath.Join(destinationRoot, filepath.FromSlash(spec.path))
+		if err := fsutil.MovePathWritable(source, destination); err != nil {
+			return nil, err
 		}
 	}
-	return nil
+	return paths, nil
 }
 
-func outputSnapshot(worktree string, specs []outputSpec) (filesystemSnapshot, []string, error) {
-	all, err := snapshotFilesystem(worktree, false)
+func inspectDeclaredOutputs(ctx context.Context, root string, specs []outputSpec, budget *validationBudget, progress *validationProgress) ([]string, error) {
+	set := map[string]bool{}
+	for _, spec := range topLevelOutputSpecs(specs) {
+		start := filepath.Join(root, filepath.FromSlash(spec.path))
+		if _, err := os.Lstat(start); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		err := filepath.WalkDir(start, func(full string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(root, full)
+			if err != nil {
+				return err
+			}
+			rel = cleanSlash(rel)
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			logicalBytes := int64(0)
+			if entry.Type().IsRegular() {
+				logicalBytes = info.Size()
+			}
+			if err := budget.process(rel, 1, logicalBytes); err != nil {
+				return err
+			}
+			progress.update(false)
+			if !entry.IsDir() {
+				set[rel] = true
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return sortedSet(set), nil
+}
+
+func topLevelOutputSpecs(specs []outputSpec) []outputSpec {
+	out := make([]outputSpec, 0, len(specs))
+	for _, candidate := range specs {
+		covered := false
+		for _, parent := range specs {
+			if parent.path == candidate.path || parent.kind == "file" {
+				continue
+			}
+			if hasPathPrefix(candidate.path, parent.path) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func outputSnapshot(ctx context.Context, worktree string, specs []outputSpec, budget *validationBudget, progress *validationProgress) (filesystemSnapshot, []string, error) {
+	all, err := snapshotFilesystem(ctx, worktree, false, budget, progress)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -684,17 +753,29 @@ func snapshotDifferences(left, right filesystemSnapshot) []string {
 	return sortedSet(set)
 }
 
-func hashFile(filePath string) (string, error) {
+func hashFile(ctx context.Context, filePath string) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, file); err != nil {
+	if _, err := io.Copy(h, &contextReader{ctx: ctx, reader: file}); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
 }
 
 func hashBytes(value []byte) string {

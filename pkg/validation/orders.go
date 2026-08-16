@@ -13,7 +13,7 @@ import (
 	"github.com/benjaco/devflow/pkg/graph"
 )
 
-func (v *Validator) validateOrders(ctx context.Context, req Request, template runtimeTemplate, closure []string, root string) (*api.OrderValidationResult, error) {
+func (v *Validator) validateOrders(ctx context.Context, req Request, template runtimeTemplate, closure []string, root string, budget *validationBudget, progress *validationProgress) (*api.OrderValidationResult, error) {
 	result := &api.OrderValidationResult{
 		Success:   true,
 		Complete:  true,
@@ -53,10 +53,16 @@ func (v *Validator) validateOrders(ctx context.Context, req Request, template ru
 			Tasks:   append([]string(nil), taskOrder...),
 			Success: true,
 		}
-		if err := copyWorktreeForOrders(ctx, req.Worktree, sandbox, outputs); err != nil {
+		if err := progress.start(ctx, phaseCopying, true); err != nil {
+			return nil, err
+		}
+		if err := copyWorktreeForOrders(ctx, req.Worktree, sandbox, outputs, budget, progress); err != nil {
 			return nil, fmt.Errorf("seed order %d sandbox: %w", orderIndex+1, err)
 		}
-		if err := materializeInPlaceInputs(ctx, req.Worktree, sandbox, v.graph, closure); err != nil {
+		if err := progress.start(ctx, phaseProjecting, true); err != nil {
+			return nil, err
+		}
+		if err := materializeInPlaceInputs(ctx, req.Worktree, sandbox, v.graph, closure, budget, progress); err != nil {
 			return nil, fmt.Errorf("seed in-place inputs for order %d: %w", orderIndex+1, err)
 		}
 		execution, err := template.runtime(sandbox, string(api.ValidationModeOrders))
@@ -77,6 +83,9 @@ func (v *Validator) validateOrders(ctx context.Context, req Request, template ru
 			}
 			sort.Strings(depKeys)
 			logPath := filepath.Join(logsRoot, fmt.Sprintf("%04d-%04d-%s.log", orderIndex+1, taskIndex+1, safePathPart(name)))
+			if err := progress.start(ctx, phaseRunning, false); err != nil {
+				return nil, err
+			}
 			logText, taskErr := execution.runTask(ctx, task, logPath, depKeys)
 			if symlinkErr := validateSandboxSymlinks(sandbox); symlinkErr != nil && taskErr == nil {
 				taskErr = symlinkErr
@@ -103,7 +112,13 @@ func (v *Validator) validateOrders(ctx context.Context, req Request, template ru
 		}
 
 		if run.Success {
-			snapshot, missing, err := outputSnapshot(sandbox, outputs)
+			if err := budget.refreshTemporary(ctx); err != nil {
+				return nil, err
+			}
+			if err := progress.start(ctx, phaseCapturing, false); err != nil {
+				return nil, err
+			}
+			snapshot, missing, err := outputSnapshot(ctx, sandbox, outputs, budget, progress)
 			if err != nil {
 				return nil, fmt.Errorf("snapshot declared outputs after order %d: %w", orderIndex+1, err)
 			}
@@ -111,6 +126,9 @@ func (v *Validator) validateOrders(ctx context.Context, req Request, template ru
 				run.Success = false
 				run.Error = "declared outputs missing after order: " + strings.Join(missing, ", ")
 			} else {
+				if err := progress.start(ctx, phaseAnalyzing, false); err != nil {
+					return nil, err
+				}
 				run.OutputDigest = snapshotDigest(snapshot)
 				if baseline == nil {
 					baseline = snapshot
@@ -137,6 +155,9 @@ func (v *Validator) validateOrders(ctx context.Context, req Request, template ru
 			))
 		}
 		result.Runs = append(result.Runs, run)
+		if !run.Success {
+			progress.setIssues(progress.issueCount + 1)
+		}
 	}
 	return result, nil
 }
