@@ -394,8 +394,9 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	var progressWG sync.WaitGroup
 	if mode == api.ModeCI && jsonOut {
 		// Subscribe synchronously so a fast run cannot publish run_started
-		// before the progress goroutine has been scheduled.
-		progressEvents := eng.SubscribeEvents()
+		// before the progress goroutine has been scheduled. Direct CI output is
+		// lossless because stderr is the only live execution record.
+		progressEvents := eng.SubscribeEventsLossless()
 		progressWG.Add(1)
 		go func() {
 			defer progressWG.Done()

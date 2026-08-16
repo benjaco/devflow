@@ -884,6 +884,9 @@ func TestRunJSONStillReturnsExecutionError(t *testing.T) {
 		t.Fatalf("bounded failure JSON unexpectedly large: %d bytes", len(stdout.Bytes()))
 	}
 	progress := stderr.String()
+	if got := strings.Count(progress, "[devflow] fail stderr:"); got != 361 {
+		t.Fatalf("CI JSON progress emitted %d task log events, want 361:\n%s", got, progress)
+	}
 	if !strings.Contains(progress, "[devflow] run build started") || !strings.Contains(progress, "[devflow] task fail: failed: boom") || !strings.Contains(progress, "implementator failure details") {
 		t.Fatalf("CI JSON progress was not streamed to stderr: %s", progress)
 	}

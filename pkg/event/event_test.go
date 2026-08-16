@@ -40,6 +40,34 @@ func TestBusDoesNotBlockOnSlowSubscriber(t *testing.T) {
 	}
 }
 
+func TestBusLosslessSubscriberBackpressuresWithoutDropping(t *testing.T) {
+	var bus Bus[int]
+	ch := bus.SubscribeLossless()
+	publishDone := make(chan struct{})
+	go func() {
+		defer close(publishDone)
+		for i := 0; i < 1_000; i++ {
+			bus.Publish(i)
+		}
+	}()
+
+	for want := 0; want < 1_000; want++ {
+		select {
+		case got := <-ch:
+			if got != want {
+				t.Fatalf("event = %d, want %d", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for event %d", want)
+		}
+	}
+	select {
+	case <-publishDone:
+	case <-time.After(time.Second):
+		t.Fatal("publisher remained blocked after subscriber drained all events")
+	}
+}
+
 func TestBusConcurrentSubscribeAndPublish(t *testing.T) {
 	var bus Bus[int]
 	var wg sync.WaitGroup

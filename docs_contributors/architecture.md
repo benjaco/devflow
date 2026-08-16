@@ -559,7 +559,7 @@ The engine now emits a typed in-process event stream for live consumers. Event c
 - process exited
 - interaction requested / answered / cancelled
 
-The daemon subscribes to engine events, persists them, and fans them out over its JSON-line socket to live consumers such as the TUI. Direct `run --ci --json` subscribes in-process too: task state, cache, and log progress streams to stderr while stdout remains a single final JSON result suitable for parsers.
+The daemon subscribes to engine events, persists them, and fans them out over its JSON-line socket to live consumers such as the TUI. Those observer subscriptions remain best-effort so a slow UI cannot block execution. Direct `run --ci --json` instead registers a lossless, backpressured in-process subscription before execution starts: burst task state, cache, and log progress cannot be dropped from stderr, while stdout remains a single final JSON result suitable for parsers.
 
 For watch cycles specifically:
 - `files` now carries the raw changed worktree-relative file paths from the watcher batch

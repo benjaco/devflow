@@ -5,7 +5,7 @@ Last updated: 2026-08-16
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: follow-up real-project hardening is complete across PostgreSQL URL credential handling, CI failure diagnostics, bounded/resource-aware validation, and cache-key manifest reuse; the per-worktree daemon remains the mutable dev/watch/operator control plane while `run --ci` remains direct and finite
+- State: follow-up real-project hardening and the rolling Go-stable Ubuntu CI event-stream saturation fix are complete; direct CI progress is lossless while daemon/TUI observers remain best-effort
 - Confidence: under Go 1.26.6 the full default/race suites, focused copier/database/cache/engine/validation/CLI suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, and Linux/Windows amd64/arm64 builds pass on `darwin/arm64`; Docker-backed database tests were invoked but skipped because Docker Desktop was not running
 
 ## In Progress
@@ -13,6 +13,12 @@ Last updated: 2026-08-16
 - None.
 
 ## Completed
+
+- Rolling Go-stable CI event saturation fix:
+  - added an explicit lossless/backpressured event subscription and selected it only for direct `run --ci --json`, preventing burst log lines and terminal failure state from overflowing the existing 64-event best-effort observer buffer
+  - retained nonblocking best-effort subscriptions for daemon/TUI observers so a slow interface cannot stall execution
+  - strengthened the synthetic CI failure to require all 361 log events, added ordered 1,000-event lossless delivery coverage, and passed the formerly flaky test 100 consecutive times plus focused and full race suites
+  - passed full tests, vet, Staticcheck v0.7.0, govulncheck v1.6.0, formatting/tidy/diff checks, workflow YAML parsing, and Linux/Windows amd64/arm64 builds under Go 1.26.6
 
 - CM Navigator follow-up hardening:
   - query-string PostgreSQL passwords now follow libpq precedence, are percent-decoded into owner-only pgpass/stdin transport, and are removed from configured and ambient URLs; unsupported credential query channels are rejected with redacted errors

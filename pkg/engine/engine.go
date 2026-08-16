@@ -105,6 +105,12 @@ func (e *Engine) SubscribeEvents() <-chan api.Event {
 	return e.events.Subscribe()
 }
 
+// SubscribeEventsLossless returns a backpressured event subscription for
+// consumers that must observe every event, such as direct CI progress output.
+func (e *Engine) SubscribeEventsLossless() <-chan api.Event {
+	return e.events.SubscribeLossless()
+}
+
 func (e *Engine) CacheKey(ctx context.Context, req Request) (*api.CacheKeyResult, error) {
 	result, _, err := e.CacheKeyWithManifest(ctx, req)
 	return result, err
