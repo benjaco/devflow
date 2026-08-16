@@ -692,6 +692,117 @@ func assertDocsMarkersInOrder(t *testing.T, output string, markers []string) {
 	}
 }
 
+type notifyingBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+	needle string
+	seen   chan struct{}
+	once   sync.Once
+}
+
+func newNotifyingBuffer(needle string) *notifyingBuffer {
+	return &notifyingBuffer{needle: needle, seen: make(chan struct{})}
+}
+
+func (b *notifyingBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	n, err := b.buffer.Write(p)
+	matched := strings.Contains(b.buffer.String(), b.needle)
+	b.mu.Unlock()
+	if matched {
+		b.once.Do(func() { close(b.seen) })
+	}
+	return n, err
+}
+
+func (b *notifyingBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
+
+func TestUpgradeTextStreamsGoInstallOutputBeforeCompletion(t *testing.T) {
+	installFakeGo(t, 0)
+	t.Setenv("DEVFLOW_FAKE_GO_UPGRADE_DELAY", "500ms")
+	stream := newNotifyingBuffer("fake go output")
+	app := &App{Stdout: stream, Stderr: stream}
+	done := make(chan error, 1)
+	go func() {
+		done <- app.Run([]string{"upgrade"})
+	}()
+
+	select {
+	case <-stream.seen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for streamed go install output")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("upgrade completed before its child output was observed: %v", err)
+	default:
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upgrade completion")
+	}
+	output := stream.String()
+	for _, want := range []string{"[devflow] upgrade started", "fake go output", "[devflow] upgrade finished success=true", "upgraded devflow using go install"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("streamed text output lacks %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestUpgradeJSONStreamsToStderrAndKeepsStdoutMachineClean(t *testing.T) {
+	installFakeGo(t, 0)
+	t.Setenv("DEVFLOW_FAKE_GO_UPGRADE_DELAY", "500ms")
+	stdout := &bytes.Buffer{}
+	stderr := newNotifyingBuffer("fake go output")
+	app := &App{Stdout: stdout, Stderr: stderr}
+	done := make(chan error, 1)
+	go func() {
+		done <- app.Run([]string{"upgrade", "--json"})
+	}()
+
+	select {
+	case <-stderr.seen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for JSON-mode streamed go install output")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("JSON upgrade completed before its child output was observed: %v", err)
+	default:
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for JSON upgrade completion")
+	}
+
+	var result api.UpgradeResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode upgrade JSON: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if !result.Success || !strings.Contains(result.Output, "fake go output") {
+		t.Fatalf("upgrade JSON lost captured child output: %+v", result)
+	}
+	if strings.Contains(stdout.String(), "[devflow]") {
+		t.Fatalf("upgrade progress leaked onto JSON stdout: %s", stdout.String())
+	}
+	progress := stderr.String()
+	if !strings.Contains(progress, "[devflow] upgrade started") || !strings.Contains(progress, "[devflow] upgrade finished success=true") {
+		t.Fatalf("upgrade progress was not streamed to stderr: %s", progress)
+	}
+}
+
 func TestUpgradeJSONRunsGoInstallLatest(t *testing.T) {
 	argsPath := installFakeGo(t, 0)
 	stdout := &bytes.Buffer{}
@@ -1715,6 +1826,14 @@ func main() {
 		mustWrite(argsPath, strings.Join(os.Args[1:], " ")+"\n")
 		mustWrite(argsPath+".goproxy", os.Getenv("GOPROXY")+"\n")
 		fmt.Println("fake go output")
+		if delay := os.Getenv("DEVFLOW_FAKE_GO_UPGRADE_DELAY"); delay != "" {
+			parsed, err := time.ParseDuration(delay)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			time.Sleep(parsed)
+		}
 		os.Exit(exitCode)
 	case "build":
 		logPath := os.Getenv("DEVFLOW_FAKE_GO_BUILD_LOG")

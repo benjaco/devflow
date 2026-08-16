@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -1682,14 +1683,28 @@ func (a *App) upgradeCmd(args []string) error {
 	if *direct {
 		cmd.Env = upgradeGoEnv(os.Environ())
 	}
-	output, err := cmd.CombinedOutput()
+	_, _ = fmt.Fprintf(a.Stderr, "[devflow] upgrade started target=%s command=%q\n", target, strings.Join(command, " "))
+	var output bytes.Buffer
+	if *jsonOut {
+		// Preserve one final JSON document on stdout while making the child
+		// command observable during long downloads and compilation.
+		combined := io.MultiWriter(a.Stderr, &output)
+		cmd.Stdout = combined
+		cmd.Stderr = combined
+	} else {
+		cmd.Stdout = a.Stdout
+		cmd.Stderr = a.Stderr
+	}
+	err := cmd.Run()
+	duration := time.Since(started)
+	_, _ = fmt.Fprintf(a.Stderr, "[devflow] upgrade finished success=%t duration_ms=%d\n", err == nil, duration.Milliseconds())
 	result := api.UpgradeResult{
 		Command:       command,
 		Package:       version.CommandPackage,
 		VersionTarget: target,
 		Success:       err == nil,
-		DurationMs:    time.Since(started).Milliseconds(),
-		Output:        strings.TrimSpace(string(output)),
+		DurationMs:    duration.Milliseconds(),
+		Output:        strings.TrimSpace(output.String()),
 	}
 	if err != nil {
 		result.Error = err.Error()
@@ -1704,9 +1719,6 @@ func (a *App) upgradeCmd(args []string) error {
 		return nil
 	}
 	if err != nil {
-		if result.Output != "" {
-			_, _ = fmt.Fprintln(a.Stdout, result.Output)
-		}
 		return fmt.Errorf("upgrade failed: %w", err)
 	}
 	if *direct {

@@ -201,7 +201,7 @@ If exactly one migration-create action exists, the component flag can be omitted
 go install github.com/benjaco/devflow/cmd/devflow@latest
 ```
 
-`upgrade --version v0.1.2` installs that specific tag. `upgrade --direct` sets `GOPROXY=direct` for testing freshly pushed commits before the public Go proxy catches up. `upgrade --json` returns the command, package, version target, success flag, duration, and any error/output. It exits non-zero when the underlying `go install` fails. In text mode, `upgrade` warns when `go install` writes a binary somewhere other than the `devflow` command currently found on `PATH`.
+`upgrade --version v0.1.2` installs that specific tag. `upgrade --direct` sets `GOPROXY=direct` for testing freshly pushed commits before the public Go proxy catches up. Upgrade emits immediate start/finish progress and streams the underlying `go install` stdout/stderr instead of buffering it until exit. In text mode the child keeps its stdout/stderr destinations. With `upgrade --json`, live progress and combined child output go to stderr while stdout remains one final JSON document containing the command, package, version target, success flag, duration, and captured `output`. It exits non-zero when the underlying `go install` fails. In text mode, `upgrade` warns when `go install` writes a binary somewhere other than the `devflow` command currently found on `PATH`.
 
 `docs setup` prints the setup/pipeline user docs bundle. `docs development` prints the day-to-day CLI/TUI/operator user docs bundle.
 

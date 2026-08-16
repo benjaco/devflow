@@ -5,7 +5,7 @@ Last updated: 2026-08-16
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: follow-up real-project hardening and failure-excerpt diagnostic polish are complete
+- State: follow-up real-project hardening and live `devflow upgrade` progress/output streaming are complete
 - Confidence: under Go 1.26.6 the full default/race suites, focused copier/database/cache/engine/validation/CLI suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, and Linux/Windows amd64/arm64 builds pass on `darwin/arm64`; Docker-backed database tests were invoked but skipped because Docker Desktop was not running
 
 ## In Progress
@@ -13,6 +13,11 @@ Last updated: 2026-08-16
 - None.
 
 ## Completed
+
+- Live upgrade progress:
+  - replaced buffered `go install` execution with immediate start/finish progress and live child stdout/stderr streaming in text mode
+  - kept `upgrade --json` stdout as one final JSON document while teeing combined child output to stderr and retaining it in the existing `output` field
+  - added delayed fake-Go regressions proving output arrives before process completion in both modes; passed repeated/focused race tests, full default/race suites, vet, Staticcheck, govulncheck, formatting/tidy/diff/workflow checks, and Linux/Windows amd64/arm64 builds
 
 - Failure-excerpt diagnostic polish:
   - classify `*_test.go:line:` assertion locations as Go test failures while requiring a line/column source location or compiler keyword for `compiler-error`

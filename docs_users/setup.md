@@ -26,6 +26,8 @@ Update later with:
 devflow upgrade
 ```
 
+The command reports its target immediately and streams `go install` download/build output while it runs. With `--json`, that live progress stays on stderr and stdout contains only the final JSON result.
+
 For testing a freshly pushed commit before the public Go proxy catches up, use `devflow upgrade --direct`.
 
 ## Setup Mental Model
