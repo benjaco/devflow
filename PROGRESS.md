@@ -5,7 +5,7 @@ Last updated: 2026-08-16
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: follow-up real-project hardening and the rolling Go-stable Ubuntu CI event-stream saturation fix are complete; direct CI progress is lossless while daemon/TUI observers remain best-effort
+- State: follow-up real-project hardening and failure-excerpt diagnostic polish are complete
 - Confidence: under Go 1.26.6 the full default/race suites, focused copier/database/cache/engine/validation/CLI suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, and Linux/Windows amd64/arm64 builds pass on `darwin/arm64`; Docker-backed database tests were invoked but skipped because Docker Desktop was not running
 
 ## In Progress
@@ -13,6 +13,11 @@ Last updated: 2026-08-16
 - None.
 
 ## Completed
+
+- Failure-excerpt diagnostic polish:
+  - classify `*_test.go:line:` assertion locations as Go test failures while requiring a line/column source location or compiler keyword for `compiler-error`
+  - remove line overlap after a context window reaches its cap and omit any aggregate-capped window whose initiating marker was not retained
+  - added focused classifier, maximum-window, global-line-cap, repeated, and race regressions; passed full default/race tests, vet, Staticcheck, govulncheck, formatting/tidy/diff checks, and Linux/Windows amd64/arm64 builds
 
 - Rolling Go-stable CI event saturation fix:
   - added an explicit lossless/backpressured event subscription and selected it only for direct `run --ci --json`, preventing burst log lines and terminal failure state from overflowing the existing 64-event best-effort observer buffer

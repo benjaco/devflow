@@ -82,6 +82,91 @@ func TestBoundedFailureExcerptsKeepDistantFailuresIndependent(t *testing.T) {
 	assertFailureExcerptBounds(t, excerpts)
 }
 
+func TestBoundedFailureExcerptsDoNotOverlapAfterWindowCap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "window-cap.log")
+	markers := map[int]bool{10: true, 35: true, 60: true, 85: true}
+	var log strings.Builder
+	for line := 1; line <= 140; line++ {
+		if markers[line] {
+			fmt.Fprintf(&log, "panic: failure at line %d\n", line)
+		} else {
+			fmt.Fprintf(&log, "context line %d\n", line)
+		}
+	}
+	if err := os.WriteFile(path, []byte(log.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	excerpts := boundedFailureExcerpts(path, "test")
+	if len(excerpts) != 2 {
+		t.Fatalf("capped excerpts = %d, want 2: %+v", len(excerpts), excerpts)
+	}
+	if excerpts[0].EndLine >= excerpts[1].StartLine {
+		t.Fatalf("capped excerpts overlap: %+v", excerpts)
+	}
+	assertFailureExcerptBounds(t, excerpts)
+}
+
+func TestBoundedFailureExcerptsDropWindowWhenGlobalCapExcludesTrigger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "line-cap.log")
+	markers := map[int]bool{
+		10: true, 35: true, 60: true,
+		100: true, 125: true, 150: true,
+		190: true,
+		300: true,
+	}
+	var log strings.Builder
+	for line := 1; line <= 340; line++ {
+		if markers[line] {
+			fmt.Fprintf(&log, "panic: failure marker %d\n", line)
+		} else {
+			fmt.Fprintf(&log, "context line %d\n", line)
+		}
+	}
+	if err := os.WriteFile(path, []byte(log.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	excerpts := boundedFailureExcerpts(path, "test")
+	if len(excerpts) != 3 {
+		t.Fatalf("capped excerpts = %d, want 3 without context-only window: %+v", len(excerpts), excerpts)
+	}
+	for _, excerpt := range excerpts {
+		joined := strings.Join(excerpt.Lines, "\n")
+		if !strings.Contains(joined, "failure marker") {
+			t.Fatalf("excerpt does not retain its triggering marker: %+v", excerpt)
+		}
+		if excerpt.StartLine >= 295 {
+			t.Fatalf("global line cap emitted context-only fourth excerpt: %+v", excerpt)
+		}
+	}
+	assertFailureExcerptBounds(t, excerpts)
+}
+
+func TestClassifyFailureLineDistinguishesGoTestAndCompilerDiagnostics(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "test assertion", line: "pkg/service_test.go:128: expected 215, got 229", want: "go-test-failure"},
+		{name: "prefixed test assertion", line: "stderr: pkg/service_test.go:128: assertion values differ", want: "go-test-failure"},
+		{name: "compiler location", line: "pkg/service.go:128:9: invalid operation", want: "compiler-error"},
+		{name: "compiler keyword without column", line: "pkg/service.go:128: undefined: missingName", want: "compiler-error"},
+		{name: "test source compiler error", line: "pkg/service_test.go:128:9: undefined: missingName", want: "compiler-error"},
+		{name: "generic build failure", line: "build failed", want: "error"},
+		{name: "ordinary source location", line: "pkg/service.go:128: diagnostic context", want: ""},
+		{name: "stack source location", line: "pkg/service.go:128 +0x45", want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := classifyFailureLine(test.line); got != test.want {
+				t.Fatalf("classifyFailureLine(%q) = %q, want %q", test.line, got, test.want)
+			}
+		})
+	}
+}
+
 func TestBoundedFailureExcerptsTruncateHugeLinesWithoutUnboundedBuffers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "huge.log")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)

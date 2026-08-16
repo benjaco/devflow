@@ -22,7 +22,10 @@ const (
 	failureExcerptMaxWindow     = 80
 )
 
-var goCompilerFailurePattern = regexp.MustCompile(`(?i)(^|[ /\\])[^ :]+\.go:[0-9]+(?::[0-9]+)?:`)
+var (
+	goCompilerLocationPattern = regexp.MustCompile(`(?i)\.go:[0-9]+:[0-9]+:`)
+	goTestDiagnosticPattern   = regexp.MustCompile(`(?i)_test\.go:[0-9]+:($|[^0-9])`)
+)
 
 type diagnosticLine struct {
 	number int
@@ -30,8 +33,10 @@ type diagnosticLine struct {
 }
 
 type pendingFailureExcerpt struct {
-	excerpt   api.FailureExcerpt
-	wantedEnd int
+	excerpt         api.FailureExcerpt
+	wantedEnd       int
+	triggerLine     int
+	triggerIncluded bool
 }
 
 func boundedFailureExcerpts(path, node string) []api.FailureExcerpt {
@@ -66,13 +71,16 @@ func boundedFailureExcerpts(path, node string) []api.FailureExcerpt {
 		}
 		target.excerpt.Lines = append(target.excerpt.Lines, text)
 		target.excerpt.EndLine = line.number
+		if line.number == target.triggerLine {
+			target.triggerIncluded = true
+		}
 		totalLines++
 		totalBytes += len(text) + 1
 		return true
 	}
 
 	finishActive := func() {
-		if active == nil || len(active.excerpt.Lines) == 0 {
+		if active == nil || len(active.excerpt.Lines) == 0 || !active.triggerIncluded {
 			active = nil
 			return
 		}
@@ -96,9 +104,16 @@ func boundedFailureExcerpts(path, node string) []api.FailureExcerpt {
 			finishActive()
 		}
 		if active == nil && reason != "" && len(result) < failureExcerptMaxWindows && totalLines < failureExcerptMaxLines && totalBytes < failureExcerptMaxBytes {
+			priorStart := 0
+			if len(result) > 0 {
+				previousEnd := result[len(result)-1].EndLine
+				for priorStart < len(previous) && previous[priorStart].number <= previousEnd {
+					priorStart++
+				}
+			}
 			start := lineNumber
-			if len(previous) > 0 {
-				start = previous[0].number
+			if priorStart < len(previous) {
+				start = previous[priorStart].number
 			}
 			active = &pendingFailureExcerpt{
 				excerpt: api.FailureExcerpt{
@@ -109,9 +124,10 @@ func boundedFailureExcerpts(path, node string) []api.FailureExcerpt {
 					EndLine:   start - 1,
 					Lines:     make([]string, 0, failureExcerptContextBefore+failureExcerptContextAfter+1),
 				},
-				wantedEnd: lineNumber + failureExcerptContextAfter,
+				wantedEnd:   lineNumber + failureExcerptContextAfter,
+				triggerLine: lineNumber,
 			}
-			for _, prior := range previous {
+			for _, prior := range previous[priorStart:] {
 				if !appendLine(active, prior) {
 					break
 				}
@@ -221,10 +237,14 @@ func classifyFailureLine(line string) string {
 		return "go-test-failure"
 	case strings.HasPrefix(lower, "panic:") || strings.Contains(lower, "fatal error:"):
 		return "panic"
+	case goCompilerLocationPattern.MatchString(line) || strings.Contains(lower, "undefined:") || strings.Contains(lower, "cannot use ") || strings.Contains(lower, "syntax error:"):
+		return "compiler-error"
+	case goTestDiagnosticPattern.MatchString(line):
+		return "go-test-failure"
 	case strings.Contains(line, "AssertionError"):
 		return "assertion-error"
-	case goCompilerFailurePattern.MatchString(line) || strings.Contains(lower, "undefined:") || strings.Contains(lower, "cannot use ") || strings.Contains(lower, "syntax error:") || strings.Contains(lower, "build failed"):
-		return "compiler-error"
+	case strings.Contains(lower, "build failed"):
+		return "error"
 	case strings.HasPrefix(line, "ERROR") || strings.HasPrefix(line, "Error:"):
 		return "error"
 	case line == "FAIL" || strings.HasPrefix(line, "FAIL\t") || strings.HasPrefix(lower, "failed tests") || strings.HasPrefix(lower, "tests failed") || strings.Contains(lower, " test(s) failed"):
