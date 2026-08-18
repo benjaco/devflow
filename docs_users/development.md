@@ -83,19 +83,26 @@ Run `devflow` or `devflow tui` with no args in a project worktree to start or re
 
 Use `devflow tui --instance <id>` only when you intentionally want to attach to a specific existing instance. In that attach-only mode, Devflow does not start or retarget background work for you.
 
-If that TUI launch had to start the worktree daemon, quitting the TUI also stops daemon-owned work and exits the daemon. If a daemon was already running before the TUI connected, quitting the TUI only closes the UI and leaves that existing background workflow alive.
+If that TUI launch had to start the worktree daemon, quitting the TUI also stops daemon-owned work and exits the daemon. If a daemon was already running before the TUI connected, quitting only closes the UI; after terminal restoration DevFlow prints exact status/stop commands for the background workflow that remains alive.
 
 Useful TUI keys:
+- `?`: contextual help for the current view
+- `Tab`: switch task-table/log-pane focus
 - `q`: quit
-- `j` / `k` / arrow keys: move selection
-- `g` / `G`: top/bottom
+- `j` / `k` / arrow keys: move in the focused pane
+- `Home` / `End`: task top/bottom or log beginning/resume-follow, depending on focus
+- `f`: resume live-log following
+- `o`: load an older bounded block of retained log lines
 - `l`: selected task log or supervisor log
 - `d`: database/Prisma panel
+- `a`: toggle the explicit active/failure attention view
 - `m`: create a migration through the project migration-create action
-- `i`: invalidate selected task and rerun downstream
-- `t`: retarget to the selected task
+- `i`: preview and confirm the selected rerun scope
+- `t`: choose a target, then preview and confirm retarget scope
 
-The selected log keeps its current scroll position while it refreshes. Switching to another task, the supervisor log, or the database panel starts that newly selected view from the top.
+Running logs open at the live tail as `FOLLOWING`. Page Up or upward scrolling changes the view to `PAUSED`, preserves that manual position across refreshes, and never snaps back; End or `f` resumes at the latest line. The panel reports its retained line range and truncation. `o` increases the bounded retained window without reading an unbounded file into memory. Switching log sources resets following predictably.
+
+Task rows remain in stable graph order while states change. The selected task/log source and focused pane are always labeled, lifecycle badges remain distinct without color, and failed/blocked/degraded rows include a concise reason. Action status has reserved footer space and remains visible until replaced or dismissed. Rerun and retarget show the same stop/execute/preserve/restart plan used by the daemon; Escape cancels before any process changes.
 
 The database/Prisma panel shows managed Postgres identity, the persisted `postgres`/`postgis` flavor and configured/automatic image choice, cached Prisma migration-prefix snapshots, and schema/migration drift when Prisma metadata is available. Migration authoring is explicit; normal startup does not secretly generate migrations. When you create a migration from the TUI, Devflow sends a daemon action with kind `devflow.database.migration.create`, streams task progress in the footer immediately, surfaces any declared confirmation prompts, and then relaunches the previously detached target so services come back through the graph. The same `m` action can drive non-Prisma components such as PayloadCMS when the adapter registers a migration-create action.
 
@@ -191,7 +198,7 @@ devflow cache gc --json
 
 `cache path` returns the supported OS-specific cache root and project namespace path. `cache key` returns an aggregate target key plus each cacheable/stamped task key, which is suitable for a CI cache key without duplicating Devflow's fingerprint logic.
 
-The TUI `i` action is usually faster for targeted local invalidation because it invalidates the selected downstream slice and relaunches the active target.
+The TUI `i` action previews targeted invalidation/restart scope before execution. For CLI automation, use `restart --preview --json` or `stop --preview --json` before the matching lifecycle command.
 
 ## Runtime State
 

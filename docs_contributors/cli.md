@@ -70,7 +70,7 @@ Implemented `run` flags include:
 - `--max-parallel`
 - `--cache-key-manifest` (finite `--ci` runs only)
 
-The final `RunResult` includes top-level failure text, failed-node name and log path, an optional bounded terminal tail, `failureExcerpts`, cache hit/miss lists, and the final run snapshot of every selected node (including pending downstream nodes after an upstream failure). Each node includes `durationMs`; cacheable nodes also include cache outcome plus key/read/write/manifest/total timing. `failureExcerpts` scans the log as a stream and recognizes Go `--- FAIL:` blocks and `*_test.go:line:` diagnostics, panic/fatal output, compiler keywords or `file.go:line:column:` locations, `AssertionError`, conventional error/failed-test summaries, and process-failure markers. It keeps up to five context lines before and 30 after, merges nearby windows, removes overlap between adjacent windows, and is capped at five windows, 200 total lines, 64 KiB total text, and 8 KiB per line. A window is omitted if the aggregate cap cannot retain its triggering marker. If no useful marker exists it is `[]` and the terminal `logTail` remains available.
+The final `RunResult` includes top-level failure text, failed-node name and log path, an optional bounded terminal tail, `failureExcerpts`, cache hit/miss lists, and the final run snapshot of every selected node. Downstream work skipped after a dependency failure is `blocked` with the dependency in `lastError`; unrelated interrupted work is `canceled`. Each node includes `durationMs`; cacheable nodes also include cache outcome plus key/read/write/manifest/total timing. `failureExcerpts` scans the log as a stream and recognizes Go `--- FAIL:` blocks and `*_test.go:line:` diagnostics, panic/fatal output, compiler keywords or `file.go:line:column:` locations, `AssertionError`, conventional error/failed-test summaries, and process-failure markers. It keeps up to five context lines before and 30 after, merges nearby windows, removes overlap between adjacent windows, and is capped at five windows, 200 total lines, 64 KiB total text, and 8 KiB per line. A window is omitted if the aggregate cap cannot retain its triggering marker. If no useful marker exists it is `[]` and the terminal `logTail` remains available.
 
 `watch` connects to the per-worktree daemon, runs an initial watch-mode cycle, then keeps polling for changes and reruns only the affected downstream slice. In attached JSON mode it emits the typed event stream line-by-line.
 
@@ -207,9 +207,18 @@ go install github.com/benjaco/devflow/cmd/devflow@latest
 
 Bare `docs` is intentionally a usage error so agents and users do not accidentally pull both context lanes into one prompt. The docs commands are projectless, have no flags, have no JSON mode, and do not print contributor docs.
 
-`restart` connects to the daemon. It supports rerunning non-service task slices from the CLI. For service tasks, if the instance has a recorded run target, `restart` asks the daemon to relaunch that target.
+`restart` connects to the daemon. A service restart is handled by the active engine that owns the service handle: it stops only the planned service set, preserves unrelated services, assigns a new process generation, waits through the task readiness probe, and reports success only after a different ready identity exists. Repeated requests are serialized. A failed or stopped service can be started again while its watch supervisor remains active. `restart --preview` returns the same `LifecyclePlan` without changing execution state. Non-service restart slices retain their finite attached execution behavior.
 
-`stop` is daemon-backed; if no daemon is running, it may start a short-lived daemon to reconcile persisted runtime state. It terminates persisted service PIDs for a selected task. With `--all`, it reconciles all known runtime process groups for the instance: active daemon-owned work, legacy supervisor/executor PIDs and their process-tree descendants, tracked service tasks, and PID-bearing status nodes. It then clears persisted process refs, updates nonterminal node state to `stopped`, stops the managed database container, and shuts down the daemon after sending the response.
+`stop` is daemon-backed; if no daemon is running, it may start a short-lived daemon to reconcile persisted runtime state. `stop --task` is genuinely task-scoped: the active engine stops the named service and any planned active service dependents without canceling the active run or unrelated services. An already-stopped known task succeeds idempotently with an empty stopped set; an unknown task fails before changing processes. `stop --preview` returns the plan without mutation. With `--all`, DevFlow retains complete cleanup: active daemon-owned work, legacy supervisor/executor PIDs and descendants, tracked/status processes, managed database, and daemon.
+
+Lifecycle JSON is additive and shared across CLI/TUI daemon actions. `LifecyclePlan` contains `requestedAction`, selected task/target, `tasksToInvalidate`, `processesToStop`, `tasksToExecute`, `servicesToPreserve`, `servicesToRestart`, and `confirmationRecommended`. `LifecycleResult` adds exact `affected`, `stopped`, and `restarted` sets plus old/new PID and generation identities and readiness. Existing top-level stop/run fields remain present. Use:
+
+```bash
+devflow restart backend_debug --preview --json
+devflow restart backend_debug --json
+devflow stop --task backend_debug --preview --json
+devflow stop --task backend_debug --json
+```
 
 `doctor` supports `--target <target>` and `--strict`. Without a target it checks the full adapter required CLI catalog and project/task required-env metadata. With a target it resolves the target or task name and checks only `RequiredCLIs` and `RequiredEnv` attached to that target and its task closure, plus project-wide required env. JSON includes `project`, `target`, `cliScope`, `checksPassed`, and `requiredEnv` entries with `name`, `set`, and the detected source. Normal doctor remains report-only; `--strict` emits the same complete text/JSON result and exits nonzero when any check fails.
 
@@ -226,12 +235,17 @@ Bare `docs` is intentionally a usage error so agents and users do not accidental
 - daemon/supervisor PID, liveness, and log path when present
 - per-node debug metadata for `debug_service` tasks, including host, port, port name, binary path, package, protocol, and a Go remote-attach shape
 
-`NodeStatus.pid` is a host-process identifier, not a universal service identity. Process-backed services report a positive PID. Engine-managed resources such as the managed Postgres container report PID `0` while running; their liveness is held by the daemon's registered service handle and verified by `flush`, and their output still uses the normal task log/typed log-event surfaces.
+`NodeStatus.pid` is a host-process identifier, not a universal service identity. `generation` is the monotonic engine-owned service identity and also works for PID-less handles; `attempt` exposes the corresponding attempt number. `ready` is set only after the service readiness callback succeeds. Process-backed services report a positive PID. Engine-managed resources such as the managed Postgres container report PID `0` while running; their liveness is held by the daemon's registered service handle and verified by `flush`, and their output still uses the normal task log/typed log-event surfaces. Detached start JSON distinguishes request acceptance (`accepted=true`) from service readiness (`ready=false` until status/flush proves readiness).
 
 Task states now distinguish:
+- `pending`, `starting`, `running`, `ready`, and `restarting`
+- `cached` and `done`
 - `failed`: the task itself failed
+- `blocked`: a downstream task could not run and `lastError` identifies the failed dependency
+- `degraded`: a service remains present but lifecycle control could not complete cleanly
 - `migration_needed`: the task intentionally blocked because a database migration must be authored before downstream work can run
 - `canceled`: the task was interrupted because another task failed or the run was canceled
+- `stopped` and `dirty`
 
 `logs` supports task logs as before and also accepts `supervisor` to read the daemon/supervisor log directly.
 
@@ -239,23 +253,26 @@ Task log files now represent the current run attempt for that task. The engine t
 
 `tui` now opens a live operator console connected to the per-worktree daemon. Without `--instance`, `devflow tui` follows the same default launch path as bare `devflow`: resolve the default target, ensure the per-worktree daemon is running it in watch mode, wait for a matching non-empty status snapshot, then render. With `--instance`, `tui` is attach-only and does not start or retarget work.
 
-The first slice includes:
+The operator console includes:
 - instance/runtime header
 - live task list with selection
 - selected-task metadata
-- live tail of the selected task log
+- a bounded live tail of the selected task log; running logs open at the tail in `FOLLOWING`, upward/Page Up scrolling switches to `PAUSED`, End or `f` resumes, and `o` loads older retained lines up to a fixed bound
 - toggle to the daemon/supervisor log
 - `d` toggles a database/Prisma panel with managed Postgres identity, persisted flavor (`postgres` or `postgis`), the selected PostgreSQL major when configured, configured/automatic image selection, and recent cached Prisma migration-prefix snapshots; `F2` is a backup key
 - the database/Prisma panel flags schema/migration drift and `m` asks for a migration name, then sends a daemon action with kind `devflow.database.migration.create` through the daemon-owned engine and relaunches the previously detached target; `F4` is a backup key
 - while the TUI creates a Prisma migration, the footer status reports target/task state and the latest task output line
 - global shortcuts are disabled while text-input popups are focused, so migration names can contain normal letters
-- running tasks pinned first and pending work directly below them
-- `i` on the selected task invalidates the selected downstream cacheable slice and relaunches the current target
-- `t` on the selected task updates the detached run target to that task and relaunches the instance on the selected task closure
+- stable graph/topological task order; state changes never move rows, while `a` explicitly toggles an attention-only view
+- distinct monochrome-readable badges for waiting, starting, running, ready, restarting, cached, done, failed, canceled, blocked, stopped, degraded, and dirty states, with concise failure/block reasons
+- `i` previews a shared lifecycle plan, then reruns the selected task scope only after confirmation; Escape cancels without mutation
+- `t` opens a real target chooser, previews stop/execute/preserve/start scope, then retargets only after confirmation
+- `?` opens contextual help; Tab changes task/log focus, focused panes have distinct titles/borders, and popup/input footers advertise only valid keys
+- responsive layouts preserve a selectable task row before hiding the optional log pane and show a deliberate too-small fallback below 40x10
 - popup confirm and text prompts for interactive tasks that emit `interaction_requested` events
 - primary live refresh from the daemon event subscription, with the persisted event stream at `.devflow/state/instances/<instance-id>/events.jsonl` as fallback
 
-Daemon ownership is session-scoped. If `devflow tui` or bare `devflow` has to start the daemon for that TUI session, quitting the TUI sends `stop --all` through the daemon so services, managed databases, and the daemon exit together. If the daemon already existed before the TUI connected, quitting the TUI only closes the UI.
+Daemon ownership is session-scoped. If `devflow tui` or bare `devflow` has to start the daemon for that TUI session, quitting the TUI sends `stop --all` through the daemon so services, managed databases, and the daemon exit together. If the daemon already existed before the TUI connected, quitting closes only the UI and, after terminal restoration, prints the exact status and stop commands for the still-active instance.
 
 Interactive prompt answers are written back through the instance interaction directory, so detached runs can still receive operator input from the TUI.
 

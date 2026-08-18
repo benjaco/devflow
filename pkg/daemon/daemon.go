@@ -65,19 +65,21 @@ type Request struct {
 	ActionKind   string            `json:"actionKind,omitempty"`
 	Component    string            `json:"component,omitempty"`
 	Inputs       map[string]string `json:"inputs,omitempty"`
+	Preview      bool              `json:"preview,omitempty"`
 }
 
 type Response struct {
-	ID           string            `json:"id,omitempty"`
-	OK           bool              `json:"ok"`
-	Error        string            `json:"error,omitempty"`
-	Started      *StartResult      `json:"started,omitempty"`
-	Run          *api.RunResult    `json:"run,omitempty"`
-	Flush        *api.FlushResult  `json:"flush,omitempty"`
-	Stop         *StopResult       `json:"stop,omitempty"`
-	Status       *api.StatusResult `json:"status,omitempty"`
-	Actions      *ActionListResult `json:"actions,omitempty"`
-	ActionResult *ActionRunResult  `json:"actionResult,omitempty"`
+	ID           string               `json:"id,omitempty"`
+	OK           bool                 `json:"ok"`
+	Error        string               `json:"error,omitempty"`
+	Started      *StartResult         `json:"started,omitempty"`
+	Run          *api.RunResult       `json:"run,omitempty"`
+	Flush        *api.FlushResult     `json:"flush,omitempty"`
+	Stop         *StopResult          `json:"stop,omitempty"`
+	Status       *api.StatusResult    `json:"status,omitempty"`
+	Actions      *ActionListResult    `json:"actions,omitempty"`
+	ActionResult *ActionRunResult     `json:"actionResult,omitempty"`
+	Lifecycle    *api.LifecycleResult `json:"lifecycle,omitempty"`
 }
 
 type StartResult struct {
@@ -86,11 +88,14 @@ type StartResult struct {
 	Mode       api.RunMode `json:"mode"`
 	DaemonPID  int         `json:"daemonPid"`
 	LogPath    string      `json:"logPath"`
+	Accepted   bool        `json:"accepted,omitempty"`
+	Ready      bool        `json:"ready"`
 }
 
 type StopResult struct {
-	InstanceID string   `json:"instanceId"`
-	Stopped    []string `json:"stopped"`
+	InstanceID string               `json:"instanceId"`
+	Stopped    []string             `json:"stopped"`
+	Lifecycle  *api.LifecycleResult `json:"lifecycle,omitempty"`
 }
 
 type ActionListResult struct {
@@ -148,6 +153,7 @@ type activeRun struct {
 	result      *api.RunResult
 	err         error
 	startedAt   time.Time
+	controller  *engine.LifecycleController
 }
 
 type Client struct {
@@ -691,31 +697,69 @@ func (s *Server) handleRequest(ctx context.Context, req Request) Response {
 		}
 		return resp
 	case ActionStop:
+		if req.Preview {
+			lifecycle, err := s.previewLifecycle(req)
+			resp.Lifecycle = lifecycle
+			if err != nil {
+				return responseWithError(resp, err)
+			}
+			return resp
+		}
 		result, err := s.stopWork(ctx, req.All, req.Task)
 		if result != nil {
 			resp.Stop = result
+			resp.Lifecycle = result.Lifecycle
 		}
 		if err != nil {
 			return responseWithError(resp, err)
 		}
 		return resp
 	case ActionRestart:
-		result, err := s.restart(ctx, req.Project, req.Task, req.Upstream, req.Downstream, req.MaxParallel)
+		if req.Preview {
+			lifecycle, err := s.previewLifecycle(req)
+			resp.Lifecycle = lifecycle
+			if err != nil {
+				return responseWithError(resp, err)
+			}
+			return resp
+		}
+		result, lifecycle, err := s.restart(ctx, req.Project, req.Task, req.Upstream, req.Downstream, req.MaxParallel)
 		if result != nil {
 			resp.Run = result
 		}
+		resp.Lifecycle = lifecycle
 		if err != nil {
 			return responseWithError(resp, err)
 		}
 		return resp
 	case ActionInvalidate:
-		if err := s.invalidateAndRelaunch(ctx, req.Task); err != nil {
-			return errorResponse(req.ID, err)
+		if req.Preview {
+			lifecycle, err := s.previewLifecycle(req)
+			resp.Lifecycle = lifecycle
+			if err != nil {
+				return responseWithError(resp, err)
+			}
+			return resp
+		}
+		lifecycle, err := s.invalidateAndRelaunch(ctx, req.Task)
+		resp.Lifecycle = lifecycle
+		if err != nil {
+			return responseWithError(resp, err)
 		}
 		return resp
 	case ActionRetarget:
-		if err := s.retarget(ctx, req.Target); err != nil {
-			return errorResponse(req.ID, err)
+		if req.Preview {
+			lifecycle, err := s.previewLifecycle(req)
+			resp.Lifecycle = lifecycle
+			if err != nil {
+				return responseWithError(resp, err)
+			}
+			return resp
+		}
+		lifecycle, err := s.retarget(ctx, req.Target)
+		resp.Lifecycle = lifecycle
+		if err != nil {
+			return responseWithError(resp, err)
 		}
 		return resp
 	case ActionListActions:
@@ -897,6 +941,7 @@ func (s *Server) startActive(ctx context.Context, projectName, target string, mo
 			Mode:       mode,
 			DaemonPID:  os.Getpid(),
 			LogPath:    s.logPath,
+			Accepted:   true,
 		}, nil
 	}
 	s.mu.Unlock()
@@ -911,6 +956,7 @@ func (s *Server) startActive(ctx context.Context, projectName, target string, mo
 		cancel:      cancel,
 		done:        make(chan struct{}),
 		startedAt:   time.Now().UTC(),
+		controller:  engine.NewLifecycleController(),
 	}
 	s.mu.Lock()
 	s.active = newActive
@@ -926,6 +972,7 @@ func (s *Server) startActive(ctx context.Context, projectName, target string, mo
 		Mode:       mode,
 		DaemonPID:  os.Getpid(),
 		LogPath:    s.logPath,
+		Accepted:   true,
 	}, nil
 }
 
@@ -1003,7 +1050,13 @@ func (s *Server) runEngine(ctx context.Context, p project.Project, target string
 			}
 		}
 	}()
-	req := engine.Request{Target: target, Worktree: s.worktree, Mode: mode, MaxParallel: maxParallel}
+	req := engine.Request{
+		Target:              target,
+		Worktree:            s.worktree,
+		Mode:                mode,
+		MaxParallel:         maxParallel,
+		LifecycleController: active.controller,
+	}
 	switch mode {
 	case api.ModeWatch:
 		active.err = eng.Watch(ctx, req)
@@ -1183,26 +1236,90 @@ func (s *Server) flush(ctx context.Context, projectName, target string, timeout 
 }
 
 func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResult, error) {
-	s.stopActive(5 * time.Second)
 	inst, err := instance.Load(s.worktree, s.instanceID)
 	if err != nil {
 		return nil, err
 	}
 	var stopped []string
+	var lifecycle *api.LifecycleResult
 	if all {
+		plan := planStopAll(inst, stopAllExtraProcessRefs(s.worktree, s.instanceID, inst), os.Getpid())
+		lifecycle = &api.LifecycleResult{
+			Plan:      plan,
+			Affected:  []string{},
+			Stopped:   []string{},
+			Restarted: []string{},
+			Processes: []api.LifecycleProcessChange{},
+			Success:   false,
+		}
+		s.stopActive(5 * time.Second)
+		inst, err = instance.Load(s.worktree, s.instanceID)
+		if err != nil {
+			return nil, err
+		}
 		stopped, err = instance.StopDaemonWork(inst, stopAllExtraProcessRefs(s.worktree, s.instanceID, inst), os.Getpid())
 	} else {
 		if strings.TrimSpace(task) == "" {
 			return nil, fmt.Errorf("usage: devflow stop --task <name> | --all")
 		}
-		stopped, err = instance.StopProcesses(inst, task)
+		plan, planErr := s.planTaskStop(inst, task)
+		if planErr != nil {
+			return nil, planErr
+		}
+		lifecycle = &api.LifecycleResult{
+			Plan:      plan,
+			Affected:  []string{},
+			Stopped:   []string{},
+			Restarted: []string{},
+			Processes: []api.LifecycleProcessChange{},
+			Success:   true,
+		}
+		s.mu.Lock()
+		active := s.active
+		s.mu.Unlock()
+		for _, name := range plan.ProcessesToStop {
+			if active != nil && active.controller != nil {
+				change, stopErr := active.controller.Stop(ctx, name)
+				if stopErr != nil {
+					lifecycle.Success = false
+					lifecycle.Error = stopErr.Error()
+					return &StopResult{InstanceID: s.instanceID, Stopped: lifecycle.Stopped, Lifecycle: lifecycle}, stopErr
+				}
+				lifecycle.Stopped = append(lifecycle.Stopped, name)
+				lifecycle.Affected = append(lifecycle.Affected, name)
+				lifecycle.Processes = append(lifecycle.Processes, api.LifecycleProcessChange{
+					Task:               name,
+					PreviousPID:        change.Previous.PID,
+					PreviousGeneration: change.Previous.Generation,
+				})
+				continue
+			}
+			var names []string
+			names, err = instance.StopProcesses(inst, name)
+			stopped = append(stopped, names...)
+			if err != nil {
+				lifecycle.Success = false
+				lifecycle.Error = err.Error()
+				return &StopResult{InstanceID: s.instanceID, Stopped: uniqueSortedStrings(stopped), Lifecycle: lifecycle}, err
+			}
+			lifecycle.Stopped = append(lifecycle.Stopped, names...)
+			lifecycle.Affected = append(lifecycle.Affected, names...)
+		}
+		lifecycle.Stopped = uniqueSortedStrings(lifecycle.Stopped)
+		lifecycle.Affected = uniqueSortedStrings(lifecycle.Affected)
+		_ = markStoppedNodes(s.worktree, s.instanceID, lifecycle.Stopped)
+		return &StopResult{InstanceID: s.instanceID, Stopped: lifecycle.Stopped, Lifecycle: lifecycle}, nil
 	}
 	if err != nil {
-		return nil, err
+		lifecycle.Error = err.Error()
+		return &StopResult{InstanceID: s.instanceID, Stopped: stopped, Lifecycle: lifecycle}, err
 	}
 	if all && inst.DB.ContainerName != "" {
 		if err := database.New().StopRuntime(ctx, inst.DB); err != nil {
-			return nil, err
+			lifecycle.Error = err.Error()
+			lifecycle.Stopped = uniqueSortedStrings(stopped)
+			lifecycle.Affected = append([]string(nil), lifecycle.Stopped...)
+			return &StopResult{InstanceID: s.instanceID, Stopped: lifecycle.Stopped, Lifecycle: lifecycle}, err
 		}
 		stopped = append(stopped, "database")
 	}
@@ -1212,13 +1329,274 @@ func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResu
 		inst.Processes = map[string]api.ProcessRef{}
 		_ = instance.Save(inst)
 		stopped = uniqueSortedStrings(stopped)
+		lifecycle.Stopped = append([]string(nil), stopped...)
+		lifecycle.Affected = append([]string(nil), stopped...)
+		lifecycle.Success = true
 	}
 	if all {
 		_ = markAllStoppedNodes(s.worktree, s.instanceID)
 	} else {
 		_ = markStoppedNodes(s.worktree, s.instanceID, stopped)
 	}
-	return &StopResult{InstanceID: s.instanceID, Stopped: stopped}, nil
+	return &StopResult{InstanceID: s.instanceID, Stopped: stopped, Lifecycle: lifecycle}, nil
+}
+
+func planStopAll(inst *api.Instance, extra map[string]int, daemonPID int) api.LifecyclePlan {
+	toStop := map[string]bool{"daemon": true}
+	if inst.Supervisor.PID > 0 && inst.Supervisor.PID != daemonPID {
+		toStop["supervisor"] = true
+	}
+	if inst.Supervisor.ExecPID > 0 {
+		toStop["executor"] = true
+	}
+	for name, ref := range inst.Processes {
+		if ref.PID > 0 {
+			toStop[name] = true
+		}
+	}
+	for name, pid := range extra {
+		if pid > 0 {
+			toStop[name] = true
+		}
+	}
+	if inst.DB.ContainerName != "" {
+		toStop["database"] = true
+	}
+	return api.LifecyclePlan{
+		RequestedAction:         "stop-all",
+		SelectedTarget:          inst.LastRun.Target,
+		TasksToInvalidate:       []string{},
+		ProcessesToStop:         sortedStringSet(toStop),
+		TasksToExecute:          []string{},
+		ServicesToPreserve:      []string{},
+		ServicesToRestart:       []string{},
+		ConfirmationRecommended: true,
+	}
+}
+
+func (s *Server) planTaskStop(inst *api.Instance, task string) (api.LifecyclePlan, error) {
+	task = strings.TrimSpace(task)
+	plan := api.LifecyclePlan{
+		RequestedAction:         "stop",
+		SelectedTask:            task,
+		TasksToInvalidate:       []string{},
+		ProcessesToStop:         []string{},
+		TasksToExecute:          []string{},
+		ServicesToPreserve:      []string{},
+		ServicesToRestart:       []string{},
+		ConfirmationRecommended: false,
+	}
+	if task == "" {
+		return plan, fmt.Errorf("usage: devflow stop --task <name> | --all")
+	}
+	toStop := map[string]bool{}
+	known := false
+	if _, ok := inst.Processes[task]; ok {
+		known = true
+	}
+	state, _ := instance.LoadStatus(s.worktree, s.instanceID)
+	if state != nil {
+		if node, ok := state.Nodes[task]; ok {
+			known = true
+			if lifecycleNodeActive(node.State) {
+				toStop[task] = true
+			}
+		}
+	}
+
+	if ref, ok := inst.Processes[task]; ok && ref.PID > 0 {
+		toStop[task] = true
+	}
+	if name := strings.TrimSpace(inst.LastRun.Project); name != "" && inst.LastRun.Target != "" {
+		if p, lookupErr := project.Lookup(name); lookupErr == nil {
+			if g, target, graphErr := executionGraphForProject(p, inst.LastRun.Target); graphErr == nil {
+				if _, ok := g.Tasks[task]; ok {
+					known = true
+					closure, _ := g.TargetClosure(target)
+					inClosure := make(map[string]bool, len(closure))
+					for _, name := range closure {
+						inClosure[name] = true
+					}
+					for _, name := range g.Downstream([]string{task}) {
+						def, ok := g.Tasks[name]
+						if !ok || !inClosure[name] || !project.IsServiceKind(def.Kind) {
+							continue
+						}
+						ref, running := inst.Processes[name]
+						node, tracked := api.NodeStatus{}, false
+						if state != nil {
+							node, tracked = state.Nodes[name]
+						}
+						if (running && ref.PID > 0) || (tracked && lifecycleNodeActive(node.State)) {
+							toStop[name] = true
+						}
+					}
+				}
+			}
+		}
+	}
+	if !known {
+		return plan, fmt.Errorf("unknown task %q", task)
+	}
+	plan.ProcessesToStop = sortedStringSet(toStop)
+	for name, ref := range inst.Processes {
+		if ref.PID > 0 && !toStop[name] {
+			plan.ServicesToPreserve = append(plan.ServicesToPreserve, name)
+		}
+	}
+	if state != nil {
+		for name, node := range state.Nodes {
+			if lifecycleNodeActive(node.State) && !toStop[name] && !containsString(plan.ServicesToPreserve, name) {
+				plan.ServicesToPreserve = append(plan.ServicesToPreserve, name)
+			}
+		}
+	}
+	sort.Strings(plan.ServicesToPreserve)
+	plan.ConfirmationRecommended = len(plan.ProcessesToStop) > 1
+	return plan, nil
+}
+
+func (s *Server) previewLifecycle(req Request) (*api.LifecycleResult, error) {
+	inst, err := instance.Load(s.worktree, s.instanceID)
+	if err != nil {
+		return nil, err
+	}
+	status, _ := instance.LoadStatus(s.worktree, s.instanceID)
+	result := &api.LifecycleResult{
+		Affected:  []string{},
+		Stopped:   []string{},
+		Restarted: []string{},
+		Processes: []api.LifecycleProcessChange{},
+		Success:   true,
+	}
+	switch req.Action {
+	case ActionStop:
+		if req.All {
+			result.Plan = planStopAll(inst, stopAllExtraProcessRefs(s.worktree, s.instanceID, inst), os.Getpid())
+			return result, nil
+		}
+		result.Plan, err = s.planTaskStop(inst, req.Task)
+		return result, err
+	case ActionRestart:
+		projectName := req.Project
+		if strings.TrimSpace(projectName) == "" {
+			projectName = inst.LastRun.Project
+		}
+		_, p, resolveErr := s.resolveProject(projectName)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		g, graphErr := graph.New(p.Tasks(), p.Targets())
+		if graphErr != nil {
+			return nil, graphErr
+		}
+		selected, closureErr := restartClosure(g, req.Task, req.Upstream, req.Downstream)
+		if closureErr != nil {
+			return nil, closureErr
+		}
+		result.Plan = restartLifecyclePlan(g, inst, status, req.Task, selected)
+		return result, nil
+	case ActionInvalidate:
+		projectName, p, resolveErr := s.resolveProject(inst.LastRun.Project)
+		_ = projectName
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		g, target, graphErr := executionGraphForProject(p, inst.LastRun.Target)
+		if graphErr != nil {
+			return nil, graphErr
+		}
+		def, ok := g.Tasks[req.Task]
+		if !ok {
+			return nil, fmt.Errorf("unknown task %q", req.Task)
+		}
+		if project.IsServiceKind(def.Kind) {
+			selected, closureErr := restartClosure(g, req.Task, false, false)
+			if closureErr != nil {
+				return nil, closureErr
+			}
+			result.Plan = restartLifecyclePlan(g, inst, status, req.Task, selected)
+			result.Plan.RequestedAction = "rerun"
+			return result, nil
+		}
+		invalidated, invalidErr := downstreamInvalidateTasks(g, target, req.Task)
+		if invalidErr != nil {
+			return nil, invalidErr
+		}
+		closure, closureErr := g.TargetClosure(target)
+		if closureErr != nil {
+			return nil, closureErr
+		}
+		result.Plan = api.LifecyclePlan{
+			RequestedAction:         "rerun",
+			SelectedTask:            req.Task,
+			SelectedTarget:          target,
+			TasksToInvalidate:       invalidated,
+			ProcessesToStop:         sortedProcessNames(inst.Processes),
+			TasksToExecute:          closure,
+			ServicesToPreserve:      []string{},
+			ServicesToRestart:       serviceNamesInTasks(g, closure),
+			ConfirmationRecommended: true,
+		}
+		return result, nil
+	case ActionRetarget:
+		_, p, resolveErr := s.resolveProject(inst.LastRun.Project)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		execProject, target, targetErr := project.ResolveExecutionProject(p, req.Target)
+		if targetErr != nil {
+			return nil, targetErr
+		}
+		g, graphErr := graph.New(execProject.Tasks(), execProject.Targets())
+		if graphErr != nil {
+			return nil, graphErr
+		}
+		closure, closureErr := g.TargetClosure(target)
+		if closureErr != nil {
+			return nil, closureErr
+		}
+		result.Plan = api.LifecyclePlan{
+			RequestedAction:         "retarget",
+			SelectedTarget:          target,
+			TasksToInvalidate:       []string{},
+			ProcessesToStop:         sortedProcessNames(inst.Processes),
+			TasksToExecute:          closure,
+			ServicesToPreserve:      []string{},
+			ServicesToRestart:       serviceNamesInTasks(g, closure),
+			ConfirmationRecommended: true,
+		}
+		return result, nil
+	default:
+		return nil, fmt.Errorf("action %q does not support lifecycle planning", req.Action)
+	}
+}
+
+func lifecycleNodeActive(state api.NodeState) bool {
+	switch state {
+	case api.StateStarting, api.StateReady, api.StateRunning, api.StateRestarting, api.StateDegraded:
+		return true
+	default:
+		return false
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func sortedStringSet(values map[string]bool) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func uniqueSortedStrings(values []string) []string {
@@ -1337,103 +1715,372 @@ func waitForWatchReady(worktree, instanceID string, after time.Time, timeout tim
 	return false
 }
 
-func (s *Server) invalidateAndRelaunch(ctx context.Context, task string) error {
+func (s *Server) invalidateAndRelaunch(ctx context.Context, task string) (*api.LifecycleResult, error) {
 	task = strings.TrimSpace(task)
 	if task == "" {
-		return fmt.Errorf("no task selected")
+		return nil, fmt.Errorf("no task selected")
 	}
 	inst, err := instance.Load(s.worktree, s.instanceID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	projectName, p, err := s.resolveProject(inst.LastRun.Project)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if inst.LastRun.Target == "" {
-		return fmt.Errorf("instance has no recorded project/target to relaunch")
+		return nil, fmt.Errorf("instance has no recorded project/target to relaunch")
 	}
 	g, resolvedTarget, err := executionGraphForProject(p, inst.LastRun.Target)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	selectedDef, ok := g.Tasks[task]
+	if !ok {
+		return nil, fmt.Errorf("unknown task %q", task)
+	}
+	if project.IsServiceKind(selectedDef.Kind) {
+		_, lifecycle, restartErr := s.restart(ctx, projectName, task, false, false, inst.LastRun.MaxParallel)
+		if lifecycle != nil {
+			lifecycle.Plan.RequestedAction = "rerun"
+		}
+		return lifecycle, restartErr
 	}
 	toInvalidate, err := downstreamInvalidateTasks(g, resolvedTarget, task)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	closure, err := g.TargetClosure(resolvedTarget)
+	if err != nil {
+		return nil, err
+	}
+	plan := api.LifecyclePlan{
+		RequestedAction:         "rerun",
+		SelectedTask:            task,
+		SelectedTarget:          resolvedTarget,
+		TasksToInvalidate:       append([]string(nil), toInvalidate...),
+		ProcessesToStop:         sortedProcessNames(inst.Processes),
+		TasksToExecute:          append([]string(nil), closure...),
+		ServicesToPreserve:      []string{},
+		ServicesToRestart:       serviceNamesInTasks(g, closure),
+		ConfirmationRecommended: true,
+	}
+	lifecycle := &api.LifecycleResult{
+		Plan:      plan,
+		Affected:  []string{},
+		Stopped:   []string{},
+		Restarted: []string{},
+		Processes: []api.LifecycleProcessChange{},
+		Success:   false,
 	}
 	s.stopActive(5 * time.Second)
 	if err := writeInvalidateTransition(s.worktree, s.instanceID, resolvedTarget, g, toInvalidate); err != nil {
-		return err
+		lifecycle.Error = err.Error()
+		return lifecycle, err
 	}
 	s.publishStatus("invalidated downstream from %s, relaunching %s", task, inst.LastRun.Target)
 	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p))
 	for _, name := range toInvalidate {
 		if err := store.Invalidate(name); err != nil {
-			return err
+			lifecycle.Error = err.Error()
+			return lifecycle, err
 		}
 		if err := instance.RemoveTaskStamp(s.worktree, s.instanceID, name); err != nil {
-			return err
+			lifecycle.Error = err.Error()
+			return lifecycle, err
 		}
 	}
 	_, err = s.startActive(ctx, projectName, inst.LastRun.Target, inst.LastRun.Mode, inst.LastRun.MaxParallel)
-	return err
+	lifecycle.Affected = append(lifecycle.Affected, toInvalidate...)
+	lifecycle.Stopped = append(lifecycle.Stopped, plan.ProcessesToStop...)
+	lifecycle.Restarted = append(lifecycle.Restarted, plan.ServicesToRestart...)
+	lifecycle.Success = err == nil
+	if err != nil {
+		lifecycle.Error = err.Error()
+	}
+	return lifecycle, err
 }
 
-func (s *Server) restart(ctx context.Context, projectName, task string, upstream, downstream bool, maxParallel int) (*api.RunResult, error) {
+func (s *Server) restart(ctx context.Context, projectName, task string, upstream, downstream bool, maxParallel int) (*api.RunResult, *api.LifecycleResult, error) {
 	task = strings.TrimSpace(task)
 	if task == "" {
-		return nil, fmt.Errorf("usage: devflow restart <task>")
+		return nil, nil, fmt.Errorf("usage: devflow restart <task>")
 	}
 	projectName, p, err := s.resolveProject(projectName)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	g, err := graph.New(p.Tasks(), p.Targets())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	selected, err := restartClosure(g, task, upstream, downstream)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	taskDef, ok := g.Tasks[task]
 	if !ok {
-		return nil, fmt.Errorf("unknown task %q", task)
+		return nil, nil, fmt.Errorf("unknown task %q", task)
 	}
 	inst, err := instance.Load(s.worktree, s.instanceID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	status, _ := instance.LoadStatus(s.worktree, s.instanceID)
+	plan := restartLifecyclePlan(g, inst, status, task, selected)
+	lifecycle := &api.LifecycleResult{
+		Plan:      plan,
+		Affected:  []string{},
+		Stopped:   []string{},
+		Restarted: []string{},
+		Processes: []api.LifecycleProcessChange{},
+		Success:   false,
 	}
 	if project.IsServiceKind(taskDef.Kind) {
 		if inst.LastRun.Target == "" {
-			return nil, fmt.Errorf("service restart requires a previously detached run for this instance")
+			err := fmt.Errorf("service restart requires a previously detached run for this instance")
+			lifecycle.Error = err.Error()
+			return nil, lifecycle, err
 		}
-		_, err := s.startActive(ctx, projectName, inst.LastRun.Target, inst.LastRun.Mode, inst.LastRun.MaxParallel)
-		return nil, err
+		s.mu.Lock()
+		active := s.active
+		s.mu.Unlock()
+		if active == nil || active.controller == nil {
+			if len(plan.ServicesToPreserve) > 0 {
+				restartErr := fmt.Errorf("cannot restart service %q without its owning active run while preserving %s; no restart occurred", task, strings.Join(plan.ServicesToPreserve, ", "))
+				lifecycle.Error = restartErr.Error()
+				return nil, lifecycle, restartErr
+			}
+			// A prior startup failure has no live engine left to own a
+			// service-local replacement. Relaunch the recorded detached target;
+			// unlike the old same-target path this always starts real work.
+			started, startErr := s.startActive(ctx, projectName, inst.LastRun.Target, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+			if startErr != nil {
+				lifecycle.Error = startErr.Error()
+				return nil, lifecycle, startErr
+			}
+			readyTimeout := taskDef.ReadyTimeout
+			if readyTimeout <= 0 {
+				readyTimeout = 10 * time.Second
+			}
+			readyNode, readyErr := waitForTaskTerminalReadiness(ctx, s.worktree, s.instanceID, task, readyTimeout)
+			if readyErr != nil {
+				lifecycle.Error = readyErr.Error()
+				return nil, lifecycle, readyErr
+			}
+			lifecycle.Affected = append(lifecycle.Affected, task)
+			lifecycle.Restarted = append(lifecycle.Restarted, task)
+			lifecycle.Processes = append(lifecycle.Processes, api.LifecycleProcessChange{
+				Task:       task,
+				PID:        readyNode.PID,
+				Generation: readyNode.Generation,
+				Ready:      true,
+			})
+			lifecycle.Success = started.Accepted
+			return nil, lifecycle, nil
+		}
+		for _, name := range plan.ServicesToRestart {
+			change, restartErr := active.controller.Restart(ctx, name)
+			if restartErr != nil {
+				lifecycle.Error = restartErr.Error()
+				return nil, lifecycle, restartErr
+			}
+			if change.Previous.Generation == change.Current.Generation || !change.Ready {
+				restartErr = fmt.Errorf("service %q did not produce a ready replacement", name)
+				lifecycle.Error = restartErr.Error()
+				return nil, lifecycle, restartErr
+			}
+			lifecycle.Affected = append(lifecycle.Affected, name)
+			lifecycle.Stopped = append(lifecycle.Stopped, name)
+			lifecycle.Restarted = append(lifecycle.Restarted, name)
+			lifecycle.Processes = append(lifecycle.Processes, api.LifecycleProcessChange{
+				Task:               name,
+				PreviousPID:        change.Previous.PID,
+				PreviousGeneration: change.Previous.Generation,
+				PID:                change.Current.PID,
+				Generation:         change.Current.Generation,
+				Ready:              change.Ready,
+			})
+		}
+		if len(lifecycle.Restarted) == 0 {
+			err := fmt.Errorf("service %q was not restarted", task)
+			lifecycle.Error = err.Error()
+			return nil, lifecycle, err
+		}
+		lifecycle.Success = true
+		return nil, lifecycle, nil
 	}
 	targetName := "__restart_" + task
 	wrapped := restartProject{base: p, target: project.Target{Name: targetName, RootTasks: selected}}
-	return s.runAttachedProject(ctx, projectName, wrapped, targetName, api.ModeDev, maxParallel, nil)
+	result, runErr := s.runAttachedProject(ctx, projectName, wrapped, targetName, api.ModeDev, maxParallel, nil)
+	lifecycle.Affected = append(lifecycle.Affected, selected...)
+	lifecycle.Success = runErr == nil
+	if runErr != nil {
+		lifecycle.Error = runErr.Error()
+	}
+	return result, lifecycle, runErr
 }
 
-func (s *Server) retarget(ctx context.Context, target string) error {
+func waitForTaskTerminalReadiness(ctx context.Context, worktree, instanceID, task string, timeout time.Duration) (api.NodeStatus, error) {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		state, err := instance.LoadStatus(worktree, instanceID)
+		if err == nil {
+			if node, ok := state.Nodes[task]; ok {
+				switch node.State {
+				case api.StateRunning:
+					if !node.Ready {
+						break
+					}
+					return node, nil
+				case api.StateFailed, api.StateCanceled, api.StateDegraded, api.StateStopped:
+					cause := strings.TrimSpace(node.LastError)
+					if cause == "" {
+						cause = string(node.State)
+					}
+					return node, fmt.Errorf("service %q did not become ready: %s", task, cause)
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return api.NodeStatus{}, ctx.Err()
+		case <-deadline.C:
+			return api.NodeStatus{}, fmt.Errorf("service %q readiness timed out after %s", task, timeout)
+		case <-ticker.C:
+		}
+	}
+}
+
+func restartLifecyclePlan(g *graph.Graph, inst *api.Instance, status *instance.State, selectedTask string, tasks []string) api.LifecyclePlan {
+	plan := api.LifecyclePlan{
+		RequestedAction:         "restart",
+		SelectedTask:            selectedTask,
+		TasksToInvalidate:       []string{},
+		ProcessesToStop:         []string{},
+		TasksToExecute:          append([]string(nil), tasks...),
+		ServicesToPreserve:      []string{},
+		ServicesToRestart:       []string{},
+		ConfirmationRecommended: len(tasks) > 1,
+	}
+	selected := make(map[string]bool, len(tasks))
+	active := make(map[string]bool)
+	for name, ref := range inst.Processes {
+		if ref.PID > 0 {
+			active[name] = true
+		}
+	}
+	if status != nil {
+		for name, node := range status.Nodes {
+			if def, ok := g.Tasks[name]; ok && project.IsServiceKind(def.Kind) && lifecycleNodeActive(node.State) {
+				active[name] = true
+			}
+		}
+	}
+	for _, name := range tasks {
+		selected[name] = true
+		if def, ok := g.Tasks[name]; ok && project.IsServiceKind(def.Kind) {
+			plan.ServicesToRestart = append(plan.ServicesToRestart, name)
+			if active[name] {
+				plan.ProcessesToStop = append(plan.ProcessesToStop, name)
+			}
+		}
+	}
+	for name := range active {
+		if !selected[name] {
+			plan.ServicesToPreserve = append(plan.ServicesToPreserve, name)
+		}
+	}
+	sort.Strings(plan.ProcessesToStop)
+	sort.Strings(plan.ServicesToPreserve)
+	return plan
+}
+
+func (s *Server) retarget(ctx context.Context, target string) (*api.LifecycleResult, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
-		return fmt.Errorf("no target selected")
+		return nil, fmt.Errorf("no target selected")
 	}
 	inst, err := instance.Load(s.worktree, s.instanceID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	projectName, p, err := s.resolveProject(inst.LastRun.Project)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if _, _, err := project.ResolveExecutionProject(p, target); err != nil {
-		return err
+	execProject, resolvedTarget, err := project.ResolveExecutionProject(p, target)
+	if err != nil {
+		return nil, err
 	}
-	_, err = s.startActive(ctx, projectName, target, inst.LastRun.Mode, inst.LastRun.MaxParallel)
-	return err
+	g, err := graph.New(execProject.Tasks(), execProject.Targets())
+	if err != nil {
+		return nil, err
+	}
+	closure, err := g.TargetClosure(resolvedTarget)
+	if err != nil {
+		return nil, err
+	}
+	plan := api.LifecyclePlan{
+		RequestedAction:         "retarget",
+		SelectedTarget:          resolvedTarget,
+		TasksToInvalidate:       []string{},
+		ProcessesToStop:         sortedProcessNames(inst.Processes),
+		TasksToExecute:          append([]string(nil), closure...),
+		ServicesToPreserve:      []string{},
+		ServicesToRestart:       serviceNamesInTasks(g, closure),
+		ConfirmationRecommended: true,
+	}
+	lifecycle := &api.LifecycleResult{
+		Plan:      plan,
+		Affected:  []string{},
+		Stopped:   []string{},
+		Restarted: []string{},
+		Processes: []api.LifecycleProcessChange{},
+		Success:   false,
+	}
+	s.mu.Lock()
+	active := s.active
+	s.mu.Unlock()
+	if active != nil && active.target == resolvedTarget && active.projectName == projectName {
+		err := fmt.Errorf("target %q is already active; no retarget occurred", resolvedTarget)
+		lifecycle.Error = err.Error()
+		return lifecycle, err
+	}
+	_, err = s.startActive(ctx, projectName, resolvedTarget, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+	lifecycle.Affected = append(lifecycle.Affected, closure...)
+	lifecycle.Stopped = append(lifecycle.Stopped, plan.ProcessesToStop...)
+	lifecycle.Restarted = append(lifecycle.Restarted, plan.ServicesToRestart...)
+	lifecycle.Success = err == nil
+	if err != nil {
+		lifecycle.Error = err.Error()
+	}
+	return lifecycle, err
+}
+
+func sortedProcessNames(processes map[string]api.ProcessRef) []string {
+	names := make([]string, 0, len(processes))
+	for name, ref := range processes {
+		if ref.PID > 0 {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func serviceNamesInTasks(g *graph.Graph, tasks []string) []string {
+	names := make([]string, 0)
+	for _, name := range tasks {
+		if task, ok := g.Tasks[name]; ok && project.IsServiceKind(task.Kind) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (s *Server) listActions(projectName string) (*ActionListResult, error) {

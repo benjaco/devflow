@@ -41,7 +41,7 @@ func WriteFileAtomic(path string, v any) error {
 }
 
 func ReadFile(path string, v any) error {
-	data, err := os.ReadFile(path)
+	data, err := readFile(path)
 	if err != nil {
 		return err
 	}

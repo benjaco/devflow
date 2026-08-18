@@ -1,18 +1,29 @@
 # Progress
 
-Last updated: 2026-08-16
+Last updated: 2026-08-18
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: deterministic multi-file worktree-local Go project adapters are complete
-- Confidence: under Go 1.26.6 the full default/race suites, focused copier/database/cache/engine/validation/CLI suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, and Linux/Windows amd64/arm64 builds pass on `darwin/arm64`; Docker-backed database tests were invoked but skipped because Docker Desktop was not running
+- State: lifecycle/TUI hardening and its Ubuntu/Windows CI race follow-up are implemented and verified
+- Confidence: under Go 1.26.6 the full default/race suites, focused daemon/engine/process/JSON lifecycle suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, Windows amd64/arm64 test compilation, and Linux/Windows amd64/arm64 builds pass on `darwin/arm64`; the formerly failing real-process cancellation test passes 100 consecutive runs
 
 ## In Progress
 
-- None.
+- None for the lifecycle/TUI hardening backlog.
 
 ## Completed
+
+- Ubuntu/Windows lifecycle CI race follow-up:
+  - made concurrent `process.Handle.Stop` calls join one bounded terminate/kill/reap operation so engine cancellation cannot return while the context watcher is still stopping a service
+  - added bounded Windows JSON read retry for transient access, sharing, and lock violations during atomic state replacement, with a native Windows locked-file regression
+  - passed the reported Ubuntu lifecycle test 100 consecutive times, focused and full default/race suites, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean formatting/tidy/diff checks, full Windows amd64/arm64 test compilation, and Linux/Windows amd64/arm64 builds
+
+- Daemon lifecycle and core TUI hardening:
+  - explicit service restart/stop now runs through the owning engine, uses PID plus monotonic generation identity, waits for replacement readiness, preserves independent services, and keeps task-scoped stop from canceling the active run
+  - added shared preview/actual lifecycle JSON, read-only `--preview` CLI paths, exact affected sets, detached accepted-versus-ready metadata, watch-mode post-readiness exit detection, bounded node failure excerpts, attempt/readiness state, and dependency blocking reasons
+  - added stable graph-ordered TUI rows, explicit attention filtering, contextual help/focus, persistent timestamped action feedback, lifecycle confirmation/cancel modals, real retarget target selection, bounded follow/pause/older-log behavior, compact layouts, distinct state badges/reasons, and detached-quit guidance
+  - added independent PID-less and real-process lifecycle tests, cross-platform process cleanup assertions, watch debug broken-pipe coverage, CLI preview/result coverage, and TUI screen/key/log/state regressions
 
 - Multi-file project-local Go adapters:
   - added one deterministic discovery contract that requires regular `devflow.project.go`, returns it first, includes sorted regular root-level `devflow_*.go` companions, excludes `_test.go` and unrelated/nested Go files, and rejects matching directories, symlinks, and special files with path-specific errors

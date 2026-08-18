@@ -2190,9 +2190,34 @@ func TestStopCommandStopsTrackedProcess(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
-	if err := app.Run([]string{"stop", "--worktree", worktree, "--task", "svc"}); err != nil {
+	previewOut := &bytes.Buffer{}
+	app := &App{Stdout: previewOut, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"stop", "--worktree", worktree, "--task", "svc", "--preview", "--json"}); err != nil {
 		t.Fatal(err)
+	}
+	var preview struct {
+		Plan api.LifecyclePlan `json:"plan"`
+	}
+	if err := json.Unmarshal(previewOut.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(preview.Plan.ProcessesToStop, ",") != "svc" || !instance.ProcessAlive(handle.PID()) {
+		t.Fatalf("stop preview changed process state or lost scope: %+v", preview.Plan)
+	}
+	stdout := &bytes.Buffer{}
+	app = &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"stop", "--worktree", worktree, "--task", "svc", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Stopped   []string             `json:"stopped"`
+		Lifecycle *api.LifecycleResult `json:"lifecycle"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(payload.Stopped, ",") != "svc" || payload.Lifecycle == nil || !payload.Lifecycle.Success || strings.Join(payload.Lifecycle.Affected, ",") != "svc" {
+		t.Fatalf("task-scoped stop JSON did not expose exact result: %+v", payload)
 	}
 	waitForProcessExit(t, handle)
 	state, err := instance.LoadStatus(worktree, inst.ID)

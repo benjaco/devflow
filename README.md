@@ -107,6 +107,7 @@ devflow flush up --json
 `flush` writes a sync sentinel, waits for the watcher to process file changes before that sentinel, waits for the selected target closure to settle, and reports structured success or issues. Coding agents should edit files, run `devflow flush --json`, and only run tests after `success=true`.
 
 Bare `devflow` inside a project worktree starts the default target detached when needed and opens the TUI.
+The TUI keeps graph order stable, distinguishes service startup/readiness/restart/failure states, follows running logs until you scroll up, and uses `?` for contextual help. Lifecycle actions show their stop/execute/preserve scope before execution.
 
 ## Project Model
 
@@ -147,6 +148,10 @@ devflow watch up --detach --json
 devflow flush up --json
 devflow status --json
 devflow logs <task>
+devflow restart <service> --preview --json
+devflow restart <service> --json
+devflow stop --task <service> --preview --json
+devflow stop --task <service> --json
 devflow stop --all --json
 devflow cache status --json
 devflow cache path --json

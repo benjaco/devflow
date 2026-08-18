@@ -119,7 +119,7 @@ func (a *App) launchDefaultTUI(root string) error {
 		return err
 	}
 	waitForInitialStatus(root, plan.instanceID, plan.target, api.ModeWatch, 3*time.Second)
-	return tui.Run(tui.Options{Worktree: root, InstanceID: plan.instanceID, StopDaemonOnExit: daemonStarted})
+	return tui.Run(tui.Options{Worktree: root, InstanceID: plan.instanceID, StopDaemonOnExit: daemonStarted, Output: a.Stdout})
 }
 
 type launchPlan struct {
@@ -718,6 +718,7 @@ func (a *App) restartCmd(args []string) error {
 	maxParallel := fs.Int("max-parallel", 0, "")
 	upstream := fs.Bool("upstream", false, "")
 	downstream := fs.Bool("downstream", false, "")
+	preview := fs.Bool("preview", false, "preview lifecycle scope without changing processes")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -743,8 +744,26 @@ func (a *App) restartCmd(args []string) error {
 		Upstream:    *upstream,
 		Downstream:  *downstream,
 		MaxParallel: *maxParallel,
+		Preview:     *preview,
 	})
+	if *preview {
+		if resp.Lifecycle == nil {
+			if runErr != nil {
+				return runErr
+			}
+			return fmt.Errorf("daemon returned no lifecycle plan")
+		}
+		if *jsonOut {
+			if err := writeJSON(a.Stdout, resp.Lifecycle); err != nil {
+				return err
+			}
+		} else {
+			writeLifecyclePlanText(a.Stdout, resp.Lifecycle.Plan)
+		}
+		return runErr
+	}
 	if resp.Run != nil {
+		resp.Run.Lifecycle = resp.Lifecycle
 		if *jsonOut {
 			if err := writeJSON(a.Stdout, resp.Run); err != nil {
 				return err
@@ -752,11 +771,26 @@ func (a *App) restartCmd(args []string) error {
 			return runErr
 		}
 		_, _ = fmt.Fprintf(a.Stdout, "restarted=%s success=%v cache_hits=%d\n", task, resp.Run.Success, len(resp.Run.CacheHits))
+	} else if *jsonOut && resp.Lifecycle != nil {
+		if err := writeJSON(a.Stdout, resp.Lifecycle); err != nil {
+			return err
+		}
+		return runErr
 	} else if runErr == nil {
 		if *jsonOut {
-			return writeJSON(a.Stdout, map[string]any{"restarted": task, "success": true})
+			payload := map[string]any{"restarted": task, "success": true}
+			if resp.Lifecycle != nil {
+				payload["affected"] = resp.Lifecycle.Affected
+				payload["plan"] = resp.Lifecycle.Plan
+				payload["processes"] = resp.Lifecycle.Processes
+			}
+			return writeJSON(a.Stdout, payload)
 		}
-		_, _ = fmt.Fprintf(a.Stdout, "restarted=%s\n", task)
+		affected := []string{task}
+		if resp.Lifecycle != nil {
+			affected = resp.Lifecycle.Affected
+		}
+		_, _ = fmt.Fprintf(a.Stdout, "restarted: %s\n", strings.Join(affected, ", "))
 	}
 	return runErr
 }
@@ -769,6 +803,7 @@ func (a *App) stopCmd(args []string) error {
 	instanceID := fs.String("instance", "", "")
 	task := fs.String("task", "", "")
 	all := fs.Bool("all", false, "")
+	preview := fs.Bool("preview", false, "preview lifecycle scope without changing processes")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -784,11 +819,11 @@ func (a *App) stopCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := client.Call(context.Background(), daemon.Request{Action: daemon.ActionStop, All: *all, Task: *task})
+	resp, err := client.Call(context.Background(), daemon.Request{Action: daemon.ActionStop, All: *all, Task: *task, Preview: *preview})
 	if err != nil {
 		return err
 	}
-	if *all {
+	if *all && !*preview {
 		waitForDaemonDisconnect(client, 3*time.Second)
 	}
 	stopped := []string{}
@@ -799,11 +834,28 @@ func (a *App) stopCmd(args []string) error {
 		"instanceId": id,
 		"stopped":    stopped,
 	}
+	if resp.Lifecycle != nil {
+		payload["lifecycle"] = resp.Lifecycle
+		payload["plan"] = resp.Lifecycle.Plan
+	}
 	if *jsonOut {
 		return writeJSON(a.Stdout, payload)
 	}
+	if *preview && resp.Lifecycle != nil {
+		writeLifecyclePlanText(a.Stdout, resp.Lifecycle.Plan)
+		return nil
+	}
 	_, _ = fmt.Fprintf(a.Stdout, "stopped: %s\n", strings.Join(stopped, ", "))
 	return nil
+}
+
+func writeLifecyclePlanText(output io.Writer, plan api.LifecyclePlan) {
+	_, _ = fmt.Fprintf(output, "action=%s task=%s target=%s\n", plan.RequestedAction, plan.SelectedTask, plan.SelectedTarget)
+	_, _ = fmt.Fprintf(output, "invalidate=%s\n", strings.Join(plan.TasksToInvalidate, ","))
+	_, _ = fmt.Fprintf(output, "stop=%s\n", strings.Join(plan.ProcessesToStop, ","))
+	_, _ = fmt.Fprintf(output, "execute=%s\n", strings.Join(plan.TasksToExecute, ","))
+	_, _ = fmt.Fprintf(output, "preserve=%s\n", strings.Join(plan.ServicesToPreserve, ","))
+	_, _ = fmt.Fprintf(output, "restart=%s confirmation_recommended=%v\n", strings.Join(plan.ServicesToRestart, ","), plan.ConfirmationRecommended)
 }
 
 func (a *App) actionCmd(args []string) error {
@@ -1667,6 +1719,7 @@ func (a *App) tuiCmd(args []string) error {
 	return tui.Run(tui.Options{
 		Worktree:   *worktree,
 		InstanceID: *instanceID,
+		Output:     a.Stdout,
 	})
 }
 

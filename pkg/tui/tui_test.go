@@ -1,11 +1,11 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -36,29 +36,33 @@ func TestReadLastLines(t *testing.T) {
 	}
 }
 
-func TestTaskStatePriorityOrdersRunningThenPending(t *testing.T) {
+func TestOrderNodesForTUIUsesStableGraphOrderAcrossStateChanges(t *testing.T) {
+	const name = "tui-stable-order-project"
+	p := testProject{
+		name: name,
+		tasks: []project.Task{
+			{Name: "build", Kind: project.KindOnce},
+			{Name: "backend", Kind: project.KindService, Deps: []string{"build"}},
+			{Name: "frontend", Kind: project.KindService},
+		},
+		targets: []project.Target{{Name: "dev", RootTasks: []string{"backend", "frontend"}}},
+	}
+	project.Register(p)
+	inst := &api.Instance{LastRun: api.RunConfig{Project: name, Target: "dev"}}
 	nodes := []api.NodeStatus{
-		{Name: "done_task", State: api.StateDone},
-		{Name: "pending_task", State: api.StatePending},
-		{Name: "migration_task", State: api.StateMigrationNeeded},
-		{Name: "running_task", State: api.StateRunning},
-		{Name: "cached_task", State: api.StateCached},
+		{Name: "frontend", State: api.StateRunning},
+		{Name: "backend", State: api.StatePending},
+		{Name: "build", State: api.StateDone},
 	}
-	sort.Slice(nodes, func(i, j int) bool {
-		left := taskStatePriority(nodes[i].State)
-		right := taskStatePriority(nodes[j].State)
-		if left != right {
-			return left < right
-		}
-		return nodes[i].Name < nodes[j].Name
-	})
-	got := make([]string, 0, len(nodes))
-	for _, node := range nodes {
-		got = append(got, node.Name)
+	orderNodesForTUI(nodes, inst, "dev")
+	first := []string{nodes[0].Name, nodes[1].Name, nodes[2].Name}
+	for index := range nodes {
+		nodes[index].State = []api.NodeState{api.StateFailed, api.StateRunning, api.StateCached}[index]
 	}
-	want := []string{"running_task", "pending_task", "migration_task", "cached_task", "done_task"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("unexpected node order: got %v want %v", got, want)
+	orderNodesForTUI(nodes, inst, "dev")
+	second := []string{nodes[0].Name, nodes[1].Name, nodes[2].Name}
+	if strings.Join(first, ",") != "build,backend,frontend" || strings.Join(second, ",") != strings.Join(first, ",") {
+		t.Fatalf("state transition reordered task rows: before=%v after=%v", first, second)
 	}
 }
 
@@ -432,6 +436,202 @@ func TestRenderFooterShowsPrismaMigrationProgressStatus(t *testing.T) {
 	}
 	if !strings.Contains(text, `running Prisma migration generation for "add-age"`) {
 		t.Fatalf("expected footer to render Prisma migration progress, got %q", text)
+	}
+}
+
+func TestFooterAndContextualHelpRespectModalAndInputSemantics(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	d.setStatus("[red]restart failed: broken pipe")
+	footer := d.footer.GetText(false)
+	if !strings.Contains(footer, "restart failed") || !strings.Contains(footer, "?") {
+		t.Fatalf("action status/help was not permanently visible: %q", footer)
+	}
+	if got := d.handleKeys(tcell.NewEventKey(tcell.KeyRune, '?', tcell.ModNone)); got != nil || !d.helpOpen {
+		t.Fatalf("? did not open contextual help: event=%v open=%v", got, d.helpOpen)
+	}
+	if got := d.handleKeys(tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone)); got != nil || d.helpOpen {
+		t.Fatalf("Escape did not return from help: event=%v open=%v", got, d.helpOpen)
+	}
+	d.activeInput = true
+	d.renderFooter()
+	footer = d.footer.GetText(false)
+	if strings.Contains(footer, "q quit") || !strings.Contains(footer, "Enter accept") || !strings.Contains(footer, "Escape cancel") {
+		t.Fatalf("text-input footer advertised global shortcuts: %q", footer)
+	}
+}
+
+func TestLifecyclePlanEscapeCancelsWithoutExecuting(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	executed := false
+	d.openLifecyclePlan(api.LifecyclePlan{
+		RequestedAction:    "rerun",
+		SelectedTask:       "backend_debug",
+		ProcessesToStop:    []string{"backend_debug"},
+		TasksToInvalidate:  []string{},
+		TasksToExecute:     []string{"backend_debug"},
+		ServicesToPreserve: []string{"frontend"},
+		ServicesToRestart:  []string{"backend_debug"},
+	}, func() { executed = true })
+	d.handleKeys(tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone))
+	if executed || d.lifecycleModal || !strings.Contains(d.statusMessage, "canceled") {
+		t.Fatalf("Escape changed execution state: executed=%v modal=%v status=%q", executed, d.lifecycleModal, d.statusMessage)
+	}
+}
+
+func TestLiveLogFollowingPauseResumeAndTaskSwitch(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	d.selectedName = "backend"
+	backendPath := filepath.Join(t.TempDir(), "backend.log")
+	snap := snapshot{
+		logTitle: "backend task log",
+		logPath:  backendPath,
+		logLines: []string{"one", "two", "three"},
+		nodes:    []api.NodeStatus{{Name: "backend", State: api.StateRunning}},
+	}
+	d.updateLogsFromSnapshot(snap)
+	if !d.logFollowing || !strings.Contains(d.logs.GetTitle(), "FOLLOWING") {
+		t.Fatalf("running log did not open in follow mode: %q", d.logs.GetTitle())
+	}
+	d.scrollLogs(-1)
+	snap.logLines = append(snap.logLines, "four")
+	d.updateLogsFromSnapshot(snap)
+	if d.logFollowing || !strings.Contains(d.logs.GetTitle(), "PAUSED") {
+		t.Fatalf("manual upward scroll did not pause following: %q", d.logs.GetTitle())
+	}
+	d.resumeLogFollowing()
+	if !d.logFollowing || !strings.Contains(d.logs.GetTitle(), "FOLLOWING") {
+		t.Fatalf("f/End resume did not restore following: %q", d.logs.GetTitle())
+	}
+	d.selectedName = "frontend"
+	d.updateLogsFromSnapshot(snapshot{
+		logTitle: "frontend task log",
+		logPath:  filepath.Join(t.TempDir(), "frontend.log"),
+		logLines: []string{"fresh"},
+		nodes:    []api.NodeStatus{{Name: "frontend", State: api.StateRunning}},
+	})
+	if !d.logFollowing {
+		t.Fatal("switching task logs did not reset to follow mode")
+	}
+}
+
+func TestReadLastLinesIsBoundedAndReportsRetainedRange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large.log")
+	var content strings.Builder
+	for i := 1; i <= 300; i++ {
+		_, _ = fmt.Fprintf(&content, "line %03d\n", i)
+	}
+	content.WriteString(strings.Repeat("x", 128*1024))
+	if err := os.WriteFile(path, []byte(content.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := readLastLinesInfo(path, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.lines) != 200 || info.startLine != 102 || info.endLine != 301 || !info.truncated {
+		t.Fatalf("unexpected bounded tail metadata: %+v", info)
+	}
+	if last := info.lines[len(info.lines)-1]; len(last) > 17*1024 || !strings.Contains(last, "line truncated") {
+		t.Fatalf("oversized line was not safely truncated: bytes=%d tail=%q", len(last), last[max(0, len(last)-32):])
+	}
+}
+
+func TestLifecycleBadgesAreDistinctWithoutColor(t *testing.T) {
+	states := []api.NodeState{
+		api.StatePending, api.StateStarting, api.StateRunning, api.StateReady,
+		api.StateRestarting, api.StateCached, api.StateDone, api.StateFailed,
+		api.StateCanceled, api.StateBlocked, api.StateStopped, api.StateDegraded,
+		api.StateDirty,
+	}
+	seen := map[string]api.NodeState{}
+	for _, state := range states {
+		badge := stateBadge(state)
+		if prior, exists := seen[badge]; exists {
+			t.Fatalf("states %q and %q share monochrome badge %q", prior, state, badge)
+		}
+		seen[badge] = state
+	}
+	if reason := nodeStateReason(api.NodeStatus{State: api.StateBlocked, LastError: "waiting for database"}); !strings.Contains(reason, "database") {
+		t.Fatalf("blocking reason was hidden: %q", reason)
+	}
+}
+
+func TestResponsiveDashboardLayouts(t *testing.T) {
+	cases := []struct {
+		width  int
+		height int
+		want   []string
+	}{
+		{60, 24, []string{"? help", "backend_debug"}},
+		{80, 24, []string{"backend_debug", "restart failed"}},
+		{100, 12, []string{"backend_debug", "RUN"}},
+		{100, 30, []string{"backend_debug", "task log"}},
+		{140, 40, []string{"backend_debug", "task log", "restart failed"}},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%dx%d", tc.width, tc.height), func(t *testing.T) {
+			d := newDashboard(t.TempDir(), "abc123")
+			d.currentNodes = []api.NodeStatus{{Name: "backend_debug", Kind: "debug_service", State: api.StateRunning}}
+			d.selectedName = "backend_debug"
+			d.header.SetText("instance=abc123 target=dev mode=watch\nworktree=/tmp/example\ndb=running\nurls=backend\nstates=RUN=1")
+			d.renderTasks(d.currentNodes)
+			d.updateLogsFromSnapshot(snapshot{
+				logTitle: "backend_debug task log",
+				logLines: []string{"service output"},
+				nodes:    d.currentNodes,
+			})
+			d.setStatus("[red]restart failed: broken pipe")
+			d.applyResponsiveLayout(tc.width, tc.height)
+			screen := tcell.NewSimulationScreen("UTF-8")
+			if err := screen.Init(); err != nil {
+				t.Fatal(err)
+			}
+			defer screen.Fini()
+			screen.SetSize(tc.width, tc.height)
+			d.pages.SetRect(0, 0, tc.width, tc.height)
+			d.pages.Draw(screen)
+			text := simulationScreenText(screen, tc.width, tc.height)
+			for _, want := range tc.want {
+				if !strings.Contains(text, want) {
+					t.Fatalf("layout missing %q:\n%s", want, text)
+				}
+			}
+		})
+	}
+}
+
+func simulationScreenText(screen tcell.Screen, width, height int) string {
+	var text strings.Builder
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			cell, _, _ := screen.Get(x, y)
+			if cell == "" {
+				cell = " "
+			}
+			text.WriteString(cell)
+		}
+		text.WriteByte('\n')
+	}
+	return text.String()
+}
+
+func TestDetachedQuitMessageIncludesInspectAndStopCommands(t *testing.T) {
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.LastRun = api.RunConfig{Target: "dev", Detached: true}
+	if err := instance.Save(inst); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	writeDetachedQuitMessage(&output, worktree, inst.ID)
+	message := output.String()
+	for _, want := range []string{"remains active", "devflow status", "devflow stop", inst.ID, "dev"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("quit message missing %q: %q", want, message)
+		}
 	}
 }
 

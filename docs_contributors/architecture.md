@@ -80,6 +80,8 @@ Daemon/supervisor state is also per worktree. The instance snapshot records:
 - service task PIDs when the supervised service is an operating-system process; managed resources such as database containers have no host PID entry
 - the daemon log path
 
+The engine, not the CLI or persisted PID registry, owns live service handles. Each daemon active run therefore carries an `engine.LifecycleController`. Task-scoped stop/restart commands are serialized through the engine loop, which verifies a monotonic service generation and readiness before returning. Late `Wait` results from a replaced handle are ignored by generation. Watch mode monitors every current generation after readiness, so an unexpected Delve/service exit becomes terminal status without tearing down independent services. Direct OS process termination remains only the recovery path when no live owning engine exists; `stop --all` remains the complete cleanup boundary.
+
 Task cache storage is global for the user:
 - `<os.UserCacheDir()>/devflow/cache`
 
@@ -101,7 +103,7 @@ The daemon Unix socket lives in a short per-user temp directory such as `/tmp/de
 
 This split keeps runtime logs and instance state local to the worktree, keeps task cache globally reusable, keeps port allocation coordinated for sibling git worktrees, and keeps socket paths short enough for real terminals and test worktrees.
 
-Structured state files and `runtime.env` are replaced through unique temporary files in the same directory so a failed or concurrent write cannot expose a partially truncated destination. Same-destination replacements are serialized within a process. On Windows, the final `MoveFileEx(..., REPLACE_EXISTING)` operation also retries bounded transient access, sharing, and lock violations because concurrent processes and file scanners can briefly open the destination without delete sharing. The existing destination is never removed first, so readers still see either the old complete file or the new complete file. On Unix-like systems these persisted files are owner-readable/writable only (`0600`), because instance JSON and runtime env can contain local database credentials or other sensitive development values. This is local hardening, not encryption.
+Structured state files and `runtime.env` are replaced through unique temporary files in the same directory so a failed or concurrent write cannot expose a partially truncated destination. Same-destination replacements are serialized within a process. On Windows, the final `MoveFileEx(..., REPLACE_EXISTING)` operation and JSON readers both retry bounded transient access, sharing, and lock violations because concurrent daemon/engine operations and file scanners can briefly hold the destination. The existing destination is never removed first, so readers still see either the old complete file or the new complete file. On Unix-like systems these persisted files are owner-readable/writable only (`0600`), because instance JSON and runtime env can contain local database credentials or other sensitive development values. This is local hardening, not encryption.
 
 Task, daemon, and event-stream log files are also created and repaired to owner-only `0600` permissions on Unix-like systems. They can contain command output derived from runtime configuration and must not default to group/world-readable files.
 
@@ -130,7 +132,7 @@ Instance env is persisted under `.devflow/state` so detached supervisors, status
 
 ## Service Supervision Boundary
 
-The engine supervises `project.ServiceHandle`, not only child processes. A handle reports liveness, waits for termination, stops idempotently, and may expose a host PID. `process.Handle` implements that contract for command-backed services. Engine-managed resources can return PID `0`; the engine retains their in-memory handle for readiness, flush health, watch restarts, CI cleanup, and attached-run shutdown without persisting a false OS-process reference.
+The engine supervises `project.ServiceHandle`, not only child processes. A handle reports liveness, waits for termination, stops idempotently, and may expose a host PID. `process.Handle` implements that contract for command-backed services. Concurrent calls to its `Stop` method join the same bounded terminate/kill operation; a context watcher cannot make engine cleanup return before the child has been reaped. Engine-managed resources can return PID `0`; the engine retains their in-memory handle for readiness, flush health, watch restarts, CI cleanup, and attached-run shutdown without persisting a false OS-process reference.
 
 Database adapters use `database.Manager.StartRuntimeService` for this path. It ensures the container, follows stdout/stderr through the Docker Engine log API, waits for container termination through the Engine API, and stops the container through the Engine API. Adapters register the returned handle with `Runtime.RegisterServiceHandle` and route its log callback through `Runtime.LineEmitter`. A wrapper process running `docker logs -f` is neither required nor permitted by the managed-database portability contract.
 

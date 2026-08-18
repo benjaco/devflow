@@ -34,6 +34,7 @@ type Request struct {
 	Mode                 api.RunMode
 	MaxParallel          int
 	CacheKeyManifestPath string
+	LifecycleController  *LifecycleController
 }
 
 type Outcome struct {
@@ -51,18 +52,21 @@ type Engine struct {
 }
 
 type runState struct {
-	mu            sync.Mutex
-	req           Request
-	inst          *api.Instance
-	status        map[string]api.NodeStatus
-	depKeys       map[string]string
-	cacheHits     []string
-	cacheMisses   []string
-	nodeStarted   map[string]time.Time
-	services      map[string]project.ServiceHandle
-	publish       func(api.Event)
-	manifest      *validatedCacheKeyManifest
-	manifestUsage *api.CacheKeyManifestUsage
+	mu          sync.Mutex
+	req         Request
+	inst        *api.Instance
+	status      map[string]api.NodeStatus
+	depKeys     map[string]string
+	cacheHits   []string
+	cacheMisses []string
+	nodeStarted map[string]time.Time
+	services    map[string]project.ServiceHandle
+	// serviceGeneration distinguishes a replaced handle from late Wait results
+	// produced by the previous handle, including PID-less test/service handles.
+	serviceGeneration map[string]uint64
+	publish           func(api.Event)
+	manifest          *validatedCacheKeyManifest
+	manifestUsage     *api.CacheKeyManifestUsage
 }
 
 type taskResult struct {
@@ -70,6 +74,12 @@ type taskResult struct {
 	key    string
 	cached bool
 	err    error
+}
+
+type serviceExit struct {
+	task       string
+	generation uint64
+	err        error
 }
 
 type watchOutputSuppressor struct {
@@ -117,6 +127,9 @@ func (e *Engine) CacheKey(ctx context.Context, req Request) (*api.CacheKeyResult
 }
 
 func (e *Engine) Watch(ctx context.Context, req Request) error {
+	if req.LifecycleController != nil {
+		defer req.LifecycleController.closeController()
+	}
 	started := time.Now().UTC()
 	inst, state, baseRT, err := e.prepareExecution(ctx, req)
 	if err != nil {
@@ -140,6 +153,13 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 	initialSuccess := true
 	if err := e.runReadyQueue(ctx, func() {}, baseRT, state, order); err != nil {
 		initialSuccess = false
+	}
+	serviceExits := make(chan serviceExit, len(e.graph.Tasks)+1)
+	watchedServices := map[string]uint64{}
+	watchServiceHandles(state, serviceExits, watchedServices)
+	var lifecycleCommands <-chan serviceLifecycleCommand
+	if req.LifecycleController != nil {
+		lifecycleCommands = req.LifecycleController.commands
 	}
 	e.publish(api.Event{
 		TS:         process.NowRFC3339Nano(),
@@ -200,6 +220,12 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 				FinishedAt: time.Now().UTC().Format(time.RFC3339),
 			}, req.Worktree, "")
 			return nil
+		case command := <-lifecycleCommands:
+			result, commandErr := e.applyServiceLifecycleCommand(ctx, req, state, baseRT, command)
+			command.result <- serviceLifecycleResponse{result: result, err: commandErr}
+			watchServiceHandles(state, serviceExits, watchedServices)
+		case exited := <-serviceExits:
+			e.handleUnexpectedServiceExit(ctx, req, inst, state, exited)
 		case err, ok := <-errs:
 			if !ok {
 				e.stopAllServices(req, inst, state)
@@ -236,6 +262,7 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 				if err := e.runReadyQueue(ctx, func() {}, baseRT, state, affectedOrder); err != nil {
 					success = false
 				}
+				watchServiceHandles(state, serviceExits, watchedServices)
 				suppressor.Record(e.graph, affectedOrder, watchOutputSuppressTTL)
 				e.publish(api.Event{
 					TS:            process.NowRFC3339Nano(),
@@ -255,6 +282,9 @@ func (e *Engine) Watch(ctx context.Context, req Request) error {
 }
 
 func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
+	if req.LifecycleController != nil {
+		defer req.LifecycleController.closeController()
+	}
 	started := time.Now().UTC()
 	result := api.RunResult{
 		Target:          req.Target,
@@ -316,7 +346,7 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 		if req.Mode == api.ModeCI {
 			state.stopServices(req, sortedHandles(services))
 		} else {
-			waitErr := e.waitForServices(ctx, req, inst, state, services)
+			waitErr := e.waitForServices(ctx, req, inst, state, baseRT, services)
 			if waitErr != nil && !errors.Is(waitErr, context.Canceled) {
 				result.Success = false
 				result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
@@ -394,15 +424,16 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 	}
 
 	state := &runState{
-		req:           req,
-		inst:          inst,
-		status:        map[string]api.NodeStatus{},
-		depKeys:       map[string]string{},
-		nodeStarted:   map[string]time.Time{},
-		services:      map[string]project.ServiceHandle{},
-		publish:       e.publish,
-		manifest:      manifest,
-		manifestUsage: manifestUsage,
+		req:               req,
+		inst:              inst,
+		status:            map[string]api.NodeStatus{},
+		depKeys:           map[string]string{},
+		nodeStarted:       map[string]time.Time{},
+		services:          map[string]project.ServiceHandle{},
+		serviceGeneration: map[string]uint64{},
+		publish:           e.publish,
+		manifest:          manifest,
+		manifestUsage:     manifestUsage,
 	}
 	for _, name := range order {
 		task := e.graph.Tasks[name]
@@ -524,6 +555,7 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 	completed := 0
 	failed := false
 	var runErr error
+	failedTask := ""
 
 	for completed < len(order) {
 		for !failed && running < maxParallel && len(ready) > 0 {
@@ -544,8 +576,9 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 				continue
 			}
 
-			state.setNodeState(name, api.StateReady, "", "", 0)
-			if !project.IsServiceKind(task.Kind) {
+			if project.IsServiceKind(task.Kind) {
+				state.setNodeState(name, api.StateStarting, "", "", 0)
+			} else {
 				state.setNodeState(name, api.StateRunning, "", "", 0)
 			}
 
@@ -579,6 +612,7 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 			failed = true
 			if runErr == nil {
 				runErr = res.err
+				failedTask = res.name
 			}
 			cancel()
 			continue
@@ -599,6 +633,26 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 	}
 
 	wg.Wait()
+	if failedTask != "" {
+		// The scheduler stops launching new work after the first failure. Mark
+		// the untouched nodes now so status consumers can distinguish a real
+		// dependency block from work that simply has not started yet.
+		downstream := make(map[string]bool)
+		for _, name := range e.graph.Downstream([]string{failedTask}) {
+			downstream[name] = true
+		}
+		for _, name := range order {
+			node := state.statusSnapshot()[name]
+			if node.State != api.StatePending && node.State != api.StateStarting {
+				continue
+			}
+			if downstream[name] {
+				state.setNodeState(name, api.StateBlocked, node.LastRunKey, fmt.Sprintf("blocked by failed dependency %s", failedTask), 0)
+			} else {
+				state.setNodeState(name, api.StateCanceled, node.LastRunKey, fmt.Sprintf("canceled after %s failed", failedTask), 0)
+			}
+		}
+	}
 	return runErr
 }
 
@@ -743,6 +797,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			return taskResult{name: task.Name, err: err}
 		}
 		state.setNodeState(task.Name, api.StateRunning, "", "", handle.PID())
+		state.setNodeReady(task.Name, true)
 		return taskResult{name: task.Name}
 	}
 	state.setNodeState(task.Name, api.StateDone, "", "", 0)
@@ -925,61 +980,139 @@ func (e *Engine) waitForPromptAnswer(ctx context.Context, req Request, instanceI
 	}
 }
 
-func (e *Engine) waitForServices(parent context.Context, req Request, inst *api.Instance, state *runState, services map[string]project.ServiceHandle) error {
+func (e *Engine) waitForServices(parent context.Context, req Request, inst *api.Instance, state *runState, baseRT *project.Runtime, services map[string]project.ServiceHandle) error {
 	ctx, cancel := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	type exit struct {
-		task string
-		err  error
-	}
-	exits := make(chan exit, len(services))
-	for name, handle := range services {
-		go func(task string, h project.ServiceHandle) {
-			exits <- exit{task: task, err: h.Wait()}
-		}(name, handle)
+	exits := make(chan serviceExit, len(services)+1)
+	watched := map[string]uint64{}
+	watchServiceHandles(state, exits, watched)
+
+	var commands <-chan serviceLifecycleCommand
+	if req.LifecycleController != nil {
+		commands = req.LifecycleController.commands
 	}
 
-	select {
-	case <-ctx.Done():
-		state.stopServices(req, sortedHandles(services))
-		return ctx.Err()
-	case ex := <-exits:
-		node := state.statusSnapshot()[ex.task]
-		prev := node.State
-		state.removeService(ex.task)
-		if ex.err != nil {
-			state.setErrorState(ex.task, ctx, node.LastRunKey, ex.err, 0)
-		} else {
-			state.setNodeState(ex.task, api.StateStopped, node.LastRunKey, "", 0)
+	for {
+		select {
+		case <-ctx.Done():
+			state.stopServices(req, sortedHandles(state.snapshotServices()))
+			return ctx.Err()
+		case command := <-commands:
+			result, err := e.applyServiceLifecycleCommand(ctx, req, state, baseRT, command)
+			command.result <- serviceLifecycleResponse{result: result, err: err}
+			watchServiceHandles(state, exits, watched)
+		case ex := <-exits:
+			e.handleUnexpectedServiceExit(ctx, req, inst, state, ex)
 		}
-		updated := state.statusSnapshot()[ex.task]
-		e.publish(api.Event{
-			TS:            process.NowRFC3339Nano(),
-			Type:          api.EventProcessExited,
-			InstanceID:    inst.ID,
-			Worktree:      req.Worktree,
-			Target:        req.Target,
-			Task:          ex.task,
-			Mode:          req.Mode,
-			PID:           node.PID,
-			State:         updated.State,
-			PreviousState: prev,
-			Error:         updated.LastError,
-		})
-		remaining := make([]string, 0, len(services)-1)
-		for task := range services {
-			if task != ex.task {
-				remaining = append(remaining, task)
-			}
-		}
-		sort.Strings(remaining)
-		state.stopServices(req, remaining)
-		if ex.err != nil {
-			return fmt.Errorf("service %q exited: %w", ex.task, ex.err)
-		}
-		return nil
 	}
+}
+
+// watchServiceHandles installs at most one waiter per task generation. A
+// replacement gets a new generation, so the old waiter may finish later
+// without being mistaken for the current process by handleUnexpectedServiceExit.
+func watchServiceHandles(state *runState, exits chan<- serviceExit, watched map[string]uint64) {
+	for task := range state.snapshotServices() {
+		snapshot, ok := state.serviceSnapshot(task)
+		if !ok || watched[task] == snapshot.generation {
+			continue
+		}
+		watched[task] = snapshot.generation
+		go func(task string, current serviceSnapshot) {
+			exits <- serviceExit{task: task, generation: current.generation, err: current.handle.Wait()}
+		}(task, snapshot)
+	}
+}
+
+func (e *Engine) handleUnexpectedServiceExit(ctx context.Context, req Request, inst *api.Instance, state *runState, exited serviceExit) {
+	current, ok := state.serviceSnapshot(exited.task)
+	if !ok || current.generation != exited.generation {
+		// A deliberate stop/restart leaves a waiter for the previous handle
+		// behind. Its eventual result must not affect the replacement.
+		return
+	}
+	node := state.statusSnapshot()[exited.task]
+	previous := node.State
+	if !state.removeServiceGeneration(exited.task, exited.generation) {
+		return
+	}
+	if exited.err != nil {
+		state.setErrorState(exited.task, ctx, node.LastRunKey, fmt.Errorf("service exited: %w", exited.err), 0)
+	} else {
+		state.setNodeState(exited.task, api.StateStopped, node.LastRunKey, "", 0)
+	}
+	updated := state.statusSnapshot()[exited.task]
+	e.publish(api.Event{
+		TS:            process.NowRFC3339Nano(),
+		Type:          api.EventProcessExited,
+		InstanceID:    inst.ID,
+		Worktree:      req.Worktree,
+		Target:        req.Target,
+		Task:          exited.task,
+		Mode:          req.Mode,
+		PID:           node.PID,
+		State:         updated.State,
+		PreviousState: previous,
+		Error:         updated.LastError,
+	})
+}
+
+func (e *Engine) applyServiceLifecycleCommand(ctx context.Context, req Request, state *runState, baseRT *project.Runtime, command serviceLifecycleCommand) (ServiceLifecycleResult, error) {
+	result := ServiceLifecycleResult{Task: command.task, Action: command.action}
+	task, ok := e.graph.Tasks[command.task]
+	if !ok {
+		return result, fmt.Errorf("unknown task %q", command.task)
+	}
+	if !project.IsServiceKind(task.Kind) {
+		return result, fmt.Errorf("task %q is not a service", command.task)
+	}
+	current, ok := state.serviceSnapshot(command.task)
+	if !ok {
+		if command.action == "restart" {
+			return e.startStoppedService(ctx, state, baseRT, task, result)
+		}
+		return result, fmt.Errorf("service %q is not running; no %s occurred", command.task, command.action)
+	}
+	result.Previous = ServiceIdentity{PID: current.handle.PID(), Generation: current.generation}
+	node := state.statusSnapshot()[command.task]
+	if command.action == "restart" {
+		state.setNodeState(command.task, api.StateRestarting, node.LastRunKey, "", current.handle.PID())
+	}
+	if err := current.handle.Stop(); err != nil {
+		state.setNodeState(command.task, api.StateDegraded, node.LastRunKey, fmt.Sprintf("failed to stop service for %s: %v", command.action, err), current.handle.PID())
+		return result, fmt.Errorf("%s service %q: %w", command.action, command.task, err)
+	}
+	if !state.removeServiceGeneration(command.task, current.generation) {
+		return result, fmt.Errorf("service %q changed while %s was in progress", command.task, command.action)
+	}
+	state.setNodeState(command.task, api.StateStopped, node.LastRunKey, "", 0)
+	if command.action == "stop" {
+		return result, nil
+	}
+	if command.action != "restart" {
+		return result, fmt.Errorf("unsupported service lifecycle action %q", command.action)
+	}
+
+	return e.startStoppedService(ctx, state, baseRT, task, result)
+}
+
+func (e *Engine) startStoppedService(ctx context.Context, state *runState, baseRT *project.Runtime, task project.Task, result ServiceLifecycleResult) (ServiceLifecycleResult, error) {
+	node := state.statusSnapshot()[task.Name]
+	state.setNodeState(task.Name, api.StateStarting, node.LastRunKey, "", 0)
+	runtime := baseRT.WithTask(task.Name, instance.LogPath(state.req.Worktree, state.inst.ID, task.Name))
+	depKeys := state.depKeySnapshot(task.Deps)
+	runtime.DepKeys = append([]string(nil), depKeys...)
+	execution := e.executeTask(ctx, state, runtime, task, depKeys)
+	if execution.err != nil {
+		return result, fmt.Errorf("restart service %q: %w", task.Name, execution.err)
+	}
+	replacement, ok := state.serviceSnapshot(task.Name)
+	if !ok || replacement.generation == result.Previous.Generation {
+		return result, fmt.Errorf("restart service %q completed without a replacement process", task.Name)
+	}
+	result.Current = ServiceIdentity{PID: replacement.handle.PID(), Generation: replacement.generation}
+	result.Ready = true
+	return result, nil
 }
 
 func (s *runState) setNodeState(name string, state api.NodeState, lastRunKey, lastError string, pid int) {
@@ -991,18 +1124,24 @@ func (s *runState) setNodeState(name string, state api.NodeState, lastRunKey, la
 	prevPID := node.PID
 	prevError := node.LastError
 	node.State = state
+	if state == api.StateStarting || state == api.StateRestarting || terminalNodeState(state) {
+		node.Ready = false
+	}
 	if lastRunKey != "" {
 		node.LastRunKey = lastRunKey
 	}
 	if lastError == "" {
 		node.LastError = ""
+		if state != api.StateFailed && state != api.StateDegraded && state != api.StateBlocked {
+			node.FailureExcerpts = nil
+		}
 	} else {
 		node.LastError = lastError
 	}
 	if pid != 0 {
 		node.PID = pid
 	}
-	if state == api.StateReady || state == api.StateRunning {
+	if state == api.StateStarting || state == api.StateReady || state == api.StateRunning || state == api.StateRestarting {
 		if s.nodeStarted[name].IsZero() || terminalNodeState(prev) {
 			s.nodeStarted[name] = now
 			node.DurationMs = 0
@@ -1035,9 +1174,18 @@ func (s *runState) setNodeState(name string, state api.NodeState, lastRunKey, la
 	}
 }
 
+func (s *runState) setNodeReady(name string, ready bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	node := s.status[name]
+	node.Ready = ready
+	s.status[name] = node
+	s.saveLocked()
+}
+
 func terminalNodeState(state api.NodeState) bool {
 	switch state {
-	case api.StateCached, api.StateDone, api.StateFailed, api.StateMigrationNeeded, api.StateCanceled, api.StateStopped, api.StateSkipped:
+	case api.StateCached, api.StateDone, api.StateFailed, api.StateMigrationNeeded, api.StateCanceled, api.StateStopped, api.StateSkipped, api.StateBlocked, api.StateDegraded:
 		return true
 	default:
 		return false
@@ -1057,7 +1205,21 @@ func durationMilliseconds(duration time.Duration) int64 {
 }
 
 func (s *runState) setErrorState(name string, ctx context.Context, lastRunKey string, err error, pid int) {
-	s.setNodeState(name, classifyTaskError(ctx, err), lastRunKey, displayTaskError(ctx, err), pid)
+	display := truncateDiagnosticText(displayTaskError(ctx, err), 4*1024)
+	s.setNodeState(name, classifyTaskError(ctx, err), lastRunKey, display, pid)
+	s.mu.Lock()
+	node := s.status[name]
+	s.mu.Unlock()
+	excerpts := boundedFailureExcerpts(node.LogPath, name)
+	if len(excerpts) == 0 {
+		return
+	}
+	s.mu.Lock()
+	node = s.status[name]
+	node.FailureExcerpts = excerpts
+	s.status[name] = node
+	s.saveLocked()
+	s.mu.Unlock()
 }
 
 func classifyTaskError(ctx context.Context, err error) api.NodeState {
@@ -1208,14 +1370,19 @@ func (s *runState) publishEvent(evt api.Event) {
 func (s *runState) registerService(task string, handle project.ServiceHandle) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.serviceGeneration[task]++
+	generation := s.serviceGeneration[task]
 	s.services[task] = handle
 	if pid := handle.PID(); pid > 0 {
-		s.inst.Processes[task] = api.ProcessRef{PID: pid, StartedAt: time.Now().UTC()}
+		s.inst.Processes[task] = api.ProcessRef{PID: pid, StartedAt: time.Now().UTC(), Generation: generation}
 	} else {
 		delete(s.inst.Processes, task)
 	}
 	node := s.status[task]
 	node.PID = handle.PID()
+	node.Generation = generation
+	node.Attempt = int(generation)
+	node.Ready = false
 	s.status[task] = node
 	_ = instance.Save(s.inst)
 	s.saveLocked()
@@ -1229,15 +1396,24 @@ func (s *runState) serviceHandle(task string) (project.ServiceHandle, bool) {
 }
 
 func (s *runState) removeService(task string) {
+	s.removeServiceGeneration(task, 0)
+}
+
+func (s *runState) removeServiceGeneration(task string, generation uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if generation != 0 && s.serviceGeneration[task] != generation {
+		return false
+	}
 	delete(s.services, task)
 	delete(s.inst.Processes, task)
 	node := s.status[task]
 	node.PID = 0
+	node.Ready = false
 	s.status[task] = node
 	_ = instance.Save(s.inst)
 	s.saveLocked()
+	return true
 }
 
 func (s *runState) depKeySnapshot(deps []string) []string {
@@ -1268,6 +1444,11 @@ func (s *runState) snapshotCacheMisses() []string {
 	return out
 }
 
+type serviceSnapshot struct {
+	handle     project.ServiceHandle
+	generation uint64
+}
+
 func (s *runState) snapshotServices() map[string]project.ServiceHandle {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1276,6 +1457,13 @@ func (s *runState) snapshotServices() map[string]project.ServiceHandle {
 		out[name] = handle
 	}
 	return out
+}
+
+func (s *runState) serviceSnapshot(task string) (serviceSnapshot, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	handle, ok := s.services[task]
+	return serviceSnapshot{handle: handle, generation: s.serviceGeneration[task]}, ok
 }
 
 func (s *runState) stopServices(req Request, tasks []string) {
