@@ -45,11 +45,38 @@ type snapshot struct {
 	logStartLine int
 	logEndLine   int
 	logTruncated bool
+	logSource    logSource
 	prisma       []prismaSnapshotSummary
 	prismaErr    string
 	prismaCfg    tuiPrismaConfig
 	prismaDev    *database.PrismaDevelopmentStatus
 	prismaDevErr string
+}
+
+type logSourceKind string
+
+const (
+	logSourceTask       logSourceKind = "task"
+	logSourceSupervisor logSourceKind = "supervisor"
+	logSourceDatabase   logSourceKind = "database"
+)
+
+// logSource contains only durable identity. Paths and snapshot metadata are
+// deliberately excluded because they can disappear briefly during service
+// replacement or change as a log is rotated.
+type logSource struct {
+	instanceID string
+	kind       logSourceKind
+	task       string
+}
+
+type logSourceState struct {
+	initialized     bool
+	following       bool
+	viewportRow     int
+	viewportColumn  int
+	absoluteTopLine int
+	hasLineAnchor   bool
 }
 
 type prismaSnapshotSummary struct {
@@ -90,13 +117,9 @@ type dashboard struct {
 	eventOffset       int64
 	activePromptID    string
 	activeInput       bool
-	lastLogPath       string
-	lastLogLines      []string
 	lastSnapshot      snapshot
-	renderedLogKey    string
-	logScrollKey      string
-	logScrollRow      int
-	logScrollCol      int
+	renderedLogSource logSource
+	logSourceStates   map[logSource]logSourceState
 	logFollowing      bool
 	logLineLimit      int
 	helpOpen          bool
@@ -212,17 +235,18 @@ func maybeStopDaemonForTUI(client *daemon.Client, enabled bool) error {
 
 func newDashboard(root, instanceID string) *dashboard {
 	d := &dashboard{
-		root:         root,
-		instanceID:   instanceID,
-		eventsPath:   instance.EventsPath(root, instanceID),
-		app:          tview.NewApplication(),
-		header:       tview.NewTextView(),
-		tasks:        tview.NewTable(),
-		logs:         tview.NewTextView(),
-		footer:       tview.NewTextView(),
-		tooSmall:     tview.NewTextView(),
-		logFollowing: true,
-		logLineLimit: 200,
+		root:            root,
+		instanceID:      instanceID,
+		eventsPath:      instance.EventsPath(root, instanceID),
+		app:             tview.NewApplication(),
+		header:          tview.NewTextView(),
+		tasks:           tview.NewTable(),
+		logs:            tview.NewTextView(),
+		footer:          tview.NewTextView(),
+		tooSmall:        tview.NewTextView(),
+		logSourceStates: map[logSource]logSourceState{},
+		logFollowing:    true,
+		logLineLimit:    200,
 	}
 
 	d.header.
@@ -241,10 +265,9 @@ func newDashboard(root, instanceID string) *dashboard {
 		if row <= 0 || row-1 >= len(d.currentNodes) {
 			return
 		}
-		d.selectedName = d.currentNodes[row-1].Name
-		d.logFollowing = true
-		d.logLineLimit = 200
-		d.updateLogs()
+		if d.selectTaskSource(d.currentNodes[row-1].Name) {
+			d.updateLogs()
+		}
 	})
 
 	d.logs.
@@ -293,11 +316,11 @@ func newDashboard(root, instanceID string) *dashboard {
 		switch action {
 		case tview.MouseScrollUp:
 			d.app.SetFocus(d.logs)
-			d.logFollowing = false
+			d.setLogFollowing(false)
 			d.rememberLogScrollDelta(-1)
 		case tview.MouseScrollDown:
 			d.app.SetFocus(d.logs)
-			d.logFollowing = false
+			d.setLogFollowing(false)
 			d.rememberLogScrollDelta(1)
 		case tview.MouseLeftClick:
 			d.app.SetFocus(d.logs)
@@ -491,9 +514,9 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case tcell.KeyHome:
 		if logsFocused {
-			d.logFollowing = false
+			d.setLogFollowing(false)
 			d.logs.ScrollToBeginning()
-			d.rememberLogScroll(d.renderedLogKey, 0, 0)
+			d.rememberLogScroll(d.renderedLogSource, 0, 0)
 			d.updateLogs()
 		} else {
 			d.selectIndex(0)
@@ -551,9 +574,9 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 			return nil
 		case 'g':
 			if logsFocused {
-				d.logFollowing = false
+				d.setLogFollowing(false)
 				d.logs.ScrollToBeginning()
-				d.rememberLogScroll(d.renderedLogKey, 0, 0)
+				d.rememberLogScroll(d.renderedLogSource, 0, 0)
 				d.updateLogs()
 			} else {
 				d.selectIndex(0)
@@ -713,11 +736,20 @@ func (d *dashboard) selectIndex(index int) {
 		return
 	}
 	index = max(0, min(len(d.currentNodes)-1, index))
-	d.selectedName = d.currentNodes[index].Name
-	d.logFollowing = true
-	d.logLineLimit = 200
+	changed := d.selectTaskSource(d.currentNodes[index].Name)
 	d.tasks.Select(index+1, 0)
-	d.updateLogs()
+	if changed {
+		d.updateLogs()
+	}
+}
+
+func (d *dashboard) selectTaskSource(name string) bool {
+	if name == d.selectedName {
+		return false
+	}
+	d.selectedName = name
+	d.logLineLimit = 200
+	return true
 }
 
 func (d *dashboard) refresh() error {
@@ -810,7 +842,9 @@ func nodeStateReason(node api.NodeStatus) string {
 
 func (d *dashboard) reconcileSelection() {
 	if len(d.currentNodes) == 0 {
-		d.selectedName = ""
+		// An atomic daemon status replacement can briefly expose no nodes. Keep
+		// the selected task identity so that this incomplete snapshot cannot be
+		// mistaken for a user-requested log-source switch.
 		return
 	}
 	if d.selectedName != "" {
@@ -821,7 +855,7 @@ func (d *dashboard) reconcileSelection() {
 			}
 		}
 	}
-	d.selectedName = d.currentNodes[0].Name
+	d.selectTaskSource(d.currentNodes[0].Name)
 	d.tasks.Select(1, 0)
 }
 
@@ -836,42 +870,15 @@ func (d *dashboard) updateLogs() {
 }
 
 func (d *dashboard) updateLogsFromSnapshot(snap snapshot) {
-	d.updateLogsFromSnapshotWithOptions(snap, logUpdateOptions{})
-}
-
-type logUpdateOptions struct {
-	preserveFollow bool
-	prependedLines int
-}
-
-func (d *dashboard) updateLogsFromSnapshotWithOptions(snap snapshot, opts logUpdateOptions) {
+	nextSource := d.logSourceForSnapshot(snap)
+	snap.logSource = nextSource
+	snap = d.preserveTransientLogSnapshot(snap, nextSource)
 	d.lastSnapshot = snap
-	nextKey := logViewKey(snap, d.selectedName)
-	prevKey := d.renderedLogKey
-	if nextKey != prevKey && !opts.preserveFollow {
-		d.logFollowing = true
-	}
-	row, col := 0, 0
-	if nextKey != "" && nextKey == prevKey {
-		row, col = d.desiredLogScroll(nextKey)
-		if !d.logFollowing && opts.prependedLines > 0 {
-			// The rendered metadata prefix is unchanged when a bounded tail is
-			// expanded, so shifting by the number of prepended log lines keeps
-			// the same logical line at the top of the paused viewport.
-			row += opts.prependedLines
-		}
-	}
-	if snap.logPath != "" {
-		if len(snap.logLines) > 0 {
-			d.lastLogPath = snap.logPath
-			d.lastLogLines = append([]string(nil), snap.logLines...)
-		} else if snap.logPath == d.lastLogPath && len(d.lastLogLines) > 0 && transientEmptyLogAllowed(snap, d.selectedName) {
-			snap.logLines = append([]string(nil), d.lastLogLines...)
-		}
-	} else {
-		d.lastLogPath = ""
-		d.lastLogLines = nil
-	}
+
+	state := d.logSourceState(nextSource)
+	// The per-source state is authoritative. Snapshot rendering never changes
+	// follow preference, even if lifecycle/log metadata was temporarily absent.
+	d.logFollowing = state.following
 	followState := "PAUSED"
 	if d.logFollowing {
 		followState = "FOLLOWING"
@@ -880,79 +887,175 @@ func (d *dashboard) updateLogsFromSnapshotWithOptions(snap snapshot, opts logUpd
 	lines := renderLogPanel(snap, d.selectedName)
 	d.logs.SetText(strings.Join(lines, "\n"))
 	if d.logFollowing {
-		if nextKey != prevKey {
-			d.logs.ScrollToBeginning()
-		}
 		d.logs.ScrollToEnd()
-		row, col = d.logs.GetScrollOffset()
-		d.rememberLogScroll(nextKey, row, col)
-	} else if nextKey != "" && nextKey == prevKey {
-		d.logs.ScrollTo(row, col)
-		d.rememberLogScroll(nextKey, row, col)
+		state.hasLineAnchor = false
 	} else {
-		d.logs.ScrollToBeginning()
-		d.rememberLogScroll(nextKey, 0, 0)
+		var row, col int
+		state, row, col = d.viewportForSnapshot(state, snap)
+		d.logs.ScrollTo(row, col)
+		state.viewportRow = row
+		state.viewportColumn = col
 	}
-	d.renderedLogKey = nextKey
+	d.logSourceStates[nextSource] = state
+	d.renderedLogSource = nextSource
 	d.updateFocusTreatment()
 }
 
-func logViewKey(snap snapshot, selectedName string) string {
-	if snap.logTitle == databasePanelTitle || snap.logTitle == supervisorLogTitle {
-		return snap.logTitle + "\x00" + snap.logPath
+func (d *dashboard) logSourceForSnapshot(snap snapshot) logSource {
+	if snap.logSource.kind != "" {
+		return snap.logSource
 	}
-	if snap.logPath != "" {
-		return snap.logTitle + "\x00" + snap.logPath
+	source := logSource{instanceID: d.instanceID, kind: logSourceTask, task: d.selectedName}
+	switch {
+	case d.showDatabasePanel || snap.logTitle == databasePanelTitle:
+		source.kind = logSourceDatabase
+		source.task = ""
+	case d.showSupervisorLog || snap.logTitle == supervisorLogTitle:
+		source.kind = logSourceSupervisor
+		source.task = ""
+	case source.task == "":
+		if selected := findSelectedNode(snap.nodes, ""); selected != nil {
+			source.task = selected.Name
+		}
 	}
-	return snap.logTitle + "\x00" + selectedName
+	return source
 }
 
-func transientEmptyLogAllowed(snap snapshot, selectedName string) bool {
-	if snap.logTitle == supervisorLogTitle || snap.logTitle == databasePanelTitle {
+func (d *dashboard) logSourceState(source logSource) logSourceState {
+	if d.logSourceStates == nil {
+		d.logSourceStates = map[logSource]logSourceState{}
+	}
+	state, ok := d.logSourceStates[source]
+	if !ok || !state.initialized {
+		state = logSourceState{initialized: true, following: true}
+		d.logSourceStates[source] = state
+	}
+	return state
+}
+
+func (d *dashboard) setLogFollowing(following bool) {
+	source := d.renderedLogSource
+	if source.kind == "" {
+		source = d.logSourceForSnapshot(d.lastSnapshot)
+	}
+	state := d.logSourceState(source)
+	state.following = following
+	if following {
+		state.hasLineAnchor = false
+	}
+	d.logSourceStates[source] = state
+	d.logFollowing = following
+}
+
+func (d *dashboard) preserveTransientLogSnapshot(snap snapshot, source logSource) snapshot {
+	previous := d.lastSnapshot
+	if source != d.renderedLogSource || source != d.logSourceForSnapshot(previous) || len(previous.logLines) == 0 || len(snap.logLines) > 0 {
+		return snap
+	}
+	if source.kind == logSourceDatabase || !transientEmptyLogAllowed(snap, source) {
+		return snap
+	}
+	// Status and log files are replaced independently. Carry the complete
+	// retained window until the same logical source publishes usable metadata
+	// again, avoiding a false source transition and a clamped historical view.
+	if snap.logPath == "" {
+		snap.logPath = previous.logPath
+	}
+	snap.logLines = append([]string(nil), previous.logLines...)
+	snap.logStartLine = previous.logStartLine
+	snap.logEndLine = previous.logEndLine
+	snap.logTruncated = previous.logTruncated
+	return snap
+}
+
+func transientEmptyLogAllowed(snap snapshot, source logSource) bool {
+	if source.kind == logSourceSupervisor {
+		return true
+	}
+	if source.kind != logSourceTask {
 		return false
 	}
-	node := findSelectedNode(snap.nodes, selectedName)
+	var node *api.NodeStatus
+	for index := range snap.nodes {
+		if snap.nodes[index].Name == source.task {
+			node = &snap.nodes[index]
+			break
+		}
+	}
 	if node == nil {
-		return false
+		return true
 	}
 	switch node.State {
-	case api.StatePending, api.StateReady, api.StateRunning, api.StateDirty:
+	case api.StatePending, api.StateStarting, api.StateReady, api.StateRunning, api.StateRestarting, api.StateDirty:
 		return true
 	default:
 		return false
 	}
 }
 
+func logContentStartRow(snap snapshot, selectedName string) (int, bool) {
+	if snap.logStartLine <= 0 || len(snap.logLines) == 0 {
+		return 0, false
+	}
+	return len(renderLogPanel(snap, selectedName)) - len(snap.logLines), true
+}
+
+func (d *dashboard) viewportForSnapshot(state logSourceState, snap snapshot) (logSourceState, int, int) {
+	row := state.viewportRow
+	if !state.hasLineAnchor {
+		return state, max(0, row), max(0, state.viewportColumn)
+	}
+	contentStart, ok := logContentStartRow(snap, d.selectedName)
+	if !ok {
+		return state, max(0, row), max(0, state.viewportColumn)
+	}
+	absolute := max(snap.logStartLine, min(snap.logEndLine, state.absoluteTopLine))
+	offset := min(len(snap.logLines)-1, max(0, absolute-snap.logStartLine))
+	state.absoluteTopLine = snap.logStartLine + offset
+	state.viewportRow = contentStart + offset
+	state.viewportColumn = max(0, state.viewportColumn)
+	return state, state.viewportRow, state.viewportColumn
+}
+
+func absoluteLogLineAtRow(snap snapshot, selectedName string, row int) (int, bool) {
+	contentStart, ok := logContentStartRow(snap, selectedName)
+	if !ok || row < contentStart {
+		return 0, false
+	}
+	offset := min(len(snap.logLines)-1, max(0, row-contentStart))
+	return snap.logStartLine + offset, true
+}
+
 func (d *dashboard) scrollLogs(delta int) {
 	if delta == 0 {
 		return
 	}
-	d.logFollowing = false
-	row, col := d.desiredLogScroll(d.renderedLogKey)
+	wasFollowing := d.logFollowing
+	row, col := d.desiredLogScroll(d.renderedLogSource)
+	if wasFollowing {
+		row, col = d.logs.GetScrollOffset()
+	}
+	d.setLogFollowing(false)
 	nextRow := row + delta
 	if nextRow < 0 {
 		nextRow = 0
 	}
 	d.logs.ScrollTo(nextRow, col)
-	d.rememberLogScroll(d.renderedLogKey, nextRow, col)
+	d.rememberLogScroll(d.renderedLogSource, nextRow, col)
 }
 
 func (d *dashboard) pauseAndScrollLogs(delta int) {
-	d.logFollowing = false
 	d.scrollLogs(delta)
 	d.updateLogs()
 }
 
 func (d *dashboard) resumeLogFollowing() {
-	d.logFollowing = true
+	d.setLogFollowing(true)
 	if d.lastSnapshot.state != nil || d.lastSnapshot.logTitle != "" {
 		d.updateLogsFromSnapshot(d.lastSnapshot)
 	} else {
 		d.updateLogs()
 	}
-	d.logs.ScrollToEnd()
-	row, col := d.logs.GetScrollOffset()
-	d.rememberLogScroll(d.renderedLogKey, row, col)
 }
 
 func (d *dashboard) loadOlderLogContent() {
@@ -961,8 +1064,6 @@ func (d *dashboard) loadOlderLogContent() {
 		return
 	}
 	previous := d.lastSnapshot
-	previousKey := d.renderedLogKey
-	wasFollowing := d.logFollowing
 	nextLimit := min(1000, d.logLineLimit+200)
 	if nextLimit == d.logLineLimit {
 		d.setStatus(fmt.Sprintf("[yellow]the maximum retained window of %d lines is already loaded", d.logLineLimit))
@@ -975,15 +1076,11 @@ func (d *dashboard) loadOlderLogContent() {
 		return
 	}
 	d.logLineLimit = nextLimit
-	d.logFollowing = wasFollowing
 	prepended := 0
-	if previousKey != "" && previousKey == logViewKey(snap, d.selectedName) && previous.logStartLine > snap.logStartLine {
+	if d.logSourceForSnapshot(previous) == d.logSourceForSnapshot(snap) && previous.logStartLine > snap.logStartLine {
 		prepended = previous.logStartLine - snap.logStartLine
 	}
-	d.updateLogsFromSnapshotWithOptions(snap, logUpdateOptions{
-		preserveFollow: true,
-		prependedLines: prepended,
-	})
+	d.updateLogsFromSnapshot(snap)
 	if prepended > 0 {
 		d.setStatus(fmt.Sprintf("[green]loaded %d older retained log lines", prepended))
 	} else {
@@ -995,23 +1092,24 @@ func (d *dashboard) rememberLogScrollDelta(delta int) {
 	if delta == 0 {
 		return
 	}
-	row, col := d.desiredLogScroll(d.renderedLogKey)
+	row, col := d.logs.GetScrollOffset()
 	nextRow := row + delta
 	if nextRow < 0 {
 		nextRow = 0
 	}
-	d.rememberLogScroll(d.renderedLogKey, nextRow, col)
+	d.rememberLogScroll(d.renderedLogSource, nextRow, col)
 }
 
-func (d *dashboard) desiredLogScroll(key string) (int, int) {
-	if key != "" && d.logScrollKey == key {
-		return d.logScrollRow, d.logScrollCol
+func (d *dashboard) desiredLogScroll(source logSource) (int, int) {
+	if source.kind != "" {
+		state := d.logSourceState(source)
+		return state.viewportRow, state.viewportColumn
 	}
 	return d.logs.GetScrollOffset()
 }
 
-func (d *dashboard) rememberLogScroll(key string, row, col int) {
-	if key == "" {
+func (d *dashboard) rememberLogScroll(source logSource, row, col int) {
+	if source.kind == "" {
 		return
 	}
 	if row < 0 {
@@ -1020,9 +1118,15 @@ func (d *dashboard) rememberLogScroll(key string, row, col int) {
 	if col < 0 {
 		col = 0
 	}
-	d.logScrollKey = key
-	d.logScrollRow = row
-	d.logScrollCol = col
+	state := d.logSourceState(source)
+	state.following = d.logFollowing
+	state.viewportRow = row
+	state.viewportColumn = col
+	if absolute, ok := absoluteLogLineAtRow(d.lastSnapshot, d.selectedName, row); ok {
+		state.absoluteTopLine = absolute
+		state.hasLineAnchor = true
+	}
+	d.logSourceStates[source] = state
 }
 
 func (d *dashboard) setStatus(msg string) {
@@ -1510,19 +1614,29 @@ func loadSnapshotWithLogLimit(root, instanceID string, showSupervisor bool, show
 	}
 	orderNodesForTUI(nodes, inst, state.Target)
 
-	selected := findSelectedNode(nodes, selectedName)
+	selected := findLogNode(nodes, selectedName)
 	logTitle := "selected log"
 	logPath := ""
+	logSource := logSource{instanceID: instanceID, kind: logSourceTask, task: selectedName}
 	if showDatabase {
 		logTitle = databasePanelTitle
+		logSource.kind = logSourceDatabase
+		logSource.task = ""
 	} else if showSupervisor {
 		logTitle = supervisorLogTitle
+		logSource.kind = logSourceSupervisor
+		logSource.task = ""
 		if supervisor != nil {
 			logPath = supervisor.LogPath
 		}
 	} else if selected != nil {
 		logTitle = selected.Name + " log"
 		logPath = selected.LogPath
+		logSource.task = selected.Name
+	} else if selectedName != "" {
+		// Preserve the requested task identity across a temporarily incomplete
+		// daemon status snapshot even when its mutable log metadata is absent.
+		logTitle = selectedName + " log"
 	}
 	if logLineLimit <= 0 {
 		logLineLimit = 200
@@ -1541,12 +1655,28 @@ func loadSnapshotWithLogLimit(root, instanceID string, showSupervisor bool, show
 		logStartLine: logInfo.startLine,
 		logEndLine:   logInfo.endLine,
 		logTruncated: logInfo.truncated,
+		logSource:    logSource,
 		prisma:       prisma,
 		prismaErr:    prismaErr,
 		prismaCfg:    prismaCfg,
 		prismaDev:    prismaDev,
 		prismaDevErr: prismaDevErr,
 	}, nil
+}
+
+func findLogNode(nodes []api.NodeStatus, selectedName string) *api.NodeStatus {
+	if selectedName == "" {
+		if len(nodes) == 0 {
+			return nil
+		}
+		return &nodes[0]
+	}
+	for index := range nodes {
+		if nodes[index].Name == selectedName {
+			return &nodes[index]
+		}
+	}
+	return nil
 }
 
 func orderNodesForTUI(nodes []api.NodeStatus, inst *api.Instance, target string) {

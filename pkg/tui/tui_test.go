@@ -1008,6 +1008,240 @@ func TestLiveLogFollowingPauseResumeAndTaskSwitch(t *testing.T) {
 	}
 }
 
+type runningLogDashboardFixture struct {
+	dashboard  *dashboard
+	screen     *observedSimulationScreen
+	done       <-chan error
+	worktree   string
+	instanceID string
+	logPath    string
+}
+
+func startRunningLogDashboard(t *testing.T, totalLines int) runningLogDashboardFixture {
+	t.Helper()
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "durable-log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := instance.LogPath(worktree, inst.ID, "backend")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeNumberedLogRange(t, logPath, 1, totalLines, false)
+	saveRunningLogNode(t, worktree, inst.ID, logPath)
+
+	d := newDashboard(worktree, inst.ID)
+	if err := d.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	screen := newObservedSimulationScreen(100, 30)
+	d.app.SetScreen(screen)
+	done := make(chan error, 1)
+	go func() { done <- runTUIApplication(d.app) }()
+	screen.waitForFrame(t)
+	t.Cleanup(func() {
+		d.app.Stop()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("running log TUI did not stop during cleanup")
+		}
+	})
+	return runningLogDashboardFixture{
+		dashboard:  d,
+		screen:     screen,
+		done:       done,
+		worktree:   worktree,
+		instanceID: inst.ID,
+		logPath:    logPath,
+	}
+}
+
+func writeNumberedLogRange(t *testing.T, path string, first, last int, appendFile bool) {
+	t.Helper()
+	flags := os.O_CREATE | os.O_WRONLY
+	if appendFile {
+		flags |= os.O_APPEND
+	} else {
+		flags |= os.O_TRUNC
+	}
+	file, err := os.OpenFile(path, flags, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for line := first; line <= last; line++ {
+		if _, err := fmt.Fprintf(file, "stdout: logical line %03d\n", line); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func saveRunningLogNode(t *testing.T, worktree, instanceID, logPath string) {
+	t.Helper()
+	if err := instance.SaveStatus(worktree, instanceID, "dev", api.ModeWatch, map[string]api.NodeStatus{
+		"backend": {Name: "backend", Kind: string(project.KindService), State: api.StateRunning, Ready: true, LogPath: logPath},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func refreshRunningLogDashboard(t *testing.T, fixture runningLogDashboardFixture) {
+	t.Helper()
+	for len(fixture.screen.frames) > 0 {
+		<-fixture.screen.frames
+	}
+	var refreshErr error
+	fixture.dashboard.app.QueueUpdateDraw(func() { refreshErr = fixture.dashboard.refresh() })
+	if refreshErr != nil {
+		t.Fatal(refreshErr)
+	}
+	fixture.screen.waitForFrame(t)
+}
+
+func visibleLogicalTopLine(d *dashboard) int {
+	row, _ := d.logs.GetScrollOffset()
+	if d.lastSnapshot.logStartLine <= 0 || len(d.lastSnapshot.logLines) == 0 {
+		return 0
+	}
+	contentRow := len(renderLogPanel(d.lastSnapshot, d.selectedName)) - len(d.lastSnapshot.logLines)
+	offset := max(0, row-contentRow)
+	offset = min(offset, len(d.lastSnapshot.logLines)-1)
+	return d.lastSnapshot.logStartLine + offset
+}
+
+func assertPausedLogicalTop(t *testing.T, fixture runningLogDashboardFixture, want int) {
+	t.Helper()
+	state := dashboardState(t, fixture.dashboard, func() struct {
+		following bool
+		title     string
+		top       int
+	} {
+		return struct {
+			following bool
+			title     string
+			top       int
+		}{fixture.dashboard.logFollowing, fixture.dashboard.logs.GetTitle(), visibleLogicalTopLine(fixture.dashboard)}
+	})
+	if state.following || !strings.Contains(state.title, "PAUSED") || state.top != want {
+		t.Fatalf("paused log state changed: following=%v title=%q logicalTop=%d want=%d", state.following, state.title, state.top, want)
+	}
+	wantLine := fmt.Sprintf("stdout: logical line %03d", want)
+	if rendered := simulationScreenText(fixture.screen, 100, 30); !strings.Contains(rendered, wantLine) {
+		t.Fatalf("anchored logical line %q is not visible in the paused viewport:\n%s", wantLine, rendered)
+	}
+}
+
+func assertFollowingAtTail(t *testing.T, fixture runningLogDashboardFixture, lastLine int) {
+	t.Helper()
+	state := dashboardState(t, fixture.dashboard, func() struct {
+		following bool
+		title     string
+	} {
+		return struct {
+			following bool
+			title     string
+		}{fixture.dashboard.logFollowing, fixture.dashboard.logs.GetTitle()}
+	})
+	if !state.following || !strings.Contains(state.title, "FOLLOWING") {
+		t.Fatalf("explicit resume did not enable following: following=%v title=%q", state.following, state.title)
+	}
+	want := fmt.Sprintf("stdout: logical line %03d", lastLine)
+	if rendered := simulationScreenText(fixture.screen, 100, 30); !strings.Contains(rendered, want) {
+		t.Fatalf("explicit resume did not move to tail %q:\n%s", want, rendered)
+	}
+}
+
+func TestApplicationPausedLogStateSurvivesRefreshAndHistory(t *testing.T) {
+	t.Run("background refresh", func(t *testing.T) {
+		fixture := startRunningLogDashboard(t, 500)
+		fixture.screen.postKey(t, tcell.KeyPgUp, 0)
+		logicalTop := dashboardState(t, fixture.dashboard, func() int { return visibleLogicalTopLine(fixture.dashboard) })
+		assertPausedLogicalTop(t, fixture, logicalTop)
+
+		writeNumberedLogRange(t, fixture.logPath, 501, 510, true)
+		refreshRunningLogDashboard(t, fixture)
+		refreshRunningLogDashboard(t, fixture)
+		assertPausedLogicalTop(t, fixture, logicalTop)
+
+		// A daemon status write can temporarily omit the selected task's log
+		// metadata while a generation is being replaced. It remains the same
+		// logical source and must not discard either pause intent or its anchor.
+		saveRunningLogNode(t, fixture.worktree, fixture.instanceID, "")
+		refreshRunningLogDashboard(t, fixture)
+		assertPausedLogicalTop(t, fixture, logicalTop)
+		if err := instance.SaveStatus(fixture.worktree, fixture.instanceID, "dev", api.ModeWatch, map[string]api.NodeStatus{}); err != nil {
+			t.Fatal(err)
+		}
+		refreshRunningLogDashboard(t, fixture)
+		assertPausedLogicalTop(t, fixture, logicalTop)
+		saveRunningLogNode(t, fixture.worktree, fixture.instanceID, fixture.logPath)
+		refreshRunningLogDashboard(t, fixture)
+		assertPausedLogicalTop(t, fixture, logicalTop)
+
+		fixture.screen.postKey(t, tcell.KeyRune, 'f')
+		assertFollowingAtTail(t, fixture, 510)
+	})
+
+	t.Run("older history", func(t *testing.T) {
+		fixture := startRunningLogDashboard(t, 500)
+		fixture.screen.postKey(t, tcell.KeyPgUp, 0)
+		logicalTop := dashboardState(t, fixture.dashboard, func() int { return visibleLogicalTopLine(fixture.dashboard) })
+		assertPausedLogicalTop(t, fixture, logicalTop)
+		fixture.screen.postKey(t, tcell.KeyRune, 'o')
+		state := dashboardState(t, fixture.dashboard, func() struct {
+			start  int
+			end    int
+			status string
+		} {
+			return struct {
+				start  int
+				end    int
+				status string
+			}{fixture.dashboard.lastSnapshot.logStartLine, fixture.dashboard.lastSnapshot.logEndLine, fixture.dashboard.statusMessage}
+		})
+		if state.start != 101 || state.end != 500 || !strings.Contains(state.status, "loaded 200 older") {
+			t.Fatalf("older history load state = %+v", state)
+		}
+		assertPausedLogicalTop(t, fixture, logicalTop)
+
+		fixture.screen.postKey(t, tcell.KeyEnd, 0)
+		assertFollowingAtTail(t, fixture, 500)
+	})
+
+	t.Run("no older history", func(t *testing.T) {
+		fixture := startRunningLogDashboard(t, 100)
+		fixture.screen.postKey(t, tcell.KeyPgUp, 0)
+		logicalTop := dashboardState(t, fixture.dashboard, func() int { return visibleLogicalTopLine(fixture.dashboard) })
+		rowBefore := dashboardState(t, fixture.dashboard, func() int {
+			row, _ := fixture.dashboard.logs.GetScrollOffset()
+			return row
+		})
+		fixture.screen.postKey(t, tcell.KeyRune, 'o')
+		state := dashboardState(t, fixture.dashboard, func() struct {
+			row    int
+			status string
+		} {
+			row, _ := fixture.dashboard.logs.GetScrollOffset()
+			return struct {
+				row    int
+				status string
+			}{row, fixture.dashboard.statusMessage}
+		})
+		if state.row != rowBefore || !strings.Contains(state.status, "complete retained log") {
+			t.Fatalf("no-history o was not a status-only no-op: before=%d after=%+v", rowBefore, state)
+		}
+		assertPausedLogicalTop(t, fixture, logicalTop)
+
+		fixture.screen.postKey(t, tcell.KeyRune, 'G')
+		assertFollowingAtTail(t, fixture, 100)
+	})
+}
+
 func TestLoadOlderLogContentPreservesPausedLogicalPosition(t *testing.T) {
 	worktree := t.TempDir()
 	inst, err := instance.Resolve(worktree, "older-log")
@@ -1037,14 +1271,16 @@ func TestLoadOlderLogContentPreservesPausedLogicalPosition(t *testing.T) {
 	if d.lastSnapshot.logStartLine != 301 || d.lastSnapshot.logEndLine != 500 || !d.lastSnapshot.logTruncated {
 		t.Fatalf("unexpected initial retained range: %d-%d truncated=%v", d.lastSnapshot.logStartLine, d.lastSnapshot.logEndLine, d.lastSnapshot.logTruncated)
 	}
-	d.logFollowing = false
+	d.setLogFollowing(false)
 	d.logs.ScrollTo(25, 0)
-	d.rememberLogScroll(d.renderedLogKey, 25, 0)
+	d.rememberLogScroll(d.renderedLogSource, 25, 0)
+	anchorBefore := d.logSourceState(d.renderedLogSource).absoluteTopLine
 	d.loadOlderLogContent()
 
-	row, col := d.desiredLogScroll(d.renderedLogKey)
-	if d.logFollowing || row != 225 || col != 0 {
-		t.Fatalf("older history changed paused logical position: following=%v row=%d col=%d", d.logFollowing, row, col)
+	row, col := d.desiredLogScroll(d.renderedLogSource)
+	state := d.logSourceState(d.renderedLogSource)
+	if d.logFollowing || row != 225 || col != 0 || state.absoluteTopLine != anchorBefore {
+		t.Fatalf("older history changed paused logical position: following=%v row=%d col=%d anchor=%d want=%d", d.logFollowing, row, col, state.absoluteTopLine, anchorBefore)
 	}
 	if d.lastSnapshot.logStartLine != 101 || d.lastSnapshot.logEndLine != 500 {
 		t.Fatalf("unexpected expanded retained range: %d-%d", d.lastSnapshot.logStartLine, d.lastSnapshot.logEndLine)
@@ -1064,9 +1300,10 @@ func TestLoadOlderLogContentPreservesPausedLogicalPosition(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.updateLogs()
-	row, col = d.desiredLogScroll(d.renderedLogKey)
-	if d.logFollowing || row != 225 || col != 0 {
-		t.Fatalf("background refresh changed paused viewport: following=%v row=%d col=%d", d.logFollowing, row, col)
+	row, col = d.desiredLogScroll(d.renderedLogSource)
+	state = d.logSourceState(d.renderedLogSource)
+	if d.logFollowing || row != 224 || col != 0 || state.absoluteTopLine != anchorBefore {
+		t.Fatalf("background refresh changed paused viewport: following=%v row=%d col=%d anchor=%d want=%d", d.logFollowing, row, col, state.absoluteTopLine, anchorBefore)
 	}
 }
 
@@ -1081,11 +1318,11 @@ func TestLoadOlderLogContentWithoutHistoryPreservesFollowPreference(t *testing.T
 		logEndLine:   3,
 		nodes:        []api.NodeStatus{{Name: "backend", State: api.StateRunning}},
 	})
-	d.logFollowing = false
+	d.setLogFollowing(false)
 	d.logs.ScrollTo(1, 0)
-	d.rememberLogScroll(d.renderedLogKey, 1, 0)
+	d.rememberLogScroll(d.renderedLogSource, 1, 0)
 	d.loadOlderLogContent()
-	row, col := d.desiredLogScroll(d.renderedLogKey)
+	row, col := d.desiredLogScroll(d.renderedLogSource)
 	if d.logFollowing || row != 1 || col != 0 || d.logLineLimit != 200 {
 		t.Fatalf("no-history load changed paused state: following=%v row=%d col=%d limit=%d", d.logFollowing, row, col, d.logLineLimit)
 	}
@@ -1107,9 +1344,9 @@ func TestExplicitLogFollowKeysResumeAtTail(t *testing.T) {
 				nodes:    []api.NodeStatus{{Name: "backend", State: api.StateRunning}},
 			})
 			d.focusedPane = dashboardPaneLogs
-			d.logFollowing = false
+			d.setLogFollowing(false)
 			d.logs.ScrollToBeginning()
-			d.rememberLogScroll(d.renderedLogKey, 0, 0)
+			d.rememberLogScroll(d.renderedLogSource, 0, 0)
 			if got := d.handleKeys(event); got != nil {
 				t.Fatalf("follow key was not consumed: %#v", got)
 			}
@@ -1276,6 +1513,7 @@ func TestUpdateLogsPreservesScrollForSameLogReload(t *testing.T) {
 		nodes:    []api.NodeStatus{{Name: "task", State: api.StateRunning}},
 	})
 	d.scrollLogs(12)
+	before := d.logSourceState(d.renderedLogSource)
 
 	lines = append(lines, "stdout: new line")
 	d.updateLogsFromSnapshot(snapshot{
@@ -1285,9 +1523,9 @@ func TestUpdateLogsPreservesScrollForSameLogReload(t *testing.T) {
 		nodes:    []api.NodeStatus{{Name: "task", State: api.StateRunning}},
 	})
 
-	row, col := d.logs.GetScrollOffset()
-	if row != 12 || col != 0 {
-		t.Fatalf("expected scroll offset to survive same-log reload, got row=%d col=%d", row, col)
+	after := d.logSourceState(d.renderedLogSource)
+	if after.viewportRow != before.viewportRow || after.viewportColumn != before.viewportColumn || after.following {
+		t.Fatalf("expected desired paused viewport to survive same-log reload: before=%+v after=%+v", before, after)
 	}
 }
 
@@ -1307,6 +1545,7 @@ func TestUpdateLogsRestoresDesiredScrollAfterTemporaryShortReload(t *testing.T) 
 	}
 	d.updateLogsFromSnapshot(snap)
 	d.scrollLogs(12)
+	desired := d.logSourceState(d.renderedLogSource)
 
 	screen := tcell.NewSimulationScreen("UTF-8")
 	if err := screen.Init(); err != nil {
@@ -1324,9 +1563,9 @@ func TestUpdateLogsRestoresDesiredScrollAfterTemporaryShortReload(t *testing.T) 
 
 	snap.logLines = lines
 	d.updateLogsFromSnapshot(snap)
-	row, col := d.logs.GetScrollOffset()
-	if row != 12 || col != 0 {
-		t.Fatalf("expected desired scroll to be restored after full log reload, got row=%d col=%d", row, col)
+	restored := d.logSourceState(d.renderedLogSource)
+	if restored.viewportRow != desired.viewportRow || restored.viewportColumn != desired.viewportColumn || restored.following {
+		t.Fatalf("expected desired paused viewport to survive temporary short log: desired=%+v restored=%+v", desired, restored)
 	}
 }
 
@@ -1349,8 +1588,8 @@ func TestLogMouseCaptureForwardsNativeScrollAndRecordsDesiredOffset(t *testing.T
 	if action != tview.MouseScrollDown || event == nil {
 		t.Fatalf("expected native scroll event to be forwarded, got action=%v event=%v", action, event)
 	}
-	if d.logScrollRow != 1 {
-		t.Fatalf("expected desired scroll row to be recorded, got %d", d.logScrollRow)
+	if d.logFollowing {
+		t.Fatal("mouse scrolling did not persist paused follow intent")
 	}
 }
 
@@ -1374,10 +1613,17 @@ func TestUpdateLogsResetsScrollWhenLogChanges(t *testing.T) {
 		logLines: []string{"stdout: second"},
 		nodes:    []api.NodeStatus{{Name: "second", State: api.StateRunning}},
 	})
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer screen.Fini()
+	d.logs.SetRect(0, 0, 80, 8)
+	d.logs.Draw(screen)
 
 	row, _ := d.logs.GetScrollOffset()
-	if row != 0 {
-		t.Fatalf("expected scroll offset to reset when switching logs, got row %d", row)
+	if !d.logFollowing || d.renderedLogSource.task != "second" || row != 0 {
+		t.Fatalf("expected new source to initialize at its tail: following=%v source=%+v row=%d", d.logFollowing, d.renderedLogSource, row)
 	}
 }
 

@@ -701,6 +701,6 @@ The first usable TUI slice is now implemented as a local terminal console connec
 - prompt popups for interactive confirm and text questions emitted by daemon-owned work
 - lifecycle overlays own their input until dismissal: Escape is consumed before global quit handling, Enter executes a confirmed plan once, and closing an overlay restores the prior dashboard pane without changing task selection or viewport
 - retargeting uses a stable, vertically scrollable target list that marks the active target and shows the complete selected name before opening the existing impact preview
-- log following is explicit user state; loading older retained lines preserves PAUSED/FOLLOWING and shifts a paused viewport by the number of prepended lines so the same logical content remains visible
+- log following is explicit per-source user state keyed only by durable instance/source/task identity; snapshots never change PAUSED/FOLLOWING, and paused views retain an absolute logical-line anchor that is translated into each retained range after append, pagination, truncation, rotation, or temporarily missing log metadata
 
 The tview before-draw hook may resize or draw primitives, but must not call application methods such as `GetFocus`, `SetFocus`, or page visibility helpers that reacquire tview's application lock. DevFlow tracks task/log focus from focus callbacks and input handling; too-small rendering is performed directly on the supplied screen. This preserves focus styling without making the first frame re-enter a non-reentrant application mutex.

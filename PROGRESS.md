@@ -5,14 +5,20 @@ Last updated: 2026-08-18
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: essential TUI interaction round is implemented and verified; the previously recorded failing-restart readiness wait remains a separate follow-up
-- Confidence: under Go 1.26.6 the current essential TUI changes pass the focused event-path regressions 30 consecutive times, focused race coverage, the full default suite, vet, Staticcheck v0.7.0, clean module metadata/format/diff checks, and `pkg/tui` test compilation for Linux and Windows amd64/arm64; the broader lifecycle/TUI verification baseline remains green on `darwin/arm64`
+- State: durable paused-log follow-up is implemented and verified; lifecycle overlays and vertical retarget behavior remain unchanged
+- Confidence: under Go 1.26.6 the durable paused-log event-loop regression passes 20 consecutive times and under the race detector; the full default suite, full `pkg/tui` race suite, vet, Staticcheck v0.7.0, clean module metadata/format/diff checks, and `pkg/tui` test compilation for Linux and Windows amd64/arm64 pass on `darwin/arm64`
 
 ## In Progress
 
-- None for the scoped essential TUI round.
+- None for the scoped durable paused-log follow-up.
 
 ## Completed
+
+- Durable paused-log state:
+  - bound PAUSED/FOLLOWING intent to stable instance/source-kind/task identity and removed refresh-time selection callbacks and mutable log path/title metadata from source-change decisions
+  - store the paused viewport as an absolute logical top line, translate it against each retained-range start, clamp only for truncation/rotation, and never call `ScrollToEnd` while the source is paused
+  - carry the same source's last complete retained window through temporary missing log paths or empty node snapshots without changing follow intent
+  - added a lock-faithful `Application.Run` fixture with 500 numbered lines, multiple queued refreshes, append, incomplete metadata, older/no-older `o`, and f/End/G tail-resume assertions; passed focused repetition/race plus the full TUI and repository suites
 
 - Essential TUI interaction round:
   - replaced the lifecycle-modal boolean with explicit overlay ownership; Escape is consumed before global quit handling, prior pane/selection/viewport state is restored, and lifecycle execution callbacks are one-shot
