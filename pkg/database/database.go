@@ -270,6 +270,26 @@ func (m *Manager) StopRuntime(ctx context.Context, db api.DBInstance) error {
 	return m.stopContainer(ctx, db.ContainerName, 10)
 }
 
+// StopRuntimeIfRunning reports whether a live container was actually stopped.
+// Lifecycle result assembly uses this stricter form so stale database metadata
+// cannot be presented to users as a successful stop.
+func (m *Manager) StopRuntimeIfRunning(ctx context.Context, db api.DBInstance) (bool, error) {
+	if db.ContainerName == "" {
+		return false, nil
+	}
+	container, exists, err := m.inspectContainer(ctx, db.ContainerName)
+	if err != nil {
+		return false, err
+	}
+	if !exists || !container.Running {
+		return false, nil
+	}
+	if err := m.stopContainer(ctx, db.ContainerName, 10); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ExecSQL executes a SQL statement inside the managed Postgres container
 // through the Docker Engine API. Output is returned even when psql fails.
 func (m *Manager) ExecSQL(ctx context.Context, db api.DBInstance, statement string) ([]byte, error) {

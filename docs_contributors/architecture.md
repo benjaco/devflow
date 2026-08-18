@@ -680,7 +680,7 @@ The daemon persists:
 This is enough for:
 - `run --detach`
 - `watch --detach`
-- `stop --all` against daemon-owned work; it terminates legacy supervisor/executor process groups and descendants, tracked service process groups, PID-bearing status nodes, and the instance-managed database container before clearing persisted process state and shutting the daemon down
+- `stop --all` against daemon-owned work; it snapshots live resources before engine cancellation clears references, terminates legacy supervisor/executor process groups and descendants, tracked service process groups and PID-bearing status nodes, stops the managed database only when its container is running, and reports only confirmed actual stops before shutting the daemon down
 - service `restart` by asking the daemon to relaunch the last active target
 
 The operator surface now also reconciles detached state when queried:
@@ -700,4 +700,4 @@ The first usable TUI slice is now implemented as a local terminal console connec
 - invalidate-and-rerun from the selected task by sending a daemon action that invalidates the selected downstream cacheable once-task slice and relaunches the current target
 - prompt popups for interactive confirm and text questions emitted by daemon-owned work
 
-What is still missing is fine-grained detached control of a single service inside a multi-service detached target.
+The tview before-draw hook may resize or draw primitives, but must not call application methods such as `GetFocus`, `SetFocus`, or page visibility helpers that reacquire tview's application lock. DevFlow tracks task/log focus from focus callbacks and input handling; too-small rendering is performed directly on the supplied screen. This preserves focus styling without making the first frame re-enter a non-reentrant application mutex.

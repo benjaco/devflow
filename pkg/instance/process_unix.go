@@ -2,10 +2,7 @@
 
 package instance
 
-import (
-	"errors"
-	"syscall"
-)
+import "syscall"
 
 func processAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
@@ -17,10 +14,6 @@ func terminateProcessGroup(pid int) error {
 
 func killProcessGroup(pid int) error {
 	return signalProcessGroup(pid, syscall.SIGKILL)
-}
-
-func isNoProcess(err error) bool {
-	return errors.Is(err, syscall.ESRCH)
 }
 
 func signalProcessGroup(pid int, signal syscall.Signal) error {

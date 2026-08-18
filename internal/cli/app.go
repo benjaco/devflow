@@ -486,22 +486,18 @@ func (a *App) runViaDaemon(target string, jsonOut bool, worktreeFlag, projectNam
 		MaxParallel: maxParallel,
 		Detach:      detach,
 	})
+	if err != nil {
+		return err
+	}
 	if detach {
 		if resp.Started != nil {
-			payload := map[string]any{
-				"instanceId": resp.Started.InstanceID,
-				"target":     resp.Started.Target,
-				"mode":       resp.Started.Mode,
-				"detached":   true,
-				"pid":        resp.Started.DaemonPID,
-				"logPath":    resp.Started.LogPath,
-			}
+			payload := newDetachedStartResult(resp.Started)
 			if jsonOut {
 				return writeJSON(a.Stdout, payload)
 			}
 			_, _ = fmt.Fprintf(a.Stdout, "daemon instance=%s pid=%d target=%s\n", resp.Started.InstanceID, resp.Started.DaemonPID, resp.Started.Target)
 		}
-		return err
+		return nil
 	}
 	if resp.Run != nil {
 		if jsonOut {
@@ -564,14 +560,7 @@ func (a *App) watchViaDaemon(target string, jsonOut bool, worktreeFlag, projectN
 	if resp.Started == nil {
 		return fmt.Errorf("daemon did not return watch start metadata")
 	}
-	payload := map[string]any{
-		"instanceId": resp.Started.InstanceID,
-		"target":     resp.Started.Target,
-		"mode":       resp.Started.Mode,
-		"detached":   true,
-		"pid":        resp.Started.DaemonPID,
-		"logPath":    resp.Started.LogPath,
-	}
+	payload := newDetachedStartResult(resp.Started)
 	if detach {
 		if jsonOut {
 			return writeJSON(a.Stdout, payload)
@@ -592,6 +581,23 @@ func (a *App) watchViaDaemon(target string, jsonOut bool, worktreeFlag, projectN
 			_ = writeJSONLine(a.Stdout, evt)
 		}
 	})
+}
+
+// detachedStartResult embeds the daemon's authoritative launch result while
+// retaining the historical CLI-only detached and pid fields. This avoids the
+// two JSON surfaces drifting when launch-state fields are added to the daemon.
+type detachedStartResult struct {
+	daemon.StartResult
+	Detached bool `json:"detached"`
+	PID      int  `json:"pid"`
+}
+
+func newDetachedStartResult(started *daemon.StartResult) detachedStartResult {
+	return detachedStartResult{
+		StartResult: *started,
+		Detached:    true,
+		PID:         started.DaemonPID,
+	}
 }
 
 func (a *App) flushCmd(args []string) error {
@@ -820,10 +826,10 @@ func (a *App) stopCmd(args []string) error {
 		return err
 	}
 	resp, err := client.Call(context.Background(), daemon.Request{Action: daemon.ActionStop, All: *all, Task: *task, Preview: *preview})
-	if err != nil {
+	if err != nil && resp.Stop == nil && resp.Lifecycle == nil {
 		return err
 	}
-	if *all && !*preview {
+	if err == nil && *all && !*preview {
 		waitForDaemonDisconnect(client, 3*time.Second)
 	}
 	stopped := []string{}
@@ -839,14 +845,22 @@ func (a *App) stopCmd(args []string) error {
 		payload["plan"] = resp.Lifecycle.Plan
 	}
 	if *jsonOut {
-		return writeJSON(a.Stdout, payload)
+		if writeErr := writeJSON(a.Stdout, payload); writeErr != nil {
+			return writeErr
+		}
+		return err
 	}
 	if *preview && resp.Lifecycle != nil {
 		writeLifecyclePlanText(a.Stdout, resp.Lifecycle.Plan)
 		return nil
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "stopped: %s\n", strings.Join(stopped, ", "))
-	return nil
+	if resp.Lifecycle != nil {
+		for _, issue := range resp.Lifecycle.Issues {
+			_, _ = fmt.Fprintf(a.Stdout, "not stopped: %s: %s\n", issue.Resource, issue.Reason)
+		}
+	}
+	return err
 }
 
 func writeLifecyclePlanText(output io.Writer, plan api.LifecyclePlan) {

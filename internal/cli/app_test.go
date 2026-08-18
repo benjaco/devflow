@@ -3,22 +3,25 @@ package cli
 import (
 	"bytes"
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	embeddedwebapp "github.com/benjaco/devflow/examples/embedded-web-app"
-	gonextmonorepo "github.com/benjaco/devflow/examples/go-next-monorepo"
+	_ "github.com/benjaco/devflow/examples/go-next-monorepo"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/cache"
 	"github.com/benjaco/devflow/pkg/daemon"
@@ -1003,6 +1006,91 @@ func TestRunJSONStillReturnsExecutionError(t *testing.T) {
 	}
 }
 
+func TestDetachedStartResultJSONPreservesAuthoritativeLaunchState(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		start daemon.StartResult
+	}{
+		{
+			name: "ready",
+			start: daemon.StartResult{
+				InstanceID:        "instance-ready",
+				Target:            "dev",
+				Mode:              api.ModeWatch,
+				DaemonPID:         1234,
+				LogPath:           "/tmp/daemon.log",
+				Accepted:          true,
+				SupervisorStarted: true,
+				Ready:             true,
+				State:             "ready",
+			},
+		},
+		{
+			name: "slow-starting",
+			start: daemon.StartResult{
+				InstanceID:        "instance-starting",
+				Target:            "dev",
+				Mode:              api.ModeWatch,
+				DaemonPID:         2345,
+				Accepted:          true,
+				SupervisorStarted: true,
+				Ready:             false,
+				State:             "starting",
+			},
+		},
+		{
+			name: "already-failed",
+			start: daemon.StartResult{
+				InstanceID:        "instance-failed",
+				Target:            "broken",
+				Mode:              api.ModeWatch,
+				DaemonPID:         3456,
+				Accepted:          true,
+				SupervisorStarted: true,
+				Ready:             false,
+				State:             "failed",
+			},
+		},
+		{
+			name: "rejected",
+			start: daemon.StartResult{
+				InstanceID:        "instance-rejected",
+				Target:            "missing",
+				Mode:              api.ModeWatch,
+				Accepted:          false,
+				SupervisorStarted: false,
+				Ready:             false,
+				State:             "rejected",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			if err := writeJSON(&output, newDetachedStartResult(&test.start)); err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(output.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"instanceId", "target", "mode", "daemonPid", "pid", "logPath", "detached", "accepted", "supervisorStarted", "ready", "state"} {
+				if _, ok := payload[field]; !ok {
+					t.Fatalf("detached JSON omitted %q: %s", field, output.String())
+				}
+			}
+			if got, ok := payload["accepted"].(bool); !ok || got != test.start.Accepted {
+				t.Fatalf("accepted = %#v, want %v", payload["accepted"], test.start.Accepted)
+			}
+			if got, ok := payload["ready"].(bool); !ok || got != test.start.Ready {
+				t.Fatalf("ready = %#v, want %v", payload["ready"], test.start.Ready)
+			}
+			if payload["pid"] != payload["daemonPid"] {
+				t.Fatalf("legacy pid and authoritative daemonPid differ: %s", output.String())
+			}
+		})
+	}
+}
+
 func TestRunAcceptsTaskNameAsSyntheticTarget(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1317,7 +1405,7 @@ func shellQuote(value string) string {
 
 func TestDefaultLaunchPlanStartsDetachedForFreshDetectedWorktree(t *testing.T) {
 	worktree := t.TempDir()
-	if err := gonextmonorepo.SeedWorktree(worktree); err != nil {
+	if err := seedExampleWorktree(worktree); err != nil {
 		t.Fatal(err)
 	}
 	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
@@ -2270,8 +2358,20 @@ func TestStopAllStopsDetachedSupervisorExecutorAndStaleStatusProcesses(t *testin
 		t.Fatal(err)
 	}
 
+	previewOut := &bytes.Buffer{}
+	app := &App{Stdout: previewOut, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"stop", "--worktree", worktree, "--all", "--preview", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var preview struct {
+		Plan api.LifecyclePlan `json:"plan"`
+	}
+	if err := json.Unmarshal(previewOut.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+
 	stdout := &bytes.Buffer{}
-	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	app = &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
 	if err := app.Run([]string{"stop", "--worktree", worktree, "--all", "--json"}); err != nil {
 		t.Fatal(err)
 	}
@@ -2284,6 +2384,9 @@ func TestStopAllStopsDetachedSupervisorExecutorAndStaleStatusProcesses(t *testin
 		if !stopped[name] {
 			t.Fatalf("expected %q in stopped payload: %v", name, payload["stopped"])
 		}
+	}
+	if got := strings.Join(preview.Plan.ProcessesToStop, ","); got != strings.Join(sortedStringSetForTest(stopped), ",") {
+		t.Fatalf("successful stop-all preview/result differ: plan=%q actual=%q", got, strings.Join(sortedStringSetForTest(stopped), ","))
 	}
 
 	waitForProcessExit(t, supervisorHandle)
@@ -2314,6 +2417,28 @@ func TestStopAllStopsDetachedSupervisorExecutorAndStaleStatusProcesses(t *testin
 			t.Fatalf("expected %s stopped with no pid, got %+v", name, node)
 		}
 	}
+
+	repeatedOut := &bytes.Buffer{}
+	app = &App{Stdout: repeatedOut, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"stop", "--worktree", worktree, "--all", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var repeated map[string]any
+	if err := json.Unmarshal(repeatedOut.Bytes(), &repeated); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(sortedStringSetForTest(stringSetFromJSONList(t, repeated["stopped"])), ","); got != "daemon" {
+		t.Fatalf("repeated stop-all reported phantom resources: %s", got)
+	}
+}
+
+func sortedStringSetForTest(values map[string]bool) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func TestStopAllStopsManagedDatabaseContainer(t *testing.T) {
@@ -2330,9 +2455,14 @@ func TestStopAllStopsManagedDatabaseContainer(t *testing.T) {
 		path   string
 		query  string
 	}
-	requests := make(chan engineRequest, 1)
+	requests := make(chan engineRequest, 2)
 	engineServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requests <- engineRequest{method: request.Method, path: request.URL.Path, query: request.URL.RawQuery}
+		if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/containers/devflow-pg-test/json") {
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = response.Write([]byte(`{"State":{"Running":true}}`))
+			return
+		}
 		response.WriteHeader(http.StatusNoContent)
 	}))
 	defer engineServer.Close()
@@ -2372,13 +2502,18 @@ func TestStopAllStopsManagedDatabaseContainer(t *testing.T) {
 	if !stopped["database"] {
 		t.Fatalf("expected managed database in stopped payload: %v", payload["stopped"])
 	}
-	select {
-	case request := <-requests:
-		if request.method != http.MethodPost || !strings.HasSuffix(request.path, "/containers/devflow-pg-test/stop") || request.query != "t=10" {
-			t.Fatalf("unexpected Docker Engine request: %+v", request)
+	var stopRequest *engineRequest
+	for len(requests) > 0 {
+		request := <-requests
+		if request.method == http.MethodPost {
+			stopRequest = &request
 		}
-	default:
+	}
+	if stopRequest == nil {
 		t.Fatal("expected a Docker Engine stop request")
+	}
+	if !strings.HasSuffix(stopRequest.path, "/containers/devflow-pg-test/stop") || stopRequest.query != "t=10" {
+		t.Fatalf("unexpected Docker Engine stop request: %+v", stopRequest)
 	}
 }
 
@@ -2841,31 +2976,41 @@ func decodeJSONLines(t *testing.T, data []byte) []map[string]string {
 	return out
 }
 
-func seedExampleWorktree(dst string) error {
-	root, err := filepath.Abs(filepath.Join("..", "..", "examples", "go-next-monorepo", "worktree"))
-	if err != nil {
-		return err
-	}
-	return copyTree(root, dst)
-}
+// Every fixture file uses a .txt transport suffix so the fixture remains in a
+// published module archive even though the materialized worktree contains its
+// own go.mod. Tests never depend on the repository-relative example tree.
+//
+//go:embed testdata/go-next-worktree
+var goNextWorktreeFixture embed.FS
 
-func copyTree(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+func seedExampleWorktree(dst string) error {
+	const fixtureRoot = "testdata/go-next-worktree"
+	return fs.WalkDir(goNextWorktreeFixture, fixtureRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(fixtureRoot, path)
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(src, path)
+		if rel == "." {
+			return os.MkdirAll(dst, 0o755)
+		}
+		materialized := strings.TrimSuffix(rel, ".txt")
+		if materialized == "dot-env" {
+			materialized = ".env"
+		}
+		target := filepath.Join(dst, materialized)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := goNextWorktreeFixture.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		target := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
-		return os.WriteFile(target, data, info.Mode())
+		return os.WriteFile(target, data, 0o644)
 	})
 }

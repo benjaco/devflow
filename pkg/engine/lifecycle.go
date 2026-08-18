@@ -22,6 +22,7 @@ type ServiceLifecycleResult struct {
 	Action   string          `json:"action"`
 	Previous ServiceIdentity `json:"previous"`
 	Current  ServiceIdentity `json:"current"`
+	Stopped  bool            `json:"stopped"`
 	Ready    bool            `json:"ready"`
 }
 

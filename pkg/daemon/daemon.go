@@ -83,13 +83,15 @@ type Response struct {
 }
 
 type StartResult struct {
-	InstanceID string      `json:"instanceId"`
-	Target     string      `json:"target"`
-	Mode       api.RunMode `json:"mode"`
-	DaemonPID  int         `json:"daemonPid"`
-	LogPath    string      `json:"logPath"`
-	Accepted   bool        `json:"accepted,omitempty"`
-	Ready      bool        `json:"ready"`
+	InstanceID        string      `json:"instanceId"`
+	Target            string      `json:"target"`
+	Mode              api.RunMode `json:"mode"`
+	DaemonPID         int         `json:"daemonPid"`
+	LogPath           string      `json:"logPath"`
+	Accepted          bool        `json:"accepted"`
+	SupervisorStarted bool        `json:"supervisorStarted"`
+	Ready             bool        `json:"ready"`
+	State             string      `json:"state"`
 }
 
 type StopResult struct {
@@ -644,7 +646,9 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	}
 	resp := s.handleRequest(ctx, req)
 	_ = writeFrame(frame{Type: "response", ID: req.ID, Response: &resp})
-	if req.Action == ActionStop && req.All && resp.OK {
+	// A stop-all preview is read-only. Only the executed action may tear down
+	// the daemon after its response has been delivered.
+	if req.Action == ActionStop && req.All && !req.Preview && resp.OK {
 		s.requestShutdown()
 	}
 }
@@ -935,14 +939,17 @@ func (s *Server) startActive(ctx context.Context, projectName, target string, mo
 	active := s.active
 	if active != nil && active.projectName == projectName && active.target == resolvedTarget && active.mode == mode {
 		s.mu.Unlock()
-		return &StartResult{
-			InstanceID: s.instanceID,
-			Target:     resolvedTarget,
-			Mode:       mode,
-			DaemonPID:  os.Getpid(),
-			LogPath:    s.logPath,
-			Accepted:   true,
-		}, nil
+		result := &StartResult{
+			InstanceID:        s.instanceID,
+			Target:            resolvedTarget,
+			Mode:              mode,
+			DaemonPID:         os.Getpid(),
+			LogPath:           s.logPath,
+			Accepted:          true,
+			SupervisorStarted: true,
+		}
+		result.Ready, result.State = s.detachedTargetState(resolvedTarget)
+		return result, nil
 	}
 	s.mu.Unlock()
 	s.stopActive(5 * time.Second)
@@ -966,14 +973,51 @@ func (s *Server) startActive(ctx context.Context, projectName, target string, mo
 		return nil, err
 	}
 	go s.runEngine(runCtx, execProject, resolvedTarget, mode, maxParallel, newActive)
-	return &StartResult{
-		InstanceID: s.instanceID,
-		Target:     resolvedTarget,
-		Mode:       mode,
-		DaemonPID:  os.Getpid(),
-		LogPath:    s.logPath,
-		Accepted:   true,
-	}, nil
+	result := &StartResult{
+		InstanceID:        s.instanceID,
+		Target:            resolvedTarget,
+		Mode:              mode,
+		DaemonPID:         os.Getpid(),
+		LogPath:           s.logPath,
+		Accepted:          true,
+		SupervisorStarted: true,
+	}
+	result.Ready, result.State = s.detachedTargetState(resolvedTarget)
+	return result, nil
+}
+
+// detachedTargetState is a response-time snapshot, not a promise that the
+// target will remain in this state. Detached callers use it to distinguish an
+// accepted launch from a target that is already ready or has already failed.
+func (s *Server) detachedTargetState(target string) (bool, string) {
+	status, err := instance.LoadStatus(s.worktree, s.instanceID)
+	// recordRun updates the selected target before the engine publishes its
+	// first status snapshot. Never attribute a prior target's terminal state to
+	// the newly accepted launch during that small interval.
+	if err != nil || status.Target != target || len(status.Nodes) == 0 {
+		return false, "starting"
+	}
+	ready := true
+	for _, node := range status.Nodes {
+		switch node.State {
+		case api.StateFailed, api.StateBlocked, api.StateCanceled:
+			return false, "failed"
+		case api.StateDegraded:
+			return false, "degraded"
+		case api.StateDone, api.StateCached, api.StateReady:
+			// Terminal one-time tasks and ready service nodes satisfy the snapshot.
+		case api.StateRunning:
+			if !node.Ready {
+				ready = false
+			}
+		default:
+			ready = false
+		}
+	}
+	if ready {
+		return true, "ready"
+	}
+	return false, "starting"
 }
 
 func (s *Server) runAttached(ctx context.Context, projectName, target string, mode api.RunMode, maxParallel int, env map[string]string) (*api.RunResult, error) {
@@ -1076,21 +1120,23 @@ func (s *Server) runEngine(ctx context.Context, p project.Project, target string
 	s.mu.Unlock()
 }
 
-func (s *Server) stopActive(timeout time.Duration) {
+func (s *Server) stopActive(timeout time.Duration) bool {
 	s.mu.Lock()
 	active := s.active
 	s.mu.Unlock()
 	if active == nil {
-		return
+		return true
 	}
 	active.cancel()
 	if timeout <= 0 {
 		<-active.done
-		return
+		return true
 	}
 	select {
 	case <-active.done:
+		return true
 	case <-time.After(timeout):
+		return false
 	}
 }
 
@@ -1243,7 +1289,8 @@ func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResu
 	var stopped []string
 	var lifecycle *api.LifecycleResult
 	if all {
-		plan := planStopAll(inst, stopAllExtraProcessRefs(s.worktree, s.instanceID, inst), os.Getpid())
+		snapshot := s.captureStopAll(inst)
+		plan := snapshot.plan
 		lifecycle = &api.LifecycleResult{
 			Plan:      plan,
 			Affected:  []string{},
@@ -1252,12 +1299,38 @@ func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResu
 			Processes: []api.LifecycleProcessChange{},
 			Success:   false,
 		}
-		s.stopActive(5 * time.Second)
-		inst, err = instance.Load(s.worktree, s.instanceID)
-		if err != nil {
-			return nil, err
+		activeStopped := s.stopActive(5 * time.Second)
+		for name, candidate := range snapshot.processes {
+			if !candidate.active {
+				continue
+			}
+			if candidate.pid > 0 {
+				if !instance.ProcessAlive(candidate.pid) {
+					stopped = append(stopped, name)
+				}
+			} else if activeStopped {
+				stopped = append(stopped, name)
+			}
 		}
-		stopped, err = instance.StopDaemonWork(inst, stopAllExtraProcessRefs(s.worktree, s.instanceID, inst), os.Getpid())
+		if !activeStopped {
+			err = fmt.Errorf("timed out waiting for active services to stop")
+		}
+		var loadErr error
+		inst, loadErr = instance.Load(s.worktree, s.instanceID)
+		if loadErr != nil {
+			lifecycle.Error = loadErr.Error()
+			lifecycle.Stopped = uniqueSortedStrings(stopped)
+			lifecycle.Affected = append([]string(nil), lifecycle.Stopped...)
+			addUnconfirmedLifecycleIssues(lifecycle, loadErr)
+			return &StopResult{InstanceID: s.instanceID, Stopped: lifecycle.Stopped, Lifecycle: lifecycle}, loadErr
+		}
+		remainingStopped, processErr := instance.StopDaemonWork(inst, snapshot.extra, os.Getpid())
+		stopped = append(stopped, remainingStopped...)
+		if err == nil {
+			err = processErr
+		} else if processErr != nil {
+			err = errors.Join(err, processErr)
+		}
 	} else {
 		if strings.TrimSpace(task) == "" {
 			return nil, fmt.Errorf("usage: devflow stop --task <name> | --all")
@@ -1285,8 +1358,12 @@ func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResu
 					lifecycle.Error = stopErr.Error()
 					return &StopResult{InstanceID: s.instanceID, Stopped: lifecycle.Stopped, Lifecycle: lifecycle}, stopErr
 				}
-				lifecycle.Stopped = append(lifecycle.Stopped, name)
-				lifecycle.Affected = append(lifecycle.Affected, name)
+				if change.Stopped {
+					lifecycle.Stopped = append(lifecycle.Stopped, name)
+					lifecycle.Affected = append(lifecycle.Affected, name)
+				} else {
+					lifecycle.Issues = append(lifecycle.Issues, api.LifecycleIssue{Resource: name, Reason: "process was already absent"})
+				}
 				lifecycle.Processes = append(lifecycle.Processes, api.LifecycleProcessChange{
 					Task:               name,
 					PreviousPID:        change.Previous.PID,
@@ -1312,16 +1389,31 @@ func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResu
 	}
 	if err != nil {
 		lifecycle.Error = err.Error()
-		return &StopResult{InstanceID: s.instanceID, Stopped: stopped, Lifecycle: lifecycle}, err
+		lifecycle.Stopped = uniqueSortedStrings(stopped)
+		lifecycle.Affected = append([]string(nil), lifecycle.Stopped...)
+		addUnconfirmedLifecycleIssues(lifecycle, err)
+		return &StopResult{InstanceID: s.instanceID, Stopped: lifecycle.Stopped, Lifecycle: lifecycle}, err
 	}
 	if all && inst.DB.ContainerName != "" {
-		if err := database.New().StopRuntime(ctx, inst.DB); err != nil {
-			lifecycle.Error = err.Error()
+		databaseStopped, stopErr := database.New().StopRuntimeIfRunning(ctx, inst.DB)
+		if stopErr != nil {
+			lifecycle.Error = stopErr.Error()
 			lifecycle.Stopped = uniqueSortedStrings(stopped)
 			lifecycle.Affected = append([]string(nil), lifecycle.Stopped...)
-			return &StopResult{InstanceID: s.instanceID, Stopped: lifecycle.Stopped, Lifecycle: lifecycle}, err
+			addUnconfirmedLifecycleIssues(lifecycle, stopErr)
+			return &StopResult{InstanceID: s.instanceID, Stopped: lifecycle.Stopped, Lifecycle: lifecycle}, stopErr
 		}
-		stopped = append(stopped, "database")
+		if databaseStopped {
+			stopped = append(stopped, "database")
+		} else {
+			// The persisted container name made database part of the preview, but
+			// the engine found no live runtime to terminate. Keep that plan/result
+			// difference explicit instead of reporting a phantom stop.
+			lifecycle.Issues = append(lifecycle.Issues, api.LifecycleIssue{
+				Resource: "database",
+				Reason:   "container was already absent or stopped",
+			})
+		}
 	}
 	if all {
 		stopped = append(stopped, "daemon")
@@ -1341,36 +1433,122 @@ func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResu
 	return &StopResult{InstanceID: s.instanceID, Stopped: stopped, Lifecycle: lifecycle}, nil
 }
 
-func planStopAll(inst *api.Instance, extra map[string]int, daemonPID int) api.LifecyclePlan {
+type stopAllCandidate struct {
+	pid    int
+	active bool
+}
+
+type stopAllSnapshot struct {
+	plan      api.LifecyclePlan
+	processes map[string]stopAllCandidate
+	extra     map[string]int
+}
+
+// captureStopAll freezes the intended stop scope before cancellation clears
+// the engine-owned service registry and persisted process references.
+func (s *Server) captureStopAll(inst *api.Instance) stopAllSnapshot {
+	extra := stopAllExtraProcessRefs(s.worktree, s.instanceID, inst)
+	status, _ := instance.LoadStatus(s.worktree, s.instanceID)
+	s.mu.Lock()
+	hasActiveRun := s.active != nil
+	s.mu.Unlock()
+
+	processes := map[string]stopAllCandidate{}
+	pidOwners := map[int]string{}
+	addPID := func(name string, pid int, active bool) {
+		if name == "" || pid <= 0 || !instance.ProcessAlive(pid) {
+			return
+		}
+		if owner, exists := pidOwners[pid]; exists {
+			candidate := processes[owner]
+			candidate.active = candidate.active || active
+			processes[owner] = candidate
+			return
+		}
+		pidOwners[pid] = name
+		processes[name] = stopAllCandidate{pid: pid, active: active}
+	}
+
+	processNames := make([]string, 0, len(inst.Processes))
+	for name := range inst.Processes {
+		processNames = append(processNames, name)
+	}
+	sort.Strings(processNames)
+	for _, name := range processNames {
+		ref := inst.Processes[name]
+		active := false
+		if status != nil {
+			active = lifecycleNodeActive(status.Nodes[name].State)
+		}
+		addPID(name, ref.PID, active)
+	}
+	if status != nil {
+		names := make([]string, 0, len(status.Nodes))
+		for name := range status.Nodes {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			node := status.Nodes[name]
+			if !lifecycleNodeActive(node.State) {
+				continue
+			}
+			if node.PID > 0 {
+				addPID(name, node.PID, true)
+			} else if hasActiveRun {
+				processes[name] = stopAllCandidate{active: true}
+			}
+		}
+	}
+	if inst.Supervisor.PID > 0 && inst.Supervisor.PID != os.Getpid() {
+		addPID("supervisor", inst.Supervisor.PID, false)
+	}
+	addPID("executor", inst.Supervisor.ExecPID, false)
+	extraNames := make([]string, 0, len(extra))
+	for name := range extra {
+		extraNames = append(extraNames, name)
+	}
+	sort.Strings(extraNames)
+	for _, name := range extraNames {
+		addPID(name, extra[name], false)
+	}
+
 	toStop := map[string]bool{"daemon": true}
-	if inst.Supervisor.PID > 0 && inst.Supervisor.PID != daemonPID {
-		toStop["supervisor"] = true
-	}
-	if inst.Supervisor.ExecPID > 0 {
-		toStop["executor"] = true
-	}
-	for name, ref := range inst.Processes {
-		if ref.PID > 0 {
-			toStop[name] = true
-		}
-	}
-	for name, pid := range extra {
-		if pid > 0 {
-			toStop[name] = true
-		}
+	for name := range processes {
+		toStop[name] = true
 	}
 	if inst.DB.ContainerName != "" {
 		toStop["database"] = true
 	}
-	return api.LifecyclePlan{
-		RequestedAction:         "stop-all",
-		SelectedTarget:          inst.LastRun.Target,
-		TasksToInvalidate:       []string{},
-		ProcessesToStop:         sortedStringSet(toStop),
-		TasksToExecute:          []string{},
-		ServicesToPreserve:      []string{},
-		ServicesToRestart:       []string{},
-		ConfirmationRecommended: true,
+	return stopAllSnapshot{
+		plan: api.LifecyclePlan{
+			RequestedAction:         "stop-all",
+			SelectedTarget:          inst.LastRun.Target,
+			TasksToInvalidate:       []string{},
+			ProcessesToStop:         sortedStringSet(toStop),
+			TasksToExecute:          []string{},
+			ServicesToPreserve:      []string{},
+			ServicesToRestart:       []string{},
+			ConfirmationRecommended: true,
+		},
+		processes: processes,
+		extra:     extra,
+	}
+}
+
+func addUnconfirmedLifecycleIssues(result *api.LifecycleResult, stopErr error) {
+	if result == nil || stopErr == nil {
+		return
+	}
+	stopped := make(map[string]bool, len(result.Stopped))
+	for _, name := range result.Stopped {
+		stopped[name] = true
+	}
+	for _, name := range result.Plan.ProcessesToStop {
+		if stopped[name] {
+			continue
+		}
+		result.Issues = append(result.Issues, api.LifecycleIssue{Resource: name, Reason: stopErr.Error()})
 	}
 }
 
@@ -1472,7 +1650,7 @@ func (s *Server) previewLifecycle(req Request) (*api.LifecycleResult, error) {
 	switch req.Action {
 	case ActionStop:
 		if req.All {
-			result.Plan = planStopAll(inst, stopAllExtraProcessRefs(s.worktree, s.instanceID, inst), os.Getpid())
+			result.Plan = s.captureStopAll(inst).plan
 			return result, nil
 		}
 		result.Plan, err = s.planTaskStop(inst, req.Task)
@@ -1891,7 +2069,9 @@ func (s *Server) restart(ctx context.Context, projectName, task string, upstream
 				return nil, lifecycle, restartErr
 			}
 			lifecycle.Affected = append(lifecycle.Affected, name)
-			lifecycle.Stopped = append(lifecycle.Stopped, name)
+			if change.Stopped {
+				lifecycle.Stopped = append(lifecycle.Stopped, name)
+			}
 			lifecycle.Restarted = append(lifecycle.Restarted, name)
 			lifecycle.Processes = append(lifecycle.Processes, api.LifecycleProcessChange{
 				Task:               name,
@@ -2499,6 +2679,16 @@ func markAllStoppedNodes(worktree, instanceID string) error {
 
 func stopAllExtraProcessRefs(worktree, instanceID string, inst *api.Instance) map[string]int {
 	refs := map[string]int{}
+	knownPIDs := map[int]bool{}
+	if inst != nil {
+		knownPIDs[inst.Supervisor.PID] = inst.Supervisor.PID > 0
+		knownPIDs[inst.Supervisor.ExecPID] = inst.Supervisor.ExecPID > 0
+		for _, ref := range inst.Processes {
+			if ref.PID > 0 {
+				knownPIDs[ref.PID] = true
+			}
+		}
+	}
 	if inst != nil && inst.Supervisor.ExecPID <= 0 {
 		logPath := inst.Supervisor.LogPath
 		if logPath == "" {
@@ -2506,17 +2696,23 @@ func stopAllExtraProcessRefs(worktree, instanceID string, inst *api.Instance) ma
 		}
 		if pid := supervisorChildPIDFromLog(logPath); pid > 0 {
 			refs["executor"] = pid
+			knownPIDs[pid] = true
 		}
 	}
 	if state, err := instance.LoadStatus(worktree, instanceID); err == nil {
 		for name, node := range state.Nodes {
-			if node.PID > 0 {
+			if node.PID > 0 && !knownPIDs[node.PID] {
 				refs[name] = node.PID
+				knownPIDs[node.PID] = true
 			}
 		}
 	}
 	for name, pid := range legacyDevflowProcessRefs(worktree) {
+		if knownPIDs[pid] {
+			continue
+		}
 		refs[name] = pid
+		knownPIDs[pid] = true
 	}
 	return refs
 }

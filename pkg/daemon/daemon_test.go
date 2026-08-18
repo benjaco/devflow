@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -664,7 +665,7 @@ func TestDaemonRestartAndScopedStopPreserveIndependentService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !started.Accepted || started.Ready {
+	if !started.Accepted || !started.SupervisorStarted || started.Ready || started.State != "starting" {
 		t.Fatalf("detached start did not distinguish acceptance from readiness: %+v", started)
 	}
 	defer s.stopActive(3 * time.Second)
@@ -672,6 +673,12 @@ func TestDaemonRestartAndScopedStopPreserveIndependentService(t *testing.T) {
 		return len(p.snapshots("backend_debug")) == 1 && len(p.snapshots("frontend")) == 1
 	}) {
 		t.Fatal("independent services did not start")
+	}
+	if !waitForDaemonCondition(3*time.Second, func() bool {
+		again, startErr := s.startActive(context.Background(), p.name, "dev", api.ModeWatch, 2)
+		return startErr == nil && again.Accepted && again.Ready && again.State == "ready"
+	}) {
+		t.Fatal("detached response did not report the already-ready target accurately")
 	}
 	frontend := p.snapshots("frontend")[0]
 	preview, err := s.previewLifecycle(Request{Action: ActionRestart, Project: p.name, Task: "backend_debug", Preview: true})
@@ -694,6 +701,9 @@ func TestDaemonRestartAndScopedStopPreserveIndependentService(t *testing.T) {
 	}
 	if lifecycle == nil || !lifecycle.Success || len(lifecycle.Restarted) != 1 || lifecycle.Restarted[0] != "backend_debug" {
 		t.Fatalf("restart did not report its exact affected set: %+v", lifecycle)
+	}
+	if got := strings.Join(lifecycle.Stopped, ","); got != "backend_debug" {
+		t.Fatalf("running-service restart did not report its confirmed stop: %+v", lifecycle)
 	}
 	if len(lifecycle.Processes) != 1 || !lifecycle.Processes[0].Ready || lifecycle.Processes[0].Generation <= lifecycle.Processes[0].PreviousGeneration {
 		t.Fatalf("restart did not verify its replacement generation/readiness: %+v", lifecycle.Processes)
@@ -733,6 +743,89 @@ func TestDaemonRestartAndScopedStopPreserveIndependentService(t *testing.T) {
 	if len(secondStop.Stopped) != 0 || secondStop.Lifecycle == nil || !secondStop.Lifecycle.Success {
 		t.Fatalf("already-stopped task was not idempotent: %+v", secondStop)
 	}
+
+	stoppedPreview, err := s.previewLifecycle(Request{Action: ActionRestart, Project: p.name, Task: "backend_debug", Preview: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stoppedPreview.Plan.ProcessesToStop) != 0 {
+		t.Fatalf("stopped-service restart preview invented a process to stop: %+v", stoppedPreview.Plan)
+	}
+	_, restartedStopped, err := s.restart(context.Background(), p.name, "backend_debug", false, false, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restartedStopped.Stopped) != 0 || strings.Join(restartedStopped.Restarted, ",") != "backend_debug" {
+		t.Fatalf("stopped-service restart reported a phantom stop: %+v", restartedStopped)
+	}
+	if len(restartedStopped.Processes) != 1 || restartedStopped.Processes[0].PreviousPID != 0 || restartedStopped.Processes[0].PreviousGeneration != 0 || !restartedStopped.Processes[0].Ready {
+		t.Fatalf("stopped-service restart did not preserve an absent previous identity: %+v", restartedStopped.Processes)
+	}
+}
+
+func TestStopAllPlanAndActualIncludeEveryActiveService(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	p := &daemonLifecycleProject{
+		name:    "daemon-stop-all-lifecycle",
+		handles: map[string][]*daemonLifecycleHandle{},
+	}
+	project.Register(p)
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{
+		worktree:    worktree,
+		instanceID:  inst.ID,
+		projectName: p.name,
+		logPath:     filepath.Join(worktree, ".devflow", "logs", inst.ID, "daemon.log"),
+		subscribers: map[chan api.Event]bool{},
+	}
+	if _, err := s.startActive(context.Background(), p.name, "dev", api.ModeWatch, 2); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForDaemonCondition(3*time.Second, func() bool {
+		return len(p.snapshots("backend_debug")) == 1 && len(p.snapshots("frontend")) == 1
+	}) {
+		t.Fatal("independent services did not start")
+	}
+	preview, err := s.previewLifecycle(Request{Action: ActionStop, All: true, Preview: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(preview.Plan.ProcessesToStop, ","); got != "backend_debug,daemon,frontend" {
+		t.Fatalf("stop-all preview scope = %q", got)
+	}
+	result, err := s.stopWork(context.Background(), true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(result.Stopped, ","); got != "backend_debug,daemon,frontend" {
+		t.Fatalf("stop-all actual scope = %q, result=%+v", got, result)
+	}
+	if got := strings.Join(result.Lifecycle.Plan.ProcessesToStop, ","); got != strings.Join(result.Stopped, ",") {
+		t.Fatalf("successful stop-all plan/result differ: plan=%q actual=%q", got, strings.Join(result.Stopped, ","))
+	}
+	if !p.snapshots("backend_debug")[0].stopped.Load() || !p.snapshots("frontend")[0].stopped.Load() {
+		t.Fatal("stop-all result completed before both services were physically stopped")
+	}
+}
+
+func TestAddUnconfirmedLifecycleIssuesPreservesPartialActualResult(t *testing.T) {
+	result := &api.LifecycleResult{
+		Plan:    api.LifecyclePlan{ProcessesToStop: []string{"backend", "daemon", "frontend"}},
+		Stopped: []string{"backend"},
+	}
+	addUnconfirmedLifecycleIssues(result, errors.New("synthetic termination failure"))
+	if len(result.Issues) != 2 || result.Issues[0].Resource != "daemon" || result.Issues[1].Resource != "frontend" {
+		t.Fatalf("partial stop differences were not explicit and deterministic: %+v", result.Issues)
+	}
+	for _, issue := range result.Issues {
+		if !strings.Contains(issue.Reason, "synthetic termination failure") {
+			t.Fatalf("partial stop issue omitted its reason: %+v", issue)
+		}
+	}
 }
 
 func waitForDaemonCondition(timeout time.Duration, condition func() bool) bool {
@@ -744,6 +837,39 @@ func waitForDaemonCondition(timeout time.Duration, condition func() bool) bool {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return condition()
+}
+
+func TestDetachedTargetStateDistinguishesStartingReadyAndFailed(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{worktree: worktree, instanceID: inst.ID}
+	if ready, state := s.detachedTargetState("dev"); ready || state != "starting" {
+		t.Fatalf("missing status = ready=%v state=%q", ready, state)
+	}
+	if err := instance.SaveStatus(worktree, inst.ID, "dev", api.ModeWatch, map[string]api.NodeStatus{
+		"build":   {Name: "build", State: api.StateDone},
+		"backend": {Name: "backend", State: api.StateRunning, Ready: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ready, state := s.detachedTargetState("dev"); !ready || state != "ready" {
+		t.Fatalf("healthy status = ready=%v state=%q", ready, state)
+	}
+	if err := instance.SaveStatus(worktree, inst.ID, "dev", api.ModeWatch, map[string]api.NodeStatus{
+		"backend": {Name: "backend", State: api.StateFailed, LastError: "exit status 17"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ready, state := s.detachedTargetState("dev"); ready || state != "failed" {
+		t.Fatalf("failed status = ready=%v state=%q", ready, state)
+	}
+	if ready, state := s.detachedTargetState("other"); ready || state != "starting" {
+		t.Fatalf("stale other-target status = ready=%v state=%q", ready, state)
+	}
 }
 
 func TestInvalidateAndRelaunchForcesMatchingActiveRunToRestart(t *testing.T) {

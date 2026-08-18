@@ -154,12 +154,18 @@ type LifecycleProcessChange struct {
 	Ready              bool   `json:"ready,omitempty"`
 }
 
+type LifecycleIssue struct {
+	Resource string `json:"resource"`
+	Reason   string `json:"reason"`
+}
+
 type LifecycleResult struct {
 	Plan      LifecyclePlan            `json:"plan"`
 	Affected  []string                 `json:"affected"`
 	Stopped   []string                 `json:"stopped"`
 	Restarted []string                 `json:"restarted"`
 	Processes []LifecycleProcessChange `json:"processes"`
+	Issues    []LifecycleIssue         `json:"issues,omitempty"`
 	Success   bool                     `json:"success"`
 	Error     string                   `json:"error,omitempty"`
 }

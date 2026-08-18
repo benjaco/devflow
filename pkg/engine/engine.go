@@ -67,6 +67,7 @@ type runState struct {
 	publish           func(api.Event)
 	manifest          *validatedCacheKeyManifest
 	manifestUsage     *api.CacheKeyManifestUsage
+	redactDiagnostic  func(string) string
 }
 
 type taskResult struct {
@@ -434,6 +435,7 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 		publish:           e.publish,
 		manifest:          manifest,
 		manifestUsage:     manifestUsage,
+		redactDiagnostic:  diagnosticRedactor(inst),
 	}
 	for _, name := range order {
 		task := e.graph.Tasks[name]
@@ -831,16 +833,31 @@ func (e *Engine) awaitServiceReady(ctx context.Context, rt *project.Runtime, tas
 		}
 		return nil
 	case err := <-exitCh:
-		if err != nil {
-			return fmt.Errorf("service exited before readiness: %w", err)
-		}
-		return fmt.Errorf("service exited before readiness")
+		return &serviceEarlyExitError{cause: err}
 	case <-readyCtx.Done():
 		if errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
 			return fmt.Errorf("service readiness timed out after %s", timeout)
 		}
 		return readyCtx.Err()
 	}
+}
+
+type serviceEarlyExitError struct {
+	cause error
+}
+
+func (e *serviceEarlyExitError) Error() string {
+	if e != nil && e.cause != nil {
+		return fmt.Sprintf("service exited before readiness: %v", e.cause)
+	}
+	return "service exited before readiness"
+}
+
+func (e *serviceEarlyExitError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
 }
 
 func runTask(ctx context.Context, task project.Task, rt *project.Runtime) error {
@@ -1074,6 +1091,7 @@ func (e *Engine) applyServiceLifecycleCommand(ctx context.Context, req Request, 
 		return result, fmt.Errorf("service %q is not running; no %s occurred", command.task, command.action)
 	}
 	result.Previous = ServiceIdentity{PID: current.handle.PID(), Generation: current.generation}
+	wasAlive := current.handle.Alive()
 	node := state.statusSnapshot()[command.task]
 	if command.action == "restart" {
 		state.setNodeState(command.task, api.StateRestarting, node.LastRunKey, "", current.handle.PID())
@@ -1082,6 +1100,9 @@ func (e *Engine) applyServiceLifecycleCommand(ctx context.Context, req Request, 
 		state.setNodeState(command.task, api.StateDegraded, node.LastRunKey, fmt.Sprintf("failed to stop service for %s: %v", command.action, err), current.handle.PID())
 		return result, fmt.Errorf("%s service %q: %w", command.action, command.task, err)
 	}
+	// A stale registry entry can outlive its process. Record a stop only when
+	// this command observed a live handle and confirmed that it became dead.
+	result.Stopped = wasAlive && !current.handle.Alive()
 	if !state.removeServiceGeneration(command.task, current.generation) {
 		return result, fmt.Errorf("service %q changed while %s was in progress", command.task, command.action)
 	}
@@ -1210,7 +1231,11 @@ func (s *runState) setErrorState(name string, ctx context.Context, lastRunKey st
 	s.mu.Lock()
 	node := s.status[name]
 	s.mu.Unlock()
-	excerpts := boundedFailureExcerpts(node.LogPath, name)
+	excerpts := boundedFailureExcerpts(node.LogPath, name, s.redactDiagnostic)
+	var earlyExit *serviceEarlyExitError
+	if len(excerpts) == 0 && errors.As(err, &earlyExit) {
+		excerpts = boundedEarlyExitExcerpt(node.LogPath, name, s.redactDiagnostic)
+	}
 	if len(excerpts) == 0 {
 		return
 	}
@@ -2075,8 +2100,12 @@ func finalizeRunResult(result *api.RunResult, state *runState, runErr error) {
 			continue
 		}
 		result.FailedNodeLogPath = node.LogPath
-		result.LogTail = boundedLogTail(node.LogPath, 50, 32*1024)
-		result.FailureExcerpts = boundedFailureExcerpts(node.LogPath, node.Name)
+		result.LogTail = boundedLogTail(node.LogPath, 50, 32*1024, state.redactDiagnostic)
+		if len(node.FailureExcerpts) > 0 {
+			result.FailureExcerpts = append([]api.FailureExcerpt(nil), node.FailureExcerpts...)
+		} else {
+			result.FailureExcerpts = boundedFailureExcerpts(node.LogPath, node.Name, state.redactDiagnostic)
+		}
 		break
 	}
 }
@@ -2097,7 +2126,7 @@ func (s *runState) resultNodes() []api.NodeStatus {
 	return nodes
 }
 
-func boundedLogTail(path string, maxLines int, maxBytes int64) []string {
+func boundedLogTail(path string, maxLines int, maxBytes int64, sanitizers ...func(string) string) []string {
 	if path == "" || maxLines <= 0 || maxBytes <= 0 {
 		return nil
 	}
@@ -2132,6 +2161,9 @@ func boundedLogTail(path string, maxLines int, maxBytes int64) []string {
 	}
 	if len(lines) > maxLines {
 		lines = lines[len(lines)-maxLines:]
+	}
+	for index := range lines {
+		lines[index] = sanitizeDiagnosticLine(lines[index], sanitizers)
 	}
 	return lines
 }

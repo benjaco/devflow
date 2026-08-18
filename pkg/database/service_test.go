@@ -18,6 +18,49 @@ type runtimeServiceEngine struct {
 	stopCalls       atomic.Int32
 }
 
+type runtimeStopEngine struct {
+	dockerEngine
+	exists    bool
+	running   bool
+	stopCalls atomic.Int32
+	stopErr   error
+}
+
+func (e *runtimeStopEngine) InspectContainer(context.Context, string) (dockerContainer, bool, error) {
+	return dockerContainer{Running: e.running}, e.exists, nil
+}
+
+func (e *runtimeStopEngine) StopContainer(context.Context, string, int) error {
+	e.stopCalls.Add(1)
+	return e.stopErr
+}
+
+func TestStopRuntimeIfRunningReportsOnlyPhysicalStop(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		exists      bool
+		running     bool
+		wantStopped bool
+		wantCalls   int32
+	}{
+		{name: "missing", exists: false},
+		{name: "already-stopped", exists: true},
+		{name: "running", exists: true, running: true, wantStopped: true, wantCalls: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			engine := &runtimeStopEngine{exists: test.exists, running: test.running}
+			manager := newManagerWithDockerEngine(engine)
+			stopped, err := manager.StopRuntimeIfRunning(context.Background(), api.DBInstance{ContainerName: "devflow-pg-test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stopped != test.wantStopped || engine.stopCalls.Load() != test.wantCalls {
+				t.Fatalf("stopped=%v calls=%d, want stopped=%v calls=%d", stopped, engine.stopCalls.Load(), test.wantStopped, test.wantCalls)
+			}
+		})
+	}
+}
+
 func (e *runtimeServiceEngine) InspectContainer(context.Context, string) (dockerContainer, bool, error) {
 	return dockerContainer{
 		Running: true,

@@ -30,6 +30,37 @@ func TestResolveSameWorktreeSameInstance(t *testing.T) {
 	}
 }
 
+func TestStopDaemonWorkDoesNotReportAbsentProcess(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	inst, err := Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.Processes["already-stopped"] = api.ProcessRef{PID: 1 << 30, StartedAt: time.Now().UTC()}
+	inst.Supervisor = api.SupervisorRef{PID: (1 << 30) + 1, ExecPID: (1 << 30) + 2}
+	if err := Save(inst); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := StopDaemonWork(inst, nil, os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stopped) != 0 {
+		t.Fatalf("absent process was reported as stopped: %v", stopped)
+	}
+	loaded, err := Load(worktree, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Processes) != 0 {
+		t.Fatalf("stale process reference was not removed: %+v", loaded.Processes)
+	}
+	if loaded.Supervisor.PID != 0 || loaded.Supervisor.ExecPID != 0 {
+		t.Fatalf("stale supervisor references were not removed: %+v", loaded.Supervisor)
+	}
+}
+
 func TestSaveWritesRuntimeEnv(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

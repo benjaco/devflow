@@ -499,17 +499,33 @@ func StopDaemonWork(inst *api.Instance, extra map[string]int, daemonPID int) ([]
 	for name, pid := range extra {
 		addStopRef(refs, name, pid)
 	}
-	stopped, err := stopNamedProcessGroups(refs, 3*time.Second)
-	if err != nil {
-		return stopped, err
+	stopped, stopErr := stopNamedProcessGroups(refs, 3*time.Second)
+	stoppedPIDs := map[int]bool{}
+	for _, name := range stopped {
+		if pid := refs[name]; pid > 0 {
+			stoppedPIDs[pid] = true
+		}
 	}
-	if inst.Supervisor.PID != daemonPID {
+	if inst.Supervisor.PID != daemonPID && inst.Supervisor.PID > 0 && (stoppedPIDs[inst.Supervisor.PID] || !ProcessAlive(inst.Supervisor.PID)) {
 		inst.Supervisor = api.SupervisorRef{}
-	} else {
+	} else if inst.Supervisor.ExecPID > 0 && (stoppedPIDs[inst.Supervisor.ExecPID] || !ProcessAlive(inst.Supervisor.ExecPID)) {
+		// The current daemon reference is retained until its caller has written
+		// the stop response, but an absent legacy executor can be cleared now.
 		inst.Supervisor.ExecPID = 0
 	}
-	inst.Processes = map[string]api.ProcessRef{}
-	return stopped, Save(inst)
+	for name, ref := range inst.Processes {
+		if stoppedPIDs[ref.PID] || !ProcessAlive(ref.PID) {
+			delete(inst.Processes, name)
+		}
+	}
+	saveErr := Save(inst)
+	if stopErr != nil && saveErr != nil {
+		return stopped, errors.Join(stopErr, saveErr)
+	}
+	if stopErr != nil {
+		return stopped, stopErr
+	}
+	return stopped, saveErr
 }
 
 func ProcessAlive(pid int) bool {
@@ -530,32 +546,54 @@ func addStopRef(refs map[string]int, name string, pid int) {
 }
 
 func stopNamedProcessGroups(refs map[string]int, grace time.Duration) ([]string, error) {
-	names := make([]string, 0, len(refs))
-	unique := map[int]bool{}
-	for name, pid := range refs {
-		if pid <= 0 {
+	orderedNames := make([]string, 0, len(refs))
+	for name := range refs {
+		orderedNames = append(orderedNames, name)
+	}
+	sort.Strings(orderedNames)
+	live := map[int]bool{}
+	pidNames := map[int]string{}
+	for _, name := range orderedNames {
+		pid := refs[name]
+		if pid <= 0 || !ProcessAlive(pid) {
 			continue
 		}
-		names = append(names, name)
-		if !unique[pid] {
-			if err := terminateProcessGroup(pid); err != nil && !isNoProcess(err) {
-				return names, err
-			}
-			unique[pid] = true
+		// Multiple compatibility references can point at the same process.
+		// Keep one deterministic resource name in the actual-result set.
+		if _, exists := pidNames[pid]; exists {
+			continue
 		}
+		pidNames[pid] = name
+		live[pid] = true
 	}
-	sort.Strings(names)
-	if len(unique) == 0 {
-		return names, nil
+	if len(live) == 0 {
+		return []string{}, nil
 	}
-	waitForProcessExit(unique, grace)
-	for pid := range unique {
+	for pid := range live {
+		_ = terminateProcessGroup(pid)
+	}
+	waitForProcessExit(live, grace)
+	for pid := range live {
 		if ProcessAlive(pid) {
 			_ = killProcessGroup(pid)
 		}
 	}
-	waitForProcessExit(unique, 500*time.Millisecond)
-	return names, nil
+	waitForProcessExit(live, 500*time.Millisecond)
+	stopped := make([]string, 0, len(live))
+	remaining := make([]string, 0)
+	for pid, name := range pidNames {
+		if ProcessAlive(pid) {
+			remaining = append(remaining, fmt.Sprintf("%s (pid %d)", name, pid))
+			continue
+		}
+		stopped = append(stopped, name)
+	}
+	sort.Strings(stopped)
+	sort.Strings(remaining)
+	if len(remaining) > 0 {
+		return stopped, fmt.Errorf("processes remained alive after stop: %s", strings.Join(remaining, ", "))
+	}
+	return stopped, nil
 }
 
 func waitForProcessExit(pids map[int]bool, timeout time.Duration) {

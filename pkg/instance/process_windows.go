@@ -3,7 +3,6 @@
 package instance
 
 import (
-	"errors"
 	"os/exec"
 	"strconv"
 
@@ -31,10 +30,6 @@ func terminateProcessGroup(pid int) error {
 
 func killProcessGroup(pid int) error {
 	return terminateProcess(pid)
-}
-
-func isNoProcess(err error) bool {
-	return errors.Is(err, windows.ERROR_INVALID_PARAMETER)
 }
 
 func terminateProcess(pid int) error {

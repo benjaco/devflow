@@ -5,14 +5,23 @@ Last updated: 2026-08-18
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: lifecycle/TUI hardening and its Ubuntu/Windows CI race follow-up are implemented and verified
-- Confidence: under Go 1.26.6 the full default/race suites, focused daemon/engine/process/JSON lifecycle suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, Windows amd64/arm64 test compilation, and Linux/Windows amd64/arm64 builds pass on `darwin/arm64`; the formerly failing real-process cancellation test passes 100 consecutive runs
+- State: lifecycle/TUI hardening round 2 is implemented and verified; one newly observed failing-restart readiness wait is recorded for a follow-up round
+- Confidence: under Go 1.26.6 the full default/race suites, focused daemon/engine/process/JSON lifecycle suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, full Linux/Windows amd64/arm64 test compilation, Linux/Windows amd64/arm64 builds, generated-module-zip CLI tests, and real xterm PTY checks pass on `darwin/arm64`
 
 ## In Progress
 
-- None for the lifecycle/TUI hardening backlog.
+- None for the scoped round-2 implementation.
 
 ## Completed
+
+- Lifecycle/TUI hardening round 2 implementation:
+  - removed every tview application-lock re-entry from before-draw while retaining responsive/focus rendering, added lock-faithful `Application.Run` tests, and passed a real xterm PTY first-frame/help/focus/navigation/quit/restore smoke
+  - detached launch JSON now retains authoritative accepted/supervisor-started/ready/state metadata while preserving legacy fields
+  - stop-all snapshots live resources before cancellation, deduplicates compatibility refs, reports only confirmed services/processes/running database/daemon stops, preserves partial issues, and keeps previews read-only; stopped-service restart no longer reports a phantom stop or previous identity
+  - generic early service exits receive a streamed 12-line bounded fallback with shared secret/PostgreSQL-URL redaction, while recognized failure markers retain priority
+  - published-module CLI tests materialize embedded archive-safe `.txt` fixtures instead of reading the nested example module; the focused tests pass from a module zip in which the nested example `go.mod` is absent
+  - reran the original real-process detached, scoped-stop, stopped-restart, stop-all, and generic-exit scenarios successfully with no fixture process left behind
+  - repeated the P1 TUI matrix in real xterm PTYs at 60x24, 80x24, 100x12, and 100x30: first draw, contextual help/migration footer, task/log focus, live follow/pause/resume, retained-range truncation, stable rows, rerun/retarget preview and cancellation, backend-only ready-gated restart, detached quit guidance, and live starting/ready/failed/blocked/stopped badges passed; the canceled badge passed only the lock-faithful simulation and is recorded as partial manual coverage
 
 - Ubuntu/Windows lifecycle CI race follow-up:
   - made concurrent `process.Handle.Stop` calls join one bounded terminate/kill/reap operation so engine cancellation cannot return while the context watcher is still stopping a service
@@ -812,6 +821,6 @@ Last updated: 2026-08-18
 
 - Publishing maintained multi-architecture PostGIS images remains deferred until the project defines a registry, image provenance/signing, PostgreSQL/PostGIS patch cadence, and release ownership; native arm64 local builds remain the supported fallback
 - Round-1 release flow deliberately has no binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable
-- Fine-grained detached per-service restart is not fully implemented yet
+- A real PTY rerun of a service whose process exits immediately while its custom readiness callback waits only on context remained at `rerun running` for more than eight seconds, despite status already exposing the failed process and bounded excerpt. This was discovered during R2-07 and is deliberately deferred to a focused lifecycle follow-up; restart readiness should race process exit and return the existing bounded failure promptly.
 - The example adapter still uses a deterministic fake-DB path in normal tests; the full real Docker-backed module suite remains opt-in, while the focused PostGIS case is required in CI on native Linux amd64/arm64
 - The `embedded-web-app` adapter is manually validated against a local repo for build, DB prep, detached runtime, health, and shutdown flows. Its shared production container supervision now has real Docker-backed package coverage; a full adapter-level Docker smoke remains manual, as does richer control UX.

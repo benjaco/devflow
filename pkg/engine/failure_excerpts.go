@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -20,11 +21,14 @@ const (
 	failureExcerptContextBefore = 5
 	failureExcerptContextAfter  = 30
 	failureExcerptMaxWindow     = 80
+	failureExcerptFallbackLines = 12
 )
 
 var (
 	goCompilerLocationPattern = regexp.MustCompile(`(?i)\.go:[0-9]+:[0-9]+:`)
 	goTestDiagnosticPattern   = regexp.MustCompile(`(?i)_test\.go:[0-9]+:($|[^0-9])`)
+	postgresDiagnosticPattern = regexp.MustCompile(`(?i)postgres(?:ql)?://[^\s"'<>]+`)
+	passwordDiagnosticPattern = regexp.MustCompile(`(?i)(password|pgpassword)=([^\s&]+)`)
 )
 
 type diagnosticLine struct {
@@ -39,7 +43,7 @@ type pendingFailureExcerpt struct {
 	triggerIncluded bool
 }
 
-func boundedFailureExcerpts(path, node string) []api.FailureExcerpt {
+func boundedFailureExcerpts(path, node string, sanitizers ...func(string) string) []api.FailureExcerpt {
 	result := make([]api.FailureExcerpt, 0)
 	if path == "" || node == "" {
 		return result
@@ -61,7 +65,7 @@ func boundedFailureExcerpts(path, node string) []api.FailureExcerpt {
 		if totalLines >= failureExcerptMaxLines || totalBytes >= failureExcerptMaxBytes {
 			return false
 		}
-		text := line.text
+		text := sanitizeDiagnosticLine(line.text, sanitizers)
 		remaining := failureExcerptMaxBytes - totalBytes
 		if len(text)+1 > remaining {
 			text = truncateDiagnosticText(text, remaining-1)
@@ -162,6 +166,125 @@ func boundedFailureExcerpts(path, node string) []api.FailureExcerpt {
 	}
 	finishActive()
 	return result
+}
+
+// boundedEarlyExitExcerpt keeps only a small ring of meaningful terminal
+// lines. It is used when the preferred marker scanner found nothing, so a
+// generic service exit still explains itself while retaining only bounded
+// terminal state, regardless of the size of the file being streamed.
+func boundedEarlyExitExcerpt(path, node string, sanitizers ...func(string) string) []api.FailureExcerpt {
+	result := make([]api.FailureExcerpt, 0)
+	if path == "" || node == "" {
+		return result
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return result
+	}
+	defer file.Close()
+
+	reader := bufio.NewReaderSize(file, 64*1024)
+	ring := make([]diagnosticLine, 0, failureExcerptFallbackLines)
+	ringBytes := 0
+	lineNumber := 0
+	for {
+		line, readErr := readBoundedDiagnosticLine(reader, failureExcerptMaxLineBytes)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			break
+		}
+		if errors.Is(readErr, io.EOF) && line == "" {
+			break
+		}
+		lineNumber++
+		line = sanitizeDiagnosticLine(line, sanitizers)
+		if strings.TrimSpace(stripTaskLogPrefix(line)) != "" {
+			ring = append(ring, diagnosticLine{number: lineNumber, text: line})
+			ringBytes += len(line) + 1
+			for len(ring) > failureExcerptFallbackLines || ringBytes > failureExcerptMaxBytes {
+				ringBytes -= len(ring[0].text) + 1
+				ring = ring[1:]
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+	}
+	if len(ring) == 0 {
+		return result
+	}
+	lines := make([]string, 0, len(ring))
+	for _, line := range ring {
+		lines = append(lines, line.text)
+	}
+	return append(result, api.FailureExcerpt{
+		Node:      node,
+		LogPath:   path,
+		Reason:    "process-exit-tail",
+		StartLine: ring[0].number,
+		EndLine:   ring[len(ring)-1].number,
+		Lines:     lines,
+	})
+}
+
+func sanitizeDiagnosticLine(line string, sanitizers []func(string) string) string {
+	for _, sanitize := range sanitizers {
+		if sanitize != nil {
+			line = sanitize(line)
+		}
+	}
+	return line
+}
+
+func diagnosticRedactor(inst *api.Instance) func(string) string {
+	secretSet := map[string]bool{}
+	addSecret := func(value string) {
+		value = strings.TrimSpace(value)
+		if len(value) >= 4 {
+			secretSet[value] = true
+		}
+	}
+	if inst != nil {
+		addSecret(inst.DB.Password)
+		addSecret(inst.DB.URL)
+		for key, value := range inst.Env {
+			if diagnosticEnvironmentValueIsSensitive(key, value) {
+				addSecret(value)
+			}
+		}
+	}
+	for _, item := range os.Environ() {
+		key, value, ok := strings.Cut(item, "=")
+		if ok && diagnosticEnvironmentValueIsSensitive(key, value) {
+			addSecret(value)
+		}
+	}
+	secrets := make([]string, 0, len(secretSet))
+	for secret := range secretSet {
+		secrets = append(secrets, secret)
+	}
+	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	return func(line string) string {
+		for _, secret := range secrets {
+			line = strings.ReplaceAll(line, secret, "[REDACTED]")
+		}
+		line = postgresDiagnosticPattern.ReplaceAllString(line, "[REDACTED_POSTGRES_URL]")
+		line = passwordDiagnosticPattern.ReplaceAllString(line, "$1=[REDACTED]")
+		return line
+	}
+}
+
+func diagnosticEnvironmentValueIsSensitive(key, value string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(key))
+	lowerValue := strings.ToLower(strings.TrimSpace(value))
+	if strings.HasPrefix(lowerValue, "postgres://") || strings.HasPrefix(lowerValue, "postgresql://") {
+		return true
+	}
+	for _, marker := range []string{"PASSWORD", "PASSWD", "PGPASS", "SECRET", "TOKEN", "CREDENTIAL", "PRIVATE_KEY", "API_KEY"} {
+		if strings.Contains(upper, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func readBoundedDiagnosticLine(reader *bufio.Reader, maxBytes int) (string, error) {

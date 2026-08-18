@@ -210,6 +210,60 @@ func TestBoundedFailureExcerptsReturnEmptyArrayWithoutMarker(t *testing.T) {
 	}
 }
 
+func TestBoundedEarlyExitExcerptUsesRedactedMeaningfulTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "generic-exit.log")
+	const secret = "fallback-secret"
+	var log strings.Builder
+	for line := 1; line <= 400; line++ {
+		fmt.Fprintf(&log, "stdout: routine output %03d\n", line)
+	}
+	log.WriteString("\n")
+	log.WriteString("stderr: broken_service: synthetic early exit before readiness " + secret + " postgresql://user:db-pass@db.example/app\n")
+	if err := os.WriteFile(path, []byte(log.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	redact := diagnosticRedactor(&api.Instance{Env: map[string]string{"SERVICE_TOKEN": secret}})
+	excerpts := boundedEarlyExitExcerpt(path, "broken_service", redact)
+	if len(excerpts) != 1 || excerpts[0].Reason != "process-exit-tail" {
+		t.Fatalf("unexpected fallback excerpt: %+v", excerpts)
+	}
+	joined := strings.Join(excerpts[0].Lines, "\n")
+	if !strings.Contains(joined, "synthetic early exit before readiness") {
+		t.Fatalf("fallback omitted the useful terminal line: %+v", excerpts)
+	}
+	if strings.Contains(joined, secret) || strings.Contains(joined, "db-pass") || strings.Contains(joined, "postgresql://") {
+		t.Fatalf("fallback leaked a secret or database URL: %s", joined)
+	}
+	assertFailureExcerptBounds(t, excerpts)
+}
+
+func TestBoundedEarlyExitExcerptHandlesHugeLinesAndEmptyLogs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "huge-generic.log")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(strings.Repeat("x", 8*1024*1024) + "\nlast useful line\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	excerpts := boundedEarlyExitExcerpt(path, "huge")
+	if len(excerpts) != 1 || len(excerpts[0].Lines) != 2 || len(excerpts[0].Lines[0]) > failureExcerptMaxLineBytes {
+		t.Fatalf("huge fallback was not bounded: %+v", excerpts)
+	}
+	assertFailureExcerptBounds(t, excerpts)
+
+	empty := filepath.Join(t.TempDir(), "empty.log")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := boundedEarlyExitExcerpt(empty, "empty"); got == nil || len(got) != 0 {
+		t.Fatalf("empty log produced fallback diagnostics: %#v", got)
+	}
+}
+
 func assertFailureExcerptBounds(t *testing.T, excerpts []api.FailureExcerpt) {
 	t.Helper()
 	if len(excerpts) > failureExcerptMaxWindows {

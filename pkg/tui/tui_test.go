@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +20,203 @@ import (
 	"github.com/benjaco/devflow/pkg/instance"
 	"github.com/benjaco/devflow/pkg/project"
 )
+
+type observedSimulationScreen struct {
+	tcell.SimulationScreen
+	frames    chan struct{}
+	finalized atomic.Bool
+	width     int
+	height    int
+}
+
+func newObservedSimulationScreen(width, height int) *observedSimulationScreen {
+	screen := &observedSimulationScreen{
+		SimulationScreen: tcell.NewSimulationScreen("UTF-8"),
+		frames:           make(chan struct{}, 32),
+		width:            width,
+		height:           height,
+	}
+	return screen
+}
+
+func (s *observedSimulationScreen) Init() error {
+	if err := s.SimulationScreen.Init(); err != nil {
+		return err
+	}
+	s.SetSize(s.width, s.height)
+	return nil
+}
+
+func (s *observedSimulationScreen) Show() {
+	s.SimulationScreen.Show()
+	select {
+	case s.frames <- struct{}{}:
+	default:
+	}
+}
+
+func (s *observedSimulationScreen) Fini() {
+	s.finalized.Store(true)
+	s.SimulationScreen.Fini()
+}
+
+func (s *observedSimulationScreen) waitForFrame(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.frames:
+	case <-time.After(time.Second):
+		t.Fatal("TUI did not render a frame before the bounded timeout")
+	}
+}
+
+func (s *observedSimulationScreen) postKey(t *testing.T, key tcell.Key, r rune) {
+	t.Helper()
+	for len(s.frames) > 0 {
+		<-s.frames
+	}
+	if err := s.PostEvent(tcell.NewEventKey(key, r, tcell.ModNone)); err != nil {
+		t.Fatal(err)
+	}
+	s.waitForFrame(t)
+}
+
+func dashboardState[T any](t *testing.T, d *dashboard, read func() T) T {
+	t.Helper()
+	result := make(chan T, 1)
+	d.app.QueueUpdate(func() { result <- read() })
+	select {
+	case value := <-result:
+		return value
+	case <-time.After(time.Second):
+		t.Fatal("TUI event loop did not process the state read")
+		var zero T
+		return zero
+	}
+}
+
+func prepareRunningDashboard(t *testing.T) *dashboard {
+	t.Helper()
+	d := newDashboard(t.TempDir(), "lock-faithful")
+	d.currentNodes = []api.NodeStatus{
+		{Name: "alpha", Kind: "once", State: api.StateDone},
+		{Name: "beta", Kind: "service", State: api.StateRunning, Ready: true},
+	}
+	d.allNodes = append([]api.NodeStatus(nil), d.currentNodes...)
+	d.selectedName = "alpha"
+	d.header.SetText("instance=lock-faithful target=dev mode=watch")
+	d.renderTasks(d.currentNodes)
+	d.reconcileSelection()
+	d.updateLogsFromSnapshot(snapshot{logTitle: "alpha task log", nodes: d.currentNodes, logLines: []string{"ready"}})
+	return d
+}
+
+func TestApplicationRunDrawsHandlesInputAndExitsWithoutDeadlock(t *testing.T) {
+	for _, dimensions := range []struct {
+		width  int
+		height int
+	}{{120, 36}, {100, 30}, {100, 12}, {80, 24}} {
+		t.Run(fmt.Sprintf("%dx%d", dimensions.width, dimensions.height), func(t *testing.T) {
+			d := prepareRunningDashboard(t)
+			screen := newObservedSimulationScreen(dimensions.width, dimensions.height)
+			d.app.SetScreen(screen)
+			done := make(chan error, 1)
+			go func() { done <- runTUIApplication(d.app) }()
+
+			screen.waitForFrame(t)
+			if dimensions.width == 120 && dimensions.height == 36 {
+				if pane := dashboardState(t, d, func() dashboardPane { return d.focusedPane }); pane != dashboardPaneLogs {
+					t.Fatalf("initial focused pane = %v, want logs", pane)
+				}
+				if title := dashboardState(t, d, func() string { return d.logs.GetTitle() }); !strings.Contains(title, "[FOCUSED]") {
+					t.Fatalf("initial log title does not show focus: %q", title)
+				}
+				screen.postKey(t, tcell.KeyTab, 0)
+				if pane := dashboardState(t, d, func() dashboardPane { return d.focusedPane }); pane != dashboardPaneTasks {
+					t.Fatalf("focused pane after Tab = %v, want tasks", pane)
+				}
+				if title := dashboardState(t, d, func() string { return d.tasks.GetTitle() }); !strings.Contains(title, "[FOCUSED]") {
+					t.Fatalf("task title does not show focus after Tab: %q", title)
+				}
+				screen.postKey(t, tcell.KeyDown, 0)
+				if selected := dashboardState(t, d, func() string { return d.selectedName }); selected != "beta" {
+					t.Fatalf("selected task after Down = %q, want beta", selected)
+				}
+				screen.postKey(t, tcell.KeyRune, 'k')
+				if selected := dashboardState(t, d, func() string { return d.selectedName }); selected != "alpha" {
+					t.Fatalf("selected task after k = %q, want alpha", selected)
+				}
+				screen.postKey(t, tcell.KeyRune, 'j')
+				screen.postKey(t, tcell.KeyUp, 0)
+				screen.postKey(t, tcell.KeyTab, 0)
+				if pane := dashboardState(t, d, func() dashboardPane { return d.focusedPane }); pane != dashboardPaneLogs {
+					t.Fatalf("focused pane after second Tab = %v, want logs", pane)
+				}
+
+				screen.postKey(t, tcell.KeyRune, '?')
+				if open := dashboardState(t, d, func() bool { return d.helpOpen }); !open {
+					t.Fatal("contextual help did not open")
+				}
+				if text := simulationScreenText(screen, dimensions.width, dimensions.height); !strings.Contains(text, "Contextual Help") {
+					t.Fatalf("contextual help state was not rendered:\n%s", text)
+				}
+				screen.postKey(t, tcell.KeyEsc, 0)
+				d.app.QueueUpdateDraw(func() {
+					d.openLifecyclePlan(api.LifecyclePlan{RequestedAction: "restart", SelectedTask: "beta"}, func() {})
+				})
+				screen.waitForFrame(t)
+				if open := dashboardState(t, d, func() bool { return d.lifecycleModal }); !open {
+					t.Fatal("lifecycle modal did not render")
+				}
+				if text := simulationScreenText(screen, dimensions.width, dimensions.height); !strings.Contains(text, "Action: restart") {
+					t.Fatalf("lifecycle plan was not rendered:\n%s", text)
+				}
+				screen.postKey(t, tcell.KeyEsc, 0)
+			}
+
+			if err := screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone)); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Application.Run remained blocked after q")
+			}
+			if !screen.finalized.Load() {
+				t.Fatal("simulation screen was not finalized after TUI exit")
+			}
+		})
+	}
+}
+
+func TestApplicationRunRestoresScreenAfterDrawPanic(t *testing.T) {
+	d := prepareRunningDashboard(t)
+	screen := newObservedSimulationScreen(80, 24)
+	d.app.SetScreen(screen)
+	originalBeforeDraw := d.app.GetBeforeDrawFunc()
+	d.app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
+		originalBeforeDraw(screen)
+		panic("synthetic draw panic")
+	})
+	panicked := make(chan any, 1)
+	go func() {
+		defer func() { panicked <- recover() }()
+		_ = runTUIApplication(d.app)
+	}()
+	select {
+	case recovered := <-panicked:
+		if recovered != "synthetic draw panic" {
+			t.Fatalf("recovered panic = %v", recovered)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("draw panic left Application.Run blocked")
+	}
+	if !screen.finalized.Load() {
+		t.Fatal("screen was not finalized after draw panic")
+	}
+}
 
 func TestReadLastLines(t *testing.T) {
 	dir := t.TempDir()

@@ -101,8 +101,17 @@ type dashboard struct {
 	logLineLimit      int
 	helpOpen          bool
 	lifecycleModal    bool
+	focusedPane       dashboardPane
 	compactLevel      int
 }
+
+type dashboardPane uint8
+
+const (
+	dashboardPaneNone dashboardPane = iota
+	dashboardPaneTasks
+	dashboardPaneLogs
+)
 
 const (
 	fallbackRefreshInterval = 2 * time.Second
@@ -145,13 +154,26 @@ func Run(opts Options) error {
 	go d.daemonEventLoop(ctx, client)
 	go d.eventLoop(ctx)
 	go d.fallbackRefreshLoop(ctx)
-	runErr := d.app.Run()
+	runErr := runTUIApplication(d.app)
 	cancel()
 	_ = maybeStopDaemonForTUI(client, stopDaemonOnExit)
 	if !stopDaemonOnExit {
 		writeDetachedQuitMessage(opts.Output, root, id)
 	}
 	return runErr
+}
+
+func runTUIApplication(app *tview.Application) (err error) {
+	// tview restores the screen when its event loop panics. On ordinary return
+	// Stop is already a no-op, while on initialization errors it finalizes any
+	// partially initialized screen before control returns to the shell.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			panic(recovered)
+		}
+		app.Stop()
+	}()
+	return app.Run()
 }
 
 func writeDetachedQuitMessage(output io.Writer, root, instanceID string) {
@@ -217,6 +239,29 @@ func newDashboard(root, instanceID string) *dashboard {
 		SetBorder(true).
 		SetTitle(" Logs ")
 	d.logs.SetScrollable(true)
+	// Focus callbacks are the source of truth for pane styling. The draw hook
+	// runs while tview holds its application lock and therefore must never ask
+	// the application for its current focus.
+	d.tasks.SetFocusFunc(func() {
+		d.focusedPane = dashboardPaneTasks
+		d.updateFocusTreatment()
+	})
+	d.tasks.SetBlurFunc(func() {
+		if d.focusedPane == dashboardPaneTasks {
+			d.focusedPane = dashboardPaneNone
+			d.updateFocusTreatment()
+		}
+	})
+	d.logs.SetFocusFunc(func() {
+		d.focusedPane = dashboardPaneLogs
+		d.updateFocusTreatment()
+	})
+	d.logs.SetBlurFunc(func() {
+		if d.focusedPane == dashboardPaneLogs {
+			d.focusedPane = dashboardPaneNone
+			d.updateFocusTreatment()
+		}
+	})
 
 	d.tasks.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
 		switch action {
@@ -270,22 +315,25 @@ func newDashboard(root, instanceID string) *dashboard {
 	d.app.SetInputCapture(d.handleKeys)
 	d.app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
 		width, height := screen.Size()
-		d.applyResponsiveLayout(width, height)
+		if d.applyResponsiveLayout(width, height) {
+			d.tooSmall.SetRect(0, 0, width, height)
+			d.tooSmall.Draw(screen)
+			return true
+		}
 		return false
 	})
 	d.updateFocusTreatment()
 	return d
 }
 
-func (d *dashboard) applyResponsiveLayout(width, height int) {
-	d.updateFocusTreatment()
+func (d *dashboard) applyResponsiveLayout(width, height int) bool {
 	if width < 40 || height < 10 {
 		d.tooSmall.SetText(fmt.Sprintf("Terminal too small (%dx%d)\nResize to at least 40x10. Press ? for help or q to quit.", width, height))
-		d.pages.ShowPage("too_small")
-		return
+		// Drawing the fallback directly avoids Pages.ShowPage/HidePage here.
+		// Those methods can delegate focus back to Application.SetFocus, which
+		// would re-enter the application lock held around before-draw callbacks.
+		return !d.helpOpen && !d.activeInput && !d.lifecycleModal
 	}
-	d.pages.HidePage("too_small")
-	d.pages.ShowPage("main")
 	nextCompact := 0
 	if width <= 60 || height < 20 {
 		nextCompact = 2
@@ -315,11 +363,11 @@ func (d *dashboard) applyResponsiveLayout(width, height int) {
 		d.layout.ResizeItem(d.logs, 0, 3)
 		d.layout.ResizeItem(d.footer, 5, 0)
 	}
+	return false
 }
 
 func (d *dashboard) updateFocusTreatment() {
-	focus := d.app.GetFocus()
-	if focus == d.tasks {
+	if d.focusedPane == dashboardPaneTasks {
 		d.tasks.SetBorderColor(tcell.ColorLightBlue).SetTitle(" Tasks [FOCUSED] ")
 	} else {
 		d.tasks.SetBorderColor(tcell.ColorGray).SetTitle(" Tasks ")
@@ -327,7 +375,7 @@ func (d *dashboard) updateFocusTreatment() {
 	logTitle := strings.TrimSpace(d.logs.GetTitle())
 	logTitle = strings.TrimSuffix(logTitle, "[FOCUSED]")
 	logTitle = strings.TrimSpace(logTitle)
-	if focus == d.logs {
+	if d.focusedPane == dashboardPaneLogs {
 		d.logs.SetBorderColor(tcell.ColorLightBlue).SetTitle(" " + logTitle + " [FOCUSED] ")
 	} else {
 		d.logs.SetBorderColor(tcell.ColorGray).SetTitle(" " + logTitle + " ")
@@ -414,7 +462,7 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 	if d.activeInput {
 		return event
 	}
-	logsFocused := d.app.GetFocus() == d.logs
+	logsFocused := d.focusedPane == dashboardPaneLogs
 	switch event.Key() {
 	case tcell.KeyEsc:
 		d.app.Stop()

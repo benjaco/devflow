@@ -2318,12 +2318,80 @@ func TestEarlyDebugExitBecomesFailedWithBoundedContext(t *testing.T) {
 	if len(node.FailureExcerpts) == 0 || !strings.Contains(strings.Join(node.FailureExcerpts[0].Lines, "\n"), "broken pipe") {
 		t.Fatalf("bounded failure context was not exposed in status: %+v", node.FailureExcerpts)
 	}
+	if node.FailureExcerpts[0].Reason == "process-exit-tail" {
+		t.Fatalf("generic fallback replaced a recognized error marker: %+v", node.FailureExcerpts)
+	}
 	data, marshalErr := json.Marshal(node)
 	if marshalErr != nil {
 		t.Fatal(marshalErr)
 	}
 	if len(data) > 80*1024 {
 		t.Fatalf("debug failure status was not bounded: %d bytes", len(data))
+	}
+}
+
+type genericEarlyExitProject struct{}
+
+func (genericEarlyExitProject) Name() string { return "generic-early-exit-project" }
+func (genericEarlyExitProject) ConfigureInstance(context.Context, string) (project.InstanceConfig, error) {
+	return project.InstanceConfig{
+		Label: "generic-early-exit",
+		Env:   map[string]string{"SERVICE_TOKEN": "do-not-expose"},
+	}, nil
+}
+func (genericEarlyExitProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"broken_service"}}}
+}
+func (genericEarlyExitProject) Tasks() []project.Task {
+	return []project.Task{{
+		Name:         "broken_service",
+		Kind:         project.KindService,
+		ReadyTimeout: time.Second,
+		Ready: func(ctx context.Context, _ *project.Runtime) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		Run: func(_ context.Context, rt *project.Runtime) error {
+			line := "stderr: broken_service: synthetic early exit before readiness do-not-expose postgresql://user:db-secret@db.example/app\n"
+			if err := os.WriteFile(rt.LogPath, []byte(line), 0o600); err != nil {
+				return err
+			}
+			rt.RegisterServiceHandle(earlyExitServiceHandle{err: errors.New("exit status 17")})
+			return nil
+		},
+	}}
+}
+
+func TestGenericEarlyServiceExitIncludesBoundedRedactedFallback(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	eng, err := New(genericEarlyExitProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, runErr := eng.Run(context.Background(), Request{Target: "dev", Worktree: worktree, Mode: api.ModeDev})
+	if runErr == nil || out == nil {
+		t.Fatalf("expected generic early exit failure: outcome=%+v err=%v", out, runErr)
+	}
+	node := out.Result.Nodes[0]
+	if node.State != api.StateFailed || !strings.Contains(node.LastError, "exit status 17") {
+		t.Fatalf("generic process error missing: %+v", node)
+	}
+	if len(node.FailureExcerpts) != 1 || node.FailureExcerpts[0].Reason != "process-exit-tail" {
+		t.Fatalf("generic fallback missing from status: %+v", node.FailureExcerpts)
+	}
+	encoded, err := json.Marshal(out.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	if !strings.Contains(text, "synthetic early exit before readiness") {
+		t.Fatalf("failure result omitted the useful service output: %s", text)
+	}
+	for _, secret := range []string{"do-not-expose", "db-secret", "postgresql://"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("failure result leaked %q: %s", secret, text)
+		}
 	}
 }
 
@@ -2466,7 +2534,7 @@ func TestLifecycleControllerRestartsAndStopsOnlySelectedService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !restarted.Ready || restarted.Previous.Generation == 0 || restarted.Current.Generation <= restarted.Previous.Generation {
+	if !restarted.Stopped || !restarted.Ready || restarted.Previous.Generation == 0 || restarted.Current.Generation <= restarted.Previous.Generation {
 		t.Fatalf("restart did not report a ready replacement identity: %+v", restarted)
 	}
 	if !firstBackend.stopped.Load() {
@@ -2483,6 +2551,9 @@ func TestLifecycleControllerRestartsAndStopsOnlySelectedService(t *testing.T) {
 	if stopped.Previous.Generation != restarted.Current.Generation {
 		t.Fatalf("stop affected the wrong backend generation: stop=%+v restart=%+v", stopped, restarted)
 	}
+	if !stopped.Stopped {
+		t.Fatalf("live backend stop was not confirmed: %+v", stopped)
+	}
 	if frontend.stopped.Load() {
 		t.Fatal("independent frontend was changed by backend stop")
 	}
@@ -2491,7 +2562,7 @@ func TestLifecycleControllerRestartsAndStopsOnlySelectedService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !restartedFromStopped.Ready || restartedFromStopped.Previous.Generation != 0 || restartedFromStopped.Current.Generation <= restarted.Current.Generation {
+	if restartedFromStopped.Stopped || !restartedFromStopped.Ready || restartedFromStopped.Previous.Generation != 0 || restartedFromStopped.Current.Generation <= restarted.Current.Generation {
 		t.Fatalf("stopped service did not get a new ready generation: %+v", restartedFromStopped)
 	}
 	concurrent := make(chan ServiceLifecycleResult, 2)
