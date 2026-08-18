@@ -100,7 +100,13 @@ type dashboard struct {
 	logFollowing      bool
 	logLineLimit      int
 	helpOpen          bool
-	lifecycleModal    bool
+	lifecycleOverlay  lifecycleOverlayKind
+	overlayReturnPane dashboardPane
+	lifecycleExecute  func()
+	retargetList      *tview.List
+	retargetTargets   []string
+	retargetCurrent   string
+	retargetDetail    *tview.TextView
 	focusedPane       dashboardPane
 	compactLevel      int
 }
@@ -111,6 +117,14 @@ const (
 	dashboardPaneNone dashboardPane = iota
 	dashboardPaneTasks
 	dashboardPaneLogs
+)
+
+type lifecycleOverlayKind uint8
+
+const (
+	lifecycleOverlayNone lifecycleOverlayKind = iota
+	lifecycleOverlayPlan
+	lifecycleOverlayRetarget
 )
 
 const (
@@ -332,7 +346,7 @@ func (d *dashboard) applyResponsiveLayout(width, height int) bool {
 		// Drawing the fallback directly avoids Pages.ShowPage/HidePage here.
 		// Those methods can delegate focus back to Application.SetFocus, which
 		// would re-enter the application lock held around before-draw callbacks.
-		return !d.helpOpen && !d.activeInput && !d.lifecycleModal
+		return !d.helpOpen && !d.activeInput && d.lifecycleOverlay == lifecycleOverlayNone
 	}
 	nextCompact := 0
 	if width <= 60 || height < 20 {
@@ -455,8 +469,7 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 		}
 		return event
 	}
-	if d.lifecycleModal && event.Key() == tcell.KeyEsc {
-		d.closeLifecyclePlan("[yellow]lifecycle action canceled")
+	if d.routeLifecycleOverlayKey(event) {
 		return nil
 	}
 	if d.activeInput {
@@ -597,6 +610,47 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	}
 	return event
+}
+
+func (d *dashboard) routeLifecycleOverlayKey(event *tcell.EventKey) bool {
+	switch d.lifecycleOverlay {
+	case lifecycleOverlayNone:
+		return false
+	case lifecycleOverlayPlan:
+		switch event.Key() {
+		case tcell.KeyEsc:
+			// Capture that the event belongs to the overlay before removing it.
+			// Otherwise the same Escape can observe the dashboard after the modal
+			// disappears and fall through to the global quit command.
+			d.closeLifecycleOverlay("[yellow]lifecycle action canceled")
+			return true
+		}
+	case lifecycleOverlayRetarget:
+		switch event.Key() {
+		case tcell.KeyEsc:
+			d.closeLifecycleOverlay("[yellow]retarget canceled")
+			return true
+		case tcell.KeyEnter:
+			d.selectRetargetTarget()
+			return true
+		case tcell.KeyDown:
+			d.moveRetargetSelection(1)
+			return true
+		case tcell.KeyUp:
+			d.moveRetargetSelection(-1)
+			return true
+		case tcell.KeyRune:
+			switch event.Rune() {
+			case 'j':
+				d.moveRetargetSelection(1)
+				return true
+			case 'k':
+				d.moveRetargetSelection(-1)
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (d *dashboard) openHelp() {
@@ -782,15 +836,30 @@ func (d *dashboard) updateLogs() {
 }
 
 func (d *dashboard) updateLogsFromSnapshot(snap snapshot) {
+	d.updateLogsFromSnapshotWithOptions(snap, logUpdateOptions{})
+}
+
+type logUpdateOptions struct {
+	preserveFollow bool
+	prependedLines int
+}
+
+func (d *dashboard) updateLogsFromSnapshotWithOptions(snap snapshot, opts logUpdateOptions) {
 	d.lastSnapshot = snap
 	nextKey := logViewKey(snap, d.selectedName)
 	prevKey := d.renderedLogKey
-	if nextKey != prevKey {
+	if nextKey != prevKey && !opts.preserveFollow {
 		d.logFollowing = true
 	}
 	row, col := 0, 0
 	if nextKey != "" && nextKey == prevKey {
 		row, col = d.desiredLogScroll(nextKey)
+		if !d.logFollowing && opts.prependedLines > 0 {
+			// The rendered metadata prefix is unchanged when a bounded tail is
+			// expanded, so shifting by the number of prepended log lines keeps
+			// the same logical line at the top of the paused viewport.
+			row += opts.prependedLines
+		}
 	}
 	if snap.logPath != "" {
 		if len(snap.logLines) > 0 {
@@ -891,10 +960,35 @@ func (d *dashboard) loadOlderLogContent() {
 		d.setStatus("[yellow]the complete retained log is already loaded")
 		return
 	}
-	d.logFollowing = false
-	d.logLineLimit = min(1000, d.logLineLimit+200)
-	d.setStatus(fmt.Sprintf("[yellow]loading up to %d retained log lines...", d.logLineLimit))
-	d.updateLogs()
+	previous := d.lastSnapshot
+	previousKey := d.renderedLogKey
+	wasFollowing := d.logFollowing
+	nextLimit := min(1000, d.logLineLimit+200)
+	if nextLimit == d.logLineLimit {
+		d.setStatus(fmt.Sprintf("[yellow]the maximum retained window of %d lines is already loaded", d.logLineLimit))
+		return
+	}
+	d.setStatus(fmt.Sprintf("[yellow]loading up to %d retained log lines...", nextLimit))
+	snap, err := loadSnapshotWithLogLimit(d.root, d.instanceID, d.showSupervisorLog, d.showDatabasePanel, d.selectedName, nextLimit)
+	if err != nil {
+		d.setStatus(fmt.Sprintf("[red]failed to load older log content: %v", err))
+		return
+	}
+	d.logLineLimit = nextLimit
+	d.logFollowing = wasFollowing
+	prepended := 0
+	if previousKey != "" && previousKey == logViewKey(snap, d.selectedName) && previous.logStartLine > snap.logStartLine {
+		prepended = previous.logStartLine - snap.logStartLine
+	}
+	d.updateLogsFromSnapshotWithOptions(snap, logUpdateOptions{
+		preserveFollow: true,
+		prependedLines: prepended,
+	})
+	if prepended > 0 {
+		d.setStatus(fmt.Sprintf("[green]loaded %d older retained log lines", prepended))
+	} else {
+		d.setStatus("[yellow]no additional retained log lines were available")
+	}
 }
 
 func (d *dashboard) rememberLogScrollDelta(delta int) {
@@ -1134,32 +1228,79 @@ func (d *dashboard) triggerRetargetSelected() {
 	}
 	targets := make([]string, 0)
 	for _, target := range p.Targets() {
-		if target.Name != inst.LastRun.Target {
-			targets = append(targets, target.Name)
+		targets = append(targets, target.Name)
+	}
+	alternates := 0
+	for _, target := range targets {
+		if target != inst.LastRun.Target {
+			alternates++
 		}
 	}
-	sort.Strings(targets)
-	if len(targets) == 0 {
+	if alternates == 0 {
 		d.setStatus("[yellow]no alternate target is available")
 		return
 	}
-	buttons := append(append([]string(nil), targets...), "Cancel")
-	modal := tview.NewModal().
-		SetText(fmt.Sprintf("Current target: %s\nChoose a target to preview.", inst.LastRun.Target)).
-		AddButtons(buttons).
-		SetDoneFunc(func(_ int, label string) {
-			if label == "Cancel" || label == "" {
-				d.closeLifecyclePlan("[yellow]retarget canceled")
-				return
-			}
-			d.closeLifecyclePlan("")
-			d.planRetarget(label)
-		})
-	d.lifecycleModal = true
-	d.activeInput = true
-	d.pages.AddPage("lifecycle_plan", modal, true, true)
-	d.app.SetFocus(modal)
-	d.setStatus("[yellow]retarget chooser open; Enter selects, Escape cancels")
+	d.openRetargetChooser(inst.LastRun.Target, targets)
+}
+
+func (d *dashboard) openRetargetChooser(current string, targets []string) {
+	ordered := append([]string(nil), targets...)
+	sort.Strings(ordered)
+	if len(ordered) == 0 {
+		d.setStatus("[yellow]no target is available")
+		return
+	}
+
+	detail := tview.NewTextView().
+		SetDynamicColors(false).
+		SetWrap(true).
+		SetWordWrap(false)
+	list := tview.NewList().
+		ShowSecondaryText(false).
+		SetWrapAround(false)
+	initialIndex := 0
+	foundAlternative := false
+	for index, target := range ordered {
+		label := target
+		if target == current {
+			label += "  (current)"
+		} else if !foundAlternative {
+			// Match the former chooser's safe default: Enter should preview an
+			// actual retarget, while the active target remains visible and marked.
+			initialIndex = index
+			foundAlternative = true
+		}
+		list.AddItem(label, "", 0, nil)
+	}
+	setDetail := func(index int) {
+		if index < 0 || index >= len(ordered) {
+			return
+		}
+		marker := ""
+		if ordered[index] == current {
+			marker = " (current)"
+		}
+		detail.SetText(fmt.Sprintf("Selected target%s:\n%s", marker, ordered[index]))
+	}
+	list.SetChangedFunc(func(index int, _ string, _ string, _ rune) { setDetail(index) })
+	list.SetSelectedFunc(func(_ int, _ string, _ string, _ rune) { d.selectRetargetTarget() })
+	list.SetDoneFunc(func() { d.closeLifecycleOverlay("[yellow]retarget canceled") })
+	list.SetCurrentItem(initialIndex)
+	setDetail(initialIndex)
+
+	chooser := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(detail, 4, 0, false).
+		AddItem(list, 0, 1, true)
+	chooser.SetBorder(true).SetTitle(" Retarget ")
+	height := min(24, max(10, len(ordered)+7))
+
+	d.retargetList = list
+	d.retargetTargets = ordered
+	d.retargetCurrent = current
+	d.retargetDetail = detail
+	d.openLifecycleOverlay(lifecycleOverlayRetarget, wideCentered(chooser, height))
+	d.app.SetFocus(list)
+	d.setStatus("[yellow]retarget chooser open; arrows or j/k select, Enter previews, Escape cancels")
 }
 
 func (d *dashboard) planRetarget(selected string) {
@@ -1210,24 +1351,86 @@ func (d *dashboard) openLifecyclePlan(plan api.LifecyclePlan, execute func()) {
 		AddButtons([]string{"Execute", "Cancel"}).
 		SetDoneFunc(func(_ int, label string) {
 			if label != "Execute" {
-				d.closeLifecyclePlan("[yellow]lifecycle action canceled")
+				d.closeLifecycleOverlay("[yellow]lifecycle action canceled")
 				return
 			}
-			d.closeLifecyclePlan("")
-			execute()
+			d.confirmLifecyclePlan()
 		})
-	d.lifecycleModal = true
-	d.activeInput = true
-	d.pages.AddPage("lifecycle_plan", modal, true, true)
+	d.lifecycleExecute = execute
+	d.openLifecycleOverlay(lifecycleOverlayPlan, modal)
 	d.app.SetFocus(modal)
 	d.setStatus("[yellow]lifecycle plan ready; Enter executes, Escape cancels")
 }
 
-func (d *dashboard) closeLifecyclePlan(status string) {
-	d.lifecycleModal = false
+func (d *dashboard) openLifecycleOverlay(kind lifecycleOverlayKind, primitive tview.Primitive) {
+	returnPane := d.focusedPane
+	if returnPane == dashboardPaneNone {
+		returnPane = dashboardPaneLogs
+	}
+	d.overlayReturnPane = returnPane
+	d.lifecycleOverlay = kind
+	d.activeInput = true
+	d.pages.AddPage("lifecycle_overlay", primitive, true, true)
+}
+
+func (d *dashboard) confirmLifecyclePlan() {
+	if d.lifecycleOverlay != lifecycleOverlayPlan {
+		return
+	}
+	execute := d.lifecycleExecute
+	// Clear the callback before invoking it. Keyboard input is captured at the
+	// application boundary and modal mouse callbacks share this path, so even a
+	// repeated event cannot execute a lifecycle action twice.
+	d.lifecycleExecute = nil
+	d.closeLifecycleOverlay("")
+	if execute != nil {
+		execute()
+	}
+}
+
+func (d *dashboard) moveRetargetSelection(delta int) {
+	if d.lifecycleOverlay != lifecycleOverlayRetarget || d.retargetList == nil || len(d.retargetTargets) == 0 {
+		return
+	}
+	index := d.retargetList.GetCurrentItem()
+	index = max(0, min(len(d.retargetTargets)-1, index+delta))
+	d.retargetList.SetCurrentItem(index)
+}
+
+func (d *dashboard) selectRetargetTarget() {
+	if d.lifecycleOverlay != lifecycleOverlayRetarget || d.retargetList == nil {
+		return
+	}
+	index := d.retargetList.GetCurrentItem()
+	if index < 0 || index >= len(d.retargetTargets) {
+		return
+	}
+	selected := d.retargetTargets[index]
+	current := d.retargetCurrent
+	d.closeLifecycleOverlay("")
+	if selected == current {
+		d.setStatus(fmt.Sprintf("[yellow]target %s is already active", selected))
+		return
+	}
+	d.planRetarget(selected)
+}
+
+func (d *dashboard) closeLifecycleOverlay(status string) {
+	returnPane := d.overlayReturnPane
+	d.lifecycleOverlay = lifecycleOverlayNone
+	d.overlayReturnPane = dashboardPaneNone
+	d.lifecycleExecute = nil
+	d.retargetList = nil
+	d.retargetTargets = nil
+	d.retargetCurrent = ""
+	d.retargetDetail = nil
 	d.activeInput = false
-	d.pages.RemovePage("lifecycle_plan")
-	d.app.SetFocus(d.tasks)
+	d.pages.RemovePage("lifecycle_overlay")
+	if returnPane == dashboardPaneTasks {
+		d.app.SetFocus(d.tasks)
+	} else {
+		d.app.SetFocus(d.logs)
+	}
 	d.updateFocusTreatment()
 	if status != "" {
 		d.setStatus(status)
@@ -1571,6 +1774,18 @@ func centered(p tview.Primitive, width, height int) tview.Primitive {
 			AddItem(p, height, 1, true).
 			AddItem(nil, 0, 1, false), width, 1, true).
 		AddItem(nil, 0, 1, false)
+}
+
+func wideCentered(p tview.Primitive, height int) tview.Primitive {
+	// One-cell horizontal margins let the retarget list use the available
+	// terminal width, while the bounded height keeps long target sets scrollable.
+	return tview.NewFlex().
+		AddItem(nil, 1, 0, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 0, 1, false).
+			AddItem(p, height, 0, true).
+			AddItem(nil, 0, 1, false), 0, 1, true).
+		AddItem(nil, 1, 0, false)
 }
 
 func renderLogPanel(snap snapshot, selectedName string) []string {

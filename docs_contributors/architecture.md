@@ -699,5 +699,8 @@ The first usable TUI slice is now implemented as a local terminal console connec
 - stable terminal rendering via a real TUI library instead of manual ANSI frame painting
 - invalidate-and-rerun from the selected task by sending a daemon action that invalidates the selected downstream cacheable once-task slice and relaunches the current target
 - prompt popups for interactive confirm and text questions emitted by daemon-owned work
+- lifecycle overlays own their input until dismissal: Escape is consumed before global quit handling, Enter executes a confirmed plan once, and closing an overlay restores the prior dashboard pane without changing task selection or viewport
+- retargeting uses a stable, vertically scrollable target list that marks the active target and shows the complete selected name before opening the existing impact preview
+- log following is explicit user state; loading older retained lines preserves PAUSED/FOLLOWING and shifts a paused viewport by the number of prepended lines so the same logical content remains visible
 
 The tview before-draw hook may resize or draw primitives, but must not call application methods such as `GetFocus`, `SetFocus`, or page visibility helpers that reacquire tview's application lock. DevFlow tracks task/log focus from focus callbacks and input handling; too-small rendering is performed directly on the supplied screen. This preserves focus styling without making the first frame re-enter a non-reentrant application mutex.

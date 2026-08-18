@@ -5,14 +5,20 @@ Last updated: 2026-08-18
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: lifecycle/TUI hardening round 2 is implemented and verified; one newly observed failing-restart readiness wait is recorded for a follow-up round
-- Confidence: under Go 1.26.6 the full default/race suites, focused daemon/engine/process/JSON lifecycle suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, full Linux/Windows amd64/arm64 test compilation, Linux/Windows amd64/arm64 builds, generated-module-zip CLI tests, and real xterm PTY checks pass on `darwin/arm64`
+- State: essential TUI interaction round is implemented and verified; the previously recorded failing-restart readiness wait remains a separate follow-up
+- Confidence: under Go 1.26.6 the current essential TUI changes pass the focused event-path regressions 30 consecutive times, focused race coverage, the full default suite, vet, Staticcheck v0.7.0, clean module metadata/format/diff checks, and `pkg/tui` test compilation for Linux and Windows amd64/arm64; the broader lifecycle/TUI verification baseline remains green on `darwin/arm64`
 
 ## In Progress
 
-- None for the scoped round-2 implementation.
+- None for the scoped essential TUI round.
 
 ## Completed
+
+- Essential TUI interaction round:
+  - replaced the lifecycle-modal boolean with explicit overlay ownership; Escape is consumed before global quit handling, prior pane/selection/viewport state is restored, and lifecycle execution callbacks are one-shot
+  - kept PAUSED/FOLLOWING as explicit user state while loading retained history and compensated paused scroll offsets for prepended lines without changing existing explicit f/End/G resume behavior
+  - replaced horizontal retarget buttons with a stable scrollable vertical list, active-target marker, full selected-name detail, arrows/j/k navigation, and the existing impact-preview handoff
+  - added lock-faithful `Application.Run` regressions for rerun/retarget cancellation, post-cancel navigation, one-shot Enter, vertical-list reachability/rendering, paused history loading, background refresh, and explicit resume keys
 
 - Lifecycle/TUI hardening round 2 implementation:
   - removed every tview application-lock re-entry from before-draw while retaining responsive/focus rendering, added lock-faithful `Application.Run` tests, and passed a real xterm PTY first-frame/help/focus/navigation/quit/restore smoke

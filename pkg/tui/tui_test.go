@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -164,7 +166,7 @@ func TestApplicationRunDrawsHandlesInputAndExitsWithoutDeadlock(t *testing.T) {
 					d.openLifecyclePlan(api.LifecyclePlan{RequestedAction: "restart", SelectedTask: "beta"}, func() {})
 				})
 				screen.waitForFrame(t)
-				if open := dashboardState(t, d, func() bool { return d.lifecycleModal }); !open {
+				if open := dashboardState(t, d, func() bool { return d.lifecycleOverlay != lifecycleOverlayNone }); !open {
 					t.Fatal("lifecycle modal did not render")
 				}
 				if text := simulationScreenText(screen, dimensions.width, dimensions.height); !strings.Contains(text, "Action: restart") {
@@ -188,6 +190,131 @@ func TestApplicationRunDrawsHandlesInputAndExitsWithoutDeadlock(t *testing.T) {
 				t.Fatal("simulation screen was not finalized after TUI exit")
 			}
 		})
+	}
+}
+
+func TestApplicationLifecyclePreviewConsumesEscapeAndRestoresDashboard(t *testing.T) {
+	for _, action := range []string{"rerun", "retarget"} {
+		t.Run(action, func(t *testing.T) {
+			d := prepareRunningDashboard(t)
+			screen := newObservedSimulationScreen(100, 30)
+			d.app.SetScreen(screen)
+			t.Cleanup(d.app.Stop)
+			done := make(chan error, 1)
+			go func() { done <- runTUIApplication(d.app) }()
+
+			screen.waitForFrame(t)
+			d.app.QueueUpdateDraw(func() {
+				d.currentNodes = make([]api.NodeStatus, 24)
+				for index := range d.currentNodes {
+					d.currentNodes[index] = api.NodeStatus{Name: fmt.Sprintf("task-%02d", index), Kind: "once", State: api.StateDone}
+				}
+				d.allNodes = append([]api.NodeStatus(nil), d.currentNodes...)
+				d.renderTasks(d.currentNodes)
+				d.selectedName = "task-14"
+				d.tasks.Select(15, 0)
+				d.tasks.SetOffset(9, 0)
+				d.app.SetFocus(d.logs)
+			})
+			screen.waitForFrame(t)
+			beforeViewport := dashboardState(t, d, func() int {
+				row, _ := d.tasks.GetOffset()
+				return row
+			})
+			d.app.QueueUpdateDraw(func() {
+				d.openLifecyclePlan(api.LifecyclePlan{RequestedAction: action, SelectedTask: "task-14"}, func() {
+					t.Error("canceled lifecycle preview executed its action")
+				})
+			})
+			screen.waitForFrame(t)
+
+			screen.postKey(t, tcell.KeyEsc, 0)
+			select {
+			case err := <-done:
+				t.Fatalf("Escape exited the TUI instead of closing the %s preview: %v", action, err)
+			default:
+			}
+			state := dashboardState(t, d, func() struct {
+				modal       bool
+				pane        dashboardPane
+				selected    string
+				viewportRow int
+				status      string
+			} {
+				row, _ := d.tasks.GetOffset()
+				return struct {
+					modal       bool
+					pane        dashboardPane
+					selected    string
+					viewportRow int
+					status      string
+				}{d.lifecycleOverlay != lifecycleOverlayNone, d.focusedPane, d.selectedName, row, d.statusMessage}
+			})
+			if beforeViewport == 0 {
+				t.Fatal("test did not establish a scrolled task viewport")
+			}
+			if state.modal || state.pane != dashboardPaneLogs || state.selected != "task-14" || state.viewportRow != beforeViewport || !strings.Contains(state.status, "canceled") {
+				t.Fatalf("dashboard state changed after cancel: %+v", state)
+			}
+
+			// The next dashboard event proves Escape was consumed and normal event
+			// routing resumes instead of leaving a hidden modal or stopped app.
+			screen.postKey(t, tcell.KeyTab, 0)
+			screen.postKey(t, tcell.KeyDown, 0)
+			if selected := dashboardState(t, d, func() string { return d.selectedName }); selected != "task-15" {
+				t.Fatalf("dashboard navigation did not resume after cancel: selected=%q", selected)
+			}
+
+			if err := screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone)); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("TUI did not exit after the subsequent dashboard q")
+			}
+		})
+	}
+}
+
+func TestApplicationLifecyclePreviewEnterExecutesExactlyOnce(t *testing.T) {
+	d := prepareRunningDashboard(t)
+	screen := newObservedSimulationScreen(100, 30)
+	d.app.SetScreen(screen)
+	t.Cleanup(d.app.Stop)
+	done := make(chan error, 1)
+	go func() { done <- runTUIApplication(d.app) }()
+	screen.waitForFrame(t)
+
+	var executions atomic.Int32
+	d.app.QueueUpdateDraw(func() {
+		d.openLifecyclePlan(api.LifecyclePlan{RequestedAction: "rerun", SelectedTask: "alpha"}, func() {
+			executions.Add(1)
+		})
+	})
+	screen.waitForFrame(t)
+	screen.postKey(t, tcell.KeyEnter, 0)
+	if got := executions.Load(); got != 1 {
+		t.Fatalf("lifecycle Enter executions = %d, want 1", got)
+	}
+	screen.postKey(t, tcell.KeyDown, 0)
+	if got := executions.Load(); got != 1 {
+		t.Fatalf("dashboard event repeated lifecycle execution: %d", got)
+	}
+
+	if err := screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TUI did not exit after q")
 	}
 }
 
@@ -671,8 +798,177 @@ func TestLifecyclePlanEscapeCancelsWithoutExecuting(t *testing.T) {
 		ServicesToRestart:  []string{"backend_debug"},
 	}, func() { executed = true })
 	d.handleKeys(tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone))
-	if executed || d.lifecycleModal || !strings.Contains(d.statusMessage, "canceled") {
-		t.Fatalf("Escape changed execution state: executed=%v modal=%v status=%q", executed, d.lifecycleModal, d.statusMessage)
+	if executed || d.lifecycleOverlay != lifecycleOverlayNone || !strings.Contains(d.statusMessage, "canceled") {
+		t.Fatalf("Escape changed execution state: executed=%v overlay=%v status=%q", executed, d.lifecycleOverlay, d.statusMessage)
+	}
+}
+
+func TestApplicationRetargetChooserIsVerticalScrollableAndCancelable(t *testing.T) {
+	d := prepareRunningDashboard(t)
+	screen := newObservedSimulationScreen(80, 24)
+	d.app.SetScreen(screen)
+	t.Cleanup(d.app.Stop)
+	done := make(chan error, 1)
+	go func() { done <- runTUIApplication(d.app) }()
+	screen.waitForFrame(t)
+
+	targets := []string{
+		"unit", "backend", "dev", "ci", "deploy", "docs", "e2e", "frontend", "lint", "migration",
+		"production_readiness_with_a_complete_selected_name", "release", "smoke", "staticcheck", "test",
+	}
+	d.app.QueueUpdateDraw(func() {
+		d.app.SetFocus(d.logs)
+		d.openRetargetChooser("dev", targets)
+	})
+	screen.waitForFrame(t)
+
+	state := dashboardState(t, d, func() struct {
+		ordered     []string
+		selected    string
+		currentItem string
+		detail      string
+	} {
+		index := d.retargetList.GetCurrentItem()
+		currentIndex := slices.Index(d.retargetTargets, "dev")
+		currentItem, _ := d.retargetList.GetItemText(currentIndex)
+		return struct {
+			ordered     []string
+			selected    string
+			currentItem string
+			detail      string
+		}{append([]string(nil), d.retargetTargets...), d.retargetTargets[index], currentItem, d.retargetDetail.GetText(false)}
+	})
+	wantOrder := append([]string(nil), targets...)
+	sort.Strings(wantOrder)
+	if !slices.Equal(state.ordered, wantOrder) {
+		t.Fatalf("retarget ordering = %v, want %v", state.ordered, wantOrder)
+	}
+	if state.selected == "dev" || !strings.Contains(state.currentItem, "dev") || !strings.Contains(state.currentItem, "current") || !strings.Contains(state.detail, state.selected) {
+		t.Fatalf("retarget initial/current state is unclear: selected=%q current=%q detail=%q", state.selected, state.currentItem, state.detail)
+	}
+	const longTarget = "production_readiness_with_a_complete_selected_name"
+	d.app.QueueUpdateDraw(func() { d.retargetList.SetCurrentItem(slices.Index(wantOrder, longTarget)) })
+	screen.waitForFrame(t)
+	if detail := dashboardState(t, d, func() string { return d.retargetDetail.GetText(false) }); !strings.Contains(detail, longTarget) {
+		t.Fatalf("selected long target was not retained in full: %q", detail)
+	}
+	if rendered := simulationScreenText(screen, 80, 24); !strings.Contains(rendered, longTarget) {
+		t.Fatalf("selected long target was clipped from the rendered chooser:\n%s", rendered)
+	}
+
+	// Home plus actual Down/j/k events prove the list scroll path can reach
+	// every stable entry without falling through to dashboard navigation.
+	screen.postKey(t, tcell.KeyHome, 0)
+	visited := map[string]bool{}
+	for index := range wantOrder {
+		selected := dashboardState(t, d, func() string {
+			return d.retargetTargets[d.retargetList.GetCurrentItem()]
+		})
+		visited[selected] = true
+		if index+1 < len(wantOrder) {
+			screen.postKey(t, tcell.KeyDown, 0)
+		}
+	}
+	if len(visited) != len(wantOrder) {
+		t.Fatalf("reachable retarget choices = %d, want %d: %v", len(visited), len(wantOrder), visited)
+	}
+	screen.postKey(t, tcell.KeyRune, 'k')
+	screen.postKey(t, tcell.KeyRune, 'j')
+	selected := dashboardState(t, d, func() string {
+		return d.retargetTargets[d.retargetList.GetCurrentItem()]
+	})
+	detail := dashboardState(t, d, func() string { return d.retargetDetail.GetText(false) })
+	if !strings.Contains(detail, selected) {
+		t.Fatalf("selected target is clipped from chooser detail: selected=%q detail=%q", selected, detail)
+	}
+
+	screen.postKey(t, tcell.KeyEsc, 0)
+	select {
+	case err := <-done:
+		t.Fatalf("retarget Escape exited the TUI: %v", err)
+	default:
+	}
+	if pane := dashboardState(t, d, func() dashboardPane { return d.focusedPane }); pane != dashboardPaneLogs {
+		t.Fatalf("retarget cancel restored pane %v, want logs", pane)
+	}
+	screen.postKey(t, tcell.KeyTab, 0)
+	screen.postKey(t, tcell.KeyDown, 0)
+	if selected := dashboardState(t, d, func() string { return d.selectedName }); selected != "beta" {
+		t.Fatalf("dashboard navigation did not resume after chooser cancel: %q", selected)
+	}
+
+	if err := screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TUI did not exit after q")
+	}
+}
+
+func TestApplicationRetargetChooserEnterOpensImpactPreviewOnce(t *testing.T) {
+	previousCall := callDaemonForTUI
+	var previews atomic.Int32
+	callDaemonForTUI = func(_ context.Context, _ string, req daemon.Request, _ func(api.Event)) (daemon.Response, error) {
+		previews.Add(1)
+		if req.Action != daemon.ActionRetarget || req.Target != "next" || !req.Preview {
+			t.Errorf("unexpected retarget preview request: %+v", req)
+		}
+		return daemon.Response{OK: true, Lifecycle: &api.LifecycleResult{Plan: api.LifecyclePlan{
+			RequestedAction:   "retarget",
+			SelectedTarget:    "next",
+			TasksToExecute:    []string{"backend"},
+			ServicesToRestart: []string{"backend"},
+		}}}, nil
+	}
+	t.Cleanup(func() { callDaemonForTUI = previousCall })
+
+	d := prepareRunningDashboard(t)
+	screen := newObservedSimulationScreen(100, 30)
+	d.app.SetScreen(screen)
+	t.Cleanup(d.app.Stop)
+	done := make(chan error, 1)
+	go func() { done <- runTUIApplication(d.app) }()
+	screen.waitForFrame(t)
+	d.app.QueueUpdateDraw(func() { d.openRetargetChooser("current", []string{"next", "current"}) })
+	screen.waitForFrame(t)
+	screen.postKey(t, tcell.KeyDown, 0)
+	screen.postKey(t, tcell.KeyEnter, 0)
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		if dashboardState(t, d, func() lifecycleOverlayKind { return d.lifecycleOverlay }) == lifecycleOverlayPlan {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("retarget Enter did not open the lifecycle impact preview")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := previews.Load(); got != 1 {
+		t.Fatalf("retarget preview requests = %d, want 1", got)
+	}
+	screen.postKey(t, tcell.KeyEsc, 0)
+	select {
+	case err := <-done:
+		t.Fatalf("impact-preview Escape exited the TUI: %v", err)
+	default:
+	}
+
+	if err := screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TUI did not exit after q")
 	}
 }
 
@@ -709,6 +1005,118 @@ func TestLiveLogFollowingPauseResumeAndTaskSwitch(t *testing.T) {
 	})
 	if !d.logFollowing {
 		t.Fatal("switching task logs did not reset to follow mode")
+	}
+}
+
+func TestLoadOlderLogContentPreservesPausedLogicalPosition(t *testing.T) {
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "older-log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := instance.LogPath(worktree, inst.ID, "backend")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var content strings.Builder
+	for line := 1; line <= 500; line++ {
+		_, _ = fmt.Fprintf(&content, "stdout: logical line %03d\n", line)
+	}
+	if err := os.WriteFile(logPath, []byte(content.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.SaveStatus(worktree, inst.ID, "dev", api.ModeWatch, map[string]api.NodeStatus{
+		"backend": {Name: "backend", Kind: string(project.KindService), State: api.StateRunning, LogPath: logPath},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := newDashboard(worktree, inst.ID)
+	d.selectedName = "backend"
+	d.updateLogs()
+	if d.lastSnapshot.logStartLine != 301 || d.lastSnapshot.logEndLine != 500 || !d.lastSnapshot.logTruncated {
+		t.Fatalf("unexpected initial retained range: %d-%d truncated=%v", d.lastSnapshot.logStartLine, d.lastSnapshot.logEndLine, d.lastSnapshot.logTruncated)
+	}
+	d.logFollowing = false
+	d.logs.ScrollTo(25, 0)
+	d.rememberLogScroll(d.renderedLogKey, 25, 0)
+	d.loadOlderLogContent()
+
+	row, col := d.desiredLogScroll(d.renderedLogKey)
+	if d.logFollowing || row != 225 || col != 0 {
+		t.Fatalf("older history changed paused logical position: following=%v row=%d col=%d", d.logFollowing, row, col)
+	}
+	if d.lastSnapshot.logStartLine != 101 || d.lastSnapshot.logEndLine != 500 {
+		t.Fatalf("unexpected expanded retained range: %d-%d", d.lastSnapshot.logStartLine, d.lastSnapshot.logEndLine)
+	}
+
+	// Appending live output while paused must leave the same logical content
+	// under the viewport rather than snapping back to the tail.
+	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("stdout: logical line 501\n"); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d.updateLogs()
+	row, col = d.desiredLogScroll(d.renderedLogKey)
+	if d.logFollowing || row != 225 || col != 0 {
+		t.Fatalf("background refresh changed paused viewport: following=%v row=%d col=%d", d.logFollowing, row, col)
+	}
+}
+
+func TestLoadOlderLogContentWithoutHistoryPreservesFollowPreference(t *testing.T) {
+	d := newDashboard(t.TempDir(), "complete-log")
+	d.selectedName = "backend"
+	d.updateLogsFromSnapshot(snapshot{
+		logTitle:     "backend log",
+		logPath:      filepath.Join(t.TempDir(), "backend.log"),
+		logLines:     []string{"one", "two", "three"},
+		logStartLine: 1,
+		logEndLine:   3,
+		nodes:        []api.NodeStatus{{Name: "backend", State: api.StateRunning}},
+	})
+	d.logFollowing = false
+	d.logs.ScrollTo(1, 0)
+	d.rememberLogScroll(d.renderedLogKey, 1, 0)
+	d.loadOlderLogContent()
+	row, col := d.desiredLogScroll(d.renderedLogKey)
+	if d.logFollowing || row != 1 || col != 0 || d.logLineLimit != 200 {
+		t.Fatalf("no-history load changed paused state: following=%v row=%d col=%d limit=%d", d.logFollowing, row, col, d.logLineLimit)
+	}
+}
+
+func TestExplicitLogFollowKeysResumeAtTail(t *testing.T) {
+	for name, event := range map[string]*tcell.EventKey{
+		"f":   tcell.NewEventKey(tcell.KeyRune, 'f', tcell.ModNone),
+		"End": tcell.NewEventKey(tcell.KeyEnd, 0, tcell.ModNone),
+		"G":   tcell.NewEventKey(tcell.KeyRune, 'G', tcell.ModNone),
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := newDashboard(t.TempDir(), "follow-key")
+			d.selectedName = "backend"
+			d.updateLogsFromSnapshot(snapshot{
+				logTitle: "backend log",
+				logPath:  filepath.Join(t.TempDir(), "backend.log"),
+				logLines: []string{"one", "two", "three"},
+				nodes:    []api.NodeStatus{{Name: "backend", State: api.StateRunning}},
+			})
+			d.focusedPane = dashboardPaneLogs
+			d.logFollowing = false
+			d.logs.ScrollToBeginning()
+			d.rememberLogScroll(d.renderedLogKey, 0, 0)
+			if got := d.handleKeys(event); got != nil {
+				t.Fatalf("follow key was not consumed: %#v", got)
+			}
+			if !d.logFollowing || !strings.Contains(d.logs.GetTitle(), "FOLLOWING") {
+				t.Fatalf("%s did not resume live following: following=%v title=%q", name, d.logFollowing, d.logs.GetTitle())
+			}
+		})
 	}
 }
 
