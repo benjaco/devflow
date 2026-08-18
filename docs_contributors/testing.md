@@ -24,14 +24,14 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - cache-key override stability and correctness
 - instance identity and env persistence
 - port allocation and reuse
-- atomic JSON/runtime-env replacement under repeated concurrent writes, failed-marshalling preservation, owner-only Unix permissions, bounded Windows destination-sharing retry, cross-platform file-lock serialization, and non-blocking concurrent event fanout
+- atomic JSON/runtime-env replacement under repeated concurrent writes, failed-marshalling preservation, owner-only Unix permissions, bounded Windows destination-sharing retry for both writers and concurrent JSON readers, cross-platform file-lock serialization, and non-blocking concurrent event fanout
 
 ## Integration Tests
 
 - subprocess stdout/stderr capture, 256 KiB output lines, propagated scanner errors for lines above the bounded 4 MiB maximum, and pipe draining so oversized lines cannot stall child exit
 - per-task log truncation at task-attempt start so custom adapter progress and subprocess output both reflect the current run attempt, with owner-only Unix log permissions
 - interactive prompt detection and answer forwarding with a real prompt CLI fixture, including alternate/repeated prompt patterns
-- service lifecycle management for both process-backed and PID-less managed-resource handles, including CI shutdown and flush health
+- service lifecycle management for both process-backed and PID-less managed-resource handles, including concurrent stop callers joining completed process shutdown, CI shutdown, and flush health
 - daemon/engine lifecycle-controller coverage with two independent services: selected restart changes PID/generation only after readiness, selected stop leaves the other identity alive, stopped services restart, previews do not mutate, repeated commands serialize, and cancellation removes every process tree on Unix and Windows
 - detached watch debug failures, including a post-readiness broken-pipe exit that becomes terminal failed status with bounded excerpts instead of remaining pending/running
 - CI-mode service targets act as readiness probes and stop services before returning

@@ -5,14 +5,19 @@ Last updated: 2026-08-18
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: daemon lifecycle correctness and core TUI interaction hardening are implemented and verified
-- Confidence: under Go 1.26.6 the full default/race suites, focused daemon/engine/TUI/CLI lifecycle suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, Windows amd64/arm64 test compilation, and Linux/Windows amd64/arm64 builds pass on `darwin/arm64`; deterministic real-process tests cover replacement identity, independent-service preservation, and cancellation cleanup
+- State: lifecycle/TUI hardening and its Ubuntu/Windows CI race follow-up are implemented and verified
+- Confidence: under Go 1.26.6 the full default/race suites, focused daemon/engine/process/JSON lifecycle suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, Windows amd64/arm64 test compilation, and Linux/Windows amd64/arm64 builds pass on `darwin/arm64`; the formerly failing real-process cancellation test passes 100 consecutive runs
 
 ## In Progress
 
 - None for the lifecycle/TUI hardening backlog.
 
 ## Completed
+
+- Ubuntu/Windows lifecycle CI race follow-up:
+  - made concurrent `process.Handle.Stop` calls join one bounded terminate/kill/reap operation so engine cancellation cannot return while the context watcher is still stopping a service
+  - added bounded Windows JSON read retry for transient access, sharing, and lock violations during atomic state replacement, with a native Windows locked-file regression
+  - passed the reported Ubuntu lifecycle test 100 consecutive times, focused and full default/race suites, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean formatting/tidy/diff checks, full Windows amd64/arm64 test compilation, and Linux/Windows amd64/arm64 builds
 
 - Daemon lifecycle and core TUI hardening:
   - explicit service restart/stop now runs through the owning engine, uses PID plus monotonic generation identity, waits for replacement readiness, preserves independent services, and keeps task-scoped stop from canceling the active run

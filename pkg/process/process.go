@@ -68,6 +68,7 @@ type Handle struct {
 	mu    sync.Mutex
 	err   error
 
+	stopOnce      sync.Once
 	stopRequested bool
 }
 
@@ -229,29 +230,44 @@ func (h *Handle) Stop() error {
 	if h == nil || h.cmd == nil {
 		return nil
 	}
-	h.mu.Lock()
-	if h.stopRequested {
+	// The process context watcher and the engine cleanup path can call Stop at
+	// the same time. sync.Once blocks later callers until the first caller has
+	// completed the bounded terminate/kill wait, so engine shutdown cannot
+	// report completion while another goroutine is still reaping the service.
+	h.stopOnce.Do(func() {
+		h.mu.Lock()
+		h.stopRequested = true
 		h.mu.Unlock()
-		return nil
-	}
-	h.stopRequested = true
-	h.mu.Unlock()
-	if err := terminateCmd(h.cmd); err != nil {
+		if err := terminateCmd(h.cmd); err != nil {
+			_ = killCmd(h.cmd)
+			h.waitForStop(500 * time.Millisecond)
+			return
+		}
+		if h.waitForStop(h.grace) {
+			return
+		}
 		_ = killCmd(h.cmd)
-		return nil
+		h.waitForStop(500 * time.Millisecond)
+	})
+	return nil
+}
+
+func (h *Handle) waitForStop(timeout time.Duration) bool {
+	if timeout <= 0 {
+		select {
+		case <-h.done:
+			return true
+		default:
+			return false
+		}
 	}
-	timer := time.NewTimer(h.grace)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-h.done:
-		return nil
+		return true
 	case <-timer.C:
-		_ = killCmd(h.cmd)
-		select {
-		case <-h.done:
-		case <-time.After(500 * time.Millisecond):
-		}
-		return nil
+		return false
 	}
 }
 
