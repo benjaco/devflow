@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -303,6 +304,94 @@ func TestApplicationLifecyclePreviewEnterExecutesExactlyOnce(t *testing.T) {
 	screen.postKey(t, tcell.KeyDown, 0)
 	if got := executions.Load(); got != 1 {
 		t.Fatalf("dashboard event repeated lifecycle execution: %d", got)
+	}
+
+	if err := screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TUI did not exit after q")
+	}
+}
+
+func TestApplicationInvalidateRunsImmediatelyWithoutConfirmation(t *testing.T) {
+	previousCall := callDaemonForTUI
+	requests := make(chan daemon.Request, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRequest := func() { releaseOnce.Do(func() { close(release) }) }
+	var calls atomic.Int32
+	callDaemonForTUI = func(_ context.Context, _ string, req daemon.Request, _ func(api.Event)) (daemon.Response, error) {
+		calls.Add(1)
+		requests <- req
+		<-release
+		return daemon.Response{OK: true}, nil
+	}
+	d := prepareRunningDashboard(t)
+	screen := newObservedSimulationScreen(100, 30)
+	d.app.SetScreen(screen)
+	t.Cleanup(d.app.Stop)
+	// Unblock the fake daemon before stopping the application if an assertion
+	// fails while the request is in flight.
+	t.Cleanup(func() {
+		releaseRequest()
+		callDaemonForTUI = previousCall
+	})
+	done := make(chan error, 1)
+	go func() { done <- runTUIApplication(d.app) }()
+	screen.waitForFrame(t)
+
+	screen.postKey(t, tcell.KeyRune, 'i')
+	var req daemon.Request
+	select {
+	case req = <-requests:
+	case <-time.After(time.Second):
+		t.Fatal("invalidate shortcut did not dispatch its daemon request")
+	}
+	if req.Action != daemon.ActionInvalidate || req.Task != "alpha" || req.Preview {
+		t.Fatalf("unexpected invalidate request: %+v", req)
+	}
+	state := dashboardState(t, d, func() struct {
+		overlay lifecycleOverlayKind
+		busy    bool
+		status  string
+	} {
+		return struct {
+			overlay lifecycleOverlayKind
+			busy    bool
+			status  string
+		}{d.lifecycleOverlay, d.busy, d.statusMessage}
+	})
+	if state.overlay != lifecycleOverlayNone || !state.busy || !strings.Contains(state.status, "rerun running") {
+		t.Fatalf("invalidate did not start directly: %+v", state)
+	}
+
+	for len(screen.frames) > 0 {
+		<-screen.frames
+	}
+	releaseRequest()
+	screen.waitForFrame(t)
+	state = dashboardState(t, d, func() struct {
+		overlay lifecycleOverlayKind
+		busy    bool
+		status  string
+	} {
+		return struct {
+			overlay lifecycleOverlayKind
+			busy    bool
+			status  string
+		}{d.lifecycleOverlay, d.busy, d.statusMessage}
+	})
+	if state.overlay != lifecycleOverlayNone || state.busy || !strings.Contains(state.status, "rerun successful") {
+		t.Fatalf("invalidate completion state is wrong: %+v", state)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("invalidate daemon calls = %d, want 1", got)
 	}
 
 	if err := screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone)); err != nil {

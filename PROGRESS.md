@@ -5,14 +5,19 @@ Last updated: 2026-08-18
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: durable paused-log follow-up is implemented and verified; lifecycle overlays and vertical retarget behavior remain unchanged
-- Confidence: under Go 1.26.6 the durable paused-log event-loop regression passes 20 consecutive times and under the race detector; the full default suite, full `pkg/tui` race suite, vet, Staticcheck v0.7.0, clean module metadata/format/diff checks, and `pkg/tui` test compilation for Linux and Windows amd64/arm64 pass on `darwin/arm64`
+- State: selected-task TUI invalidation now executes immediately without a confirmation overlay; retarget previews and other lifecycle behavior remain unchanged
+- Confidence: under Go 1.26.6 the lock-faithful immediate-invalidate regression, full default suite, full race suite, and vet pass on `darwin/arm64`
 
 ## In Progress
 
-- None for the scoped durable paused-log follow-up.
+- None for the scoped immediate-invalidate follow-up.
 
 ## Completed
+
+- Immediate TUI invalidation:
+  - changed `i`/F5 to submit the existing selected-task daemon invalidate/rerun action immediately, while retaining running/success/failure footer feedback and leaving retarget confirmation unchanged
+  - added a real `Application.Run` regression proving one non-preview daemon request is sent, no lifecycle overlay appears, and completion remains visible
+  - updated operator, CLI, architecture, testing, and shared agent-memory documentation; passed focused tests, the full default/race suites, and vet
 
 - Durable paused-log state:
   - bound PAUSED/FOLLOWING intent to stable instance/source-kind/task identity and removed refresh-time selection callbacks and mutable log path/title metadata from source-change decisions

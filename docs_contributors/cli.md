@@ -265,7 +265,7 @@ The operator console includes:
 - global shortcuts are disabled while text-input popups are focused, so migration names can contain normal letters
 - stable graph/topological task order; state changes never move rows, while `a` explicitly toggles an attention-only view
 - distinct monochrome-readable badges for waiting, starting, running, ready, restarting, cached, done, failed, canceled, blocked, stopped, degraded, and dirty states, with concise failure/block reasons
-- `i` previews a shared lifecycle plan, then reruns the selected task scope only after confirmation; Escape cancels without mutation
+- `i` immediately invalidates and reruns the selected task scope without a confirmation modal; the daemon still calculates and applies the scoped lifecycle action
 - `t` opens a real target chooser, previews stop/execute/preserve/start scope, then retargets only after confirmation
 - `?` opens contextual help; Tab changes task/log focus, focused panes have distinct titles/borders, and popup/input footers advertise only valid keys
 - responsive layouts preserve a selectable task row before hiding the optional log pane and show a deliberate too-small fallback below 40x10

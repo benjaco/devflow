@@ -97,12 +97,12 @@ Useful TUI keys:
 - `d`: database/Prisma panel
 - `a`: toggle the explicit active/failure attention view
 - `m`: create a migration through the project migration-create action
-- `i`: preview and confirm the selected rerun scope
+- `i`: immediately invalidate and rerun the selected task scope
 - `t`: choose a target, then preview and confirm retarget scope
 
 Running logs open at the live tail as `FOLLOWING`. Page Up or upward scrolling changes the view to `PAUSED`, preserves that manual position across refreshes, and never snaps back; End or `f` resumes at the latest line. The panel reports its retained line range and truncation. `o` increases the bounded retained window without reading an unbounded file into memory. Switching log sources resets following predictably.
 
-Task rows remain in stable graph order while states change. The selected task/log source and focused pane are always labeled, lifecycle badges remain distinct without color, and failed/blocked/degraded rows include a concise reason. Action status has reserved footer space and remains visible until replaced or dismissed. Rerun and retarget show the same stop/execute/preserve/restart plan used by the daemon; Escape cancels before any process changes.
+Task rows remain in stable graph order while states change. The selected task/log source and focused pane are always labeled, lifecycle badges remain distinct without color, and failed/blocked/degraded rows include a concise reason. Action status has reserved footer space and remains visible until replaced or dismissed. Rerun immediately submits the daemon-scoped invalidation without confirmation. Retarget shows the daemon's stop/execute/preserve/restart plan, and Escape cancels before any process changes.
 
 The database/Prisma panel shows managed Postgres identity, the persisted `postgres`/`postgis` flavor and configured/automatic image choice, cached Prisma migration-prefix snapshots, and schema/migration drift when Prisma metadata is available. Migration authoring is explicit; normal startup does not secretly generate migrations. When you create a migration from the TUI, Devflow sends a daemon action with kind `devflow.database.migration.create`, streams task progress in the footer immediately, surfaces any declared confirmation prompts, and then relaunches the previously detached target so services come back through the graph. The same `m` action can drive non-Prisma components such as PayloadCMS when the adapter registers a migration-create action.
 

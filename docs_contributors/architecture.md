@@ -697,7 +697,7 @@ The first usable TUI slice is now implemented as a local terminal console connec
 - explicit migration generation from inside the TUI by asking for a migration name, sending a daemon migration-create action through the daemon-owned engine, surfacing declared prompts, and relaunching the previously detached target after success
 - instance/worktree/runtime header
 - stable terminal rendering via a real TUI library instead of manual ANSI frame painting
-- invalidate-and-rerun from the selected task by sending a daemon action that invalidates the selected downstream cacheable once-task slice and relaunches the current target
+- one-key invalidate-and-rerun from the selected task, without a TUI confirmation modal, by sending a daemon action that invalidates the selected downstream cacheable once-task slice and relaunches the current target
 - prompt popups for interactive confirm and text questions emitted by daemon-owned work
 - lifecycle overlays own their input until dismissal: Escape is consumed before global quit handling, Enter executes a confirmed plan once, and closing an overlay restores the prior dashboard pane without changing task selection or viewport
 - retargeting uses a stable, vertically scrollable target list that marks the active target and shows the complete selected name before opening the existing impact preview

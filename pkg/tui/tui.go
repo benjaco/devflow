@@ -685,7 +685,7 @@ func (d *dashboard) openHelp() {
 		SetText(strings.Join([]string{
 			"[yellow]Navigation[-]  Tab changes pane; j/k or arrows move in the focused pane.",
 			"[yellow]Logs[-]        running logs open at the tail; Page Up/up pauses; End/f resumes; o loads older retained lines.",
-			"[yellow]Actions[-]     i previews rerun scope; t previews retarget scope; m creates a migration.",
+			"[yellow]Actions[-]     i reruns the selected scope immediately; t previews retarget scope; m creates a migration.",
 			"[yellow]Views[-]       l switches task/supervisor log; d opens database details.",
 			"[yellow]Quit[-]        q or Escape closes the UI; a pre-existing detached run remains active.",
 			"",
@@ -1278,20 +1278,10 @@ func (d *dashboard) triggerInvalidateSelected() {
 		d.setStatus("[red]no task selected")
 		return
 	}
-	selected := node.Name
-	d.busy = true
-	d.setStatus(fmt.Sprintf("[yellow]rerun request accepted for %s; planning scope...", selected))
-	go func() {
-		plan, err := previewLifecycleForTUI(d.root, daemon.Request{Action: daemon.ActionInvalidate, Task: selected})
-		d.app.QueueUpdateDraw(func() {
-			d.busy = false
-			if err != nil {
-				d.setStatus(fmt.Sprintf("[red]rerun planning failed: %v", err))
-				return
-			}
-			d.openLifecyclePlan(plan, func() { d.executeInvalidate(selected) })
-		})
-	}()
+
+	// Invalidate is intentionally a one-key action in the TUI. The daemon still
+	// calculates the scoped lifecycle work; only the extra confirmation is skipped.
+	d.executeInvalidate(node.Name)
 }
 
 func (d *dashboard) executeInvalidate(selected string) {
