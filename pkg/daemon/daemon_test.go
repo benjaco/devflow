@@ -581,6 +581,171 @@ func TestWriteInvalidateTransitionMarksDirtyAndPendingNodes(t *testing.T) {
 	}
 }
 
+type daemonLifecycleHandle struct {
+	done    chan struct{}
+	stop    sync.Once
+	stopped atomic.Bool
+}
+
+func newDaemonLifecycleHandle() *daemonLifecycleHandle {
+	return &daemonLifecycleHandle{done: make(chan struct{})}
+}
+func (h *daemonLifecycleHandle) PID() int    { return 0 }
+func (h *daemonLifecycleHandle) Alive() bool { return !h.stopped.Load() }
+func (h *daemonLifecycleHandle) Wait() error {
+	<-h.done
+	return nil
+}
+func (h *daemonLifecycleHandle) Stop() error {
+	h.stop.Do(func() {
+		h.stopped.Store(true)
+		close(h.done)
+	})
+	return nil
+}
+
+type daemonLifecycleProject struct {
+	name    string
+	mu      sync.Mutex
+	handles map[string][]*daemonLifecycleHandle
+}
+
+func (p *daemonLifecycleProject) Name() string { return p.name }
+func (p *daemonLifecycleProject) ConfigureInstance(context.Context, string) (project.InstanceConfig, error) {
+	return project.InstanceConfig{Label: "daemon-lifecycle"}, nil
+}
+func (p *daemonLifecycleProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"backend_debug", "frontend"}}}
+}
+func (p *daemonLifecycleProject) Tasks() []project.Task {
+	service := func(name string) project.Task {
+		return project.Task{
+			Name:  name,
+			Kind:  project.KindService,
+			Ready: func(context.Context, *project.Runtime) error { return nil },
+			Run: func(_ context.Context, rt *project.Runtime) error {
+				handle := newDaemonLifecycleHandle()
+				p.mu.Lock()
+				p.handles[name] = append(p.handles[name], handle)
+				p.mu.Unlock()
+				rt.RegisterServiceHandle(handle)
+				return nil
+			},
+		}
+	}
+	return []project.Task{service("backend_debug"), service("frontend")}
+}
+func (p *daemonLifecycleProject) snapshots(name string) []*daemonLifecycleHandle {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]*daemonLifecycleHandle(nil), p.handles[name]...)
+}
+
+func TestDaemonRestartAndScopedStopPreserveIndependentService(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	p := &daemonLifecycleProject{
+		name:    "daemon-independent-lifecycle",
+		handles: map[string][]*daemonLifecycleHandle{},
+	}
+	project.Register(p)
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{
+		worktree:    worktree,
+		instanceID:  inst.ID,
+		projectName: p.name,
+		logPath:     filepath.Join(worktree, ".devflow", "logs", inst.ID, "daemon.log"),
+		subscribers: map[chan api.Event]bool{},
+	}
+	started, err := s.startActive(context.Background(), p.name, "dev", api.ModeWatch, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !started.Accepted || started.Ready {
+		t.Fatalf("detached start did not distinguish acceptance from readiness: %+v", started)
+	}
+	defer s.stopActive(3 * time.Second)
+	if !waitForDaemonCondition(3*time.Second, func() bool {
+		return len(p.snapshots("backend_debug")) == 1 && len(p.snapshots("frontend")) == 1
+	}) {
+		t.Fatal("independent services did not start")
+	}
+	frontend := p.snapshots("frontend")[0]
+	preview, err := s.previewLifecycle(Request{Action: ActionRestart, Project: p.name, Task: "backend_debug", Preview: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(preview.Plan.ServicesToRestart, ","); got != "backend_debug" {
+		t.Fatalf("restart preview had wrong scope: %+v", preview.Plan)
+	}
+	if got := strings.Join(preview.Plan.ServicesToPreserve, ","); got != "frontend" {
+		t.Fatalf("restart preview did not preserve independent frontend: %+v", preview.Plan)
+	}
+	if frontend.stopped.Load() || len(p.snapshots("backend_debug")) != 1 {
+		t.Fatal("preview changed process state")
+	}
+
+	_, lifecycle, err := s.restart(context.Background(), p.name, "backend_debug", false, false, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lifecycle == nil || !lifecycle.Success || len(lifecycle.Restarted) != 1 || lifecycle.Restarted[0] != "backend_debug" {
+		t.Fatalf("restart did not report its exact affected set: %+v", lifecycle)
+	}
+	if len(lifecycle.Processes) != 1 || !lifecycle.Processes[0].Ready || lifecycle.Processes[0].Generation <= lifecycle.Processes[0].PreviousGeneration {
+		t.Fatalf("restart did not verify its replacement generation/readiness: %+v", lifecycle.Processes)
+	}
+	if frontend.stopped.Load() || len(p.snapshots("frontend")) != 1 {
+		t.Fatal("backend restart changed independent frontend")
+	}
+
+	stopResult, err := s.stopWork(context.Background(), false, "backend_debug")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(stopResult.Stopped, ","); got != "backend_debug" {
+		t.Fatalf("task-scoped stop returned %q", got)
+	}
+	if frontend.stopped.Load() {
+		t.Fatal("task-scoped backend stop changed independent frontend")
+	}
+	s.mu.Lock()
+	active := s.active
+	s.mu.Unlock()
+	if active == nil {
+		t.Fatal("task-scoped stop shut down the active run")
+	}
+
+	if _, err := s.stopWork(context.Background(), false, "missing"); err == nil || !strings.Contains(err.Error(), "unknown task") {
+		t.Fatalf("unknown task stop returned %v", err)
+	}
+	if frontend.stopped.Load() {
+		t.Fatal("unknown task stop changed independent frontend")
+	}
+
+	secondStop, err := s.stopWork(context.Background(), false, "backend_debug")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondStop.Stopped) != 0 || secondStop.Lifecycle == nil || !secondStop.Lifecycle.Success {
+		t.Fatalf("already-stopped task was not idempotent: %+v", secondStop)
+	}
+}
+
+func waitForDaemonCondition(timeout time.Duration, condition func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return condition()
+}
+
 func TestInvalidateAndRelaunchForcesMatchingActiveRunToRestart(t *testing.T) {
 	name := "daemon-invalidate-force-restart"
 	project.Register(daemonTestProject{
@@ -631,7 +796,7 @@ func TestInvalidateAndRelaunchForcesMatchingActiveRunToRestart(t *testing.T) {
 		},
 	}
 
-	if err := s.invalidateAndRelaunch(context.Background(), "build"); err != nil {
+	if _, err := s.invalidateAndRelaunch(context.Background(), "build"); err != nil {
 		t.Fatal(err)
 	}
 	select {

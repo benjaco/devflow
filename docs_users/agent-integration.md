@@ -43,6 +43,35 @@ Recommended loop:
 
 Do not run downstream tests before a successful flush when relying on detached watch/dev mode. The flush sync sentinel proves the watcher has observed the post-edit boundary and has settled the selected target closure.
 
+For explicit service lifecycle changes, preview and then execute against the same per-worktree daemon:
+
+```bash
+devflow restart backend_debug --preview --json
+devflow restart backend_debug --json
+devflow stop --task backend_debug --preview --json
+devflow stop --task backend_debug --json
+```
+
+The preview/result contract is `api.LifecyclePlan` plus `api.LifecycleResult`. A plan names the selected task/target and exact invalidate, stop, execute, preserve, and restart sets. The actual result reports exact affected/stopped/restarted tasks and old/new PID plus generation; restart success means the replacement passed readiness. A known already-stopped task returns an empty successful stop result. An unknown task or a restart that did not create a replacement is non-success. `stop --task` leaves the daemon and independent services running; only `stop --all` performs complete cleanup. Detached launch JSON means the request was accepted, not that services are ready—continue to use `flush` as the agent readiness gate.
+
+Embedded engine users that intentionally provide their own long-lived supervisor can use the same ownership primitive directly:
+
+```go
+controller := engine.NewLifecycleController()
+go func() {
+    errCh <- eng.Watch(ctx, engine.Request{
+        Target: target, Worktree: worktree, Mode: api.ModeWatch,
+        LifecycleController: controller,
+    })
+}()
+
+change, err := controller.Restart(ctx, "backend_debug")
+// change.Previous and change.Current contain PID + Generation;
+// change.Ready is true only after the replacement readiness probe.
+```
+
+Use one controller for one active `Run` or `Watch` call and let that engine own all handles. Do not call `ServiceHandle.Stop` or kill a persisted PID in parallel with the controller. `Stop` and `Restart` return a clear error after the active engine finishes.
+
 For prerequisite checks, prefer the same target scope the agent will use for execution:
 
 ```bash
@@ -57,7 +86,7 @@ Avoid using attached `devflow run <service-target>` as an agent readiness gate. 
 
 For finite test/check targets that depend on services, use `devflow run <target> --ci --json` rather than plain `run`. Plain attached `run` is for keeping services alive in an operator terminal.
 
-In `--ci --json` mode, progress and task log lines stream to stderr and stdout remains exactly one final `RunResult`. On failure, inspect `error`, `failedNode`, `failedNodeLogPath`, and `failureExcerpts` before the terminal `logTail`. Excerpts find early test assertions, panic/fatal output, compiler errors, `AssertionError`, conventional errors/summaries, and process-failure markers even when hundreds of cleanup lines follow. They are bounded to five merged windows, 200 lines, 64 KiB total, and 8 KiB per line; `[]` means no useful marker was found. The `nodes` array supplies every selected node's final state and duration, including downstream nodes left pending after an upstream failure; cacheable nodes include hit/miss and key/read/write/manifest timing. Use `devflow logs` only when both bounded diagnostics are insufficient.
+In `--ci --json` mode, progress and task log lines stream to stderr and stdout remains exactly one final `RunResult`. On failure, inspect `error`, `failedNode`, `failedNodeLogPath`, and `failureExcerpts` before the terminal `logTail`. Excerpts find early test assertions, panic/fatal output, compiler errors, `AssertionError`, conventional errors/summaries, and process-failure markers even when hundreds of cleanup lines follow. They are bounded to five merged windows, 200 lines, 64 KiB total, and 8 KiB per line; `[]` means no useful marker was found. The `nodes` array supplies every selected node's final state and duration; downstream work skipped after a dependency failure is `blocked` with the dependency named in `lastError`, while unrelated interrupted work is `canceled`. Cacheable nodes include hit/miss and key/read/write/manifest timing. Use `devflow logs` only when both bounded diagnostics are insufficient.
 
 When an agent changes `devflow.project.go` inputs, outputs, or dependency edges for a finite target, use the dedicated hardening surface:
 

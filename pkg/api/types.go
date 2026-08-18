@@ -38,14 +38,18 @@ type NodeState string
 
 const (
 	StatePending         NodeState = "pending"
+	StateStarting        NodeState = "starting"
 	StateReady           NodeState = "ready"
 	StateRunning         NodeState = "running"
+	StateRestarting      NodeState = "restarting"
 	StateCached          NodeState = "cached"
 	StateDone            NodeState = "done"
 	StateFailed          NodeState = "failed"
 	StateMigrationNeeded NodeState = "migration_needed"
 	StateCanceled        NodeState = "canceled"
 	StateStopped         NodeState = "stopped"
+	StateBlocked         NodeState = "blocked"
+	StateDegraded        NodeState = "degraded"
 	StateDirty           NodeState = "dirty"
 	StateSkipped         NodeState = "skipped"
 )
@@ -68,8 +72,9 @@ type DBInstance struct {
 }
 
 type ProcessRef struct {
-	PID       int       `json:"pid"`
-	StartedAt time.Time `json:"startedAt"`
+	PID        int       `json:"pid"`
+	StartedAt  time.Time `json:"startedAt"`
+	Generation uint64    `json:"generation,omitempty"`
 }
 
 type SupervisorRef struct {
@@ -109,16 +114,54 @@ type Instance struct {
 }
 
 type NodeStatus struct {
-	Name       string       `json:"name"`
-	Kind       string       `json:"kind"`
-	State      NodeState    `json:"state"`
-	DurationMs int64        `json:"durationMs"`
-	LastRunKey string       `json:"lastRunKey,omitempty"`
-	LastError  string       `json:"lastError,omitempty"`
-	PID        int          `json:"pid,omitempty"`
-	LogPath    string       `json:"logPath,omitempty"`
-	Cache      *CacheTiming `json:"cache,omitempty"`
-	Debug      *DebugStatus `json:"debug,omitempty"`
+	Name            string           `json:"name"`
+	Kind            string           `json:"kind"`
+	State           NodeState        `json:"state"`
+	DurationMs      int64            `json:"durationMs"`
+	LastRunKey      string           `json:"lastRunKey,omitempty"`
+	LastError       string           `json:"lastError,omitempty"`
+	PID             int              `json:"pid,omitempty"`
+	Generation      uint64           `json:"generation,omitempty"`
+	Attempt         int              `json:"attempt,omitempty"`
+	Ready           bool             `json:"ready,omitempty"`
+	LogPath         string           `json:"logPath,omitempty"`
+	Cache           *CacheTiming     `json:"cache,omitempty"`
+	Debug           *DebugStatus     `json:"debug,omitempty"`
+	FailureExcerpts []FailureExcerpt `json:"failureExcerpts,omitempty"`
+}
+
+// LifecyclePlan is the shared preview contract for CLI and TUI lifecycle
+// actions. Lists are always explicit so an operator can see whether an action
+// is service-local or affects a wider part of the active graph.
+type LifecyclePlan struct {
+	RequestedAction         string   `json:"requestedAction"`
+	SelectedTask            string   `json:"selectedTask,omitempty"`
+	SelectedTarget          string   `json:"selectedTarget,omitempty"`
+	TasksToInvalidate       []string `json:"tasksToInvalidate"`
+	ProcessesToStop         []string `json:"processesToStop"`
+	TasksToExecute          []string `json:"tasksToExecute"`
+	ServicesToPreserve      []string `json:"servicesToPreserve"`
+	ServicesToRestart       []string `json:"servicesToRestart"`
+	ConfirmationRecommended bool     `json:"confirmationRecommended"`
+}
+
+type LifecycleProcessChange struct {
+	Task               string `json:"task"`
+	PreviousPID        int    `json:"previousPid,omitempty"`
+	PreviousGeneration uint64 `json:"previousGeneration,omitempty"`
+	PID                int    `json:"pid,omitempty"`
+	Generation         uint64 `json:"generation,omitempty"`
+	Ready              bool   `json:"ready,omitempty"`
+}
+
+type LifecycleResult struct {
+	Plan      LifecyclePlan            `json:"plan"`
+	Affected  []string                 `json:"affected"`
+	Stopped   []string                 `json:"stopped"`
+	Restarted []string                 `json:"restarted"`
+	Processes []LifecycleProcessChange `json:"processes"`
+	Success   bool                     `json:"success"`
+	Error     string                   `json:"error,omitempty"`
 }
 
 type CacheTiming struct {
@@ -232,6 +275,7 @@ type RunResult struct {
 	LogTail           []string               `json:"logTail,omitempty"`
 	FailureExcerpts   []FailureExcerpt       `json:"failureExcerpts"`
 	CacheKeyManifest  *CacheKeyManifestUsage `json:"cacheKeyManifest,omitempty"`
+	Lifecycle         *LifecycleResult       `json:"lifecycle,omitempty"`
 	Nodes             []NodeStatus           `json:"nodes"`
 	CacheHits         []string               `json:"cacheHits"`
 	CacheMisses       []string               `json:"cacheMisses"`

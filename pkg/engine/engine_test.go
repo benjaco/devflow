@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -723,8 +724,11 @@ func TestMigrationNeededErrorUsesMigrationNeededState(t *testing.T) {
 	if got := status.Nodes["db_prepare"].LastError; got != "migration needed" {
 		t.Fatalf("expected migration-needed last error, got %q", got)
 	}
-	if got := status.Nodes["app"].State; got != api.StatePending {
-		t.Fatalf("expected downstream task to stay pending, got %q", got)
+	if got := status.Nodes["app"].State; got != api.StateBlocked {
+		t.Fatalf("expected downstream task to be blocked, got %q", got)
+	}
+	if got := status.Nodes["app"].LastError; !strings.Contains(got, "db_prepare") {
+		t.Fatalf("expected downstream blocking reason to name db_prepare, got %q", got)
 	}
 	if appRan.Load() {
 		t.Fatal("downstream task should not run when migration is needed")
@@ -2256,10 +2260,449 @@ func TestCIModeServiceReadinessPassesThenStopsService(t *testing.T) {
 	}
 }
 
+type earlyExitServiceHandle struct {
+	err error
+}
+
+func (h earlyExitServiceHandle) PID() int    { return 0 }
+func (h earlyExitServiceHandle) Alive() bool { return false }
+func (h earlyExitServiceHandle) Wait() error { return h.err }
+func (h earlyExitServiceHandle) Stop() error { return nil }
+
+type earlyExitDebugProject struct{}
+
+func (earlyExitDebugProject) Name() string { return "early-exit-debug-project" }
+func (earlyExitDebugProject) ConfigureInstance(context.Context, string) (project.InstanceConfig, error) {
+	return project.InstanceConfig{Label: "early-debug"}, nil
+}
+func (earlyExitDebugProject) Targets() []project.Target {
+	return []project.Target{{Name: "debug", RootTasks: []string{"backend_debug"}}}
+}
+func (earlyExitDebugProject) Tasks() []project.Task {
+	return []project.Task{{
+		Name:         "backend_debug",
+		Kind:         project.KindDebugService,
+		ReadyTimeout: time.Second,
+		Ready: func(ctx context.Context, _ *project.Runtime) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		Run: func(_ context.Context, rt *project.Runtime) error {
+			if err := os.WriteFile(rt.LogPath, []byte("starting delve\nError: broken pipe while accepting DAP connection\n"), 0o600); err != nil {
+				return err
+			}
+			rt.RegisterServiceHandle(earlyExitServiceHandle{err: errors.New("delve disconnected: broken pipe")})
+			return nil
+		},
+	}}
+}
+
+func TestEarlyDebugExitBecomesFailedWithBoundedContext(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	eng, err := New(earlyExitDebugProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := eng.Run(context.Background(), Request{Target: "debug", Worktree: worktree, Mode: api.ModeDev})
+	if err == nil || out == nil {
+		t.Fatalf("expected early debug exit failure, outcome=%+v err=%v", out, err)
+	}
+	node := out.Result.Nodes[0]
+	if node.State != api.StateFailed || strings.Contains(string(node.State), "pending") {
+		t.Fatalf("dead debug process retained a non-terminal state: %+v", node)
+	}
+	if !strings.Contains(node.LastError, "broken pipe") {
+		t.Fatalf("early exit cause was not preserved: %+v", node)
+	}
+	if len(node.FailureExcerpts) == 0 || !strings.Contains(strings.Join(node.FailureExcerpts[0].Lines, "\n"), "broken pipe") {
+		t.Fatalf("bounded failure context was not exposed in status: %+v", node.FailureExcerpts)
+	}
+	data, marshalErr := json.Marshal(node)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if len(data) > 80*1024 {
+		t.Fatalf("debug failure status was not bounded: %d bytes", len(data))
+	}
+}
+
+type postReadyExitDebugProject struct{}
+
+func (postReadyExitDebugProject) Name() string { return "post-ready-exit-debug-project" }
+func (postReadyExitDebugProject) ConfigureInstance(context.Context, string) (project.InstanceConfig, error) {
+	return project.InstanceConfig{Label: "post-ready-debug"}, nil
+}
+func (postReadyExitDebugProject) Targets() []project.Target {
+	return []project.Target{{Name: "debug", RootTasks: []string{"backend_debug"}}}
+}
+func (postReadyExitDebugProject) Tasks() []project.Task {
+	return []project.Task{{
+		Name: "backend_debug",
+		Kind: project.KindDebugService,
+		Run: func(_ context.Context, rt *project.Runtime) error {
+			if err := os.WriteFile(rt.LogPath, []byte("Delve ready\nError: DAP client disconnected: broken pipe\n"), 0o600); err != nil {
+				return err
+			}
+			rt.RegisterServiceHandle(earlyExitServiceHandle{err: errors.New("DAP client disconnected: broken pipe")})
+			return nil
+		},
+	}}
+}
+
+func TestWatchDetectsDebugExitAfterReadiness(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	eng, err := New(postReadyExitDebugProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- eng.Watch(ctx, Request{Target: "debug", Worktree: worktree, Mode: api.ModeWatch})
+	}()
+	id, _, err := instance.IDForWorktree(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !waitForBool(3*time.Second, func() bool {
+		state, loadErr := instance.LoadStatus(worktree, id)
+		if loadErr != nil {
+			return false
+		}
+		node := state.Nodes["backend_debug"]
+		return node.State == api.StateFailed && strings.Contains(node.LastError, "broken pipe") && len(node.FailureExcerpts) > 0
+	}) {
+		t.Fatalf("dead debug adapter remained non-terminal: %s", readStatusForFailure(worktree, id))
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("detached watch exited instead of retaining inspectable failed state: %v", err)
+	default:
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("watch did not stop after debug failure test")
+	}
+}
+
 type genericServiceHandle struct {
 	done    chan struct{}
 	stop    sync.Once
 	stopped atomic.Bool
+}
+
+type lifecycleServiceProject struct {
+	mu      sync.Mutex
+	handles map[string][]*genericServiceHandle
+}
+
+func (p *lifecycleServiceProject) Name() string { return "lifecycle-service-project" }
+func (p *lifecycleServiceProject) ConfigureInstance(context.Context, string) (project.InstanceConfig, error) {
+	return project.InstanceConfig{Label: "lifecycle-services"}, nil
+}
+func (p *lifecycleServiceProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"backend", "frontend"}}}
+}
+func (p *lifecycleServiceProject) Tasks() []project.Task {
+	service := func(name string) project.Task {
+		return project.Task{
+			Name:  name,
+			Kind:  project.KindService,
+			Ready: func(context.Context, *project.Runtime) error { return nil },
+			Run: func(_ context.Context, rt *project.Runtime) error {
+				handle := newGenericServiceHandle()
+				p.mu.Lock()
+				p.handles[name] = append(p.handles[name], handle)
+				p.mu.Unlock()
+				rt.RegisterServiceHandle(handle)
+				return nil
+			},
+		}
+	}
+	return []project.Task{service("backend"), service("frontend")}
+}
+func (p *lifecycleServiceProject) snapshots(name string) []*genericServiceHandle {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]*genericServiceHandle(nil), p.handles[name]...)
+}
+
+func TestLifecycleControllerRestartsAndStopsOnlySelectedService(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	p := &lifecycleServiceProject{handles: map[string][]*genericServiceHandle{}}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := NewLifecycleController()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := eng.Run(ctx, Request{
+			Target:              "dev",
+			Worktree:            worktree,
+			Mode:                api.ModeDev,
+			LifecycleController: controller,
+		})
+		done <- runErr
+	}()
+
+	if !waitForBool(3*time.Second, func() bool {
+		return len(p.snapshots("backend")) == 1 && len(p.snapshots("frontend")) == 1
+	}) {
+		t.Fatal("independent services did not become ready")
+	}
+	firstBackend := p.snapshots("backend")[0]
+	frontend := p.snapshots("frontend")[0]
+	restarted, err := controller.Restart(context.Background(), "backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !restarted.Ready || restarted.Previous.Generation == 0 || restarted.Current.Generation <= restarted.Previous.Generation {
+		t.Fatalf("restart did not report a ready replacement identity: %+v", restarted)
+	}
+	if !firstBackend.stopped.Load() {
+		t.Fatal("previous backend handle was not stopped")
+	}
+	if frontend.stopped.Load() || len(p.snapshots("frontend")) != 1 {
+		t.Fatal("independent frontend was changed by backend restart")
+	}
+
+	stopped, err := controller.Stop(context.Background(), "backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.Previous.Generation != restarted.Current.Generation {
+		t.Fatalf("stop affected the wrong backend generation: stop=%+v restart=%+v", stopped, restarted)
+	}
+	if frontend.stopped.Load() {
+		t.Fatal("independent frontend was changed by backend stop")
+	}
+
+	restartedFromStopped, err := controller.Restart(context.Background(), "backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !restartedFromStopped.Ready || restartedFromStopped.Previous.Generation != 0 || restartedFromStopped.Current.Generation <= restarted.Current.Generation {
+		t.Fatalf("stopped service did not get a new ready generation: %+v", restartedFromStopped)
+	}
+	concurrent := make(chan ServiceLifecycleResult, 2)
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			result, restartErr := controller.Restart(context.Background(), "backend")
+			concurrent <- result
+			errs <- restartErr
+		}()
+	}
+	generations := map[uint64]bool{}
+	for range 2 {
+		if restartErr := <-errs; restartErr != nil {
+			t.Fatalf("serialized concurrent restart failed: %v", restartErr)
+		}
+		result := <-concurrent
+		if !result.Ready || result.Current.Generation <= restartedFromStopped.Current.Generation {
+			t.Fatalf("concurrent restart was not a ready later generation: %+v", result)
+		}
+		generations[result.Current.Generation] = true
+	}
+	if len(generations) != 2 || frontend.stopped.Load() {
+		t.Fatalf("concurrent restarts were not serialized or changed frontend: generations=%v", generations)
+	}
+
+	cancel()
+	select {
+	case runErr := <-done:
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			t.Fatal(runErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("engine did not stop after lifecycle test cancellation")
+	}
+}
+
+type lifecycleProcessProject struct{}
+
+func (lifecycleProcessProject) Name() string { return "lifecycle-process-project" }
+func (lifecycleProcessProject) ConfigureInstance(context.Context, string) (project.InstanceConfig, error) {
+	return project.InstanceConfig{Label: "lifecycle-processes"}, nil
+}
+func (lifecycleProcessProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"backend_debug", "frontend"}}}
+}
+func (lifecycleProcessProject) Tasks() []project.Task {
+	service := func(name string) project.Task {
+		return project.Task{
+			Name: name,
+			Kind: project.KindService,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				_, err := rt.StartServiceSpec(ctx, testServiceSpec(rt))
+				return err
+			},
+		}
+	}
+	return []project.Task{service("backend_debug"), service("frontend")}
+}
+
+func TestLifecycleControllerReplacesRealProcessCrossPlatform(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	eng, err := New(lifecycleProcessProject{}, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := NewLifecycleController()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := eng.Run(ctx, Request{Target: "dev", Worktree: worktree, Mode: api.ModeDev, LifecycleController: controller})
+		done <- runErr
+	}()
+	var backendPID, frontendPID int
+	if !waitForBool(5*time.Second, func() bool {
+		id, _, idErr := instance.IDForWorktree(worktree)
+		if idErr != nil {
+			return false
+		}
+		state, loadErr := instance.LoadStatus(worktree, id)
+		if loadErr != nil {
+			return false
+		}
+		backendPID = state.Nodes["backend_debug"].PID
+		frontendPID = state.Nodes["frontend"].PID
+		return backendPID > 0 && frontendPID > 0
+	}) {
+		t.Fatal("real independent service processes did not start")
+	}
+	change, err := controller.Restart(context.Background(), "backend_debug")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if change.Previous.PID != backendPID || change.Current.PID <= 0 || change.Current.PID == backendPID || !change.Ready {
+		t.Fatalf("backend process identity was not replaced after readiness: %+v", change)
+	}
+	if instance.ProcessAlive(backendPID) {
+		t.Fatalf("old backend process %d remained alive", backendPID)
+	}
+	if !instance.ProcessAlive(frontendPID) {
+		t.Fatalf("independent frontend process %d was stopped", frontendPID)
+	}
+
+	cancel()
+	select {
+	case runErr := <-done:
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			t.Fatal(runErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("process lifecycle engine did not stop")
+	}
+	if instance.ProcessAlive(change.Current.PID) || instance.ProcessAlive(frontendPID) {
+		t.Fatalf("service processes leaked after cancellation: backend=%v frontend=%v", instance.ProcessAlive(change.Current.PID), instance.ProcessAlive(frontendPID))
+	}
+}
+
+type restartFailureProject struct {
+	backendRuns atomic.Int32
+	frontend    atomic.Pointer[genericServiceHandle]
+}
+
+func (p *restartFailureProject) Name() string { return "restart-failure-project" }
+func (p *restartFailureProject) ConfigureInstance(context.Context, string) (project.InstanceConfig, error) {
+	return project.InstanceConfig{Label: "restart-failure"}, nil
+}
+func (p *restartFailureProject) Targets() []project.Target {
+	return []project.Target{{Name: "dev", RootTasks: []string{"backend", "frontend"}}}
+}
+func (p *restartFailureProject) Tasks() []project.Task {
+	return []project.Task{
+		{
+			Name: "backend",
+			Kind: project.KindService,
+			Ready: func(context.Context, *project.Runtime) error {
+				if p.backendRuns.Load() > 1 {
+					return errors.New("backend application readiness failed")
+				}
+				return nil
+			},
+			Run: func(_ context.Context, rt *project.Runtime) error {
+				attempt := p.backendRuns.Add(1)
+				if attempt > 1 {
+					if err := os.WriteFile(rt.LogPath, []byte("Error: backend bind failed during restart\n"), 0o600); err != nil {
+						return err
+					}
+				}
+				rt.RegisterServiceHandle(newGenericServiceHandle())
+				return nil
+			},
+		},
+		{
+			Name:  "frontend",
+			Kind:  project.KindService,
+			Ready: func(context.Context, *project.Runtime) error { return nil },
+			Run: func(_ context.Context, rt *project.Runtime) error {
+				handle := newGenericServiceHandle()
+				p.frontend.Store(handle)
+				rt.RegisterServiceHandle(handle)
+				return nil
+			},
+		},
+	}
+}
+
+func TestLifecycleRestartReadinessFailureIsTerminalAndPreservesIndependentService(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	p := &restartFailureProject{}
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := NewLifecycleController()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := eng.Run(ctx, Request{Target: "dev", Worktree: worktree, Mode: api.ModeDev, LifecycleController: controller})
+		done <- runErr
+	}()
+	if !waitForBool(3*time.Second, func() bool { return p.backendRuns.Load() == 1 && p.frontend.Load() != nil }) {
+		t.Fatal("restart failure fixture did not reach initial readiness")
+	}
+	if _, err := controller.Restart(context.Background(), "backend"); err == nil || !strings.Contains(err.Error(), "readiness failed") {
+		t.Fatalf("restart readiness failure was reported as success: %v", err)
+	}
+	id, _, err := instance.IDForWorktree(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := instance.LoadStatus(worktree, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := state.Nodes["backend"]
+	if backend.State != api.StateFailed || len(backend.FailureExcerpts) == 0 || !strings.Contains(strings.Join(backend.FailureExcerpts[0].Lines, "\n"), "bind failed") {
+		t.Fatalf("restart failure lacked bounded terminal diagnostics: %+v", backend)
+	}
+	if p.frontend.Load().stopped.Load() {
+		t.Fatal("backend restart failure stopped independent frontend")
+	}
+	cancel()
+	select {
+	case runErr := <-done:
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			t.Fatal(runErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("restart failure fixture did not clean up")
+	}
 }
 
 func newGenericServiceHandle() *genericServiceHandle {

@@ -8,6 +8,8 @@ The Linux quality job enforces `gofmt`, clean `go mod tidy -diff` output, `go ve
 
 Cross-platform tests should avoid Unix-only assumptions unless the test is guarded by build tags or an explicit platform skip. Prefer generated Go helper binaries over shell-script fake tools, add `.exe` to built helper paths on Windows, and use Go encoders for JSON fixtures so Windows paths are escaped correctly. Long-running process tests should verify process-tree cleanup on Windows because orphaned children can keep task log files locked after the parent exits.
 
+TUI tests render simulation screens at 60x24, 80x24, 100x12, 100x30, and 140x40 and cover help/modal key routing, focus, persistent action errors, stable ordering, every lifecycle badge, bounded log tails, pause/resume/task-switch following, and detached quit guidance. Keep lifecycle execution tests below the TUI layer as well; a presentation test alone cannot prove that an unrelated service survives.
+
 Real Delve app-readiness tests on macOS require the normal Delve prerequisites, including enabled Developer Tools security. Check `DevToolsSecurity -status`; if it is disabled, follow Delve's installation guidance before interpreting `stub exited while waiting for connection` as a Devflow regression. Do not change machine security settings automatically from tests.
 
 Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS user cache root. Set `HOME`, `XDG_CACHE_HOME`, and `LOCALAPPDATA`; Windows uses `LOCALAPPDATA` for `os.UserCacheDir()`, so `HOME` alone is not enough.
@@ -30,9 +32,12 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - per-task log truncation at task-attempt start so custom adapter progress and subprocess output both reflect the current run attempt, with owner-only Unix log permissions
 - interactive prompt detection and answer forwarding with a real prompt CLI fixture, including alternate/repeated prompt patterns
 - service lifecycle management for both process-backed and PID-less managed-resource handles, including CI shutdown and flush health
+- daemon/engine lifecycle-controller coverage with two independent services: selected restart changes PID/generation only after readiness, selected stop leaves the other identity alive, stopped services restart, previews do not mutate, repeated commands serialize, and cancellation removes every process tree on Unix and Windows
+- detached watch debug failures, including a post-readiness broken-pipe exit that becomes terminal failed status with bounded excerpts instead of remaining pending/running
 - CI-mode service targets act as readiness probes and stop services before returning
 - Go debug-service coverage includes builder API metadata, external debug binary build planning, status attach metadata, stable debug-port readiness, watch restart sequencing, and process-tree cleanup through fake `go`/`dlv` helper binaries. CI also installs real Delve and runs real `dlv exec` coverage on Linux, macOS, and Windows for both CI-mode readiness/stop and watch-mode source-edit restart back into a debug service. The real watch restart test starts an HTTP app under Delve, verifies the first response body, edits the source constant, waits for the restart, and verifies the endpoint returns the new body. Real editor attach coverage remains opt-in until the debug-service contract is proven in real projects.
 - daemon lifecycle coverage for per-worktree daemon startup locking, CLI connection, daemon event persistence/fanout, daemon executable refresh after source/local binary changes, daemon log path creation, and preserving legacy supervisor/executor PIDs for later cleanup
+- task-scoped stop JSON/preview coverage proving the exact affected set and no mutation during preview
 - stop cleanup for daemon-owned work, daemon shutdown after `stop --all`, legacy supervisor/executor refs and descendants, tracked service, and stale status process groups
 - read-only `status` coverage proving stopped-state inspection does not start a daemon
 - `stop --all` cleanup for the instance-managed database container while preserving the volume

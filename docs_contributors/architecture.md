@@ -80,6 +80,8 @@ Daemon/supervisor state is also per worktree. The instance snapshot records:
 - service task PIDs when the supervised service is an operating-system process; managed resources such as database containers have no host PID entry
 - the daemon log path
 
+The engine, not the CLI or persisted PID registry, owns live service handles. Each daemon active run therefore carries an `engine.LifecycleController`. Task-scoped stop/restart commands are serialized through the engine loop, which verifies a monotonic service generation and readiness before returning. Late `Wait` results from a replaced handle are ignored by generation. Watch mode monitors every current generation after readiness, so an unexpected Delve/service exit becomes terminal status without tearing down independent services. Direct OS process termination remains only the recovery path when no live owning engine exists; `stop --all` remains the complete cleanup boundary.
+
 Task cache storage is global for the user:
 - `<os.UserCacheDir()>/devflow/cache`
 

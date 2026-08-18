@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -17,6 +19,7 @@ import (
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/daemon"
 	"github.com/benjaco/devflow/pkg/database"
+	"github.com/benjaco/devflow/pkg/graph"
 	"github.com/benjaco/devflow/pkg/instance"
 	"github.com/benjaco/devflow/pkg/process"
 	"github.com/benjaco/devflow/pkg/project"
@@ -27,6 +30,7 @@ type Options struct {
 	Worktree         string
 	InstanceID       string
 	StopDaemonOnExit bool
+	Output           io.Writer
 }
 
 type snapshot struct {
@@ -38,6 +42,9 @@ type snapshot struct {
 	logTitle     string
 	logPath      string
 	logLines     []string
+	logStartLine int
+	logEndLine   int
+	logTruncated bool
 	prisma       []prismaSnapshotSummary
 	prismaErr    string
 	prismaCfg    tuiPrismaConfig
@@ -69,21 +76,32 @@ type dashboard struct {
 	tasks             *tview.Table
 	logs              *tview.TextView
 	footer            *tview.TextView
+	layout            *tview.Flex
+	tooSmall          *tview.TextView
 	showSupervisorLog bool
 	showDatabasePanel bool
 	selectedName      string
+	allNodes          []api.NodeStatus
 	currentNodes      []api.NodeStatus
+	attentionOnly     bool
 	statusMessage     string
+	statusAt          time.Time
 	busy              bool
 	eventOffset       int64
 	activePromptID    string
 	activeInput       bool
 	lastLogPath       string
 	lastLogLines      []string
+	lastSnapshot      snapshot
 	renderedLogKey    string
 	logScrollKey      string
 	logScrollRow      int
 	logScrollCol      int
+	logFollowing      bool
+	logLineLimit      int
+	helpOpen          bool
+	lifecycleModal    bool
+	compactLevel      int
 }
 
 const (
@@ -130,7 +148,21 @@ func Run(opts Options) error {
 	runErr := d.app.Run()
 	cancel()
 	_ = maybeStopDaemonForTUI(client, stopDaemonOnExit)
+	if !stopDaemonOnExit {
+		writeDetachedQuitMessage(opts.Output, root, id)
+	}
 	return runErr
+}
+
+func writeDetachedQuitMessage(output io.Writer, root, instanceID string) {
+	inst, err := instance.Load(root, instanceID)
+	if err != nil || !inst.LastRun.Detached {
+		return
+	}
+	if output == nil {
+		output = os.Stdout
+	}
+	_, _ = fmt.Fprintf(output, "DevFlow run %s (%s) remains active. Inspect: devflow status --worktree %q --json  Stop: devflow stop --worktree %q --all\n", inst.LastRun.Target, instanceID, root, root)
 }
 
 func maybeStopDaemonForTUI(client *daemon.Client, enabled bool) error {
@@ -144,14 +176,17 @@ func maybeStopDaemonForTUI(client *daemon.Client, enabled bool) error {
 
 func newDashboard(root, instanceID string) *dashboard {
 	d := &dashboard{
-		root:       root,
-		instanceID: instanceID,
-		eventsPath: instance.EventsPath(root, instanceID),
-		app:        tview.NewApplication(),
-		header:     tview.NewTextView(),
-		tasks:      tview.NewTable(),
-		logs:       tview.NewTextView(),
-		footer:     tview.NewTextView(),
+		root:         root,
+		instanceID:   instanceID,
+		eventsPath:   instance.EventsPath(root, instanceID),
+		app:          tview.NewApplication(),
+		header:       tview.NewTextView(),
+		tasks:        tview.NewTable(),
+		logs:         tview.NewTextView(),
+		footer:       tview.NewTextView(),
+		tooSmall:     tview.NewTextView(),
+		logFollowing: true,
+		logLineLimit: 200,
 	}
 
 	d.header.
@@ -171,6 +206,8 @@ func newDashboard(root, instanceID string) *dashboard {
 			return
 		}
 		d.selectedName = d.currentNodes[row-1].Name
+		d.logFollowing = true
+		d.logLineLimit = 200
 		d.updateLogs()
 	})
 
@@ -197,9 +234,11 @@ func newDashboard(root, instanceID string) *dashboard {
 		switch action {
 		case tview.MouseScrollUp:
 			d.app.SetFocus(d.logs)
+			d.logFollowing = false
 			d.rememberLogScrollDelta(-1)
 		case tview.MouseScrollDown:
 			d.app.SetFocus(d.logs)
+			d.logFollowing = false
 			d.rememberLogScrollDelta(1)
 		case tview.MouseLeftClick:
 			d.app.SetFocus(d.logs)
@@ -213,13 +252,15 @@ func newDashboard(root, instanceID string) *dashboard {
 		SetBorder(true).
 		SetTitle(" Keys ")
 
-	layout := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(d.header, 5, 0, false).
+	d.layout = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(d.header, 7, 0, false).
 		AddItem(d.tasks, 0, 2, true).
 		AddItem(d.logs, 0, 3, false).
-		AddItem(d.footer, 3, 0, false)
+		AddItem(d.footer, 5, 0, false)
+	d.tooSmall.SetTextAlign(tview.AlignCenter).SetBorder(true).SetTitle(" DevFlow ")
 	d.pages = tview.NewPages().
-		AddPage("main", layout, true, true)
+		AddPage("main", d.layout, true, true).
+		AddPage("too_small", d.tooSmall, true, false)
 
 	d.setStatus("[green]ready")
 
@@ -227,7 +268,70 @@ func newDashboard(root, instanceID string) *dashboard {
 	d.app.SetRoot(d.pages, true)
 	d.app.SetFocus(d.logs)
 	d.app.SetInputCapture(d.handleKeys)
+	d.app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
+		width, height := screen.Size()
+		d.applyResponsiveLayout(width, height)
+		return false
+	})
+	d.updateFocusTreatment()
 	return d
+}
+
+func (d *dashboard) applyResponsiveLayout(width, height int) {
+	d.updateFocusTreatment()
+	if width < 40 || height < 10 {
+		d.tooSmall.SetText(fmt.Sprintf("Terminal too small (%dx%d)\nResize to at least 40x10. Press ? for help or q to quit.", width, height))
+		d.pages.ShowPage("too_small")
+		return
+	}
+	d.pages.HidePage("too_small")
+	d.pages.ShowPage("main")
+	nextCompact := 0
+	if width <= 60 || height < 20 {
+		nextCompact = 2
+	} else if width < 100 || height < 28 {
+		nextCompact = 1
+	}
+	if nextCompact != d.compactLevel {
+		d.compactLevel = nextCompact
+		d.renderFooter()
+	}
+	switch {
+	case height < 16:
+		// At 100x12 this leaves six rows for the bordered task table, so
+		// navigation remains useful while the optional log pane is hidden.
+		d.layout.ResizeItem(d.header, 3, 0)
+		d.layout.ResizeItem(d.tasks, 0, 1)
+		d.layout.ResizeItem(d.logs, 0, 0)
+		d.layout.ResizeItem(d.footer, 3, 0)
+	case height < 24:
+		d.layout.ResizeItem(d.header, 3, 0)
+		d.layout.ResizeItem(d.tasks, 0, 2)
+		d.layout.ResizeItem(d.logs, 0, 2)
+		d.layout.ResizeItem(d.footer, 4, 0)
+	default:
+		d.layout.ResizeItem(d.header, 7, 0)
+		d.layout.ResizeItem(d.tasks, 0, 2)
+		d.layout.ResizeItem(d.logs, 0, 3)
+		d.layout.ResizeItem(d.footer, 5, 0)
+	}
+}
+
+func (d *dashboard) updateFocusTreatment() {
+	focus := d.app.GetFocus()
+	if focus == d.tasks {
+		d.tasks.SetBorderColor(tcell.ColorLightBlue).SetTitle(" Tasks [FOCUSED] ")
+	} else {
+		d.tasks.SetBorderColor(tcell.ColorGray).SetTitle(" Tasks ")
+	}
+	logTitle := strings.TrimSpace(d.logs.GetTitle())
+	logTitle = strings.TrimSuffix(logTitle, "[FOCUSED]")
+	logTitle = strings.TrimSpace(logTitle)
+	if focus == d.logs {
+		d.logs.SetBorderColor(tcell.ColorLightBlue).SetTitle(" " + logTitle + " [FOCUSED] ")
+	} else {
+		d.logs.SetBorderColor(tcell.ColorGray).SetTitle(" " + logTitle + " ")
+	}
 }
 
 func (d *dashboard) fallbackRefreshLoop(ctx context.Context) {
@@ -296,18 +400,56 @@ func (d *dashboard) daemonEventLoop(ctx context.Context, client *daemon.Client) 
 }
 
 func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
+	if d.helpOpen {
+		if event.Key() == tcell.KeyEsc || (event.Key() == tcell.KeyRune && (event.Rune() == '?' || event.Rune() == 'q')) {
+			d.closeHelp()
+			return nil
+		}
+		return event
+	}
+	if d.lifecycleModal && event.Key() == tcell.KeyEsc {
+		d.closeLifecyclePlan("[yellow]lifecycle action canceled")
+		return nil
+	}
 	if d.activeInput {
 		return event
 	}
+	logsFocused := d.app.GetFocus() == d.logs
 	switch event.Key() {
 	case tcell.KeyEsc:
 		d.app.Stop()
 		return nil
+	case tcell.KeyTAB, tcell.KeyBacktab:
+		if logsFocused {
+			d.app.SetFocus(d.tasks)
+		} else {
+			d.app.SetFocus(d.logs)
+		}
+		d.updateFocusTreatment()
+		d.renderFooter()
+		return nil
 	case tcell.KeyHome:
-		d.selectIndex(0)
+		if logsFocused {
+			d.logFollowing = false
+			d.logs.ScrollToBeginning()
+			d.rememberLogScroll(d.renderedLogKey, 0, 0)
+			d.updateLogs()
+		} else {
+			d.selectIndex(0)
+		}
 		return nil
 	case tcell.KeyEnd:
-		d.selectIndex(len(d.currentNodes) - 1)
+		if logsFocused {
+			d.resumeLogFollowing()
+		} else {
+			d.selectIndex(len(d.currentNodes) - 1)
+		}
+		return nil
+	case tcell.KeyPgUp:
+		d.pauseAndScrollLogs(-10)
+		return nil
+	case tcell.KeyPgDn:
+		d.scrollLogs(10)
 		return nil
 	case tcell.KeyF2:
 		d.toggleDatabasePanel()
@@ -326,20 +468,54 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case tcell.KeyRune:
 		switch event.Rune() {
+		case '?':
+			d.openHelp()
+			return nil
 		case 'q':
 			d.app.Stop()
 			return nil
 		case 'j':
-			d.moveSelection(1)
+			if logsFocused {
+				d.scrollLogs(1)
+			} else {
+				d.moveSelection(1)
+			}
 			return nil
 		case 'k':
-			d.moveSelection(-1)
+			if logsFocused {
+				d.pauseAndScrollLogs(-1)
+			} else {
+				d.moveSelection(-1)
+			}
 			return nil
 		case 'g':
-			d.selectIndex(0)
+			if logsFocused {
+				d.logFollowing = false
+				d.logs.ScrollToBeginning()
+				d.rememberLogScroll(d.renderedLogKey, 0, 0)
+				d.updateLogs()
+			} else {
+				d.selectIndex(0)
+			}
 			return nil
 		case 'G':
-			d.selectIndex(len(d.currentNodes) - 1)
+			if logsFocused {
+				d.resumeLogFollowing()
+			} else {
+				d.selectIndex(len(d.currentNodes) - 1)
+			}
+			return nil
+		case 'f':
+			d.resumeLogFollowing()
+			return nil
+		case 'o':
+			if logsFocused {
+				d.loadOlderLogContent()
+			}
+			return nil
+		case 'a':
+			d.attentionOnly = !d.attentionOnly
+			_ = d.refresh()
 			return nil
 		case 'l':
 			d.toggleSupervisorLog()
@@ -358,13 +534,51 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 			return nil
 		}
 	case tcell.KeyDown:
-		d.moveSelection(1)
+		if logsFocused {
+			d.scrollLogs(1)
+		} else {
+			d.moveSelection(1)
+		}
 		return nil
 	case tcell.KeyUp:
-		d.moveSelection(-1)
+		if logsFocused {
+			d.pauseAndScrollLogs(-1)
+		} else {
+			d.moveSelection(-1)
+		}
 		return nil
 	}
 	return event
+}
+
+func (d *dashboard) openHelp() {
+	if d.activeInput || d.helpOpen {
+		return
+	}
+	help := tview.NewTextView().
+		SetDynamicColors(true).
+		SetText(strings.Join([]string{
+			"[yellow]Navigation[-]  Tab changes pane; j/k or arrows move in the focused pane.",
+			"[yellow]Logs[-]        running logs open at the tail; Page Up/up pauses; End/f resumes; o loads older retained lines.",
+			"[yellow]Actions[-]     i previews rerun scope; t previews retarget scope; m creates a migration.",
+			"[yellow]Views[-]       l switches task/supervisor log; d opens database details.",
+			"[yellow]Quit[-]        q or Escape closes the UI; a pre-existing detached run remains active.",
+			"",
+			"Press Escape, ? or q to close help.",
+		}, "\n"))
+	help.SetBorder(true).SetTitle(" Contextual Help ")
+	d.helpOpen = true
+	d.pages.AddPage("help", centered(help, 88, 13), true, true)
+	d.app.SetFocus(help)
+	d.renderFooter()
+}
+
+func (d *dashboard) closeHelp() {
+	d.helpOpen = false
+	d.pages.RemovePage("help")
+	d.app.SetFocus(d.logs)
+	d.updateFocusTreatment()
+	d.renderFooter()
 }
 
 func (d *dashboard) toggleSupervisorLog() {
@@ -398,28 +612,55 @@ func (d *dashboard) selectIndex(index int) {
 	}
 	index = max(0, min(len(d.currentNodes)-1, index))
 	d.selectedName = d.currentNodes[index].Name
+	d.logFollowing = true
+	d.logLineLimit = 200
 	d.tasks.Select(index+1, 0)
 	d.updateLogs()
 }
 
 func (d *dashboard) refresh() error {
-	snap, err := loadSnapshot(d.root, d.instanceID, d.showSupervisorLog, d.showDatabasePanel, d.selectedName)
+	requestedSelection := d.selectedName
+	snap, err := loadSnapshotWithLogLimit(d.root, d.instanceID, d.showSupervisorLog, d.showDatabasePanel, d.selectedName, d.logLineLimit)
 	if err != nil {
 		d.header.SetText(fmt.Sprintf("[red]failed to load instance state: %v", err))
 		return err
 	}
-	d.currentNodes = snap.nodes
+	d.allNodes = append([]api.NodeStatus(nil), snap.nodes...)
+	d.currentNodes = filterAttentionNodes(snap.nodes, d.attentionOnly)
+	snap.nodes = d.currentNodes
 	d.header.SetText(strings.Join(renderHeader(snap), "\n"))
 	d.renderTasks(snap.nodes)
 	d.reconcileSelection()
+	if !d.showSupervisorLog && !d.showDatabasePanel && d.selectedName != requestedSelection {
+		selectedSnap, reloadErr := loadSnapshotWithLogLimit(d.root, d.instanceID, false, false, d.selectedName, d.logLineLimit)
+		if reloadErr == nil {
+			selectedSnap.nodes = d.currentNodes
+			snap = selectedSnap
+		}
+	}
 	d.updateLogsFromSnapshot(snap)
 	d.renderFooter()
 	return nil
 }
 
+func filterAttentionNodes(nodes []api.NodeStatus, enabled bool) []api.NodeStatus {
+	if !enabled {
+		return append([]api.NodeStatus(nil), nodes...)
+	}
+	out := make([]api.NodeStatus, 0, len(nodes))
+	for _, node := range nodes {
+		switch node.State {
+		case api.StateStarting, api.StateReady, api.StateRunning, api.StateRestarting, api.StateFailed, api.StateBlocked, api.StateDegraded, api.StateMigrationNeeded:
+			out = append(out, node)
+		}
+	}
+	return out
+}
+
 func (d *dashboard) renderTasks(nodes []api.NodeStatus) {
+	rowOffset, columnOffset := d.tasks.GetOffset()
 	d.tasks.Clear()
-	headers := []string{"STATE", "TASK", "KIND"}
+	headers := []string{"STATE", "TASK", "KIND", "REASON"}
 	for col, header := range headers {
 		d.tasks.SetCell(0, col, tview.NewTableCell(header).
 			SetSelectable(false).
@@ -428,6 +669,9 @@ func (d *dashboard) renderTasks(nodes []api.NodeStatus) {
 	}
 	for row, node := range nodes {
 		state := stateBadge(node.State)
+		if node.Ready && node.State == api.StateRunning && (node.Kind == string(project.KindService) || node.Kind == string(project.KindDebugService)) {
+			state = "READY"
+		}
 		color := stateColor(node.State)
 		d.tasks.SetCell(row+1, 0, tview.NewTableCell(state).
 			SetTextColor(color).
@@ -438,6 +682,27 @@ func (d *dashboard) renderTasks(nodes []api.NodeStatus) {
 		d.tasks.SetCell(row+1, 2, tview.NewTableCell(node.Kind).
 			SetTextColor(tcell.ColorGray).
 			SetSelectable(true))
+		d.tasks.SetCell(row+1, 3, tview.NewTableCell(nodeStateReason(node)).
+			SetTextColor(color).
+			SetSelectable(true).
+			SetMaxWidth(56))
+	}
+	d.tasks.SetOffset(rowOffset, columnOffset)
+}
+
+func nodeStateReason(node api.NodeStatus) string {
+	switch node.State {
+	case api.StateFailed, api.StateCanceled, api.StateBlocked, api.StateDegraded, api.StateMigrationNeeded:
+		reason := strings.TrimSpace(node.LastError)
+		if reason == "" {
+			return string(node.State)
+		}
+		if len(reason) > 120 {
+			return reason[:117] + "..."
+		}
+		return reason
+	default:
+		return ""
 	}
 }
 
@@ -459,7 +724,7 @@ func (d *dashboard) reconcileSelection() {
 }
 
 func (d *dashboard) updateLogs() {
-	snap, err := loadSnapshot(d.root, d.instanceID, d.showSupervisorLog, d.showDatabasePanel, d.selectedName)
+	snap, err := loadSnapshotWithLogLimit(d.root, d.instanceID, d.showSupervisorLog, d.showDatabasePanel, d.selectedName, d.logLineLimit)
 	if err != nil {
 		d.logs.SetTitle(" Logs ")
 		d.logs.SetText(fmt.Sprintf("failed to load logs: %v", err))
@@ -469,8 +734,12 @@ func (d *dashboard) updateLogs() {
 }
 
 func (d *dashboard) updateLogsFromSnapshot(snap snapshot) {
+	d.lastSnapshot = snap
 	nextKey := logViewKey(snap, d.selectedName)
 	prevKey := d.renderedLogKey
+	if nextKey != prevKey {
+		d.logFollowing = true
+	}
 	row, col := 0, 0
 	if nextKey != "" && nextKey == prevKey {
 		row, col = d.desiredLogScroll(nextKey)
@@ -486,10 +755,21 @@ func (d *dashboard) updateLogsFromSnapshot(snap snapshot) {
 		d.lastLogPath = ""
 		d.lastLogLines = nil
 	}
-	d.logs.SetTitle(" " + snap.logTitle + " ")
+	followState := "PAUSED"
+	if d.logFollowing {
+		followState = "FOLLOWING"
+	}
+	d.logs.SetTitle(" " + snap.logTitle + " · " + followState + " ")
 	lines := renderLogPanel(snap, d.selectedName)
 	d.logs.SetText(strings.Join(lines, "\n"))
-	if nextKey != "" && nextKey == prevKey {
+	if d.logFollowing {
+		if nextKey != prevKey {
+			d.logs.ScrollToBeginning()
+		}
+		d.logs.ScrollToEnd()
+		row, col = d.logs.GetScrollOffset()
+		d.rememberLogScroll(nextKey, row, col)
+	} else if nextKey != "" && nextKey == prevKey {
 		d.logs.ScrollTo(row, col)
 		d.rememberLogScroll(nextKey, row, col)
 	} else {
@@ -497,6 +777,7 @@ func (d *dashboard) updateLogsFromSnapshot(snap snapshot) {
 		d.rememberLogScroll(nextKey, 0, 0)
 	}
 	d.renderedLogKey = nextKey
+	d.updateFocusTreatment()
 }
 
 func logViewKey(snap snapshot, selectedName string) string {
@@ -529,6 +810,7 @@ func (d *dashboard) scrollLogs(delta int) {
 	if delta == 0 {
 		return
 	}
+	d.logFollowing = false
 	row, col := d.desiredLogScroll(d.renderedLogKey)
 	nextRow := row + delta
 	if nextRow < 0 {
@@ -536,6 +818,35 @@ func (d *dashboard) scrollLogs(delta int) {
 	}
 	d.logs.ScrollTo(nextRow, col)
 	d.rememberLogScroll(d.renderedLogKey, nextRow, col)
+}
+
+func (d *dashboard) pauseAndScrollLogs(delta int) {
+	d.logFollowing = false
+	d.scrollLogs(delta)
+	d.updateLogs()
+}
+
+func (d *dashboard) resumeLogFollowing() {
+	d.logFollowing = true
+	if d.lastSnapshot.state != nil || d.lastSnapshot.logTitle != "" {
+		d.updateLogsFromSnapshot(d.lastSnapshot)
+	} else {
+		d.updateLogs()
+	}
+	d.logs.ScrollToEnd()
+	row, col := d.logs.GetScrollOffset()
+	d.rememberLogScroll(d.renderedLogKey, row, col)
+}
+
+func (d *dashboard) loadOlderLogContent() {
+	if !d.lastSnapshot.logTruncated {
+		d.setStatus("[yellow]the complete retained log is already loaded")
+		return
+	}
+	d.logFollowing = false
+	d.logLineLimit = min(1000, d.logLineLimit+200)
+	d.setStatus(fmt.Sprintf("[yellow]loading up to %d retained log lines...", d.logLineLimit))
+	d.updateLogs()
 }
 
 func (d *dashboard) rememberLogScrollDelta(delta int) {
@@ -573,8 +884,17 @@ func (d *dashboard) rememberLogScroll(key string, row, col int) {
 }
 
 func (d *dashboard) setStatus(msg string) {
-	d.statusMessage = msg
+	d.statusMessage = truncateStatusMessage(msg, 240)
+	d.statusAt = time.Now()
 	d.renderFooter()
+}
+
+func truncateStatusMessage(message string, limit int) string {
+	if limit <= 0 || len(message) <= limit {
+		return message
+	}
+	const suffix = "… (? help; task log has details)"
+	return truncateTUILogLine(message, limit-len(suffix)) + suffix
 }
 
 func (d *dashboard) renderFooter() {
@@ -582,7 +902,24 @@ func (d *dashboard) renderFooter() {
 	if status == "" {
 		status = "[green]ready"
 	}
-	d.footer.SetText("q quit  j/k/arrows move  g/G top/bottom  l log  d db  m migration  i rerun  t retarget\n" + status)
+	timestamp := ""
+	if !d.statusAt.IsZero() {
+		timestamp = d.statusAt.Format("15:04:05") + "  "
+	}
+	if d.helpOpen {
+		d.footer.SetText("Escape/? close help\n" + timestamp + status)
+		return
+	}
+	if d.activeInput {
+		d.footer.SetText("Enter accept  Escape cancel  editing keys available\n" + timestamp + status)
+		return
+	}
+	if d.compactLevel >= 2 {
+		d.footer.SetText("? help  Tab focus  q quit  f follow  o older  a attention\n" + timestamp + status)
+		return
+	}
+	d.footer.SetText("? help  Tab focus  q quit  j/k/arrows move  Home/End contextual  f follow  o older\n" +
+		"l task/supervisor log  d db  a attention  m migration  i rerun  t retarget\n" + timestamp + status)
 }
 
 func (d *dashboard) openPrismaMigrationPrompt() {
@@ -635,12 +972,15 @@ func (d *dashboard) openPrismaMigrationPrompt() {
 	d.activeInput = true
 	d.pages.AddPage("prisma_migration", centered(frame, 84, 8), true, true)
 	d.app.SetFocus(input)
+	d.renderFooter()
 }
 
 func (d *dashboard) closePrismaMigrationPrompt() {
 	d.activeInput = false
 	d.pages.RemovePage("prisma_migration")
 	d.app.SetFocus(d.logs)
+	d.updateFocusTreatment()
+	d.renderFooter()
 }
 
 func (d *dashboard) triggerGeneratePrismaMigration(name string) {
@@ -692,24 +1032,38 @@ func (d *dashboard) triggerInvalidateSelected() {
 		d.setStatus("[red]no task selected")
 		return
 	}
-	d.busy = true
-	d.setStatus(fmt.Sprintf("[yellow]invalidating from %s and relaunching target...", node.Name))
-	_ = d.refresh()
 	selected := node.Name
+	d.busy = true
+	d.setStatus(fmt.Sprintf("[yellow]rerun request accepted for %s; planning scope...", selected))
+	go func() {
+		plan, err := previewLifecycleForTUI(d.root, daemon.Request{Action: daemon.ActionInvalidate, Task: selected})
+		d.app.QueueUpdateDraw(func() {
+			d.busy = false
+			if err != nil {
+				d.setStatus(fmt.Sprintf("[red]rerun planning failed: %v", err))
+				return
+			}
+			d.openLifecyclePlan(plan, func() { d.executeInvalidate(selected) })
+		})
+	}()
+}
+
+func (d *dashboard) executeInvalidate(selected string) {
+	d.busy = true
+	d.setStatus(fmt.Sprintf("[yellow]rerun running for %s...", selected))
 	go func() {
 		err := invalidateAndRerunDownstream(d.root, d.instanceID, selected, func() {
 			d.app.QueueUpdateDraw(func() {
-				d.setStatus(fmt.Sprintf("[yellow]invalidated downstream from %s, relaunching...", selected))
-				_ = d.refresh()
+				d.setStatus(fmt.Sprintf("[yellow]rerun running: invalidated downstream from %s...", selected))
 			})
 		})
 		d.app.QueueUpdateDraw(func() {
 			d.busy = false
 			if err != nil {
-				d.setStatus(fmt.Sprintf("[red]invalidate+rerun failed: %v", err))
+				d.setStatus(fmt.Sprintf("[red]rerun failed: %v", err))
 				return
 			}
-			d.setStatus(fmt.Sprintf("[green]invalidated downstream from %s and relaunched target", selected))
+			d.setStatus(fmt.Sprintf("[green]rerun successful for %s", selected))
 			_ = d.refresh()
 		})
 	}()
@@ -720,15 +1074,65 @@ func (d *dashboard) triggerRetargetSelected() {
 		d.setStatus("[yellow]action already running")
 		return
 	}
-	node := findSelectedNode(d.currentNodes, d.selectedName)
-	if node == nil {
-		d.setStatus("[red]no task selected")
+	inst, err := instance.Load(d.root, d.instanceID)
+	if err != nil {
+		d.setStatus(fmt.Sprintf("[red]retarget failed to load instance: %v", err))
 		return
 	}
+	_, p, err := resolveRelaunchProject(d.root, inst)
+	if err != nil {
+		d.setStatus(fmt.Sprintf("[red]retarget failed to resolve project: %v", err))
+		return
+	}
+	targets := make([]string, 0)
+	for _, target := range p.Targets() {
+		if target.Name != inst.LastRun.Target {
+			targets = append(targets, target.Name)
+		}
+	}
+	sort.Strings(targets)
+	if len(targets) == 0 {
+		d.setStatus("[yellow]no alternate target is available")
+		return
+	}
+	buttons := append(append([]string(nil), targets...), "Cancel")
+	modal := tview.NewModal().
+		SetText(fmt.Sprintf("Current target: %s\nChoose a target to preview.", inst.LastRun.Target)).
+		AddButtons(buttons).
+		SetDoneFunc(func(_ int, label string) {
+			if label == "Cancel" || label == "" {
+				d.closeLifecyclePlan("[yellow]retarget canceled")
+				return
+			}
+			d.closeLifecyclePlan("")
+			d.planRetarget(label)
+		})
+	d.lifecycleModal = true
+	d.activeInput = true
+	d.pages.AddPage("lifecycle_plan", modal, true, true)
+	d.app.SetFocus(modal)
+	d.setStatus("[yellow]retarget chooser open; Enter selects, Escape cancels")
+}
+
+func (d *dashboard) planRetarget(selected string) {
 	d.busy = true
-	d.setStatus(fmt.Sprintf("[yellow]retargeting detached run to %s...", node.Name))
-	_ = d.refresh()
-	selected := node.Name
+	d.setStatus(fmt.Sprintf("[yellow]retarget request accepted for %s; planning scope...", selected))
+	go func() {
+		plan, err := previewLifecycleForTUI(d.root, daemon.Request{Action: daemon.ActionRetarget, Target: selected})
+		d.app.QueueUpdateDraw(func() {
+			d.busy = false
+			if err != nil {
+				d.setStatus(fmt.Sprintf("[red]retarget planning failed: %v", err))
+				return
+			}
+			d.openLifecyclePlan(plan, func() { d.executeRetarget(selected) })
+		})
+	}()
+}
+
+func (d *dashboard) executeRetarget(selected string) {
+	d.busy = true
+	d.setStatus(fmt.Sprintf("[yellow]retarget running for %s...", selected))
 	go func() {
 		err := retargetAndRelaunch(d.root, d.instanceID, selected)
 		d.app.QueueUpdateDraw(func() {
@@ -737,13 +1141,65 @@ func (d *dashboard) triggerRetargetSelected() {
 				d.setStatus(fmt.Sprintf("[red]retarget failed: %v", err))
 				return
 			}
-			d.setStatus(fmt.Sprintf("[green]retargeted detached run to %s", selected))
+			d.setStatus(fmt.Sprintf("[green]retarget successful for %s", selected))
 			_ = d.refresh()
 		})
 	}()
 }
 
+func (d *dashboard) openLifecyclePlan(plan api.LifecyclePlan, execute func()) {
+	text := strings.Join([]string{
+		fmt.Sprintf("Action: %s", plan.RequestedAction),
+		fmt.Sprintf("Selected: %s%s", plan.SelectedTask, plan.SelectedTarget),
+		fmt.Sprintf("Invalidate: %s", lifecycleList(plan.TasksToInvalidate)),
+		fmt.Sprintf("Stop: %s", lifecycleList(plan.ProcessesToStop)),
+		fmt.Sprintf("Execute: %s", lifecycleList(plan.TasksToExecute)),
+		fmt.Sprintf("Preserve: %s", lifecycleList(plan.ServicesToPreserve)),
+		fmt.Sprintf("Restart/start: %s", lifecycleList(plan.ServicesToRestart)),
+	}, "\n")
+	modal := tview.NewModal().
+		SetText(text).
+		AddButtons([]string{"Execute", "Cancel"}).
+		SetDoneFunc(func(_ int, label string) {
+			if label != "Execute" {
+				d.closeLifecyclePlan("[yellow]lifecycle action canceled")
+				return
+			}
+			d.closeLifecyclePlan("")
+			execute()
+		})
+	d.lifecycleModal = true
+	d.activeInput = true
+	d.pages.AddPage("lifecycle_plan", modal, true, true)
+	d.app.SetFocus(modal)
+	d.setStatus("[yellow]lifecycle plan ready; Enter executes, Escape cancels")
+}
+
+func (d *dashboard) closeLifecyclePlan(status string) {
+	d.lifecycleModal = false
+	d.activeInput = false
+	d.pages.RemovePage("lifecycle_plan")
+	d.app.SetFocus(d.tasks)
+	d.updateFocusTreatment()
+	if status != "" {
+		d.setStatus(status)
+	} else {
+		d.renderFooter()
+	}
+}
+
+func lifecycleList(values []string) string {
+	if len(values) == 0 {
+		return "none"
+	}
+	return strings.Join(values, ", ")
+}
+
 func loadSnapshot(root, instanceID string, showSupervisor bool, showDatabase bool, selectedName string) (snapshot, error) {
+	return loadSnapshotWithLogLimit(root, instanceID, showSupervisor, showDatabase, selectedName, 200)
+}
+
+func loadSnapshotWithLogLimit(root, instanceID string, showSupervisor bool, showDatabase bool, selectedName string, logLineLimit int) (snapshot, error) {
 	inst, err := instance.Load(root, instanceID)
 	if err != nil {
 		return snapshot{}, err
@@ -801,14 +1257,7 @@ func loadSnapshot(root, instanceID string, showSupervisor bool, showDatabase boo
 	for _, node := range state.Nodes {
 		nodes = append(nodes, normalizeTUIState(node, prismaDev))
 	}
-	sort.Slice(nodes, func(i, j int) bool {
-		left := taskStatePriority(nodes[i].State)
-		right := taskStatePriority(nodes[j].State)
-		if left != right {
-			return left < right
-		}
-		return nodes[i].Name < nodes[j].Name
-	})
+	orderNodesForTUI(nodes, inst, state.Target)
 
 	selected := findSelectedNode(nodes, selectedName)
 	logTitle := "selected log"
@@ -824,7 +1273,10 @@ func loadSnapshot(root, instanceID string, showSupervisor bool, showDatabase boo
 		logTitle = selected.Name + " log"
 		logPath = selected.LogPath
 	}
-	logLines, _ := readLastLines(logPath, 200)
+	if logLineLimit <= 0 {
+		logLineLimit = 200
+	}
+	logInfo, _ := readLastLinesInfo(logPath, logLineLimit)
 
 	return snapshot{
 		instance:     inst,
@@ -834,13 +1286,44 @@ func loadSnapshot(root, instanceID string, showSupervisor bool, showDatabase boo
 		urls:         instanceURLs(inst),
 		logTitle:     logTitle,
 		logPath:      logPath,
-		logLines:     logLines,
+		logLines:     logInfo.lines,
+		logStartLine: logInfo.startLine,
+		logEndLine:   logInfo.endLine,
+		logTruncated: logInfo.truncated,
 		prisma:       prisma,
 		prismaErr:    prismaErr,
 		prismaCfg:    prismaCfg,
 		prismaDev:    prismaDev,
 		prismaDevErr: prismaDevErr,
 	}, nil
+}
+
+func orderNodesForTUI(nodes []api.NodeStatus, inst *api.Instance, target string) {
+	positions := map[string]int{}
+	if inst != nil && strings.TrimSpace(inst.LastRun.Project) != "" && strings.TrimSpace(target) != "" {
+		if p, err := project.Lookup(inst.LastRun.Project); err == nil {
+			if execProject, resolvedTarget, err := project.ResolveExecutionProject(p, target); err == nil {
+				if g, err := graph.New(execProject.Tasks(), execProject.Targets()); err == nil {
+					if closure, err := g.TargetClosure(resolvedTarget); err == nil {
+						for index, name := range closure {
+							positions[name] = index + 1
+						}
+					}
+				}
+			}
+		}
+	}
+	sort.SliceStable(nodes, func(i, j int) bool {
+		left, leftOK := positions[nodes[i].Name]
+		right, rightOK := positions[nodes[j].Name]
+		if leftOK != rightOK {
+			return leftOK
+		}
+		if leftOK && left != right {
+			return left < right
+		}
+		return nodes[i].Name < nodes[j].Name
+	})
 }
 
 func normalizeTUIState(node api.NodeStatus, prismaDev *database.PrismaDevelopmentStatus) api.NodeStatus {
@@ -882,14 +1365,19 @@ func renderHeader(snap snapshot) []string {
 		fmt.Sprintf("[yellow]worktree[-]: %s", snap.instance.Worktree),
 		fmt.Sprintf("[yellow]db[-]: %s host=%s port=%d container=%s", snap.instance.DB.Name, snap.instance.DB.Host, snap.instance.DB.Port, snap.instance.DB.ContainerName),
 		fmt.Sprintf("[yellow]urls[-]: %s", strings.Join(urlParts, "    ")),
-		fmt.Sprintf("[yellow]%s[-]    [yellow]states[-]: RUN=%d WAIT=%d CACHE=%d DONE=%d MIGR=%d FAIL=%d CANC=%d STOP=%d",
+		fmt.Sprintf("[yellow]%s[-]    [yellow]states[-]: WAIT=%d START=%d RUN=%d READY=%d RSTR=%d CACHE=%d DONE=%d MIGR=%d FAIL=%d BLOCK=%d DEGR=%d CANC=%d STOP=%d",
 			supervisorText,
+			counts[api.StatePending]+counts[api.StateDirty],
+			counts[api.StateStarting],
 			counts[api.StateRunning],
-			counts[api.StatePending]+counts[api.StateReady]+counts[api.StateDirty],
+			counts[api.StateReady],
+			counts[api.StateRestarting],
 			counts[api.StateCached],
 			counts[api.StateDone],
 			counts[api.StateMigrationNeeded],
 			counts[api.StateFailed],
+			counts[api.StateBlocked],
+			counts[api.StateDegraded],
 			counts[api.StateCanceled],
 			counts[api.StateStopped],
 		),
@@ -974,6 +1462,7 @@ func (d *dashboard) openPrompt(evt api.Event) {
 	}
 	d.activePromptID = evt.PromptID
 	d.activeInput = true
+	d.renderFooter()
 	switch evt.PromptKind {
 	case string(process.PromptConfirm):
 		modal := tview.NewModal().
@@ -1022,6 +1511,8 @@ func (d *dashboard) closePrompt() {
 	d.activeInput = false
 	d.pages.RemovePage("prompt")
 	d.app.SetFocus(d.tasks)
+	d.updateFocusTreatment()
+	d.renderFooter()
 }
 
 func centered(p tview.Primitive, width, height int) tview.Primitive {
@@ -1044,7 +1535,7 @@ func renderLogPanel(snap snapshot, selectedName string) []string {
 	} else if node := findSelectedNode(snap.nodes, selectedName); node != nil {
 		lines = append(lines, fmt.Sprintf("selected: %s    kind=%s    state=%s", node.Name, node.Kind, node.State))
 		if node.PID > 0 {
-			lines = append(lines, fmt.Sprintf("pid=%d", node.PID))
+			lines = append(lines, fmt.Sprintf("pid=%d generation=%d attempt=%d", node.PID, node.Generation, node.Attempt))
 		}
 		if node.Debug != nil {
 			lines = append(lines, fmt.Sprintf("debug=%s://%s:%d port=%s package=%s", node.Debug.Protocol, node.Debug.Host, node.Debug.Port, node.Debug.PortName, node.Debug.Package))
@@ -1055,6 +1546,17 @@ func renderLogPanel(snap snapshot, selectedName string) []string {
 		if node.LastError != "" {
 			lines = append(lines, fmt.Sprintf("error=%s", node.LastError))
 		}
+		for _, excerpt := range node.FailureExcerpts {
+			lines = append(lines, fmt.Sprintf("failure context (%s lines %d-%d):", excerpt.Reason, excerpt.StartLine, excerpt.EndLine))
+			lines = append(lines, excerpt.Lines...)
+		}
+	}
+	if snap.logEndLine > 0 {
+		retention := fmt.Sprintf("retained log lines %d-%d", snap.logStartLine, snap.logEndLine)
+		if snap.logTruncated {
+			retention += " (earlier content truncated; task failure excerpts remain available)"
+		}
+		lines = append(lines, retention)
 	}
 	lines = append(lines, "")
 	if len(snap.logLines) == 0 {
@@ -1383,22 +1885,117 @@ func resolveWorktree(flagValue string) (string, error) {
 }
 
 func readLastLines(path string, limit int) ([]string, error) {
+	info, err := readLastLinesInfo(path, limit)
+	return info.lines, err
+}
+
+type logTailInfo struct {
+	lines     []string
+	startLine int
+	endLine   int
+	truncated bool
+}
+
+func readLastLinesInfo(path string, limit int) (logTailInfo, error) {
 	if path == "" {
-		return nil, nil
+		return logTailInfo{}, nil
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return logTailInfo{}, err
 	}
-	text := strings.TrimRight(string(data), "\n")
-	if text == "" {
-		return nil, nil
+	defer file.Close()
+	if limit <= 0 {
+		return logTailInfo{}, nil
 	}
-	lines := strings.Split(text, "\n")
-	if len(lines) > limit {
-		lines = lines[len(lines)-limit:]
+	// Stream the file through a fixed-size reader and a fixed-count ring. The
+	// full scan supplies exact retained line numbers without ever loading a
+	// large task log (or one pathological line) into memory.
+	reader := bufio.NewReaderSize(file, 64*1024)
+	ring := make([]string, 0, limit)
+	total := 0
+	for {
+		line, readErr := readBoundedTUILogLine(reader, 16*1024)
+		if readErr == io.EOF && line == "" {
+			break
+		}
+		if readErr != nil && readErr != io.EOF {
+			return logTailInfo{}, readErr
+		}
+		total++
+		if len(ring) == limit {
+			copy(ring, ring[1:])
+			ring[len(ring)-1] = line
+		} else {
+			ring = append(ring, line)
+		}
+		if readErr == io.EOF {
+			break
+		}
 	}
-	return lines, nil
+	start := 0
+	if len(ring) > 0 {
+		start = total - len(ring) + 1
+	}
+	return logTailInfo{lines: ring, startLine: start, endLine: total, truncated: total > len(ring)}, nil
+}
+
+func readBoundedTUILogLine(reader *bufio.Reader, maxBytes int) (string, error) {
+	const suffix = "… [line truncated]"
+	kept := make([]byte, 0, min(maxBytes, 1024))
+	truncated := false
+	sawData := false
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(fragment) > 0 {
+			sawData = true
+			if fragment[len(fragment)-1] == '\n' {
+				fragment = fragment[:len(fragment)-1]
+			}
+			if len(kept) < maxBytes {
+				count := min(len(fragment), maxBytes-len(kept))
+				kept = append(kept, fragment[:count]...)
+				truncated = truncated || count < len(fragment)
+			} else if len(fragment) > 0 {
+				truncated = true
+			}
+		}
+		switch err {
+		case nil:
+			text := strings.TrimSuffix(string(kept), "\r")
+			if truncated {
+				text = truncateTUILogLine(text, maxBytes-len(suffix)) + suffix
+			}
+			return text, nil
+		case bufio.ErrBufferFull:
+			continue
+		case io.EOF:
+			if !sawData {
+				return "", io.EOF
+			}
+			text := strings.TrimSuffix(string(kept), "\r")
+			if truncated {
+				text = truncateTUILogLine(text, maxBytes-len(suffix)) + suffix
+			}
+			return text, io.EOF
+		default:
+			return "", err
+		}
+	}
+}
+
+func truncateTUILogLine(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	value = value[:maxBytes]
+	for value != "" && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 func supervisorStatus(inst *api.Instance) *api.SupervisorStatus {
@@ -1462,6 +2059,18 @@ func invalidateAndRerunDownstream(root, instanceID, task string, onTransition fu
 	return err
 }
 
+func previewLifecycleForTUI(root string, req daemon.Request) (api.LifecyclePlan, error) {
+	req.Preview = true
+	resp, err := callDaemonForTUI(context.Background(), root, req, nil)
+	if err != nil {
+		return api.LifecyclePlan{}, err
+	}
+	if resp.Lifecycle == nil {
+		return api.LifecyclePlan{}, fmt.Errorf("daemon returned no lifecycle plan")
+	}
+	return resp.Lifecycle.Plan, nil
+}
+
 func retargetAndRelaunch(root, instanceID, task string) error {
 	_ = instanceID
 	_, err := callDaemonForTUI(context.Background(), root, daemon.Request{Action: daemon.ActionRetarget, Target: task}, nil)
@@ -1499,10 +2108,18 @@ func resolveRelaunchProject(worktree string, inst *api.Instance) (string, projec
 
 func stateBadge(state api.NodeState) string {
 	switch state {
+	case api.StatePending:
+		return "WAIT"
+	case api.StateStarting:
+		return "START"
+	case api.StateReady:
+		return "READY"
 	case api.StateRunning:
 		return "RUN"
-	case api.StatePending, api.StateReady, api.StateDirty:
-		return "WAIT"
+	case api.StateRestarting:
+		return "RSTR"
+	case api.StateDirty:
+		return "DIRTY"
 	case api.StateCached:
 		return "CACHE"
 	case api.StateDone:
@@ -1515,6 +2132,10 @@ func stateBadge(state api.NodeState) string {
 		return "CANC"
 	case api.StateStopped:
 		return "STOP"
+	case api.StateBlocked:
+		return "BLOCK"
+	case api.StateDegraded:
+		return "DEGR"
 	case api.StateSkipped:
 		return "SKIP"
 	default:
@@ -1524,15 +2145,17 @@ func stateBadge(state api.NodeState) string {
 
 func stateColor(state api.NodeState) tcell.Color {
 	switch state {
-	case api.StateRunning:
+	case api.StateRunning, api.StateReady:
 		return tcell.ColorLightGreen
-	case api.StatePending, api.StateReady, api.StateDirty:
+	case api.StateStarting, api.StateRestarting:
+		return tcell.ColorLightCyan
+	case api.StatePending, api.StateDirty:
 		return tcell.ColorYellow
 	case api.StateCached:
 		return tcell.ColorLightBlue
 	case api.StateDone:
 		return tcell.ColorWhite
-	case api.StateFailed:
+	case api.StateFailed, api.StateDegraded, api.StateBlocked:
 		return tcell.ColorIndianRed
 	case api.StateMigrationNeeded:
 		return tcell.ColorLightYellow
@@ -1544,31 +2167,6 @@ func stateColor(state api.NodeState) tcell.Color {
 		return tcell.ColorDarkGray
 	default:
 		return tcell.ColorWhite
-	}
-}
-
-func taskStatePriority(state api.NodeState) int {
-	switch state {
-	case api.StateRunning:
-		return 0
-	case api.StatePending, api.StateReady, api.StateDirty:
-		return 1
-	case api.StateMigrationNeeded:
-		return 2
-	case api.StateFailed:
-		return 3
-	case api.StateCanceled:
-		return 4
-	case api.StateCached:
-		return 5
-	case api.StateDone:
-		return 6
-	case api.StateStopped:
-		return 7
-	case api.StateSkipped:
-		return 8
-	default:
-		return 9
 	}
 }
 

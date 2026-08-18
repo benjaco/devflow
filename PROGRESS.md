@@ -1,18 +1,24 @@
 # Progress
 
-Last updated: 2026-08-16
+Last updated: 2026-08-18
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: deterministic multi-file worktree-local Go project adapters are complete
-- Confidence: under Go 1.26.6 the full default/race suites, focused copier/database/cache/engine/validation/CLI suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, and Linux/Windows amd64/arm64 builds pass on `darwin/arm64`; Docker-backed database tests were invoked but skipped because Docker Desktop was not running
+- State: daemon lifecycle correctness and core TUI interaction hardening are implemented and verified
+- Confidence: under Go 1.26.6 the full default/race suites, focused daemon/engine/TUI/CLI lifecycle suites, all examples, vet, Staticcheck v0.7.0, govulncheck v1.6.0, clean module metadata/format/diff checks, workflow YAML parsing, native version smoke, Windows amd64/arm64 test compilation, and Linux/Windows amd64/arm64 builds pass on `darwin/arm64`; deterministic real-process tests cover replacement identity, independent-service preservation, and cancellation cleanup
 
 ## In Progress
 
-- None.
+- None for the lifecycle/TUI hardening backlog.
 
 ## Completed
+
+- Daemon lifecycle and core TUI hardening:
+  - explicit service restart/stop now runs through the owning engine, uses PID plus monotonic generation identity, waits for replacement readiness, preserves independent services, and keeps task-scoped stop from canceling the active run
+  - added shared preview/actual lifecycle JSON, read-only `--preview` CLI paths, exact affected sets, detached accepted-versus-ready metadata, watch-mode post-readiness exit detection, bounded node failure excerpts, attempt/readiness state, and dependency blocking reasons
+  - added stable graph-ordered TUI rows, explicit attention filtering, contextual help/focus, persistent timestamped action feedback, lifecycle confirmation/cancel modals, real retarget target selection, bounded follow/pause/older-log behavior, compact layouts, distinct state badges/reasons, and detached-quit guidance
+  - added independent PID-less and real-process lifecycle tests, cross-platform process cleanup assertions, watch debug broken-pipe coverage, CLI preview/result coverage, and TUI screen/key/log/state regressions
 
 - Multi-file project-local Go adapters:
   - added one deterministic discovery contract that requires regular `devflow.project.go`, returns it first, includes sorted regular root-level `devflow_*.go` companions, excludes `_test.go` and unrelated/nested Go files, and rejects matching directories, symlinks, and special files with path-specific errors
