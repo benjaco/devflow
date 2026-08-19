@@ -103,6 +103,7 @@ type dashboard struct {
 	tasks             *tview.Table
 	logs              *tview.TextView
 	footer            *tview.TextView
+	content           *tview.Flex
 	layout            *tview.Flex
 	tooSmall          *tview.TextView
 	showSupervisorLog bool
@@ -334,10 +335,12 @@ func newDashboard(root, instanceID string) *dashboard {
 		SetBorder(true).
 		SetTitle(" Keys ")
 
+	d.content = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(d.tasks, 0, 2, true).
+		AddItem(d.logs, 0, 3, false)
 	d.layout = tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(d.header, 7, 0, false).
-		AddItem(d.tasks, 0, 2, true).
-		AddItem(d.logs, 0, 3, false).
+		AddItem(d.content, 0, 1, true).
 		AddItem(d.footer, 5, 0, false)
 	d.tooSmall.SetTextAlign(tview.AlignCenter).SetBorder(true).SetTitle(" DevFlow ")
 	d.pages = tview.NewPages().
@@ -381,24 +384,35 @@ func (d *dashboard) applyResponsiveLayout(width, height int) bool {
 		d.compactLevel = nextCompact
 		d.renderFooter()
 	}
+	// Wide terminals benefit from keeping the stable task list visible beside
+	// the selected log. Compact terminals retain the established vertical flow.
+	wideWorkspace := width >= 120 && height >= 24
+	if wideWorkspace {
+		d.content.SetDirection(tview.FlexColumn)
+	} else {
+		d.content.SetDirection(tview.FlexRow)
+	}
 	switch {
 	case height < 16:
 		// At 100x12 this leaves six rows for the bordered task table, so
 		// navigation remains useful while the optional log pane is hidden.
 		d.layout.ResizeItem(d.header, 3, 0)
-		d.layout.ResizeItem(d.tasks, 0, 1)
-		d.layout.ResizeItem(d.logs, 0, 0)
+		d.layout.ResizeItem(d.content, 0, 1)
 		d.layout.ResizeItem(d.footer, 3, 0)
+		d.content.ResizeItem(d.tasks, 0, 1)
+		d.content.ResizeItem(d.logs, 0, 0)
 	case height < 24:
 		d.layout.ResizeItem(d.header, 3, 0)
-		d.layout.ResizeItem(d.tasks, 0, 2)
-		d.layout.ResizeItem(d.logs, 0, 2)
+		d.layout.ResizeItem(d.content, 0, 1)
 		d.layout.ResizeItem(d.footer, 4, 0)
+		d.content.ResizeItem(d.tasks, 0, 2)
+		d.content.ResizeItem(d.logs, 0, 2)
 	default:
 		d.layout.ResizeItem(d.header, 7, 0)
-		d.layout.ResizeItem(d.tasks, 0, 2)
-		d.layout.ResizeItem(d.logs, 0, 3)
+		d.layout.ResizeItem(d.content, 0, 1)
 		d.layout.ResizeItem(d.footer, 5, 0)
+		d.content.ResizeItem(d.tasks, 0, 2)
+		d.content.ResizeItem(d.logs, 0, 3)
 	}
 	return false
 }

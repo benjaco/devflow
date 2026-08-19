@@ -1,18 +1,23 @@
 # Progress
 
-Last updated: 2026-08-18
+Last updated: 2026-08-19
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: selected-task TUI invalidation now executes immediately without a confirmation overlay; retarget previews and other lifecycle behavior remain unchanged
-- Confidence: under Go 1.26.6 the lock-faithful immediate-invalidate regression, full default suite, full race suite, and vet pass on `darwin/arm64`
+- State: wide-terminal TUI workspace layout is implemented and verified
+- Confidence: focused simulation and lock-faithful `Application.Run` tests pass 20 consecutive times under the race detector across the 120-column desktop breakpoint; full default/race suites and vet pass on `darwin/arm64`
 
 ## In Progress
 
-- None for the scoped immediate-invalidate follow-up.
+- None for the scoped wide-terminal workspace follow-up.
 
 ## Completed
+
+- Wide-terminal TUI workspace:
+  - introduced a responsive middle workspace that keeps the task selector left of the selected log at 120+ columns and 24+ rows while preserving the established stacked and short-terminal layouts
+  - retained full-width header/footer, existing focus/selection behavior, and the compact rule that hides logs before sacrificing task navigation
+  - added exact 119/120-column boundary and 180-column geometry regressions plus lock-faithful wide-layout application coverage; passed focused repetition/race, full default/race suites, and vet
 
 - Immediate TUI invalidation:
   - changed `i`/F5 to submit the existing selected-task daemon invalidate/rerun action immediately, while retaining running/success/failure footer feedback and leaving retarget confirmation unchanged

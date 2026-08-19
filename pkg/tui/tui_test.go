@@ -1490,15 +1490,18 @@ func TestLifecycleBadgesAreDistinctWithoutColor(t *testing.T) {
 
 func TestResponsiveDashboardLayouts(t *testing.T) {
 	cases := []struct {
-		width  int
-		height int
-		want   []string
+		width      int
+		height     int
+		want       []string
+		sideBySide bool
 	}{
-		{60, 24, []string{"? help", "backend_debug"}},
-		{80, 24, []string{"backend_debug", "restart failed"}},
-		{100, 12, []string{"backend_debug", "RUN"}},
-		{100, 30, []string{"backend_debug", "task log"}},
-		{140, 40, []string{"backend_debug", "task log", "restart failed"}},
+		{60, 24, []string{"? help", "backend_debug"}, false},
+		{80, 24, []string{"backend_debug", "restart failed"}, false},
+		{100, 12, []string{"backend_debug", "RUN"}, false},
+		{100, 30, []string{"backend_debug", "task log"}, false},
+		{119, 40, []string{"backend_debug", "task log", "restart failed"}, false},
+		{120, 40, []string{"backend_debug", "task log", "restart failed"}, true},
+		{180, 50, []string{"backend_debug", "task log", "restart failed"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%dx%d", tc.width, tc.height), func(t *testing.T) {
@@ -1522,6 +1525,15 @@ func TestResponsiveDashboardLayouts(t *testing.T) {
 			screen.SetSize(tc.width, tc.height)
 			d.pages.SetRect(0, 0, tc.width, tc.height)
 			d.pages.Draw(screen)
+			taskX, taskY, _, _ := d.tasks.GetRect()
+			logX, logY, _, _ := d.logs.GetRect()
+			if tc.sideBySide {
+				if taskX >= logX || taskY != logY {
+					t.Fatalf("wide workspace is not split left/right: tasks=(%d,%d) logs=(%d,%d)", taskX, taskY, logX, logY)
+				}
+			} else if tc.height >= 16 && (taskX != logX || taskY >= logY) {
+				t.Fatalf("compact workspace is not stacked: tasks=(%d,%d) logs=(%d,%d)", taskX, taskY, logX, logY)
+			}
 			text := simulationScreenText(screen, tc.width, tc.height)
 			for _, want := range tc.want {
 				if !strings.Contains(text, want) {
