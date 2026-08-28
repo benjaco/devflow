@@ -310,6 +310,24 @@ func runFakeNPM() {
 		fmt.Println("fake npm install ok")
 		return
 	}
+	if len(args) == 2 && args[0] == "run" && args[1] == "dev" {
+		appendNPMRecord("payload-dev PAYLOAD_SCHEMA_PUSH=" + os.Getenv("PAYLOAD_SCHEMA_PUSH"))
+		readyPath := os.Getenv("DEVFLOW_FAKE_PAYLOAD_READY_FILE")
+		if readyPath != "" {
+			if err := os.MkdirAll(filepath.Dir(readyPath), 0o755); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			if err := os.WriteFile(readyPath, []byte("ready\n"), 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		}
+		fmt.Println("fake Payload development server ready")
+		for {
+			time.Sleep(time.Second)
+		}
+	}
 	if len(args) >= 4 && args[0] == "run" && args[1] == "payload" && args[2] == "--" {
 		runFakePayload(args[3:])
 		return

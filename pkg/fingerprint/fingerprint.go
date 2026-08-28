@@ -281,6 +281,8 @@ func TaskSignature(task project.Task) (string, error) {
 		Tags                      []string              `json:"tags"`
 		Description               string                `json:"description"`
 		Signature                 string                `json:"signature"`
+		HasBeforeRun              bool                  `json:"hasBeforeRun"`
+		HasAfterReady             bool                  `json:"hasAfterReady"`
 		CustomFingerprintCount    int                   `json:"customFingerprintCount"`
 		HasCacheKeyOverride       bool                  `json:"hasCacheKeyOverride"`
 	}{
@@ -299,6 +301,8 @@ func TaskSignature(task project.Task) (string, error) {
 		Tags:                      append([]string(nil), task.Tags...),
 		Description:               task.Description,
 		Signature:                 task.Signature,
+		HasBeforeRun:              task.BeforeRun != nil,
+		HasAfterReady:             task.AfterReady != nil,
 		CustomFingerprintCount:    len(task.Inputs.Custom),
 		HasCacheKeyOverride:       task.CacheKeyOverride != nil,
 	}

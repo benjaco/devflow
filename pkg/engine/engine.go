@@ -687,7 +687,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 				return taskResult{name: task.Name, key: key}
 			}
 		}
-		if err := runTask(ctx, task, rt); err != nil {
+		if _, err := runTask(ctx, task, rt); err != nil {
 			state.setErrorState(task.Name, ctx, key, err, 0)
 			return taskResult{name: task.Name, key: key, err: err}
 		}
@@ -757,7 +757,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			Mode:       state.req.Mode,
 			CacheKey:   key,
 		})
-		if err := runTask(ctx, task, rt); err != nil {
+		if _, err := runTask(ctx, task, rt); err != nil {
 			state.setErrorState(task.Name, ctx, key, err, 0)
 			return taskResult{name: task.Name, key: key, err: err}
 		}
@@ -781,7 +781,8 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 		return taskResult{name: task.Name, key: key}
 	}
 
-	if err := runTask(ctx, task, rt); err != nil {
+	taskRuntime, err := runTask(ctx, task, rt)
+	if err != nil {
 		state.setErrorState(task.Name, ctx, "", err, 0)
 		return taskResult{name: task.Name, err: err}
 	}
@@ -792,7 +793,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			state.setErrorState(task.Name, ctx, "", err, 0)
 			return taskResult{name: task.Name, err: err}
 		}
-		if err := e.awaitServiceReady(ctx, rt, task, handle); err != nil {
+		if err := e.awaitServiceReady(ctx, taskRuntime, task, handle); err != nil {
 			_ = handle.Stop()
 			state.removeService(task.Name)
 			state.setErrorState(task.Name, ctx, "", err, 0)
@@ -807,39 +808,41 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 }
 
 func (e *Engine) awaitServiceReady(ctx context.Context, rt *project.Runtime, task project.Task, handle project.ServiceHandle) error {
-	if task.Ready == nil {
-		return nil
-	}
-	timeout := task.ReadyTimeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	readyCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	readyCh := make(chan error, 1)
-	exitCh := make(chan error, 1)
-	go func() {
-		readyCh <- task.Ready(readyCtx, rt)
-	}()
-	go func() {
-		exitCh <- handle.Wait()
-	}()
-
-	select {
-	case err := <-readyCh:
-		if err != nil {
-			return err
+	if task.Ready != nil {
+		timeout := task.ReadyTimeout
+		if timeout <= 0 {
+			timeout = 10 * time.Second
 		}
-		return nil
-	case err := <-exitCh:
-		return &serviceEarlyExitError{cause: err}
-	case <-readyCtx.Done():
-		if errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("service readiness timed out after %s", timeout)
+		readyCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+
+		readyCh := make(chan error, 1)
+		exitCh := make(chan error, 1)
+		go func() {
+			readyCh <- task.Ready(readyCtx, rt)
+		}()
+		go func() {
+			exitCh <- handle.Wait()
+		}()
+
+		select {
+		case err := <-readyCh:
+			if err != nil {
+				return err
+			}
+		case err := <-exitCh:
+			return &serviceEarlyExitError{cause: err}
+		case <-readyCtx.Done():
+			if errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("service readiness timed out after %s", timeout)
+			}
+			return readyCtx.Err()
 		}
-		return readyCtx.Err()
 	}
+	if task.AfterReady != nil {
+		return task.AfterReady(ctx, rt)
+	}
+	return nil
 }
 
 type serviceEarlyExitError struct {
@@ -860,11 +863,20 @@ func (e *serviceEarlyExitError) Unwrap() error {
 	return e.cause
 }
 
-func runTask(ctx context.Context, task project.Task, rt *project.Runtime) error {
-	if task.Run == nil {
-		return nil
+func runTask(ctx context.Context, task project.Task, rt *project.Runtime) (*project.Runtime, error) {
+	taskRuntime := rt
+	if task.BeforeRun != nil {
+		clone := *rt
+		clone.Env = rt.CloneEnv()
+		taskRuntime = &clone
+		if err := task.BeforeRun(ctx, taskRuntime); err != nil {
+			return taskRuntime, err
+		}
 	}
-	return task.Run(ctx, rt)
+	if task.Run == nil {
+		return taskRuntime, nil
+	}
+	return taskRuntime, task.Run(ctx, taskRuntime)
 }
 
 func truncateTaskLog(rt *project.Runtime) error {

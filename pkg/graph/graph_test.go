@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"context"
 	"testing"
 
 	"github.com/benjaco/devflow/pkg/project"
@@ -31,6 +32,48 @@ func TestValidateStampedTaskRules(t *testing.T) {
 		[]project.Target{{Name: "up", RootTasks: []string{"install"}}},
 	); err == nil {
 		t.Fatal("expected cache and stamp validation error")
+	}
+}
+
+func TestValidateRejectsAfterReadyOnFiniteTask(t *testing.T) {
+	_, err := New(
+		[]project.Task{{
+			Name:       "generate",
+			Kind:       project.KindOnce,
+			AfterReady: func(context.Context, *project.Runtime) error { return nil },
+		}},
+		[]project.Target{{Name: "up", RootTasks: []string{"generate"}}},
+	)
+	if err == nil {
+		t.Fatal("expected finite-task AfterReady validation error")
+	}
+}
+
+func TestValidateRejectsAfterReadyWithoutReadiness(t *testing.T) {
+	_, err := New(
+		[]project.Task{{
+			Name:       "serve",
+			Kind:       project.KindService,
+			AfterReady: func(context.Context, *project.Runtime) error { return nil },
+		}},
+		[]project.Target{{Name: "up", RootTasks: []string{"serve"}}},
+	)
+	if err == nil {
+		t.Fatal("expected AfterReady readiness validation error")
+	}
+}
+
+func TestValidateRejectsBeforeRunOnGroup(t *testing.T) {
+	_, err := New(
+		[]project.Task{{
+			Name:      "all",
+			Kind:      project.KindGroup,
+			BeforeRun: func(context.Context, *project.Runtime) error { return nil },
+		}},
+		[]project.Target{{Name: "up", RootTasks: []string{"all"}}},
+	)
+	if err == nil {
+		t.Fatal("expected group BeforeRun validation error")
 	}
 }
 

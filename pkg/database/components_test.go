@@ -2,6 +2,8 @@ package database
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -214,6 +216,156 @@ func TestPayloadCMSComponentDefinesMigrationTasks(t *testing.T) {
 	}
 	if inst.Env["DATABASE_URL"] == "" {
 		t.Fatal("expected DATABASE_URL in instance env")
+	}
+}
+
+func TestPayloadCMSDevServiceGatesSchemaPushUntilReadiness(t *testing.T) {
+	worktree := t.TempDir()
+	writeComponentTestFile(t, worktree, "src/payload.config.ts", "export default {}\n")
+	writeComponentTestFile(t, worktree, "src/collections/Posts.ts", "export const Posts = { fields: [] }\n")
+	writeComponentTestFile(t, worktree, "package.json", "{}\n")
+	writeComponentTestFile(t, worktree, "pnpm-lock.yaml", "lockfileVersion: 9\n")
+
+	var payload *PayloadCMSComponent
+	p := project.Define(func(ctx context.Context, b *project.Builder) error {
+		b.Name("payload-schema-push")
+		payload = PayloadCMS("payload")
+		app := b.Service("app").
+			Command("node", "server.js").
+			ReadyFile(".ready/app")
+		payload.ConfigureDevService(app)
+		// A duplicate call must not run the prepare/commit hooks twice.
+		payload.ConfigureDevService(app)
+		b.Target("up", app)
+		return nil
+	})
+	app := taskByName(p.Tasks(), "app")
+	for _, input := range []string{"src/payload.config.ts", "src/collections", "src/globals", "src/fields", "package.json", "pnpm-lock.yaml"} {
+		if !stringSliceContainsDatabaseTest(app.Inputs.Paths, input) {
+			t.Fatalf("expected Payload dev-service input %q, got %+v", input, app.Inputs.Paths)
+		}
+	}
+	if !stringSliceContainsDatabaseTest(app.Inputs.Env, "DATABASE_URL") {
+		t.Fatalf("expected DATABASE_URL input, got %+v", app.Inputs.Env)
+	}
+	if app.BeforeRun == nil || app.AfterReady == nil {
+		t.Fatal("expected Payload dev-service lifecycle hooks")
+	}
+
+	newRuntime := func(databaseURL string) *project.Runtime {
+		return &project.Runtime{
+			Worktree: worktree,
+			TaskName: "app",
+			Instance: &api.Instance{ID: "payload-instance"},
+			Env:      map[string]string{"DATABASE_URL": databaseURL},
+		}
+	}
+	firstURL := "postgres://payload:first-secret@DB.EXAMPLE:5432/payload_dev?sslmode=disable"
+	first := newRuntime(firstURL)
+	if err := app.BeforeRun(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	if got := first.Env[PayloadSchemaPushEnv]; got != "true" {
+		t.Fatalf("first start push = %q, want true", got)
+	}
+	if _, err := os.Stat(payload.schemaPushAppliedPath(first)); !os.IsNotExist(err) {
+		t.Fatalf("schema fingerprint was applied before readiness: %v", err)
+	}
+	if err := app.AfterReady(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+
+	restart := newRuntime("postgres://payload:second-secret@db.example:5432/payload_dev?sslmode=disable")
+	if err := app.BeforeRun(context.Background(), restart); err != nil {
+		t.Fatal(err)
+	}
+	if got := restart.Env[PayloadSchemaPushEnv]; got != "false" {
+		t.Fatalf("password-only restart push = %q, want false", got)
+	}
+	if err := app.AfterReady(context.Background(), restart); err != nil {
+		t.Fatal(err)
+	}
+
+	writeComponentTestFile(t, worktree, "src/collections/Posts.ts", "export const Posts = { fields: [{ name: 'title' }] }\n")
+	schemaChange := newRuntime(firstURL)
+	if err := app.BeforeRun(context.Background(), schemaChange); err != nil {
+		t.Fatal(err)
+	}
+	if got := schemaChange.Env[PayloadSchemaPushEnv]; got != "true" {
+		t.Fatalf("schema-change push = %q, want true", got)
+	}
+	if err := app.AfterReady(context.Background(), schemaChange); err != nil {
+		t.Fatal(err)
+	}
+
+	writeComponentTestFile(t, worktree, "pnpm-lock.yaml", "lockfileVersion: 9\npackages: { payload: 3.99.0 }\n")
+	lockChange := newRuntime(firstURL)
+	if err := app.BeforeRun(context.Background(), lockChange); err != nil {
+		t.Fatal(err)
+	}
+	if got := lockChange.Env[PayloadSchemaPushEnv]; got != "true" {
+		t.Fatalf("lockfile-change push = %q, want true", got)
+	}
+	if err := app.AfterReady(context.Background(), lockChange); err != nil {
+		t.Fatal(err)
+	}
+
+	databaseChange := newRuntime("postgres://payload:third-secret@db.example:5432/other_dev?sslmode=disable")
+	if err := app.BeforeRun(context.Background(), databaseChange); err != nil {
+		t.Fatal(err)
+	}
+	if got := databaseChange.Env[PayloadSchemaPushEnv]; got != "true" {
+		t.Fatalf("database-change push = %q, want true", got)
+	}
+	if err := app.AfterReady(context.Background(), databaseChange); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := os.ReadFile(payload.schemaPushAppliedPath(databaseChange))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"first-secret", "second-secret", "third-secret", "postgres://"} {
+		if strings.Contains(string(state), secret) {
+			t.Fatalf("schema state leaked database credential or URL %q: %s", secret, state)
+		}
+	}
+}
+
+func TestPayloadDatabaseIdentityExcludesPasswordAndTracksDatabase(t *testing.T) {
+	first, err := payloadDatabaseIdentity("postgres://payload:first-secret@DB.EXAMPLE/payload_dev?sslmode=disable&password=query-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	passwordChanged, err := payloadDatabaseIdentity("postgres://payload:second-secret@db.example:5432/payload_dev?sslmode=disable&password=other-query-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != passwordChanged {
+		t.Fatalf("password-only change altered database identity:\n%s\n%s", first, passwordChanged)
+	}
+	databaseChanged, err := payloadDatabaseIdentity("postgres://payload:second-secret@db.example:5432/other_dev?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == databaseChanged {
+		t.Fatal("database-name change did not alter database identity")
+	}
+	for _, secret := range []string{"first-secret", "second-secret", "query-secret", "other-query-secret"} {
+		if strings.Contains(first, secret) || strings.Contains(passwordChanged, secret) {
+			t.Fatalf("database identity leaked %q", secret)
+		}
+	}
+}
+
+func writeComponentTestFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

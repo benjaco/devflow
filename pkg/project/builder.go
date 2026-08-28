@@ -434,6 +434,14 @@ func (t *TaskBuilder) Run(fn RunFunc) *TaskBuilder {
 	return t
 }
 
+// BeforeRun registers setup that runs with a task-local Runtime immediately
+// before the task starts. The hook may add task-scoped environment values
+// without mutating the shared instance environment.
+func (t *TaskBuilder) BeforeRun(fn RunFunc) *TaskBuilder {
+	t.task.BeforeRun = composeRunFuncs(t.task.BeforeRun, fn)
+	return t
+}
+
 func (t *TaskBuilder) DependsOn(refs ...any) *TaskBuilder {
 	for _, ref := range refs {
 		if name := refName(ref); name != "" {
@@ -542,6 +550,13 @@ func (t *TaskBuilder) Ready(fn ReadyFunc) *TaskBuilder {
 	return t
 }
 
+// AfterReady registers work that is committed only after a service passes its
+// readiness check. An error fails and stops the service startup.
+func (t *TaskBuilder) AfterReady(fn RunFunc) *TaskBuilder {
+	t.task.AfterReady = composeRunFuncs(t.task.AfterReady, fn)
+	return t
+}
+
 func (t *TaskBuilder) ReadyHTTP(portName, path string, status int) *TaskBuilder {
 	t.task.Ready = ReadyHTTPNamedPort(portName, path, status)
 	return t
@@ -633,27 +648,56 @@ func (t *TaskBuilder) build(requiredCatalog map[string]bool) Task {
 }
 
 func (t *TaskBuilder) addInput(item any) {
+	addInput(&t.task.Inputs, item)
+}
+
+// InputsFrom converts the same path, glob, slice, and filtered-input values
+// accepted by TaskBuilder.Inputs into a standalone input specification.
+func InputsFrom(items ...any) Inputs {
+	var inputs Inputs
+	for _, item := range items {
+		addInput(&inputs, item)
+	}
+	return inputs
+}
+
+func addInput(inputs *Inputs, item any) {
 	switch value := item.(type) {
 	case nil:
 		return
 	case string:
 		if pathspec.HasGlob(value) {
-			t.task.Inputs.Globs = append(t.task.Inputs.Globs, value)
+			inputs.Globs = append(inputs.Globs, value)
 		} else {
-			t.task.Inputs.Paths = append(t.task.Inputs.Paths, value)
+			inputs.Paths = append(inputs.Paths, value)
 		}
 	case InputGlob:
-		t.task.Inputs.Globs = append(t.task.Inputs.Globs, string(value))
+		inputs.Globs = append(inputs.Globs, string(value))
 	case FilteredInput:
-		t.task.Inputs.Filtered = append(t.task.Inputs.Filtered, value)
+		inputs.Filtered = append(inputs.Filtered, value)
 	case []FilteredInput:
-		t.task.Inputs.Filtered = append(t.task.Inputs.Filtered, value...)
+		inputs.Filtered = append(inputs.Filtered, value...)
 	case []string:
 		for _, path := range value {
-			t.addInput(path)
+			addInput(inputs, path)
 		}
 	default:
 		panic(fmt.Sprintf("unsupported input type %T", item))
+	}
+}
+
+func composeRunFuncs(first, second RunFunc) RunFunc {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	return func(ctx context.Context, rt *Runtime) error {
+		if err := first(ctx, rt); err != nil {
+			return err
+		}
+		return second(ctx, rt)
 	}
 }
 

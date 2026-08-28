@@ -55,11 +55,20 @@ func (g *Graph) Validate() error {
 		if task.Kind == project.KindGroup && task.Run != nil {
 			return fmt.Errorf("group task %q cannot define Run", task.Name)
 		}
+		if task.Kind == project.KindGroup && task.BeforeRun != nil {
+			return fmt.Errorf("group task %q cannot define BeforeRun", task.Name)
+		}
 		if task.Cache && task.Kind != project.KindOnce {
 			return fmt.Errorf("only once tasks may be cacheable: %q", task.Name)
 		}
 		if task.Stamp && task.Kind != project.KindOnce {
 			return fmt.Errorf("only once tasks may be stamped: %q", task.Name)
+		}
+		if task.AfterReady != nil && !project.IsServiceKind(task.Kind) {
+			return fmt.Errorf("only service tasks may define AfterReady: %q", task.Name)
+		}
+		if task.AfterReady != nil && task.Ready == nil {
+			return fmt.Errorf("service task %q with AfterReady must define readiness", task.Name)
 		}
 		if task.Cache && task.Stamp {
 			return fmt.Errorf("task %q cannot be both cacheable and stamped", task.Name)

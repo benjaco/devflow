@@ -73,6 +73,7 @@ Per-worktree state lives under `.devflow/`:
 - `.devflow/logs/<instance-id>/`
 - `.devflow/state/instances/<instance-id>/`
 - `.devflow/state/instances/<instance-id>/flush/`
+- `.devflow/state/instances/<instance-id>/payload-schema/` for password-free Payload schema-push fingerprints
 
 Daemon/supervisor state is also per worktree. The instance snapshot records:
 - the per-worktree daemon PID as the supervisor PID
@@ -414,7 +415,9 @@ Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`
 
 The opt-in `PostgresClientContainer` strategy runs the clients already bundled in the managed Postgres image. `PrismaComponent.CloneFromEnvContainerized(...)` selects it and removes host `pg_dump`/`psql` requirements, making a reachable Docker Engine sufficient for most remote-clone workflows. The Docker exec command and env contain only password-free URLs; the two pgpass records are sent through exec stdin into owner-only temporary files that are trapped for cleanup. A remote URL using host-local `localhost` is not automatically reachable from inside the managed container and must use a container-reachable hostname. The client major follows the selected managed image and must be compatible with the remote server; adapters that need another client major should select a compatible managed image or retain the host-client strategy.
 
-PayloadCMS follows the same operator rule as Prisma: normal `up`/watch paths apply existing migrations non-interactively through `payload.Migrations(b)`, while migration creation belongs to an explicit action registered by `payload.NewMigration(b)`. Payload can ask for confirmations when changes may be destructive; those prompts flow through the generic interactive prompt path instead of being handled with Payload-specific TUI logic. Payload schema module paths are part of the component input contract, not only app-service inputs: by default the component includes `src/collections` and `src/globals`, and adapters can override them with `SchemaInputs(...)`. Migration authoring uses `project.CommandOutputTasklet` with new-file semantics over the configured migration directory, because Payload can return zero without writing a migration. It retries only successful missing-output attempts, preserves non-zero failures, and never cleans the migration directory.
+PayloadCMS follows the same operator rule as Prisma: normal `up`/watch paths apply existing migrations non-interactively through `payload.Migrations(b)`, while migration creation belongs to an explicit action registered by `payload.NewMigration(b)`. Payload can ask for confirmations when changes may be destructive; those prompts flow through the generic interactive prompt path instead of being handled with Payload-specific TUI logic. Payload schema module paths are part of the component input contract, not only app-service inputs: by default the component includes `src/collections`, `src/globals`, and `src/fields`, and adapters can override or extend them with `SchemaInputs(...)`/`AddSchemaInputs(...)`. Migration authoring uses `project.CommandOutputTasklet` with new-file semantics over the configured migration directory, because Payload can return zero without writing a migration. It retries only successful missing-output attempts, preserves non-zero failures, and never cleans the migration directory.
+
+`PayloadCMSComponent.ConfigureDevService` is the development schema-push boundary. It adds config/schema/package-lock inputs directly to the service so watch mode selects a restart, computes a narrow content fingerprint plus a normalized password-free Postgres identity in `BeforeRun`, and supplies `PAYLOAD_SCHEMA_PUSH` only to that task's cloned runtime env. A pending fingerprint is not authoritative. `AfterReady` atomically promotes it to applied state only after explicit service readiness succeeds; readiness failure stops the service and leaves the prior applied key untouched. The Payload config consumes the flag with `push: process.env.PAYLOAD_SCHEMA_PUSH === 'true'`. This keeps the core hooks generic while Payload-specific paths, state, and environment behavior remain in `pkg/database`.
 
 `project.CommandOutputTasklet` is the generic finite-command convergence boundary. Required paths/globs are worktree-relative and every pattern must match a regular file. It can require matches created during the current run, rechecks after a bounded settle delay before rerunning, and honors context cancellation. Optional cleanup is restricted to explicit worktree-relative output directories that contain required patterns and exact `OutputHashFiles`. Hash cleanup cannot run independently: every directory and hash path is validated before mutation, then hashes are removed before output directories in the same one-time pre-attempt phase so a directory-removal failure cannot leave stale validity state. Cleanup rejects escaping, globbed, Git/Devflow-state, non-file hash, or symlink-traversing paths. Graph output declarations remain owned by `project.Task`; the tasklet does not infer cache artifacts.
 
@@ -589,17 +592,21 @@ type ReadyFunc func(ctx context.Context, rt *Runtime) error
 
 type Task struct {
     // ...
+    BeforeRun    RunFunc
     Ready        ReadyFunc
+    AfterReady   RunFunc
     ReadyTimeout time.Duration
 }
 ```
 
 Semantics:
 - readiness is optional and applies to service tasks
+- `BeforeRun` receives a task-local clone of runtime env and may prepare per-start values without changing persisted instance env
 - the process is started first
 - the task is only marked `running` after readiness passes
+- `AfterReady`, when defined, runs after readiness and before the task is marked running; it requires an explicit readiness function
 - if readiness fails, times out, or the process exits first, the task becomes `failed`
-- a failed readiness attempt stops the service process before returning
+- a failed readiness or `AfterReady` attempt stops the service process before returning
 
 The current helper surface includes:
 - `ReadyAll(...)`

@@ -80,8 +80,10 @@ type Task struct {
 	RequiredEnv               []string
 	Inputs                    Inputs
 	Outputs                   Outputs
+	BeforeRun                 RunFunc
 	Run                       RunFunc
 	Ready                     ReadyFunc
+	AfterReady                RunFunc
 	ReadyTimeout              time.Duration
 	Cache                     bool
 	Stamp                     bool

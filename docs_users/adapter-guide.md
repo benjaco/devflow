@@ -203,7 +203,7 @@ db := database.Postgres("payload").PortName("postgres")
 payload := database.PayloadCMS("payload").
     Config("src/payload.config.ts").
     MigrationDir("src/migrations").
-    SchemaInputs("src/collections", "src/globals").
+    SchemaInputs("src/collections", "src/globals", "src/fields").
     Database(db)
 
 npmInstall := b.Task("npm_install").
@@ -221,11 +221,23 @@ app := b.Service("app").
     InputEnv("DATABASE_URL", "PAYLOAD_SECRET", "PORT").
     Env("PORT", b.Port("app")).
     ReadyHTTP("app", "/health", 200)
+payload.ConfigureDevService(app)
 
 b.Target("up", app)
 ```
 
-Payload schema inputs default to `src/collections` and `src/globals`; configure `SchemaInputs(...)` for projects that keep collections, globals, blocks, or reusable Payload config modules elsewhere. These inputs drive both fingerprints and watch matching.
+The Payload config must let Devflow control development schema push:
+
+```ts
+db: postgresAdapter({
+    pool: { connectionString: process.env.DATABASE_URL! },
+    push: process.env.PAYLOAD_SCHEMA_PUSH === 'true',
+})
+```
+
+`ConfigureDevService(app)` fingerprints the Payload config, configured schema inputs, package manifest/common lockfiles, and a password-free database identity before every service start. It sets `PAYLOAD_SCHEMA_PUSH=true` on the first start or after one of those inputs changes, and `false` for unrelated restarts. The applied fingerprint is written under the worktree's per-instance `.devflow/state` only after the service passes its declared readiness check. A configured service must therefore define `Ready`, `ReadyHTTP`, `ReadyTCP`, or `ReadyFile`.
+
+The same schema inputs are direct service inputs, so watch mode restarts the app with `true` when a collection/global/field/config module changes. Once that restart is ready, later non-schema restarts return to `false`. The default schema module paths are `src/collections`, `src/globals`, and `src/fields`; configure `SchemaInputs(...)` or `AddSchemaInputs(...)` for blocks, plugins, or reusable Payload config modules elsewhere. The default package inputs cover `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, and `bun.lockb`; use `PackageInputs(...)` for another workspace layout. Passwords and the full `DATABASE_URL` are never stored in the schema state.
 
 By default, the component uses `npx payload migrate` and `npx payload migrate:create <name>`. If your project wraps Payload in an npm script, use:
 

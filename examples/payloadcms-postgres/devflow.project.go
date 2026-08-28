@@ -69,6 +69,7 @@ func buildPayloadCMSProject() project.Project {
 			ReadyHTTP("app", "/health", 200).
 			ReadyTimeout(30 * time.Second).
 			RestartOnInputChange()
+		payload.ConfigureDevService(app)
 
 		smoke := b.Task("smoke").
 			Command("npm", "run", "smoke").

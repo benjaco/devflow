@@ -1,18 +1,27 @@
 # Progress
 
-Last updated: 2026-08-19
+Last updated: 2026-08-28
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: wide-terminal TUI workspace layout is implemented and verified
-- Confidence: focused simulation and lock-faithful `Application.Run` tests pass 20 consecutive times under the race detector across the 120-column desktop breakpoint; full default/race suites and vet pass on `darwin/arm64`
+- State: PayloadCMS development schema-push fingerprinting and warm-cache restart behavior are implemented and verified
+- Confidence: the exact warm-start/schema-edit/unrelated-edit/second-schema-edit flow passes repeated and race runs; full implementation verification remains green
 
 ## In Progress
 
-- None for the scoped wide-terminal workspace follow-up.
+- None for the scoped PayloadCMS schema-push optimization.
 
 ## Completed
+
+- PayloadCMS development schema-push gate:
+  - added `PayloadCMS.ConfigureDevService`, which attaches config/schema/common package-lock inputs directly to the app service and derives task-local `PAYLOAD_SCHEMA_PUSH` from their narrow content fingerprint plus a password-free database identity
+  - commits the applied fingerprint atomically under per-worktree/per-instance state only after explicit service readiness; failed startups leave the prior applied key untouched, and generated flags never enter persisted instance env
+  - made the first/schema/lockfile/database-changing start use `true`, ordinary restarts and password-only URL changes use `false`, and Payload schema edits select an app restart in watch mode
+  - added an exact warm-cache live regression that warms through a successful service startup, proves the next dev start uses `false`, proves a Payload edit restarts with `true`, proves an unrelated app edit returns to `false`, and proves a second Payload edit restarts with `true` again
+  - added generic task-local `BeforeRun` and readiness-gated `AfterReady` lifecycle hooks, requiring explicit readiness for the latter
+  - expanded default Payload schema inputs with `src/fields`, covered npm/pnpm/Yarn/Bun lockfiles, updated the example Payload config and adapter/user/contributor docs, and added credential-leak, readiness, fingerprint, graph-validation, and live-watch regressions
+  - verified with focused tests, 10 repeated live-watch runs, `go test ./...`, `go test -race ./...`, `go vet ./...`, Staticcheck v0.7.0, `go mod tidy -diff`, formatting/diff checks, and `go run ./cmd/devflow version --json`
 
 - Wide-terminal TUI workspace:
   - introduced a responsive middle workspace that keeps the task selector left of the selected log at 120+ columns and 24+ rows while preserving the established stacked and short-terminal layouts

@@ -166,6 +166,127 @@ func TestPayloadCMSWatchPicksUpCollectionModuleChange(t *testing.T) {
 	}
 }
 
+func TestPayloadCMSWatchRestartsDevServerWithSchemaPushOnlyForSchemaChanges(t *testing.T) {
+	isolatePayloadUserCache(t)
+	worktree := seededPayloadWorktree(t)
+	fakeBin := installFakeNPM(t)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	recordPath := filepath.Join(worktree, ".devflow", "fake-npm-record.txt")
+	t.Setenv("DEVFLOW_FAKE_NPM_RECORD", recordPath)
+
+	// Warm the applied schema fingerprint through a real successful service
+	// startup, then clear only the fake-process audit log. This models starting
+	// dev again without changing any Payload schema input.
+	warm, err := engine.New(testPayloadDevProjectWithoutManagedDB(), worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warmOutcome, err := warm.Run(context.Background(), engine.Request{
+		Target:      "up",
+		Worktree:    worktree,
+		Mode:        api.ModeCI,
+		MaxParallel: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !warmOutcome.Result.Success {
+		t.Fatalf("schema fingerprint warmup failed: %+v", warmOutcome.Result)
+	}
+	if got := payloadRecordCount(recordPath, "payload-dev PAYLOAD_SCHEMA_PUSH=true"); got != 1 {
+		t.Fatalf("first-ever warmup push count = %d, want 1\nrecord:\n%s", got, readFilePayloadTest(t, recordPath))
+	}
+	if err := os.Remove(recordPath); err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := engine.New(testPayloadDevProjectWithoutManagedDB(), worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := eng.SubscribeEvents()
+	var (
+		eventMu     sync.Mutex
+		watchStarts []string
+	)
+	go func() {
+		for evt := range events {
+			if evt.Type != api.EventWatchCycleStart {
+				continue
+			}
+			eventMu.Lock()
+			watchStarts = append(watchStarts, "files="+strings.Join(evt.Files, ",")+" affected="+strings.Join(evt.AffectedTasks, ","))
+			eventMu.Unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Watch(ctx, engine.Request{
+			Target:      "up",
+			Worktree:    worktree,
+			Mode:        api.ModeWatch,
+			MaxParallel: 2,
+		})
+	}()
+	defer func() {
+		cancel()
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("watch returned error during cleanup: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("watch did not stop during cleanup")
+		}
+	}()
+
+	instanceID := waitForPayloadWatchReady(t, worktree)
+	waitForPayload(t, 8*time.Second, func() bool {
+		return payloadRecordCount(recordPath, "payload-dev PAYLOAD_SCHEMA_PUSH=false") == 1
+	})
+	inst, err := instance.Load(worktree, instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := inst.Env[database.PayloadSchemaPushEnv]; ok {
+		t.Fatal("task-local PAYLOAD_SCHEMA_PUSH must not be persisted in instance env")
+	}
+
+	writePayloadFile(t, worktree, "src/collections/Posts.ts", `export const Posts = {
+  slug: 'posts',
+  fields: [
+    { name: 'title', type: 'text', required: true },
+    { name: 'status', type: 'select', options: ['draft', 'published'] },
+  ],
+}
+`)
+	waitForPayload(t, 8*time.Second, func() bool {
+		return payloadRecordCount(recordPath, "payload-dev PAYLOAD_SCHEMA_PUSH=true") == 1
+	})
+	if !payloadWatchStartsContain(&eventMu, &watchStarts, "src/collections/Posts.ts", "app") {
+		t.Fatalf("expected Payload schema edit to restart app, got: %s", payloadRecentWatchStarts(&eventMu, &watchStarts))
+	}
+
+	writePayloadFile(t, worktree, "src/app.ts", "export const appVersion = 2\n")
+	waitForPayload(t, 8*time.Second, func() bool {
+		return payloadRecordCount(recordPath, "payload-dev PAYLOAD_SCHEMA_PUSH=false") == 2
+	})
+
+	writePayloadFile(t, worktree, "src/collections/Posts.ts", `export const Posts = {
+  slug: 'posts',
+  fields: [
+    { name: 'title', type: 'text', required: true },
+    { name: 'status', type: 'select', options: ['draft', 'published', 'archived'] },
+  ],
+}
+`)
+	waitForPayload(t, 8*time.Second, func() bool {
+		return payloadRecordCount(recordPath, "payload-dev PAYLOAD_SCHEMA_PUSH=true") == 2
+	})
+}
+
 func TestPayloadCMSNewMigrationForDeletedFieldRequiresConfirmation(t *testing.T) {
 	isolatePayloadUserCache(t)
 	worktree := seededPayloadWorktree(t)
@@ -309,6 +430,41 @@ func testPayloadProjectWithoutManagedDB() project.Project {
 	})
 }
 
+func testPayloadDevProjectWithoutManagedDB() project.Project {
+	return project.Define(func(ctx context.Context, b *project.Builder) error {
+		_ = ctx
+		b.Name("payloadcms-dev-schema-push-test")
+		b.CacheNamespace("payloadcms-dev-schema-push-test")
+		b.Env("DATABASE_URL", "postgres://devflow:devflow@127.0.0.1:5432/payload?sslmode=disable")
+		payload := database.PayloadCMS("payload").
+			Config("src/payload.config.ts").
+			MigrationDir("src/migrations").
+			Command("npm", "run", "payload", "--")
+		npmInstall := b.Task("npm_install").
+			Command("npm", "install").
+			Inputs("package.json", "package-lock.json").
+			Stamp()
+		migrations := payload.Migrations(b).DependsOn(npmInstall)
+		app := b.Service("app").
+			Command("npm", "run", "dev").
+			DependsOn(migrations).
+			Inputs("src/app.ts").
+			Env("DEVFLOW_FAKE_PAYLOAD_READY_FILE", ".devflow/payload-test/app.ready").
+			BeforeRun(func(ctx context.Context, rt *project.Runtime) error {
+				if err := os.Remove(rt.Abs(".devflow/payload-test/app.ready")); err != nil && !os.IsNotExist(err) {
+					return err
+				}
+				return nil
+			}).
+			ReadyFile(".devflow/payload-test/app.ready").
+			ReadyTimeout(5 * time.Second).
+			RestartOnInputChange()
+		payload.ConfigureDevService(app)
+		b.Target("up", app)
+		return nil
+	})
+}
+
 func seededPayloadWorktree(t *testing.T) string {
 	t.Helper()
 	worktree := t.TempDir()
@@ -332,7 +488,10 @@ import { Posts } from './collections/Posts'
 export default buildConfig({
   secret: process.env.PAYLOAD_SECRET || 'devflow-payload-secret',
   collections: [Posts],
-  db: postgresAdapter({ pool: { connectionString: process.env.DATABASE_URL } }),
+  db: postgresAdapter({
+    pool: { connectionString: process.env.DATABASE_URL },
+    push: process.env.PAYLOAD_SCHEMA_PUSH === 'true',
+  }),
 })
 `)
 	writePayloadFile(t, worktree, "src/collections/Posts.ts", `export const Posts = {
@@ -348,6 +507,7 @@ export async function down() {}
 `)
 	writePayloadFile(t, worktree, "src/smoke.ts", `console.log('ok')
 `)
+	writePayloadFile(t, worktree, "src/app.ts", "export const appVersion = 1\n")
 	return worktree
 }
 

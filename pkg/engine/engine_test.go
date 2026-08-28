@@ -2186,6 +2186,9 @@ func (readinessProject) Tasks() []project.Task {
 				})
 				return err
 			},
+			AfterReady: func(ctx context.Context, rt *project.Runtime) error {
+				return os.WriteFile(rt.Abs(".ready/committed"), []byte("ready\n"), 0o600)
+			},
 		},
 	}
 }
@@ -2216,6 +2219,9 @@ func (readinessTimeoutProject) Tasks() []project.Task {
 				_, err := rt.StartServiceSpec(ctx, testServiceSpec(rt))
 				return err
 			},
+			AfterReady: func(ctx context.Context, rt *project.Runtime) error {
+				return os.WriteFile(rt.Abs("after-ready-must-not-run"), []byte("unexpected\n"), 0o600)
+			},
 		},
 	}
 }
@@ -2238,6 +2244,9 @@ func TestCIModeServiceReadinessPassesThenStopsService(t *testing.T) {
 
 	if elapsed := time.Since(started); elapsed < 175*time.Millisecond {
 		t.Fatalf("service run completed before readiness delay elapsed: %s", elapsed)
+	}
+	if data, err := os.ReadFile(filepath.Join(worktree, ".ready", "committed")); err != nil || string(data) != "ready\n" {
+		t.Fatalf("after-ready hook was not committed: data=%q err=%v", data, err)
 	}
 
 	status, err := instance.LoadStatus(worktree, out.Result.InstanceID)
@@ -2913,6 +2922,9 @@ func TestServiceReadinessTimeoutFailsRun(t *testing.T) {
 	}
 	if node.LastError == "" {
 		t.Fatal("expected readiness failure message to be recorded")
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "after-ready-must-not-run")); !os.IsNotExist(err) {
+		t.Fatalf("after-ready hook ran after readiness failure: %v", err)
 	}
 }
 

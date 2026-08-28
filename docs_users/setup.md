@@ -330,7 +330,7 @@ db := database.Postgres("payload").PortName("postgres")
 payload := database.PayloadCMS("payload").
 	Config("src/payload.config.ts").
 	MigrationDir("src/migrations").
-	SchemaInputs("src/collections", "src/globals").
+	SchemaInputs("src/collections", "src/globals", "src/fields").
 	Database(db)
 
 npmInstall := b.Task("npm_install").
@@ -348,14 +348,26 @@ app := b.Service("app").
 	InputEnv("DATABASE_URL", "PAYLOAD_SECRET", "PORT").
 	Env("PORT", b.Port("app")).
 	ReadyHTTP("app", "/health", 200)
+payload.ConfigureDevService(app)
 
 b.Target("up", app)
 b.Target("setup", npmInstall, migrations)
 ```
 
+In `payload.config.ts`, make Payload's development push conditional on the environment value supplied by the component:
+
+```ts
+db: postgresAdapter({
+	pool: { connectionString: process.env.DATABASE_URL! },
+	push: process.env.PAYLOAD_SCHEMA_PUSH === 'true',
+})
+```
+
 `payload.Migrations(b)` starts the managed Postgres runtime when a `database.Postgres` component is attached, waits for host-port readiness, and runs Payload's normal migration apply command. It is not task-cacheable because database state is a live runtime side effect.
 
-Payload schema inputs default to `src/collections` and `src/globals` in addition to the config and migration directory. Use `SchemaInputs(...)` when your collections, globals, blocks, or other config modules live elsewhere. Watch mode uses the same inputs, so edits to those modules are picked up and rerun the Payload migration preparation task.
+Payload schema inputs default to `src/collections`, `src/globals`, and `src/fields` in addition to the config path. `ConfigureDevService(app)` also includes `package.json` and the common npm/pnpm/Yarn/Bun lockfiles plus a password-free database identity in its schema fingerprint. Use `SchemaInputs(...)`/`AddSchemaInputs(...)` when collections, globals, blocks, plugins, or other config modules live elsewhere, and `PackageInputs(...)` for a nonstandard workspace layout.
+
+Those inputs are attached directly to the app service. In watch mode a Payload schema edit therefore restarts the server with `PAYLOAD_SCHEMA_PUSH=true`; after the service passes readiness, Devflow commits the applied fingerprint, and unrelated later restarts use `false`. The first start and a switch to another host/port/database also use `true`. The full credential-bearing URL is not persisted. Because the commit point is service readiness, `ConfigureDevService` requires an explicit service readiness check.
 
 `payload.NewMigration(b)` registers the explicit authoring action. It reads the action input `name` through `DEVFLOW_MIGRATION_NAME`, runs Payload migration creation, writes into the configured migration directory, and is intentionally not task-cacheable. Payload can prompt for confirmations when a migration may be destructive, for example after deleting a field. Devflow models those prompts as explicit interactive events, so the TUI or daemon client can ask the user instead of hiding a hanging subprocess in watch mode.
 

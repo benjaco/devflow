@@ -160,6 +160,32 @@ func TestTaskKeyChangesWhenEnvValuesChange(t *testing.T) {
 	}
 }
 
+func TestTaskSignatureTracksLifecycleHooks(t *testing.T) {
+	base := project.Task{Name: "app", Kind: project.KindService}
+	baseSignature, err := TaskSignature(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withBefore := base
+	withBefore.BeforeRun = func(context.Context, *project.Runtime) error { return nil }
+	beforeSignature, err := TaskSignature(withBefore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseSignature == beforeSignature {
+		t.Fatal("BeforeRun did not change task signature")
+	}
+	withAfter := base
+	withAfter.AfterReady = func(context.Context, *project.Runtime) error { return nil }
+	afterSignature, err := TaskSignature(withAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseSignature == afterSignature || beforeSignature == afterSignature {
+		t.Fatal("AfterReady did not produce a distinct task signature")
+	}
+}
+
 func TestTaskKeyChangesWhenCustomFingerprintsChange(t *testing.T) {
 	task := project.Task{Name: "gen", Kind: project.KindOnce}
 	first, err := TaskKey(TaskKeyInput{Task: task, CustomFingerprints: []string{"semantic-a"}})
