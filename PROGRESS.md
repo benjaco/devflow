@@ -5,14 +5,20 @@ Last updated: 2026-08-28
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: PayloadCMS development schema-push fingerprinting and warm-cache restart behavior are implemented and verified
-- Confidence: the exact warm-start/schema-edit/unrelated-edit/second-schema-edit flow passes repeated and race runs; full implementation verification remains green
+- State: Delve compatibility with the rolling Go 1.27 CI lane is restored locally and ready for the Ubuntu CI rerun
+- Confidence: Delve v1.27.0 launches a real Devflow debug service under Go 1.26.6 and Go 1.27.0, and the full repository suite passes under both toolchains
 
 ## In Progress
 
-- None for the scoped PayloadCMS schema-push optimization.
+- None for the scoped Delve compatibility fix; the existing Ubuntu matrix will provide the authoritative Linux watch/restart rerun.
 
 ## Completed
+
+- Go 1.27 rolling-lane Delve compatibility:
+  - updated build and release workflow installs from Delve v1.26.3, which rejects Go 1.27 binaries, to v1.27.0
+  - recorded that the Delve pin must remain compatible with both the supported minimum and rolling current-stable Go lanes
+  - verified real Devflow `dlv exec` startup with Delve v1.27.0 under Go 1.26.6 and Go 1.27.0, parsed both workflow YAML files, passed `git diff --check`, and passed `go test -count=1 ./...` under both Go versions
+  - the local macOS watch/restart case reached Delve without the version rejection but could not launch the debuggee because Developer Mode is disabled; machine security was left unchanged and Ubuntu CI remains the end-to-end watch/restart gate
 
 - PayloadCMS development schema-push gate:
   - added `PayloadCMS.ConfigureDevService`, which attaches config/schema/common package-lock inputs directly to the app service and derives task-local `PAYLOAD_SCHEMA_PUSH` from their narrow content fingerprint plus a password-free database identity
@@ -845,7 +851,7 @@ Last updated: 2026-08-28
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
 - Convert bundled example adapters to the builder/component API so source examples match the new user-facing shape
 - Expand user docs/examples for script-to-Devflow convergence and fixed-port service guidance
-- Revisit the Go 1.26.6 minimum and pinned Delve line when Go 1.27 becomes the supported stable baseline
+- Revisit the Go 1.26.6 minimum when Go 1.27 becomes the project's supported minimum; keep the pinned Delve line compatible with both minimum and rolling stable CI lanes
 - Add binary artifacts, npm/Homebrew/Scoop installers, or richer update channels later only if Go install stops being enough
 
 ## Deferred / Known Gaps

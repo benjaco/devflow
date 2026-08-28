@@ -88,7 +88,7 @@ jobs:
       - name: Install Delve
         shell: bash
         run: |
-          go install github.com/go-delve/delve/cmd/dlv@v1.26.3
+          go install github.com/go-delve/delve/cmd/dlv@v1.27.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Verify native architecture
