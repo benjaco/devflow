@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/benjaco/devflow/internal/reporepair"
 	"github.com/benjaco/devflow/internal/version"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/cache"
@@ -342,6 +343,12 @@ func (a *App) runCmd(args []string) error {
 	detach := fs.Bool("detach", false, "(--detach) launch a detached supervisor and return after it starts; this is not a readiness gate")
 	maxParallel := fs.Int("max-parallel", 0, "maximum parallel tasks; 0 uses the engine default")
 	cacheKeyManifest := fs.String("cache-key-manifest", "", "owner-only cache-key manifest created by devflow cache key --manifest-out")
+	commitChanges := fs.Bool("commit-changes", false, "after a successful finite CI run, atomically commit changes allowed by --commit-path")
+	var commitPaths repeatedStringFlags
+	fs.Var(&commitPaths, "commit-path", "Git pathspec permitted in the repair commit; repeat for additional pathspecs")
+	commitMessage := fs.String("commit-message", "", "commit message for --commit-changes")
+	pushChanges := fs.Bool("push", false, "push a repository repair commit after creating it")
+	failAfterCommit := fs.Bool("fail-after-commit", false, "(--fail-after-commit) return nonzero after a repository repair commit (and requested push) succeeds")
 	projectName := fs.String("project", defaultProject(), "registered project adapter name")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -355,6 +362,39 @@ func (a *App) runCmd(args []string) error {
 	if target == "" {
 		return fmt.Errorf("usage: devflow run <target>")
 	}
+	repairFlagsUsed := len(commitPaths) > 0 || *commitMessage != "" || *pushChanges || *failAfterCommit
+	if !*commitChanges && repairFlagsUsed {
+		return fmt.Errorf("--commit-path, --commit-message, --push, and --fail-after-commit require --commit-changes")
+	}
+	var repairOptions *reporepair.Options
+	if *commitChanges {
+		if !*ciMode {
+			return fmt.Errorf("--commit-changes is supported only with run --ci")
+		}
+		if len(commitPaths) == 0 {
+			return fmt.Errorf("--commit-changes requires at least one --commit-path")
+		}
+		for _, pathspec := range commitPaths {
+			if pathspec == "" {
+				return fmt.Errorf("--commit-path must not be empty")
+			}
+			if strings.IndexByte(pathspec, 0) >= 0 {
+				return fmt.Errorf("--commit-path must not contain NUL")
+			}
+		}
+		if strings.TrimSpace(*commitMessage) == "" {
+			return fmt.Errorf("--commit-changes requires a non-empty --commit-message")
+		}
+		if strings.IndexByte(*commitMessage, 0) >= 0 {
+			return fmt.Errorf("--commit-message must not contain NUL")
+		}
+		repairOptions = &reporepair.Options{
+			Pathspecs:       append([]string(nil), commitPaths...),
+			Message:         *commitMessage,
+			Push:            *pushChanges,
+			FailAfterCommit: *failAfterCommit,
+		}
+	}
 	if *ciMode {
 		if *detach {
 			return fmt.Errorf("run --ci is finite and does not support --detach")
@@ -362,7 +402,7 @@ func (a *App) runCmd(args []string) error {
 		if *modeWatch {
 			return fmt.Errorf("run --ci is finite and does not support --watch")
 		}
-		return a.runDirect(target, *jsonOut, *worktree, *projectName, api.ModeCI, *maxParallel, *cacheKeyManifest)
+		return a.runDirect(target, *jsonOut, *worktree, *projectName, api.ModeCI, *maxParallel, *cacheKeyManifest, repairOptions)
 	}
 	if *cacheKeyManifest != "" {
 		return fmt.Errorf("--cache-key-manifest is supported only with run --ci")
@@ -373,7 +413,8 @@ func (a *App) runCmd(args []string) error {
 	return a.runViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel)
 }
 
-func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName string, mode api.RunMode, maxParallel int, cacheKeyManifest string) error {
+func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName string, mode api.RunMode, maxParallel int, cacheKeyManifest string, repairOptions *reporepair.Options) error {
+	commandStarted := time.Now().UTC()
 	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
 		return err
@@ -386,8 +427,33 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	if err != nil {
 		return err
 	}
+	var repairRunner *reporepair.Runner
+	if repairOptions != nil {
+		repairRunner = reporepair.New(root, *repairOptions, a.Stderr)
+		repositoryResult, preflightErr := repairRunner.Preflight(context.Background())
+		if preflightErr != nil {
+			result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, preflightErr)
+			result.RepositoryChanges = &repositoryResult
+			if jsonOut {
+				if writeErr := writeJSON(a.Stdout, result); writeErr != nil {
+					return writeErr
+				}
+			}
+			return preflightErr
+		}
+	}
 	eng, err := engine.New(execProject, root)
 	if err != nil {
+		if repairRunner != nil {
+			repositoryResult := repairRunner.SkippedDAGFailure()
+			result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, err)
+			result.RepositoryChanges = &repositoryResult
+			if jsonOut {
+				if writeErr := writeJSON(a.Stdout, result); writeErr != nil {
+					return writeErr
+				}
+			}
+		}
 		return err
 	}
 	runCtx := context.Background()
@@ -413,6 +479,36 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	})
 	stopProgress()
 	progressWG.Wait()
+	if repairRunner != nil {
+		if outcome == nil {
+			if runErr != nil {
+				repositoryResult := repairRunner.SkippedDAGFailure()
+				result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, runErr)
+				result.RepositoryChanges = &repositoryResult
+				if jsonOut {
+					if writeErr := writeJSON(a.Stdout, result); writeErr != nil {
+						return writeErr
+					}
+				}
+			}
+			return runErr
+		}
+		if runErr != nil || !outcome.Result.Success {
+			repositoryResult := repairRunner.SkippedDAGFailure()
+			outcome.Result.RepositoryChanges = &repositoryResult
+		} else {
+			repairStarted := time.Now()
+			repositoryResult, repairErr := repairRunner.Apply(runCtx)
+			outcome.Result.RepositoryChanges = &repositoryResult
+			outcome.Result.DurationMs += time.Since(repairStarted).Milliseconds()
+			outcome.Result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+			if repairErr != nil {
+				outcome.Result.Success = false
+				outcome.Result.Error = repairErr.Error()
+				runErr = repairErr
+			}
+		}
+	}
 	if outcome != nil {
 		if jsonOut {
 			if err := writeJSON(a.Stdout, outcome.Result); err != nil {
@@ -420,9 +516,36 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 			}
 			return runErr
 		}
-		_, _ = fmt.Fprintf(a.Stdout, "target=%s instance=%s success=%v cache_hits=%d\n", outcome.Result.Target, outcome.Result.InstanceID, outcome.Result.Success, len(outcome.Result.CacheHits))
+		_, _ = fmt.Fprintf(a.Stdout, "target=%s instance=%s success=%v cache_hits=%d", outcome.Result.Target, outcome.Result.InstanceID, outcome.Result.Success, len(outcome.Result.CacheHits))
+		if outcome.Result.RepositoryChanges != nil {
+			_, _ = fmt.Fprintf(a.Stdout, " repository_status=%s commit=%s push_attempted=%t push_succeeded=%t", outcome.Result.RepositoryChanges.Status, outcome.Result.RepositoryChanges.CommitSHA, outcome.Result.RepositoryChanges.PushAttempted, outcome.Result.RepositoryChanges.PushSucceeded)
+		}
+		_, _ = fmt.Fprintln(a.Stdout)
 	}
 	return runErr
+}
+
+func newDirectRunFailureResult(worktree, target string, mode api.RunMode, started time.Time, runErr error) api.RunResult {
+	instanceID, _, _ := instance.IDForWorktree(worktree)
+	finished := time.Now().UTC()
+	durationMs := finished.Sub(started).Milliseconds()
+	if durationMs == 0 && !finished.Before(started) {
+		durationMs = 1
+	}
+	return api.RunResult{
+		Target:          target,
+		Mode:            mode,
+		InstanceID:      instanceID,
+		Success:         false,
+		DurationMs:      durationMs,
+		Error:           runErr.Error(),
+		FailureExcerpts: []api.FailureExcerpt{},
+		Nodes:           []api.NodeStatus{},
+		CacheHits:       []string{},
+		CacheMisses:     []string{},
+		StartedAt:       started.Format(time.RFC3339),
+		FinishedAt:      finished.Format(time.RFC3339),
+	}
 }
 
 func streamCIProgress(ctx context.Context, out io.Writer, events <-chan api.Event) {
@@ -2115,6 +2238,20 @@ func resolvedProject(name, worktree string) (project.Project, error) {
 
 type kvFlags struct {
 	values map[string]string
+}
+
+type repeatedStringFlags []string
+
+func (f *repeatedStringFlags) String() string {
+	if f == nil {
+		return ""
+	}
+	return strings.Join(*f, ",")
+}
+
+func (f *repeatedStringFlags) Set(value string) error {
+	*f = append(*f, value)
+	return nil
 }
 
 func (f *kvFlags) String() string {

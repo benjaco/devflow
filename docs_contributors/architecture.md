@@ -635,6 +635,23 @@ The current automation recommendation is intentionally explicit: use detached wa
 
 Finite check/test targets with service dependencies should generally use `run --ci`, because plain attached `run` keeps service dependencies alive.
 
+## Atomic Repository Repair
+
+Repository repair is a direct-CI CLI transaction layered around the engine, not an engine task or adapter concept. This keeps the DAG generic and gives Git mutation one explicit boundary:
+
+1. Before engine execution, require the selected Devflow worktree to be the Git worktree root, require an existing `HEAD`, record its object ID and branch/detached state, and require porcelain status (including untracked files) to be empty.
+2. Let Git validate every repeated `--commit-path` so Devflow never reimplements literal, directory, glob, or other Git pathspec magic.
+3. Run the complete target through the normal direct `ModeCI` engine path.
+4. On any DAG failure, skip every post-run Git operation.
+5. After success, require the same `HEAD`/ref baseline, obtain permitted status through only the supplied pathspecs, and compare repository-wide tracked status against the permitted tracked subset. Reject any tracked path outside it. Untracked paths outside the pathspecs remain uninspected for staging and are never included in the repair commit.
+6. Stage with direct `git add -A -- <pathspecs...>`, then verify the staged set and remaining tracked worktree state again. If the permitted set changed during staging or anything outside it entered the index, restore the clean baseline index and fail.
+7. Write the exact staged tree, create one child commit with `git commit-tree`, and advance `HEAD` with `git update-ref <new> <expected-old>`. The compare-and-swap prevents a concurrent ref move from being overwritten. This plumbing path intentionally does not execute commit hooks or commit signing, which could expand or replace the verified index tree. Git is always invoked with `os/exec`; no platform shell or quoting layer is involved.
+8. Optionally run the repository's configured default `git push`. Push is deliberately outside the local commit atomic boundary, so a push failure retains and reports the successful local commit rather than pretending the whole operation rolled back.
+
+The commit command receives explicit author and committer identity. Complete role-specific `GIT_AUTHOR_*`/`GIT_COMMITTER_*` values win, then complete configured `user.name`/`user.email`; missing CI identity falls back to the matching author/committer identity from the baseline `HEAD`. Interactive Git/Git Credential Manager prompting is disabled for these finite automation subprocesses.
+
+The additive `RunResult.repositoryChanges` object is the audit surface. It carries a final status, exact changed/unexpected counts, sorted bounded path samples plus truncation flags, commit creation and SHA, push attempt/success, fail-after-commit request/trigger state, and the scoped repository error. Listed paths are capped at 200 entries, 64 KiB aggregate text, and 4 KiB per rendered path. Engine and repository progress share stderr in JSON mode; the one final `RunResult` remains stdout-only. `--fail-after-commit` is evaluated after a successful requested push and is not triggered for a no-change run.
+
 ## Watch Mode
 
 Watch mode uses a polling watcher with debounced batches. The engine scopes the watcher to the selected target closure's declared file inputs plus the flush sync directory. It does not intentionally poll the whole worktree when the closure has concrete `Inputs(...)`, `Files`, `Dirs`, or `Globs`; common heavyweight folders such as `node_modules` are ignored by default unless explicitly watched by an input path.

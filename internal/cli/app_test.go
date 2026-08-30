@@ -39,6 +39,7 @@ type graphExplainCLIProject struct{}
 type actionCLIProject struct{}
 type validationCLIProject struct{}
 type manifestCLIProject struct{}
+type repairCLIProject struct{}
 
 func (failCLIProject) Name() string { return "cli-fail-project" }
 
@@ -124,6 +125,64 @@ func (manifestCLIProject) Tasks() []project.Task {
 
 func (manifestCLIProject) Targets() []project.Target {
 	return []project.Target{{Name: "build", RootTasks: []string{"build"}}}
+}
+
+func (repairCLIProject) Name() string { return "cli-repair-project" }
+
+func (repairCLIProject) ConfigureInstance(context.Context, string) (project.InstanceConfig, error) {
+	return project.InstanceConfig{Label: "cli-repair"}, nil
+}
+
+func (repairCLIProject) Tasks() []project.Task {
+	writePermitted := func(rt *project.Runtime) error {
+		if err := os.WriteFile(rt.Abs("frontend/app.txt"), []byte("repaired frontend\n"), 0o644); err != nil {
+			return err
+		}
+		return os.WriteFile(rt.Abs("backend/generated/model.sql.go"), []byte("// repaired generated Go\n"), 0o644)
+	}
+	return []project.Task{
+		{
+			Name: "repair_no_changes",
+			Kind: project.KindOnce,
+			Run:  func(context.Context, *project.Runtime) error { return nil },
+		},
+		{
+			Name: "repair_changes",
+			Kind: project.KindOnce,
+			Run: func(_ context.Context, rt *project.Runtime) error {
+				return writePermitted(rt)
+			},
+		},
+		{
+			Name: "repair_then_fail",
+			Kind: project.KindOnce,
+			Run: func(_ context.Context, rt *project.Runtime) error {
+				if err := writePermitted(rt); err != nil {
+					return err
+				}
+				return fmt.Errorf("repair DAG failure")
+			},
+		},
+		{
+			Name: "repair_unexpected",
+			Kind: project.KindOnce,
+			Run: func(_ context.Context, rt *project.Runtime) error {
+				if err := writePermitted(rt); err != nil {
+					return err
+				}
+				return os.WriteFile(rt.Abs("outside.txt"), []byte("unexpected tracked change\n"), 0o644)
+			},
+		},
+	}
+}
+
+func (repairCLIProject) Targets() []project.Target {
+	return []project.Target{
+		{Name: "repair-no-changes", RootTasks: []string{"repair_no_changes"}},
+		{Name: "repair-changes", RootTasks: []string{"repair_changes"}},
+		{Name: "repair-fails", RootTasks: []string{"repair_then_fail"}},
+		{Name: "repair-unexpected", RootTasks: []string{"repair_unexpected"}},
+	}
 }
 
 func (taskTargetCLIProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
@@ -380,6 +439,7 @@ func init() {
 	project.Register(actionCLIProject{})
 	project.Register(validationCLIProject{})
 	project.Register(manifestCLIProject{})
+	project.Register(repairCLIProject{})
 }
 
 func TestGraphListJSON(t *testing.T) {
@@ -501,10 +561,32 @@ func TestRunHelpDescribesOperationalFlags(t *testing.T) {
 		t.Fatal("expected help error")
 	}
 	help := stderr.String()
-	for _, want := range []string{"--ci", "finite CI/readiness probe", "--detach", "not a readiness gate", "--watch"} {
+	for _, want := range []string{"--ci", "finite CI/readiness probe", "--detach", "not a readiness gate", "--watch", "--commit-changes", "--commit-path", "--fail-after-commit"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("help output missing %q:\n%s", want, help)
 		}
+	}
+}
+
+func TestRunRepositoryRepairFlagsRequireExplicitFiniteConfiguration(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "push-needs-mode", args: []string{"run", "build", "--push"}, want: "require --commit-changes"},
+		{name: "mode-needs-ci", args: []string{"run", "build", "--commit-changes", "--commit-path", "frontend", "--commit-message", "repair"}, want: "only with run --ci"},
+		{name: "mode-needs-path", args: []string{"run", "build", "--ci", "--commit-changes", "--commit-message", "repair"}, want: "at least one --commit-path"},
+		{name: "mode-needs-message", args: []string{"run", "build", "--ci", "--commit-changes", "--commit-path", "frontend"}, want: "non-empty --commit-message"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+			err := app.Run(test.args)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want substring %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -1003,6 +1085,238 @@ func TestRunJSONStillReturnsExecutionError(t *testing.T) {
 	}
 	if !strings.Contains(progress, "[devflow] run build started") || !strings.Contains(progress, "[devflow] task fail: failed: boom") || !strings.Contains(progress, "implementator failure details") {
 		t.Fatalf("CI JSON progress was not streamed to stderr: %s", progress)
+	}
+}
+
+func TestRunRepositoryRepairNoChangesReturnsNormalSuccess(t *testing.T) {
+	worktree := initRepositoryRepairGitWorktree(t)
+	before := repairGitText(t, worktree, "rev-parse", "HEAD")
+	result, stdout, stderr, runErr := runRepositoryRepair(t, worktree, "repair-no-changes", "--push", "--fail-after-commit")
+	if runErr != nil {
+		t.Fatalf("no-change repair failed: %v\nstdout=%s\nstderr=%s", runErr, stdout, stderr)
+	}
+	if !result.Success || result.RepositoryChanges == nil {
+		t.Fatalf("missing successful repository result: %+v", result)
+	}
+	repository := result.RepositoryChanges
+	if repository.Status != api.RepositoryChangeStatusNoChanges || repository.ChangedPathCount != 0 || repository.CommitCreated || repository.PushAttempted || repository.PushSucceeded {
+		t.Fatalf("unexpected no-change repository result: %+v", repository)
+	}
+	if !repository.FailAfterCommitRequested || repository.FailAfterCommitTriggered {
+		t.Fatalf("fail-after-commit should not trigger without a commit: %+v", repository)
+	}
+	if after := repairGitText(t, worktree, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("no-change run advanced HEAD: before=%s after=%s", before, after)
+	}
+	if !strings.Contains(stderr, "repository repair: no permitted changes found") || strings.Contains(stdout, "[devflow]") {
+		t.Fatalf("repository progress was not isolated to stderr:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal([]byte(stdout), &wire); err != nil {
+		t.Fatal(err)
+	}
+	repositoryWire, ok := wire["repositoryChanges"].(map[string]any)
+	if !ok {
+		t.Fatalf("repositoryChanges is not an object: %s", stdout)
+	}
+	for _, field := range []string{"status", "changedPaths", "changedPathCount", "changedPathsTruncated", "unexpectedTrackedPaths", "unexpectedTrackedPathCount", "unexpectedTrackedPathsTruncated", "commitCreated", "commitSha", "pushAttempted", "pushSucceeded", "failAfterCommitRequested", "failAfterCommitTriggered"} {
+		if _, ok := repositoryWire[field]; !ok {
+			t.Fatalf("repositoryChanges omitted stable field %q: %s", field, stdout)
+		}
+	}
+}
+
+func TestRunRepositoryRepairCommitsOnlyPermittedPathsWithHeadAttribution(t *testing.T) {
+	worktree := initRepositoryRepairGitWorktree(t)
+	before := repairGitText(t, worktree, "rev-parse", "HEAD")
+	result, stdout, stderr, runErr := runRepositoryRepair(t, worktree, "repair-changes")
+	if runErr != nil {
+		t.Fatalf("changed repair failed: %v\nstdout=%s\nstderr=%s", runErr, stdout, stderr)
+	}
+	if !result.Success || result.RepositoryChanges == nil {
+		t.Fatalf("missing successful repository result: %+v", result)
+	}
+	repository := result.RepositoryChanges
+	if repository.Status != api.RepositoryChangeStatusCommitted || !repository.CommitCreated || repository.CommitSHA == "" || repository.PushAttempted {
+		t.Fatalf("unexpected changed repository result: %+v", repository)
+	}
+	wantPaths := "backend/generated/model.sql.go,frontend/app.txt"
+	if repository.ChangedPathCount != 2 || strings.Join(repository.ChangedPaths, ",") != wantPaths || repository.ChangedPathsTruncated {
+		t.Fatalf("unexpected bounded changed paths: %+v", repository)
+	}
+	if head := repairGitText(t, worktree, "rev-parse", "HEAD"); head != repository.CommitSHA {
+		t.Fatalf("reported commit %s does not match HEAD %s", repository.CommitSHA, head)
+	}
+	if parent := repairGitText(t, worktree, "rev-parse", "HEAD^"); parent != before {
+		t.Fatalf("repair commit parent = %s, want %s", parent, before)
+	}
+	if paths := strings.Join(repairGitLines(t, worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"), ","); paths != wantPaths {
+		t.Fatalf("commit paths = %q, want %q", paths, wantPaths)
+	}
+	identity := repairGitText(t, worktree, "show", "-s", "--format=%an|%ae|%cn|%ce", "HEAD")
+	if identity != "Head Author|head@example.invalid|Head Committer|committer@example.invalid" {
+		t.Fatalf("repair identity was not derived from HEAD: %q", identity)
+	}
+	if message := repairGitText(t, worktree, "show", "-s", "--format=%s", "HEAD"); message != "bot(ci): automated Devflow formatting and generation" {
+		t.Fatalf("unexpected repair commit message %q", message)
+	}
+	if status := repairGitText(t, worktree, "status", "--porcelain=v1"); status != "" {
+		t.Fatalf("repair commit left repository dirty: %q", status)
+	}
+	if strings.Contains(stdout, "[devflow]") || !strings.Contains(stderr, "repository repair: created commit") {
+		t.Fatalf("repository output streams were mixed:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+}
+
+func TestRunRepositoryRepairDAGFailureNeverCommitsOrPushes(t *testing.T) {
+	worktree := initRepositoryRepairGitWorktree(t)
+	before := repairGitText(t, worktree, "rev-parse", "HEAD")
+	result, _, stderr, runErr := runRepositoryRepair(t, worktree, "repair-fails", "--push")
+	if runErr == nil {
+		t.Fatal("expected DAG failure")
+	}
+	if result.Success || result.Error != "repair DAG failure" || result.RepositoryChanges == nil {
+		t.Fatalf("unexpected DAG failure result: %+v", result)
+	}
+	repository := result.RepositoryChanges
+	if repository.Status != api.RepositoryChangeStatusSkippedDAGFailed || repository.CommitCreated || repository.PushAttempted {
+		t.Fatalf("DAG failure reached repository mutation: %+v", repository)
+	}
+	if after := repairGitText(t, worktree, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("DAG failure advanced HEAD: before=%s after=%s", before, after)
+	}
+	if staged := repairGitText(t, worktree, "diff", "--cached", "--name-only"); staged != "" {
+		t.Fatalf("DAG failure staged paths: %q", staged)
+	}
+	if !strings.Contains(stderr, "repository repair: skipped because the DAG failed") {
+		t.Fatalf("missing repository skip progress: %s", stderr)
+	}
+}
+
+func TestRunRepositoryRepairRejectsUnexpectedTrackedPaths(t *testing.T) {
+	worktree := initRepositoryRepairGitWorktree(t)
+	before := repairGitText(t, worktree, "rev-parse", "HEAD")
+	result, _, _, runErr := runRepositoryRepair(t, worktree, "repair-unexpected", "--push")
+	if runErr == nil {
+		t.Fatal("expected unexpected tracked change failure")
+	}
+	if result.Success || result.RepositoryChanges == nil {
+		t.Fatalf("unexpected repository failure result: %+v", result)
+	}
+	repository := result.RepositoryChanges
+	if repository.Status != api.RepositoryChangeStatusUnexpectedTrackedChanges || repository.CommitCreated || repository.PushAttempted {
+		t.Fatalf("unexpected tracked path was not rejected before mutation: %+v", repository)
+	}
+	if repository.UnexpectedTrackedPathCount != 1 || strings.Join(repository.UnexpectedTrackedPaths, ",") != "outside.txt" {
+		t.Fatalf("unexpected path detail missing: %+v", repository)
+	}
+	if repository.ChangedPathCount != 2 || strings.Join(repository.ChangedPaths, ",") != "backend/generated/model.sql.go,frontend/app.txt" {
+		t.Fatalf("permitted change detail missing: %+v", repository)
+	}
+	if after := repairGitText(t, worktree, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("unexpected-path failure advanced HEAD: before=%s after=%s", before, after)
+	}
+	if staged := repairGitText(t, worktree, "diff", "--cached", "--name-only"); staged != "" {
+		t.Fatalf("unexpected-path failure staged paths: %q", staged)
+	}
+}
+
+func TestRunRepositoryRepairPushFailureReportsCreatedLocalCommit(t *testing.T) {
+	worktree := initRepositoryRepairGitWorktree(t)
+	missingRemote := filepath.ToSlash(filepath.Join(t.TempDir(), "missing-remote.git"))
+	repairGit(t, worktree, "remote", "add", "origin", missingRemote)
+	repairGit(t, worktree, "config", "push.default", "current")
+
+	result, _, stderr, runErr := runRepositoryRepair(t, worktree, "repair-changes", "--push")
+	if runErr == nil {
+		t.Fatal("expected push failure")
+	}
+	if result.Success || result.RepositoryChanges == nil {
+		t.Fatalf("unexpected push failure result: %+v", result)
+	}
+	repository := result.RepositoryChanges
+	if repository.Status != api.RepositoryChangeStatusPushFailed || !repository.CommitCreated || repository.CommitSHA == "" || !repository.PushAttempted || repository.PushSucceeded {
+		t.Fatalf("push failure did not preserve partial-success detail: %+v", repository)
+	}
+	if head := repairGitText(t, worktree, "rev-parse", "HEAD"); head != repository.CommitSHA {
+		t.Fatalf("local commit was not retained after push failure: head=%s result=%+v", head, repository)
+	}
+	if !strings.Contains(result.Error, "created locally, but git push failed") || !strings.Contains(stderr, "repository repair: pushing commit") {
+		t.Fatalf("push partial failure was unclear:\nresult=%+v\nstderr=%s", result, stderr)
+	}
+}
+
+func TestRunRepositoryRepairPushSucceedsBeforeDeliberateFailure(t *testing.T) {
+	worktree := initRepositoryRepairGitWorktree(t)
+	remote := filepath.ToSlash(filepath.Join(t.TempDir(), "remote.git"))
+	repairGit(t, worktree, "init", "--bare", remote)
+	repairGit(t, worktree, "remote", "add", "origin", remote)
+	repairGit(t, worktree, "config", "push.default", "current")
+
+	result, _, _, runErr := runRepositoryRepair(t, worktree, "repair-changes", "--push", "--fail-after-commit")
+	if runErr == nil {
+		t.Fatal("expected deliberate post-push failure")
+	}
+	if result.RepositoryChanges == nil {
+		t.Fatalf("missing repository result: %+v", result)
+	}
+	repository := result.RepositoryChanges
+	if repository.Status != api.RepositoryChangeStatusFailedAfterCommit || !repository.CommitCreated || !repository.PushAttempted || !repository.PushSucceeded || !repository.FailAfterCommitTriggered {
+		t.Fatalf("push/fail-after ordering was not reported: %+v", repository)
+	}
+	branch := repairGitText(t, worktree, "rev-parse", "--abbrev-ref", "HEAD")
+	remoteHead := repairGitText(t, worktree, "--git-dir="+remote, "rev-parse", "refs/heads/"+branch)
+	if remoteHead != repository.CommitSHA {
+		t.Fatalf("remote commit = %s, want %s", remoteHead, repository.CommitSHA)
+	}
+}
+
+func TestRunRepositoryRepairFailAfterCommitReturnsDeliberateFailure(t *testing.T) {
+	worktree := initRepositoryRepairGitWorktree(t)
+	result, _, _, runErr := runRepositoryRepair(t, worktree, "repair-changes", "--fail-after-commit")
+	if runErr == nil {
+		t.Fatal("expected deliberate fail-after-commit error")
+	}
+	if result.Success || result.RepositoryChanges == nil {
+		t.Fatalf("unexpected fail-after-commit result: %+v", result)
+	}
+	repository := result.RepositoryChanges
+	if repository.Status != api.RepositoryChangeStatusFailedAfterCommit || !repository.CommitCreated || !repository.FailAfterCommitRequested || !repository.FailAfterCommitTriggered || repository.PushAttempted {
+		t.Fatalf("deliberate failure state missing: %+v", repository)
+	}
+	if head := repairGitText(t, worktree, "rev-parse", "HEAD"); head != repository.CommitSHA {
+		t.Fatalf("fail-after-commit did not retain commit: head=%s result=%+v", head, repository)
+	}
+	if !strings.Contains(result.Error, "failing deliberately") {
+		t.Fatalf("deliberate error missing from final JSON: %+v", result)
+	}
+}
+
+func TestRunRepositoryRepairRequiresCleanWorktreeBeforeDAG(t *testing.T) {
+	worktree := initRepositoryRepairGitWorktree(t)
+	if err := os.WriteFile(filepath.Join(worktree, "outside.txt"), []byte("dirty before run\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	beforeAllowed, err := os.ReadFile(filepath.Join(worktree, "frontend", "app.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _, _, runErr := runRepositoryRepair(t, worktree, "repair-changes")
+	if runErr == nil {
+		t.Fatal("expected dirty-worktree precondition failure")
+	}
+	if result.Success || result.RepositoryChanges == nil || result.RepositoryChanges.Status != api.RepositoryChangeStatusPreconditionFailed {
+		t.Fatalf("dirty precondition was not structured: %+v", result)
+	}
+	if result.RepositoryChanges.ChangedPathCount != 1 || strings.Join(result.RepositoryChanges.ChangedPaths, ",") != "outside.txt" {
+		t.Fatalf("dirty path detail missing: %+v", result.RepositoryChanges)
+	}
+	afterAllowed, err := os.ReadFile(filepath.Join(worktree, "frontend", "app.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterAllowed, beforeAllowed) {
+		t.Fatalf("DAG executed despite dirty precondition: before=%q after=%q", beforeAllowed, afterAllowed)
 	}
 }
 
@@ -2948,6 +3262,105 @@ func recordCLITestSupervisor(t *testing.T, worktree string, run api.RunConfig) s
 		t.Fatal(err)
 	}
 	return inst.ID
+}
+
+func initRepositoryRepairGitWorktree(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	cacheHome := t.TempDir()
+	t.Setenv("HOME", cacheHome)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(cacheHome, ".cache"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(cacheHome, "LocalAppData"))
+	globalConfig := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(globalConfig, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_TERMINAL_PROMPT", "0")
+	t.Setenv("GCM_INTERACTIVE", "Never")
+
+	worktree := t.TempDir()
+	for _, dir := range []string{"frontend", filepath.Join("backend", "generated")} {
+		if err := os.MkdirAll(filepath.Join(worktree, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := map[string]string{
+		".gitignore":                     ".devflow/\n",
+		"frontend/app.txt":               "original frontend\n",
+		"backend/generated/model.sql.go": "// original generated Go\n",
+		"outside.txt":                    "original outside\n",
+	}
+	for path, data := range files {
+		if err := os.WriteFile(filepath.Join(worktree, filepath.FromSlash(path)), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repairGit(t, worktree, "init")
+	repairGit(t, worktree, "add", "--", ".")
+	t.Setenv("GIT_AUTHOR_NAME", "Head Author")
+	t.Setenv("GIT_AUTHOR_EMAIL", "head@example.invalid")
+	t.Setenv("GIT_COMMITTER_NAME", "Head Committer")
+	t.Setenv("GIT_COMMITTER_EMAIL", "committer@example.invalid")
+	repairGit(t, worktree, "commit", "-m", "initial")
+	for _, key := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"} {
+		t.Setenv(key, "")
+	}
+	return worktree
+}
+
+func runRepositoryRepair(t *testing.T, worktree, target string, extra ...string) (api.RunResult, string, string, error) {
+	t.Helper()
+	args := []string{
+		"run", target,
+		"--ci",
+		"--json",
+		"--commit-changes",
+		"--commit-path", "frontend",
+		"--commit-path", ":(glob)backend/**/*.sql.go",
+		"--commit-message", "bot(ci): automated Devflow formatting and generation",
+	}
+	args = append(args, extra...)
+	args = append(args, "--project", "cli-repair-project", "--worktree", worktree)
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: stderr}
+	runErr := app.Run(args)
+	var result api.RunResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode repository repair JSON: %v\nstdout=%s\nstderr=%s\nrunErr=%v", err, stdout, stderr, runErr)
+	}
+	return result, stdout.String(), stderr.String(), runErr
+}
+
+func repairGit(t *testing.T, worktree string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = worktree
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+	return string(out)
+}
+
+func repairGitText(t *testing.T, worktree string, args ...string) string {
+	t.Helper()
+	return strings.TrimSuffix(strings.TrimSuffix(repairGit(t, worktree, args...), "\n"), "\r")
+}
+
+func repairGitLines(t *testing.T, worktree string, args ...string) []string {
+	t.Helper()
+	text := repairGitText(t, worktree, args...)
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	sort.Strings(lines)
+	return lines
 }
 
 func decodeCLIFlushResult(t *testing.T, data []byte) api.FlushResult {

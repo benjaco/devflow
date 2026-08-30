@@ -270,23 +270,56 @@ type DebugAttachConfig struct {
 }
 
 type RunResult struct {
-	Target            string                 `json:"target"`
-	Mode              RunMode                `json:"mode"`
-	InstanceID        string                 `json:"instanceId"`
-	Success           bool                   `json:"success"`
-	DurationMs        int64                  `json:"durationMs"`
-	Error             string                 `json:"error,omitempty"`
-	FailedNode        string                 `json:"failedNode,omitempty"`
-	FailedNodeLogPath string                 `json:"failedNodeLogPath,omitempty"`
-	LogTail           []string               `json:"logTail,omitempty"`
-	FailureExcerpts   []FailureExcerpt       `json:"failureExcerpts"`
-	CacheKeyManifest  *CacheKeyManifestUsage `json:"cacheKeyManifest,omitempty"`
-	Lifecycle         *LifecycleResult       `json:"lifecycle,omitempty"`
-	Nodes             []NodeStatus           `json:"nodes"`
-	CacheHits         []string               `json:"cacheHits"`
-	CacheMisses       []string               `json:"cacheMisses"`
-	StartedAt         string                 `json:"startedAt"`
-	FinishedAt        string                 `json:"finishedAt"`
+	Target            string                  `json:"target"`
+	Mode              RunMode                 `json:"mode"`
+	InstanceID        string                  `json:"instanceId"`
+	Success           bool                    `json:"success"`
+	DurationMs        int64                   `json:"durationMs"`
+	Error             string                  `json:"error,omitempty"`
+	FailedNode        string                  `json:"failedNode,omitempty"`
+	FailedNodeLogPath string                  `json:"failedNodeLogPath,omitempty"`
+	LogTail           []string                `json:"logTail,omitempty"`
+	FailureExcerpts   []FailureExcerpt        `json:"failureExcerpts"`
+	CacheKeyManifest  *CacheKeyManifestUsage  `json:"cacheKeyManifest,omitempty"`
+	RepositoryChanges *RepositoryChangeResult `json:"repositoryChanges,omitempty"`
+	Lifecycle         *LifecycleResult        `json:"lifecycle,omitempty"`
+	Nodes             []NodeStatus            `json:"nodes"`
+	CacheHits         []string                `json:"cacheHits"`
+	CacheMisses       []string                `json:"cacheMisses"`
+	StartedAt         string                  `json:"startedAt"`
+	FinishedAt        string                  `json:"finishedAt"`
+}
+
+type RepositoryChangeStatus string
+
+const (
+	RepositoryChangeStatusPreconditionFailed       RepositoryChangeStatus = "precondition_failed"
+	RepositoryChangeStatusSkippedDAGFailed         RepositoryChangeStatus = "skipped_dag_failed"
+	RepositoryChangeStatusNoChanges                RepositoryChangeStatus = "no_changes"
+	RepositoryChangeStatusRepositoryStateChanged   RepositoryChangeStatus = "repository_state_changed"
+	RepositoryChangeStatusUnexpectedTrackedChanges RepositoryChangeStatus = "unexpected_tracked_changes"
+	RepositoryChangeStatusCommitFailed             RepositoryChangeStatus = "commit_failed"
+	RepositoryChangeStatusCommitted                RepositoryChangeStatus = "committed"
+	RepositoryChangeStatusPushed                   RepositoryChangeStatus = "pushed"
+	RepositoryChangeStatusPushFailed               RepositoryChangeStatus = "push_failed"
+	RepositoryChangeStatusFailedAfterCommit        RepositoryChangeStatus = "failed_after_commit"
+)
+
+type RepositoryChangeResult struct {
+	Status                          RepositoryChangeStatus `json:"status"`
+	ChangedPaths                    []string               `json:"changedPaths"`
+	ChangedPathCount                int                    `json:"changedPathCount"`
+	ChangedPathsTruncated           bool                   `json:"changedPathsTruncated"`
+	UnexpectedTrackedPaths          []string               `json:"unexpectedTrackedPaths"`
+	UnexpectedTrackedPathCount      int                    `json:"unexpectedTrackedPathCount"`
+	UnexpectedTrackedPathsTruncated bool                   `json:"unexpectedTrackedPathsTruncated"`
+	CommitCreated                   bool                   `json:"commitCreated"`
+	CommitSHA                       string                 `json:"commitSha"`
+	PushAttempted                   bool                   `json:"pushAttempted"`
+	PushSucceeded                   bool                   `json:"pushSucceeded"`
+	FailAfterCommitRequested        bool                   `json:"failAfterCommitRequested"`
+	FailAfterCommitTriggered        bool                   `json:"failAfterCommitTriggered"`
+	Error                           string                 `json:"error,omitempty"`
 }
 
 type FailureExcerpt struct {

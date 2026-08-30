@@ -1,18 +1,28 @@
 # Progress
 
-Last updated: 2026-08-28
+Last updated: 2026-08-30
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: Delve compatibility with the rolling Go 1.27 CI lane is restored locally and ready for the Ubuntu CI rerun
-- Confidence: Delve v1.27.0 launches a real Devflow debug service under Go 1.26.6 and Go 1.27.0, and the full repository suite passes under both toolchains
+- State: atomic repository repair for finite `run --ci` executions is implemented and verified
+- Confidence: the requested real-Git scenario matrix, full default/race suites, quality gates, and Linux/Windows cross-compilation pass
 
 ## In Progress
 
-- None for the scoped Delve compatibility fix; the existing Ubuntu matrix will provide the authoritative Linux watch/restart rerun.
+- None for the atomic repository-repair scope.
 
 ## Completed
+
+- Atomic `run --ci --commit-changes` repository repair:
+  - added CI-only `--commit-changes`, repeated Git-native `--commit-path`, required `--commit-message`, optional `--push`, and optional `--fail-after-commit`
+  - requires a clean Git-root worktree with an existing stable `HEAD` before the DAG, runs the complete target normally, and skips all staging/commit/push work on DAG failure
+  - inspects permitted tracked/untracked status through only the supplied Git pathspecs, rejects tracked changes elsewhere, stages the exact stable set with direct Git argument vectors, and creates one exact-tree commit through `commit-tree` plus expected-old `update-ref`
+  - derives missing CI author/committer identity from the corresponding `HEAD` attribution, optionally pushes, preserves a successful local commit across push failure, and triggers deliberate nonzero only after the commit and requested push succeed
+  - added additive `RunResult.repositoryChanges` status, exact counts, 200-entry/64-KiB/4-KiB bounded path samples, commit SHA, push attempt/success, fail-after request/trigger, and scoped partial errors while keeping final JSON alone on stdout and repository progress on stderr
+  - added real-Git cross-platform integration coverage for clean/no-change, changed literal/magic pathspecs, HEAD attribution, dirty preflight, DAG failure, unexpected tracked paths, successful and failed push, and fail-after-commit; focused cases passed five repetitions
+  - updated CLI, architecture, testing, user development, agent integration, and durable agent-memory documentation, including the exact-tree hook/signing contract
+  - verified `go test ./...`, `go test -race ./...`, `go vet ./...`, Staticcheck v0.7.0, govulncheck v1.6.0, `go mod tidy -diff`, formatting/diff checks, version JSON smoke, and Linux/Windows amd64 test-binary compilation for the affected packages
 
 - Go 1.27 rolling-lane Delve compatibility:
   - updated build and release workflow installs from Delve v1.26.3, which rejects Go 1.27 binaries, to v1.27.0

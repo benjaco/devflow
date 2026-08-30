@@ -88,6 +88,25 @@ For finite test/check targets that depend on services, use `devflow run <target>
 
 In `--ci --json` mode, progress and task log lines stream to stderr and stdout remains exactly one final `RunResult`. On failure, inspect `error`, `failedNode`, `failedNodeLogPath`, and `failureExcerpts` before the terminal `logTail`. Excerpts find early test assertions, panic/fatal output, compiler errors, `AssertionError`, conventional errors/summaries, and process-failure markers even when hundreds of cleanup lines follow. An unclassified early service exit instead gets a `process-exit-tail` excerpt with up to 12 meaningful terminal lines. All excerpts remain within five windows, 200 lines, 64 KiB total, and 8 KiB per line and redact known environment secrets and PostgreSQL URLs; empty logs produce `[]`. The `nodes` array supplies every selected node's final state and duration; downstream work skipped after a dependency failure is `blocked` with the dependency named in `lastError`, while unrelated interrupted work is `canceled`. Cacheable nodes include hit/miss and key/read/write/manifest timing. Use `devflow logs` only when both bounded diagnostics are insufficient.
 
+For CI jobs that intentionally repair generated or formatted repository files, use the atomic repository mode instead of scripting status/add/commit/push around Devflow:
+
+```bash
+devflow run ci \
+  --ci \
+  --json \
+  --commit-changes \
+  --commit-path frontend \
+  --commit-path ':(glob)backend/**/*.sql.go' \
+  --commit-path ':(glob)backend/schemas/*.sql' \
+  --commit-message 'bot(ci): automated DevFlow formatting and generation' \
+  --push \
+  --fail-after-commit
+```
+
+The repository must be clean before the DAG starts. Devflow never commits or pushes a failed DAG, stages only paths matched by the repeated Git pathspecs, and rejects tracked changes elsewhere. A successful DAG with no permitted changes remains success, does not push, and does not trigger `--fail-after-commit`. When CI has no Git identity, the new commit inherits author/committer attribution from `HEAD`.
+
+Inspect `repositoryChanges.status` and its booleans before deciding what happened. In particular, `push_failed` with `commitCreated=true`, a non-empty `commitSha`, `pushAttempted=true`, and `pushSucceeded=false` means the repair commit exists locally but was not pushed. `failed_after_commit` is the requested deliberate nonzero state after the commit and any requested push succeeded. `changedPathCount` and `unexpectedTrackedPathCount` are exact; their corresponding arrays are bounded and carry truncation flags. As with every direct CI JSON run, the final JSON is alone on stdout and all DAG/Git progress is on stderr.
+
 When an agent changes `devflow.project.go` inputs, outputs, or dependency edges for a finite target, use the dedicated hardening surface:
 
 ```bash

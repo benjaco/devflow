@@ -48,6 +48,26 @@ For finite check/test targets that depend on services such as Postgres or a loca
 
 For AI-assisted development, prefer `watch --detach` plus `flush` over an attached service `run`. Attached runs are useful for a human terminal, but they are not a clean "start and return when ready" automation interface.
 
+## CI Repository Repair
+
+Use `run --ci --commit-changes` when a CI target is allowed to format or regenerate a tightly bounded part of the repository:
+
+```bash
+devflow run ci \
+  --ci --json \
+  --commit-changes \
+  --commit-path frontend \
+  --commit-path ':(glob)backend/**/*.sql.go' \
+  --commit-path ':(glob)backend/schemas/*.sql' \
+  --commit-message 'bot(ci): automated DevFlow formatting and generation' \
+  --push \
+  --fail-after-commit
+```
+
+Start from a clean Git worktree. The target runs normally and no Git mutation occurs if it fails. After success, Git interprets each repeated pathspec; Devflow rejects tracked changes outside those matches, stages the exact permitted set, creates one commit, and optionally runs the configured default push. The exact-tree commit path does not run repository commit hooks or commit signing. A no-change run is ordinary success and does not push or deliberately fail. If CI has no configured identity, attribution comes from `HEAD`.
+
+The final `RunResult.repositoryChanges` distinguishes `committed`, `pushed`, `push_failed`, and `failed_after_commit` outcomes and includes the local commit SHA, exact path counts with bounded path lists, push attempt/success, and deliberate-failure state. A push failure leaves the local commit in place and returns nonzero. JSON remains the only stdout document; progress is on stderr.
+
 ## Pipeline Validation
 
 When changing task inputs, outputs, or dependencies, validate a finite target before trusting its cache behavior:
