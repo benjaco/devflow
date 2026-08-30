@@ -21,6 +21,7 @@ Last updated: 2026-08-30
   - derives missing CI author/committer identity from the corresponding `HEAD` attribution, optionally pushes, preserves a successful local commit across push failure, and triggers deliberate nonzero only after the commit and requested push succeed
   - added additive `RunResult.repositoryChanges` status, exact counts, 200-entry/64-KiB/4-KiB bounded path samples, commit SHA, push attempt/success, fail-after request/trigger, and scoped partial errors while keeping final JSON alone on stdout and repository progress on stderr
   - added real-Git cross-platform integration coverage for clean/no-change, changed literal/magic pathspecs, HEAD attribution, dirty preflight, DAG failure, unexpected tracked paths, successful and failed push, and fail-after-commit; focused cases passed five repetitions
+  - strengthened the changed-run coverage with direct committed-blob assertions and a DAG-created out-of-pathspec untracked file that is proven absent from the commit and intact in the worktree; passed five focused repetitions, focused race coverage, and the full default suite
   - updated CLI, architecture, testing, user development, agent integration, and durable agent-memory documentation, including the exact-tree hook/signing contract
   - verified `go test ./...`, `go test -race ./...`, `go vet ./...`, Staticcheck v0.7.0, govulncheck v1.6.0, `go mod tidy -diff`, formatting/diff checks, version JSON smoke, and Linux/Windows amd64 test-binary compilation for the affected packages
 

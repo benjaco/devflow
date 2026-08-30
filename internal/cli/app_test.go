@@ -154,6 +154,16 @@ func (repairCLIProject) Tasks() []project.Task {
 			},
 		},
 		{
+			Name: "repair_changes_with_untracked",
+			Kind: project.KindOnce,
+			Run: func(_ context.Context, rt *project.Runtime) error {
+				if err := writePermitted(rt); err != nil {
+					return err
+				}
+				return os.WriteFile(rt.Abs("outside-untracked.txt"), []byte("untracked outside permitted paths\n"), 0o644)
+			},
+		},
+		{
 			Name: "repair_then_fail",
 			Kind: project.KindOnce,
 			Run: func(_ context.Context, rt *project.Runtime) error {
@@ -180,6 +190,7 @@ func (repairCLIProject) Targets() []project.Target {
 	return []project.Target{
 		{Name: "repair-no-changes", RootTasks: []string{"repair_no_changes"}},
 		{Name: "repair-changes", RootTasks: []string{"repair_changes"}},
+		{Name: "repair-changes-with-untracked", RootTasks: []string{"repair_changes_with_untracked"}},
 		{Name: "repair-fails", RootTasks: []string{"repair_then_fail"}},
 		{Name: "repair-unexpected", RootTasks: []string{"repair_unexpected"}},
 	}
@@ -1153,6 +1164,14 @@ func TestRunRepositoryRepairCommitsOnlyPermittedPathsWithHeadAttribution(t *test
 	if paths := strings.Join(repairGitLines(t, worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"), ","); paths != wantPaths {
 		t.Fatalf("commit paths = %q, want %q", paths, wantPaths)
 	}
+	for path, want := range map[string]string{
+		"frontend/app.txt":               "repaired frontend\n",
+		"backend/generated/model.sql.go": "// repaired generated Go\n",
+	} {
+		if got := repairGit(t, worktree, "show", "HEAD:"+path); got != want {
+			t.Fatalf("committed content for %s = %q, want %q", path, got, want)
+		}
+	}
 	identity := repairGitText(t, worktree, "show", "-s", "--format=%an|%ae|%cn|%ce", "HEAD")
 	if identity != "Head Author|head@example.invalid|Head Committer|committer@example.invalid" {
 		t.Fatalf("repair identity was not derived from HEAD: %q", identity)
@@ -1165,6 +1184,37 @@ func TestRunRepositoryRepairCommitsOnlyPermittedPathsWithHeadAttribution(t *test
 	}
 	if strings.Contains(stdout, "[devflow]") || !strings.Contains(stderr, "repository repair: created commit") {
 		t.Fatalf("repository output streams were mixed:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+}
+
+func TestRunRepositoryRepairLeavesOutOfPathspecUntrackedFileUncommitted(t *testing.T) {
+	worktree := initRepositoryRepairGitWorktree(t)
+	result, _, _, runErr := runRepositoryRepair(t, worktree, "repair-changes-with-untracked")
+	if runErr != nil {
+		t.Fatalf("repair with out-of-pathspec untracked file failed: %v", runErr)
+	}
+	if !result.Success || result.RepositoryChanges == nil {
+		t.Fatalf("missing successful repository result: %+v", result)
+	}
+	repository := result.RepositoryChanges
+	if repository.Status != api.RepositoryChangeStatusCommitted || !repository.CommitCreated {
+		t.Fatalf("permitted repairs were not committed: %+v", repository)
+	}
+	if got := strings.Join(repository.ChangedPaths, ","); repository.ChangedPathCount != 2 || got != "backend/generated/model.sql.go,frontend/app.txt" {
+		t.Fatalf("out-of-pathspec untracked file entered changed-path details: %+v", repository)
+	}
+	if got := repairGitText(t, worktree, "ls-tree", "-r", "--name-only", "HEAD", "--", "outside-untracked.txt"); got != "" {
+		t.Fatalf("out-of-pathspec untracked file entered repair commit: %q", got)
+	}
+	if got := repairGitText(t, worktree, "status", "--porcelain=v1", "--untracked-files=all"); got != "?? outside-untracked.txt" {
+		t.Fatalf("out-of-pathspec untracked file was not left in the worktree: %q", got)
+	}
+	data, err := os.ReadFile(filepath.Join(worktree, "outside-untracked.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "untracked outside permitted paths\n"; got != want {
+		t.Fatalf("out-of-pathspec untracked content = %q, want %q", got, want)
 	}
 }
 
