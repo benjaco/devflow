@@ -146,6 +146,8 @@ Watch mode uses task inputs as the file-change interface:
 - `Inputs.Globs` matches slash-normalized glob patterns, including `**`
 - `Inputs.Ignore` can suppress matching paths
 
+Glob expansion for fingerprinting and validation remains worktree-relative, but it does not need to scan the whole worktree for a prefixed pattern. `internal/pathspec.ExpandGlob` walks the longest leading sequence of literal directory segments before the first segment containing `*`, `?`, or `[`. For example, `backend/internal/**/app*.sql` starts at `<worktree>/backend/internal`, while `*.go` and `**/*.go` still start at the worktree root. Candidates remain relative to the original worktree and slash-normalized, and `WalkDir` ordering and directory-symlink behavior are preserved. Missing prefixes produce no matches; relevant-subtree errors still propagate. Absolute, volume-qualified, and parent-relative patterns are rejected before traversal. This optimization has no persistent index, path exclusions, or project-specific directory knowledge.
+
 When a file batch arrives, the engine:
 - finds directly affected tasks in the selected target closure
 - expands through the downstream task graph using watch restart policy rules

@@ -5,14 +5,22 @@ Last updated: 2026-08-30
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: atomic repository repair for finite `run --ci` executions is implemented and verified
-- Confidence: the requested real-Git scenario matrix, full default/race suites, quality gates, and Linux/Windows cross-compilation pass
+- State: prefixed input-glob traversal optimization is implemented and verified
+- Confidence: focused equivalence/scope/safety coverage, the full default/race suites, quality gates, and Linux/Windows cross-compilation pass
 
 ## In Progress
 
-- None for the atomic repository-repair scope.
+- None for the prefixed input-glob traversal scope.
 
 ## Completed
+
+- Prefixed input-glob traversal optimization:
+  - changed `internal/pathspec.ExpandGlob` to start `filepath.WalkDir` at the longest literal directory prefix before the first glob-bearing segment, while retaining candidate matching relative to the original worktree root
+  - preserved slash-normalized results, deterministic `WalkDir` ordering, missing-prefix behavior, and directory-symlink no-follow semantics, including protection against following an intermediate symlink in a deep literal prefix
+  - reject absolute, volume-qualified, and parent-relative patterns locally before traversal; relevant-subtree errors still propagate and root-level globs retain access to conventional and hidden directories without exclusions or indexing
+  - added focused equivalence, scan-root, multiple-prefix, filename-wildcard, root-fallback, missing-prefix, native-separator, out-of-prefix, error, ordering, symlink, and escape-safety regressions
+  - added a benchmark with 32 relevant backend files and either zero or 10,000 irrelevant sibling files; both cases remain approximately 0.5 ms with the same allocation count on the local Apple ARM run
+  - verified `go test ./...`, `go test -race ./...`, `go vet ./...`, Staticcheck v0.7.0, govulncheck v1.6.0, `go mod tidy -diff`, formatting/diff checks, version JSON smoke, and Linux/Windows amd64 pathspec test compilation
 
 - Atomic `run --ci --commit-changes` repository repair:
   - added CI-only `--commit-changes`, repeated Git-native `--commit-path`, required `--commit-message`, optional `--push`, and optional `--fail-after-commit`

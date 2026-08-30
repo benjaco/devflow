@@ -20,6 +20,7 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 
 - graph validation and closures
 - exhaustive topological-order enumeration with explicit combinatorial bounds
+- pathspec glob expansion equivalence, longest-literal-prefix scan scope, root-level fallback, native separator normalization, deterministic ordering, missing-prefix behavior, relevant-subtree errors, directory-symlink no-follow behavior, and absolute/volume/parent traversal rejection; retain a benchmark proving a prefixed glob is insensitive to a large irrelevant sibling tree
 - fingerprint determinism, including custom callback fingerprints that remain executable rather than being JSON-serialized and task-signature normalization that does not mutate adapter task definitions
 - filtered file-content fingerprints, including semantic no-op edits, Go `@` comments, Go struct declarations with doc comments, in-memory filtered-hash reuse for unchanged files, and engine-level cache behavior where irrelevant edits restore cache while relevant filtered edits rerun the task
 - cache snapshot and restore semantics, including read-only directory modes, preserved pnpm-style internal relative symlinks, external-link rejection, bounded entry/byte limits, progress callbacks, and writable cleanup
