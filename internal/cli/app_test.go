@@ -140,6 +140,26 @@ func (repairCLIProject) Tasks() []project.Task {
 		}
 		return os.WriteFile(rt.Abs("backend/generated/model.sql.go"), []byte("// repaired generated Go\n"), 0o644)
 	}
+	writeLineEndings := func(rt *project.Runtime, paths ...string) error {
+		contents := map[string]string{
+			"frontend/app.txt": "original frontend\r\n",
+			"outside.txt":      "original outside\r\n",
+		}
+		for _, path := range paths {
+			if err := os.WriteFile(rt.Abs(path), []byte(contents[path]), 0o644); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	stageFixturePath := func(ctx context.Context, rt *project.Runtime, path string) error {
+		cmd := exec.CommandContext(ctx, "git", "add", "--", path)
+		cmd.Dir = rt.Worktree
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("stage fixture path %s: %w: %s", path, err, strings.TrimSpace(string(output)))
+		}
+		return nil
+	}
 	return []project.Task{
 		{
 			Name: "repair_no_changes",
@@ -161,6 +181,33 @@ func (repairCLIProject) Tasks() []project.Task {
 					return err
 				}
 				return os.WriteFile(rt.Abs("outside-untracked.txt"), []byte("untracked outside permitted paths\n"), 0o644)
+			},
+		},
+		{
+			Name: "repair_line_endings",
+			Kind: project.KindOnce,
+			Run: func(ctx context.Context, rt *project.Runtime) error {
+				if err := writeLineEndings(rt, "frontend/app.txt"); err != nil {
+					return err
+				}
+				return stageFixturePath(ctx, rt, "frontend/app.txt")
+			},
+		},
+		{
+			Name: "repair_line_endings_mixed",
+			Kind: project.KindOnce,
+			Run: func(_ context.Context, rt *project.Runtime) error {
+				if err := writeLineEndings(rt, "frontend/app.txt", "outside.txt"); err != nil {
+					return err
+				}
+				return os.WriteFile(rt.Abs("backend/generated/model.sql.go"), []byte("// repaired generated Go\n"), 0o644)
+			},
+		},
+		{
+			Name: "repair_line_endings_with_content",
+			Kind: project.KindOnce,
+			Run: func(_ context.Context, rt *project.Runtime) error {
+				return os.WriteFile(rt.Abs("frontend/app.txt"), []byte("repaired frontend\r\n"), 0o644)
 			},
 		},
 		{
@@ -191,6 +238,9 @@ func (repairCLIProject) Targets() []project.Target {
 		{Name: "repair-no-changes", RootTasks: []string{"repair_no_changes"}},
 		{Name: "repair-changes", RootTasks: []string{"repair_changes"}},
 		{Name: "repair-changes-with-untracked", RootTasks: []string{"repair_changes_with_untracked"}},
+		{Name: "repair-line-endings", RootTasks: []string{"repair_line_endings"}},
+		{Name: "repair-line-endings-mixed", RootTasks: []string{"repair_line_endings_mixed"}},
+		{Name: "repair-line-endings-with-content", RootTasks: []string{"repair_line_endings_with_content"}},
 		{Name: "repair-fails", RootTasks: []string{"repair_then_fail"}},
 		{Name: "repair-unexpected", RootTasks: []string{"repair_unexpected"}},
 	}
@@ -572,7 +622,7 @@ func TestRunHelpDescribesOperationalFlags(t *testing.T) {
 		t.Fatal("expected help error")
 	}
 	help := stderr.String()
-	for _, want := range []string{"--ci", "finite CI/readiness probe", "--detach", "not a readiness gate", "--watch", "--commit-changes", "--commit-path", "--fail-after-commit"} {
+	for _, want := range []string{"--ci", "finite CI/readiness probe", "--detach", "not a readiness gate", "--watch", "--commit-changes", "--commit-path", "--fail-after-commit", "--pedantic"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("help output missing %q:\n%s", want, help)
 		}
@@ -586,6 +636,7 @@ func TestRunRepositoryRepairFlagsRequireExplicitFiniteConfiguration(t *testing.T
 		want string
 	}{
 		{name: "push-needs-mode", args: []string{"run", "build", "--push"}, want: "require --commit-changes"},
+		{name: "pedantic-needs-mode", args: []string{"run", "build", "--pedantic"}, want: "require --commit-changes"},
 		{name: "mode-needs-ci", args: []string{"run", "build", "--commit-changes", "--commit-path", "frontend", "--commit-message", "repair"}, want: "only with run --ci"},
 		{name: "mode-needs-path", args: []string{"run", "build", "--ci", "--commit-changes", "--commit-message", "repair"}, want: "at least one --commit-path"},
 		{name: "mode-needs-message", args: []string{"run", "build", "--ci", "--commit-changes", "--commit-path", "frontend"}, want: "non-empty --commit-message"},
@@ -1130,10 +1181,153 @@ func TestRunRepositoryRepairNoChangesReturnsNormalSuccess(t *testing.T) {
 	if !ok {
 		t.Fatalf("repositoryChanges is not an object: %s", stdout)
 	}
-	for _, field := range []string{"status", "changedPaths", "changedPathCount", "changedPathsTruncated", "unexpectedTrackedPaths", "unexpectedTrackedPathCount", "unexpectedTrackedPathsTruncated", "commitCreated", "commitSha", "pushAttempted", "pushSucceeded", "failAfterCommitRequested", "failAfterCommitTriggered"} {
+	for _, field := range []string{"status", "pedantic", "changedPaths", "changedPathCount", "changedPathsTruncated", "ignoredLineEndingPaths", "ignoredLineEndingPathCount", "ignoredLineEndingPathsTruncated", "unexpectedTrackedPaths", "unexpectedTrackedPathCount", "unexpectedTrackedPathsTruncated", "commitCreated", "commitSha", "pushAttempted", "pushSucceeded", "failAfterCommitRequested", "failAfterCommitTriggered"} {
 		if _, ok := repositoryWire[field]; !ok {
 			t.Fatalf("repositoryChanges omitted stable field %q: %s", field, stdout)
 		}
+	}
+}
+
+func TestRunRepositoryRepairIgnoresLineEndingOnlyChangesByDefault(t *testing.T) {
+	worktree := initRepositoryRepairGitWorktree(t)
+	before := repairGitText(t, worktree, "rev-parse", "HEAD")
+	result, stdout, stderr, runErr := runRepositoryRepair(t, worktree, "repair-line-endings", "--push", "--fail-after-commit")
+	if runErr != nil {
+		t.Fatalf("line-ending-only repair failed: %v\nstdout=%s\nstderr=%s", runErr, stdout, stderr)
+	}
+	if !result.Success || result.RepositoryChanges == nil {
+		t.Fatalf("missing successful repository result: %+v", result)
+	}
+	repository := result.RepositoryChanges
+	if repository.Status != api.RepositoryChangeStatusNoChanges || repository.Pedantic || repository.ChangedPathCount != 0 || repository.CommitCreated || repository.PushAttempted {
+		t.Fatalf("line-ending-only change triggered repository mutation: %+v", repository)
+	}
+	if repository.IgnoredLineEndingPathCount != 1 || strings.Join(repository.IgnoredLineEndingPaths, ",") != "frontend/app.txt" || repository.IgnoredLineEndingPathsTruncated {
+		t.Fatalf("ignored line-ending detail missing: %+v", repository)
+	}
+	if !repository.FailAfterCommitRequested || repository.FailAfterCommitTriggered {
+		t.Fatalf("line-ending-only change triggered deliberate failure: %+v", repository)
+	}
+	if after := repairGitText(t, worktree, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("line-ending-only change advanced HEAD: before=%s after=%s", before, after)
+	}
+	if got := repairGit(t, worktree, "show", "HEAD:frontend/app.txt"); got != "original frontend\n" {
+		t.Fatalf("line-ending-only bytes entered HEAD: %q", got)
+	}
+	data, err := os.ReadFile(filepath.Join(worktree, "frontend", "app.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "original frontend\r\n"; got != want {
+		t.Fatalf("ignored worktree bytes = %q, want %q", got, want)
+	}
+	if got := repairGitText(t, worktree, "status", "--porcelain=v1"); got != " M frontend/app.txt" {
+		t.Fatalf("ignored line-ending-only path was not left unstaged: %q", got)
+	}
+	if !strings.Contains(stderr, "ignoring 1 CRLF/LF-only tracked path") || !strings.Contains(stderr, "no permitted changes found") || strings.Contains(stdout, "[devflow]") {
+		t.Fatalf("line-ending progress streams were incorrect:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+}
+
+func TestRunRepositoryRepairPedanticCommitsLineEndingOnlyChanges(t *testing.T) {
+	worktree := initRepositoryRepairGitWorktree(t)
+	result, _, _, runErr := runRepositoryRepair(t, worktree, "repair-line-endings", "--pedantic")
+	if runErr != nil {
+		t.Fatalf("pedantic line-ending repair failed: %v", runErr)
+	}
+	if !result.Success || result.RepositoryChanges == nil {
+		t.Fatalf("missing successful repository result: %+v", result)
+	}
+	repository := result.RepositoryChanges
+	if repository.Status != api.RepositoryChangeStatusCommitted || !repository.Pedantic || !repository.CommitCreated || repository.ChangedPathCount != 1 || strings.Join(repository.ChangedPaths, ",") != "frontend/app.txt" {
+		t.Fatalf("pedantic mode did not commit line-ending-only change: %+v", repository)
+	}
+	if repository.IgnoredLineEndingPathCount != 0 || len(repository.IgnoredLineEndingPaths) != 0 {
+		t.Fatalf("pedantic mode reported ignored line endings: %+v", repository)
+	}
+	if got := repairGit(t, worktree, "show", "HEAD:frontend/app.txt"); got != "original frontend\r\n" {
+		t.Fatalf("pedantic commit blob = %q", got)
+	}
+	if got := repairGitText(t, worktree, "status", "--porcelain=v1"); got != "" {
+		t.Fatalf("pedantic commit left repository dirty: %q", got)
+	}
+}
+
+func TestRunRepositoryRepairPedanticRejectsUnexpectedLineEndingChanges(t *testing.T) {
+	worktree := initRepositoryRepairGitWorktree(t)
+	before := repairGitText(t, worktree, "rev-parse", "HEAD")
+	result, _, _, runErr := runRepositoryRepair(t, worktree, "repair-line-endings-mixed", "--pedantic")
+	if runErr == nil {
+		t.Fatal("expected pedantic unexpected-path failure")
+	}
+	if result.Success || result.RepositoryChanges == nil {
+		t.Fatalf("unexpected pedantic failure result: %+v", result)
+	}
+	repository := result.RepositoryChanges
+	if repository.Status != api.RepositoryChangeStatusUnexpectedTrackedChanges || !repository.Pedantic || repository.CommitCreated || repository.PushAttempted {
+		t.Fatalf("pedantic mode did not reject unexpected line-ending change: %+v", repository)
+	}
+	if repository.ChangedPathCount != 2 || strings.Join(repository.ChangedPaths, ",") != "backend/generated/model.sql.go,frontend/app.txt" || repository.UnexpectedTrackedPathCount != 1 || strings.Join(repository.UnexpectedTrackedPaths, ",") != "outside.txt" {
+		t.Fatalf("pedantic changed/unexpected paths were incorrect: %+v", repository)
+	}
+	if repository.IgnoredLineEndingPathCount != 0 {
+		t.Fatalf("pedantic mode ignored a line-ending path: %+v", repository)
+	}
+	if after := repairGitText(t, worktree, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("pedantic unexpected-path failure advanced HEAD: before=%s after=%s", before, after)
+	}
+	if staged := repairGitText(t, worktree, "diff", "--cached", "--name-only"); staged != "" {
+		t.Fatalf("pedantic unexpected-path failure staged paths: %q", staged)
+	}
+}
+
+func TestRunRepositoryRepairExcludesLineEndingsFromMixedCommit(t *testing.T) {
+	worktree := initRepositoryRepairGitWorktree(t)
+	result, _, _, runErr := runRepositoryRepair(t, worktree, "repair-line-endings-mixed")
+	if runErr != nil {
+		t.Fatalf("mixed line-ending repair failed: %v", runErr)
+	}
+	if !result.Success || result.RepositoryChanges == nil {
+		t.Fatalf("missing successful repository result: %+v", result)
+	}
+	repository := result.RepositoryChanges
+	if repository.Status != api.RepositoryChangeStatusCommitted || !repository.CommitCreated || repository.ChangedPathCount != 1 || strings.Join(repository.ChangedPaths, ",") != "backend/generated/model.sql.go" {
+		t.Fatalf("mixed repair committed the wrong paths: %+v", repository)
+	}
+	if repository.IgnoredLineEndingPathCount != 2 || strings.Join(repository.IgnoredLineEndingPaths, ",") != "frontend/app.txt,outside.txt" || repository.UnexpectedTrackedPathCount != 0 {
+		t.Fatalf("mixed repair did not ignore permitted and unexpected line endings: %+v", repository)
+	}
+	if got := strings.Join(repairGitLines(t, worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"), ","); got != "backend/generated/model.sql.go" {
+		t.Fatalf("mixed repair commit paths = %q", got)
+	}
+	for path, want := range map[string]string{
+		"frontend/app.txt": "original frontend\n",
+		"outside.txt":      "original outside\n",
+	} {
+		if got := repairGit(t, worktree, "show", "HEAD:"+path); got != want {
+			t.Fatalf("ignored line endings entered committed %s: %q", path, got)
+		}
+	}
+	if got := strings.Join(repairGitLines(t, worktree, "status", "--porcelain=v1"), ","); got != " M frontend/app.txt, M outside.txt" {
+		t.Fatalf("ignored mixed paths were not left unstaged: %q", got)
+	}
+}
+
+func TestRunRepositoryRepairCommitsContentChangeWithDifferentLineEndings(t *testing.T) {
+	worktree := initRepositoryRepairGitWorktree(t)
+	result, _, _, runErr := runRepositoryRepair(t, worktree, "repair-line-endings-with-content")
+	if runErr != nil {
+		t.Fatalf("content-plus-line-ending repair failed: %v", runErr)
+	}
+	if !result.Success || result.RepositoryChanges == nil {
+		t.Fatalf("missing successful repository result: %+v", result)
+	}
+	repository := result.RepositoryChanges
+	if repository.Status != api.RepositoryChangeStatusCommitted || !repository.CommitCreated || repository.ChangedPathCount != 1 || strings.Join(repository.ChangedPaths, ",") != "frontend/app.txt" || repository.IgnoredLineEndingPathCount != 0 {
+		t.Fatalf("real content change was ignored with its line endings: %+v", repository)
+	}
+	if got := repairGit(t, worktree, "show", "HEAD:frontend/app.txt"); got != "repaired frontend\r\n" {
+		t.Fatalf("content-plus-line-ending commit blob = %q", got)
 	}
 }
 
@@ -3350,6 +3544,7 @@ func initRepositoryRepairGitWorktree(t *testing.T) string {
 		}
 	}
 	repairGit(t, worktree, "init")
+	repairGit(t, worktree, "config", "core.autocrlf", "false")
 	repairGit(t, worktree, "add", "--", ".")
 	t.Setenv("GIT_AUTHOR_NAME", "Head Author")
 	t.Setenv("GIT_AUTHOR_EMAIL", "head@example.invalid")

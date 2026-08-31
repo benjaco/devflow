@@ -53,3 +53,29 @@ func TestGitErrorDetailRedactsCredentialURLsAndStaysBounded(t *testing.T) {
 		t.Fatalf("error detail exceeded bound: %d", len(detail))
 	}
 }
+
+func TestGitPathChunksAreDeterministicBoundedAndLossless(t *testing.T) {
+	paths := []string{"z-last.txt", "duplicate.txt", "duplicate.txt"}
+	for index := 0; index < 200; index++ {
+		paths = append(paths, fmt.Sprintf("generated/%03d-%s.sql.go", index, strings.Repeat("x", 100)))
+	}
+	chunks := gitPathChunks(paths)
+	if len(chunks) < 2 {
+		t.Fatalf("expected argument chunking, got %d chunk(s)", len(chunks))
+	}
+	flattened := make([]string, 0)
+	for _, chunk := range chunks {
+		chunkBytes := 0
+		for _, path := range chunk {
+			chunkBytes += len(path) + 1
+		}
+		if chunkBytes > maxGitPathArgBytes && len(chunk) > 1 {
+			t.Fatalf("multi-path chunk exceeded bound: paths=%d bytes=%d", len(chunk), chunkBytes)
+		}
+		flattened = append(flattened, chunk...)
+	}
+	want := uniqueSorted(paths)
+	if !samePaths(flattened, want) || strings.Join(flattened, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("chunked paths changed order or membership")
+	}
+}

@@ -21,6 +21,7 @@ import (
 const (
 	maxGitStdoutBytes    = 64 << 20
 	maxGitStderrBytes    = 64 << 10
+	maxGitPathArgBytes   = 16 << 10
 	maxReportedPaths     = 200
 	maxReportedPathBytes = 64 << 10
 	maxReportedPathLen   = 4 << 10
@@ -34,6 +35,7 @@ type Options struct {
 	Message         string
 	Push            bool
 	FailAfterCommit bool
+	Pedantic        bool
 }
 
 type Runner struct {
@@ -126,38 +128,47 @@ func (r *Runner) Apply(ctx context.Context) (api.RepositoryChangeResult, error) 
 		return r.fail(result, fmt.Errorf("repository HEAD changed during DAG execution; refusing to commit or push"))
 	}
 
-	permitted, unexpected, err := r.inspectChanges(ctx)
+	permitted, unexpected, ignoredLineEndings, err := r.inspectChanges(ctx)
 	if err != nil {
 		return r.fail(result, err)
 	}
 	r.setChangedPaths(&result, permitted)
+	r.setIgnoredLineEndingPaths(&result, ignoredLineEndings)
 	r.setUnexpectedPaths(&result, unexpected)
 	if len(unexpected) > 0 {
 		result.Status = api.RepositoryChangeStatusUnexpectedTrackedChanges
 		return r.fail(result, fmt.Errorf("DAG changed %d tracked path(s) outside --commit-path", len(unexpected)))
 	}
+	if len(ignoredLineEndings) > 0 {
+		r.progressf("repository repair: ignoring %d CRLF/LF-only tracked path(s); use --pedantic to include them", len(ignoredLineEndings))
+		if err := r.resetIndexPaths(ctx, ignoredLineEndings); err != nil {
+			return r.failAfterStaging(ctx, result, api.RepositoryChangeStatusCommitFailed, fmt.Errorf("unstage ignored CRLF/LF-only repository changes: %w", err))
+		}
+	}
 	if len(permitted) == 0 {
+		if err := r.verifyIgnoredOnlyChanges(ctx, ignoredLineEndings); err != nil {
+			if len(ignoredLineEndings) > 0 {
+				return r.failAfterStaging(ctx, result, api.RepositoryChangeStatusRepositoryStateChanged, err)
+			}
+			return r.fail(result, err)
+		}
 		result.Status = api.RepositoryChangeStatusNoChanges
 		r.progressf("repository repair: no permitted changes found")
 		return result, nil
 	}
 
 	r.progressf("repository repair: staging %d permitted path(s)", len(permitted))
-	addArgs := []string{"add", "-A", "--"}
-	addArgs = append(addArgs, r.options.Pathspecs...)
-	if _, err := r.git(ctx, nil, nil, addArgs...); err != nil {
+	if err := r.stagePaths(ctx, permitted); err != nil {
 		return r.failAfterStaging(ctx, result, api.RepositoryChangeStatusCommitFailed, fmt.Errorf("stage permitted repository changes: %w", err))
 	}
 
-	staged, unexpected, err := r.verifyStagedChanges(ctx)
+	staged, unexpected, currentIgnoredLineEndings, err := r.verifyStagedChanges(ctx, permitted, ignoredLineEndings)
 	if err != nil {
 		return r.failAfterStaging(ctx, result, api.RepositoryChangeStatusCommitFailed, err)
 	}
 	r.setChangedPaths(&result, staged)
+	r.setIgnoredLineEndingPaths(&result, currentIgnoredLineEndings)
 	r.setUnexpectedPaths(&result, unexpected)
-	if missing := pathDifference(permitted, staged); len(missing) > 0 || len(pathDifference(staged, permitted)) > 0 {
-		return r.failAfterStaging(ctx, result, api.RepositoryChangeStatusCommitFailed, fmt.Errorf("permitted repository paths changed while staging; refusing a partial commit"))
-	}
 	if len(unexpected) > 0 {
 		return r.failAfterStaging(ctx, result, api.RepositoryChangeStatusUnexpectedTrackedChanges, fmt.Errorf("repository changed %d tracked path(s) outside --commit-path while staging", len(unexpected)))
 	}
@@ -210,52 +221,152 @@ func (r *Runner) Apply(ctx context.Context) (api.RepositoryChangeResult, error) 
 	return result, nil
 }
 
-func (r *Runner) inspectChanges(ctx context.Context) (permitted []string, unexpected []string, err error) {
+func (r *Runner) inspectChanges(ctx context.Context) (permitted []string, unexpected []string, ignoredLineEndings []string, err error) {
 	permittedEntries, err := r.status(ctx, true, r.options.Pathspecs)
 	if err != nil {
-		return nil, nil, fmt.Errorf("inspect permitted repository changes: %w", err)
+		return nil, nil, nil, fmt.Errorf("inspect permitted repository changes: %w", err)
 	}
 	allTrackedEntries, err := r.status(ctx, false, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("inspect tracked repository changes: %w", err)
+		return nil, nil, nil, fmt.Errorf("inspect tracked repository changes: %w", err)
 	}
 	permittedTrackedEntries, err := r.status(ctx, false, r.options.Pathspecs)
 	if err != nil {
-		return nil, nil, fmt.Errorf("inspect permitted tracked repository changes: %w", err)
+		return nil, nil, nil, fmt.Errorf("inspect permitted tracked repository changes: %w", err)
 	}
-	return statusPaths(permittedEntries), pathDifference(statusPaths(allTrackedEntries), statusPaths(permittedTrackedEntries)), nil
+	ignoredLineEndings, err = r.lineEndingOnlyPaths(ctx, allTrackedEntries)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	permitted = pathDifference(statusPaths(permittedEntries), ignoredLineEndings)
+	materialTracked := pathDifference(statusPaths(allTrackedEntries), ignoredLineEndings)
+	unexpected = pathDifference(materialTracked, statusPaths(permittedTrackedEntries))
+	return permitted, unexpected, ignoredLineEndings, nil
 }
 
-func (r *Runner) verifyStagedChanges(ctx context.Context) (staged []string, unexpected []string, err error) {
-	permittedStatus, err := r.status(ctx, true, r.options.Pathspecs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("verify staged permitted changes: %w", err)
+func (r *Runner) lineEndingOnlyPaths(ctx context.Context, entries []statusEntry) ([]string, error) {
+	if r.options.Pedantic {
+		return nil, nil
 	}
-	for _, entry := range permittedStatus {
-		if entry.index == '?' || entry.worktree != ' ' {
-			return nil, nil, fmt.Errorf("permitted path %q changed while Devflow was staging it; refusing a partial commit", truncateUTF8(strings.ToValidUTF8(entry.path, "�"), maxReportedPathLen))
+	paths := statusPaths(entries)
+	ignored := make([]string, 0)
+	for _, path := range paths {
+		// Check both sides of the index. A task may have staged a path itself;
+		// treating only the final worktree patch as authoritative could hide a
+		// substantive staged change outside the permitted pathspecs.
+		cachedHasPatch, err := r.diffIgnoringLineEndings(ctx, true, path)
+		if err != nil {
+			return nil, fmt.Errorf("inspect staged CRLF/LF changes for %q: %w", truncateUTF8(strings.ToValidUTF8(path, "�"), maxReportedPathLen), err)
+		}
+		worktreeHasPatch, err := r.diffIgnoringLineEndings(ctx, false, path)
+		if err != nil {
+			return nil, fmt.Errorf("inspect worktree CRLF/LF changes for %q: %w", truncateUTF8(strings.ToValidUTF8(path, "�"), maxReportedPathLen), err)
+		}
+		if !cachedHasPatch && !worktreeHasPatch {
+			ignored = append(ignored, path)
 		}
 	}
-	allTrackedEntries, err := r.status(ctx, false, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("verify tracked repository changes after staging: %w", err)
+	return ignored, nil
+}
+
+func (r *Runner) diffIgnoringLineEndings(ctx context.Context, cached bool, path string) (bool, error) {
+	args := []string{
+		"--literal-pathspecs",
+		"diff",
+		"--patch",
+		"--unified=0",
+		"--no-color",
+		"--no-ext-diff",
+		"--no-textconv",
+		"--no-renames",
+		"--ignore-cr-at-eol",
+		"--ignore-submodules=none",
 	}
-	permittedTrackedEntries, err := r.status(ctx, false, r.options.Pathspecs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("verify permitted tracked repository changes after staging: %w", err)
+	if cached {
+		args = append(args, "--cached", r.baselineHead)
 	}
-	unexpected = pathDifference(statusPaths(allTrackedEntries), statusPaths(permittedTrackedEntries))
+	args = append(args, "--", path)
+	return r.gitProducesOutput(ctx, args...)
+}
+
+func (r *Runner) resetIndexPaths(ctx context.Context, paths []string) error {
+	for _, chunk := range gitPathChunks(paths) {
+		args := []string{"--literal-pathspecs", "reset", "--quiet", r.baselineHead, "--"}
+		args = append(args, chunk...)
+		if _, err := r.git(ctx, nil, nil, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Runner) stagePaths(ctx context.Context, paths []string) error {
+	for _, chunk := range gitPathChunks(paths) {
+		args := []string{"--literal-pathspecs", "add", "-A", "--"}
+		args = append(args, chunk...)
+		if _, err := r.git(ctx, nil, nil, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Runner) verifyIgnoredOnlyChanges(ctx context.Context, expectedIgnoredLineEndings []string) error {
+	permitted, unexpected, ignoredLineEndings, err := r.inspectChanges(ctx)
+	if err != nil {
+		return fmt.Errorf("verify ignored CRLF/LF-only repository changes: %w", err)
+	}
+	if len(permitted) > 0 || len(unexpected) > 0 || !samePaths(ignoredLineEndings, expectedIgnoredLineEndings) {
+		return fmt.Errorf("repository paths changed while Devflow was ignoring CRLF/LF-only changes")
+	}
+	staged, err := r.diffCachedPaths(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("verify clean index after ignoring CRLF/LF-only changes: %w", err)
+	}
+	if len(staged) > 0 {
+		return fmt.Errorf("repository index changed while Devflow was ignoring CRLF/LF-only changes")
+	}
+	return nil
+}
+
+func (r *Runner) verifyStagedChanges(ctx context.Context, expectedPermitted, expectedIgnoredLineEndings []string) (staged []string, unexpected []string, ignoredLineEndings []string, err error) {
+	permittedStatus, err := r.status(ctx, true, r.options.Pathspecs)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("verify staged permitted changes: %w", err)
+	}
+	ignoredSet := stringSet(expectedIgnoredLineEndings)
+	for _, entry := range permittedStatus {
+		if _, ignored := ignoredSet[entry.path]; ignored {
+			if entry.index != ' ' {
+				return nil, nil, nil, fmt.Errorf("ignored CRLF/LF-only path %q entered the index while Devflow was staging", truncateUTF8(strings.ToValidUTF8(entry.path, "�"), maxReportedPathLen))
+			}
+			continue
+		}
+		if entry.index == '?' || entry.worktree != ' ' {
+			return nil, nil, nil, fmt.Errorf("permitted path %q changed while Devflow was staging it; refusing a partial commit", truncateUTF8(strings.ToValidUTF8(entry.path, "�"), maxReportedPathLen))
+		}
+	}
+	currentPermitted, unexpected, ignoredLineEndings, err := r.inspectChanges(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("verify repository changes after staging: %w", err)
+	}
+	if !samePaths(currentPermitted, expectedPermitted) || !samePaths(ignoredLineEndings, expectedIgnoredLineEndings) {
+		return nil, nil, nil, fmt.Errorf("permitted repository paths changed while staging; refusing a partial commit")
+	}
 
 	staged, err = r.diffCachedPaths(ctx, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("inspect staged repository changes: %w", err)
+		return nil, nil, nil, fmt.Errorf("inspect staged repository changes: %w", err)
 	}
 	permittedStaged, err := r.diffCachedPaths(ctx, r.options.Pathspecs)
 	if err != nil {
-		return nil, nil, fmt.Errorf("inspect permitted staged repository changes: %w", err)
+		return nil, nil, nil, fmt.Errorf("inspect permitted staged repository changes: %w", err)
 	}
 	unexpected = uniqueSorted(append(unexpected, pathDifference(staged, permittedStaged)...))
-	return staged, unexpected, nil
+	if !samePaths(staged, expectedPermitted) {
+		return nil, nil, nil, fmt.Errorf("permitted repository paths changed while staging; refusing a partial commit")
+	}
+	return staged, unexpected, ignoredLineEndings, nil
 }
 
 func (r *Runner) status(ctx context.Context, includeUntracked bool, pathspecs []string) ([]statusEntry, error) {
@@ -449,6 +560,35 @@ func (r *Runner) git(ctx context.Context, stdin io.Reader, overrides map[string]
 	return append([]byte(nil), stdout.Bytes()...), nil
 }
 
+func (r *Runner) gitProducesOutput(ctx context.Context, args ...string) (bool, error) {
+	if r.gitPath == "" {
+		return false, fmt.Errorf("git executable was not resolved")
+	}
+	stdout := &presenceWriter{}
+	stderr := &boundedBuffer{max: maxGitStderrBytes}
+	cmd := exec.CommandContext(ctx, r.gitPath, args...)
+	cmd.Dir = r.root
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Env = mergedEnv(os.Environ(), map[string]string{
+		"GIT_TERMINAL_PROMPT": "0",
+		"GCM_INTERACTIVE":     "Never",
+	})
+	if err := cmd.Run(); err != nil {
+		exitCode := -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+		operation := "command"
+		if len(args) > 0 {
+			operation = args[0]
+		}
+		return false, &gitCommandError{operation: operation, exitCode: exitCode, cause: err, detail: boundedErrorDetail(stderr.String())}
+	}
+	return stdout.present, nil
+}
+
 func (r *Runner) failAfterStaging(ctx context.Context, result api.RepositoryChangeResult, status api.RepositoryChangeStatus, cause error) (api.RepositoryChangeResult, error) {
 	result.Status = status
 	if _, resetErr := r.git(ctx, nil, nil, "reset", "--mixed", "--quiet", "HEAD"); resetErr != nil {
@@ -466,7 +606,9 @@ func (r *Runner) fail(result api.RepositoryChangeResult, err error) (api.Reposit
 func (r *Runner) newResult(status api.RepositoryChangeStatus) api.RepositoryChangeResult {
 	return api.RepositoryChangeResult{
 		Status:                   status,
+		Pedantic:                 r.options.Pedantic,
 		ChangedPaths:             []string{},
+		IgnoredLineEndingPaths:   []string{},
 		UnexpectedTrackedPaths:   []string{},
 		FailAfterCommitRequested: r.options.FailAfterCommit,
 	}
@@ -474,6 +616,10 @@ func (r *Runner) newResult(status api.RepositoryChangeStatus) api.RepositoryChan
 
 func (r *Runner) setChangedPaths(result *api.RepositoryChangeResult, paths []string) {
 	result.ChangedPaths, result.ChangedPathCount, result.ChangedPathsTruncated = reportedPaths(paths)
+}
+
+func (r *Runner) setIgnoredLineEndingPaths(result *api.RepositoryChangeResult, paths []string) {
+	result.IgnoredLineEndingPaths, result.IgnoredLineEndingPathCount, result.IgnoredLineEndingPathsTruncated = reportedPaths(paths)
 }
 
 func (r *Runner) setUnexpectedPaths(result *api.RepositoryChangeResult, paths []string) {
@@ -533,6 +679,52 @@ func pathDifference(all, permitted []string) []string {
 		}
 	}
 	return uniqueSorted(out)
+}
+
+func samePaths(left, right []string) bool {
+	left = uniqueSorted(left)
+	right = uniqueSorted(right)
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func stringSet(paths []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		set[path] = struct{}{}
+	}
+	return set
+}
+
+func gitPathChunks(paths []string) [][]string {
+	// Keep direct argument-vector Git calls below Windows' command-line bound
+	// without introducing a shell or temporary pathspec file.
+	paths = uniqueSorted(paths)
+	if len(paths) == 0 {
+		return nil
+	}
+	chunks := make([][]string, 0, 1)
+	chunk := make([]string, 0, len(paths))
+	chunkBytes := 0
+	for _, path := range paths {
+		pathBytes := len(path) + 1
+		if len(chunk) > 0 && chunkBytes+pathBytes > maxGitPathArgBytes {
+			chunks = append(chunks, chunk)
+			chunk = nil
+			chunkBytes = 0
+		}
+		chunk = append(chunk, path)
+		chunkBytes += pathBytes
+	}
+	chunks = append(chunks, chunk)
+	return chunks
 }
 
 func uniqueSorted(paths []string) []string {
@@ -667,6 +859,17 @@ type boundedBuffer struct {
 	bytes.Buffer
 	max       int
 	truncated bool
+}
+
+type presenceWriter struct {
+	present bool
+}
+
+func (w *presenceWriter) Write(data []byte) (int, error) {
+	if len(data) > 0 {
+		w.present = true
+	}
+	return len(data), nil
 }
 
 func (b *boundedBuffer) Write(data []byte) (int, error) {

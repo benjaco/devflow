@@ -1,18 +1,26 @@
 # Progress
 
-Last updated: 2026-08-30
+Last updated: 2026-08-31
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: prefixed input-glob traversal optimization is implemented and verified
-- Confidence: focused equivalence/scope/safety coverage, the full default/race suites, quality gates, and Linux/Windows cross-compilation pass
+- State: platform-neutral line-ending filtering for atomic repository repair is implemented and verified
+- Confidence: repeated real-Git CRLF/LF coverage, the full default/race suites, quality gates, and Linux/Windows cross-compilation pass
 
 ## In Progress
 
-- None for the prefixed input-glob traversal scope.
+- None for the repository-repair line-ending scope.
 
 ## Completed
+
+- Platform-neutral atomic repository-repair line endings:
+  - ignore tracked CRLF/LF-only changes by default across both permitted and unexpected paths by requiring both staged and unstaged Git patches to be empty under `--ignore-cr-at-eol`; substantive content, type, mode, deletion, addition, and binary changes remain material
+  - remove ignored paths from the index without rewriting their worktree bytes, stage only exact remaining material paths through literal chunked Git argument vectors, and re-verify the material/ignored/unexpected sets before creating the exact-tree commit
+  - added repair-only `--pedantic` for byte-sensitive behavior plus additive `repositoryChanges.pedantic` and exact bounded `ignoredLineEndingPaths` audit fields
+  - added real-Git integration coverage for an ignored DAG-prestaged CRLF path, ignored-only no-push/no-fail success, mixed permitted and unexpected line-ending churn, exact mixed commit membership, substantive content with different line endings, pedantic commit, and pedantic unexpected-path rejection; focused cases passed five repetitions and race coverage
+  - updated CLI, architecture, testing, user development, agent integration, and durable agent-memory documentation
+  - verified `go test ./...`, `go test -race ./...`, `go vet ./...`, Staticcheck v0.7.0, govulncheck v1.6.0, `go mod tidy -diff`, formatting/diff checks, version JSON smoke, and Linux/Windows amd64 test-binary compilation for the affected packages
 
 - Prefixed input-glob traversal optimization:
   - changed `internal/pathspec.ExpandGlob` to start `filepath.WalkDir` at the longest literal directory prefix before the first glob-bearing segment, while retaining candidate matching relative to the original worktree root

@@ -64,9 +64,9 @@ devflow run ci \
   --fail-after-commit
 ```
 
-Start from a clean Git worktree. The target runs normally and no Git mutation occurs if it fails. After success, Git interprets each repeated pathspec; Devflow rejects tracked changes outside those matches, stages the exact permitted set, creates one commit, and optionally runs the configured default push. The exact-tree commit path does not run repository commit hooks or commit signing. A no-change run is ordinary success and does not push or deliberately fail. If CI has no configured identity, attribution comes from `HEAD`.
+Start from a clean Git worktree. The target runs normally and no Git mutation occurs if it fails. After success, Git interprets each repeated pathspec; Devflow rejects tracked changes outside those matches, stages the exact permitted set, creates one commit, and optionally runs the configured default push. CRLF/LF-only tracked changes are ignored by default even when they are outside the permitted pathspecs; they remain modified but unstaged and cannot enter the repair commit. Add `--pedantic` only when byte-for-byte line-ending changes should count. The exact-tree commit path does not run repository commit hooks or commit signing. A no-change run, including one containing only ignored line-ending churn, is ordinary success and does not push or deliberately fail. If CI has no configured identity, attribution comes from `HEAD`.
 
-The final `RunResult.repositoryChanges` distinguishes `committed`, `pushed`, `push_failed`, and `failed_after_commit` outcomes and includes the local commit SHA, exact path counts with bounded path lists, push attempt/success, and deliberate-failure state. A push failure leaves the local commit in place and returns nonzero. JSON remains the only stdout document; progress is on stderr.
+The final `RunResult.repositoryChanges` distinguishes `committed`, `pushed`, `push_failed`, and `failed_after_commit` outcomes and includes the local commit SHA, `pedantic`, exact changed/ignored-line-ending/unexpected path counts with bounded path lists, push attempt/success, and deliberate-failure state. A push failure leaves the local commit in place and returns nonzero. JSON remains the only stdout document; progress is on stderr.
 
 ## Pipeline Validation
 

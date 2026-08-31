@@ -349,6 +349,7 @@ func (a *App) runCmd(args []string) error {
 	commitMessage := fs.String("commit-message", "", "commit message for --commit-changes")
 	pushChanges := fs.Bool("push", false, "push a repository repair commit after creating it")
 	failAfterCommit := fs.Bool("fail-after-commit", false, "(--fail-after-commit) return nonzero after a repository repair commit (and requested push) succeeds")
+	pedantic := fs.Bool("pedantic", false, "(--pedantic) treat CRLF/LF-only repository changes as commit-worthy in --commit-changes mode")
 	projectName := fs.String("project", defaultProject(), "registered project adapter name")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -362,9 +363,9 @@ func (a *App) runCmd(args []string) error {
 	if target == "" {
 		return fmt.Errorf("usage: devflow run <target>")
 	}
-	repairFlagsUsed := len(commitPaths) > 0 || *commitMessage != "" || *pushChanges || *failAfterCommit
+	repairFlagsUsed := len(commitPaths) > 0 || *commitMessage != "" || *pushChanges || *failAfterCommit || *pedantic
 	if !*commitChanges && repairFlagsUsed {
-		return fmt.Errorf("--commit-path, --commit-message, --push, and --fail-after-commit require --commit-changes")
+		return fmt.Errorf("--commit-path, --commit-message, --push, --fail-after-commit, and --pedantic require --commit-changes")
 	}
 	var repairOptions *reporepair.Options
 	if *commitChanges {
@@ -393,6 +394,7 @@ func (a *App) runCmd(args []string) error {
 			Message:         *commitMessage,
 			Push:            *pushChanges,
 			FailAfterCommit: *failAfterCommit,
+			Pedantic:        *pedantic,
 		}
 	}
 	if *ciMode {

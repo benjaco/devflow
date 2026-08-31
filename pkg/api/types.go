@@ -307,9 +307,13 @@ const (
 
 type RepositoryChangeResult struct {
 	Status                          RepositoryChangeStatus `json:"status"`
+	Pedantic                        bool                   `json:"pedantic"`
 	ChangedPaths                    []string               `json:"changedPaths"`
 	ChangedPathCount                int                    `json:"changedPathCount"`
 	ChangedPathsTruncated           bool                   `json:"changedPathsTruncated"`
+	IgnoredLineEndingPaths          []string               `json:"ignoredLineEndingPaths"`
+	IgnoredLineEndingPathCount      int                    `json:"ignoredLineEndingPathCount"`
+	IgnoredLineEndingPathsTruncated bool                   `json:"ignoredLineEndingPathsTruncated"`
 	UnexpectedTrackedPaths          []string               `json:"unexpectedTrackedPaths"`
 	UnexpectedTrackedPathCount      int                    `json:"unexpectedTrackedPathCount"`
 	UnexpectedTrackedPathsTruncated bool                   `json:"unexpectedTrackedPathsTruncated"`
