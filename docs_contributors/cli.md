@@ -280,9 +280,9 @@ Task states now distinguish:
 - `canceled`: the task was interrupted because another task failed or the run was canceled
 - `stopped` and `dirty`
 
-`logs` supports task logs as before and also accepts `supervisor` to read the daemon/supervisor log directly.
+`logs` supports task logs as before and also accepts the reserved sources `supervisor` and `tui`. `logs supervisor` reads the daemon/supervisor log directly. `logs tui` reads `.devflow/logs/<instance-id>/tui.log`, including session boundaries, returned terminal errors, recovered panic stacks, and any Go fatal output duplicated while the TUI owned stderr. JSON mode retains the existing JSON-lines shape with `task: "tui"`.
 
-Task log files now represent the current run attempt for that task. The engine truncates the log at task-attempt start before adapter code can emit progress, and subprocess output appends within that attempt. Older successful, failed, or canceled output must not stay mixed into a newer running attempt. Task, daemon, and event-stream logs are owner-only (`0600`) on Unix-like systems.
+Task log files now represent the current run attempt for that task. The engine truncates the log at task-attempt start before adapter code can emit progress, and subprocess output appends within that attempt. Older successful, failed, or canceled output must not stay mixed into a newer running attempt. Task, daemon, TUI, and event-stream logs are owner-only (`0600`) on Unix-like systems.
 
 `tui` now opens a live operator console connected to the per-worktree daemon. Without `--instance`, `devflow tui` follows the same default launch path as bare `devflow`: resolve the default target, ensure the per-worktree daemon is running it in watch mode, wait for a matching non-empty status snapshot, then render. With `--instance`, `tui` is attach-only and does not start or retarget work.
 
@@ -306,6 +306,8 @@ The operator console includes:
 - primary live refresh from the daemon event subscription, with the persisted event stream at `.devflow/state/instances/<instance-id>/events.jsonl` as fallback
 
 Daemon ownership is session-scoped. If `devflow tui` or bare `devflow` has to start the daemon for that TUI session, quitting the TUI sends `stop --all` through the daemon so services, managed databases, and the daemon exit together. If the daemon already existed before the TUI connected, quitting closes only the UI and, after terminal restoration, prints the exact status and stop commands for the still-active instance.
+
+TUI startup creates/appends the owner-only per-instance `tui.log` before terminal initialization. Panics on the application goroutine are caught after tview finalizes the screen; Devflow records the panic and stack and returns a concise error containing the log path. Every Devflow-owned TUI background worker uses the same recovery boundary, records the first panic, and stops the application so the terminal can be restored. Go fatal output and panics in dependency-owned goroutines, which cannot be recovered by those boundaries, are duplicated directly to the same file by the runtime crash-output hook. Normal application errors are also retained there.
 
 Interactive prompt answers are written back through the instance interaction directory, so detached runs can still receive operator input from the TUI.
 

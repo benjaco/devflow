@@ -71,6 +71,7 @@ This model intentionally avoids:
 
 Per-worktree state lives under `.devflow/`:
 - `.devflow/logs/<instance-id>/`
+- `.devflow/logs/<instance-id>/tui.log` for interactive-client session, error, and crash diagnostics
 - `.devflow/state/instances/<instance-id>/`
 - `.devflow/state/instances/<instance-id>/flush/`
 - `.devflow/state/instances/<instance-id>/payload-schema/` for password-free Payload schema-push fingerprints
@@ -106,7 +107,7 @@ This split keeps runtime logs and instance state local to the worktree, keeps ta
 
 Structured state files and `runtime.env` are replaced through unique temporary files in the same directory so a failed or concurrent write cannot expose a partially truncated destination. Same-destination replacements are serialized within a process. On Windows, the final `MoveFileEx(..., REPLACE_EXISTING)` operation and JSON readers both retry bounded transient access, sharing, and lock violations because concurrent daemon/engine operations and file scanners can briefly hold the destination. The existing destination is never removed first, so readers still see either the old complete file or the new complete file. On Unix-like systems these persisted files are owner-readable/writable only (`0600`), because instance JSON and runtime env can contain local database credentials or other sensitive development values. This is local hardening, not encryption.
 
-Task, daemon, and event-stream log files are also created and repaired to owner-only `0600` permissions on Unix-like systems. They can contain command output derived from runtime configuration and must not default to group/world-readable files.
+Task, daemon, TUI, and event-stream log files are also created and repaired to owner-only `0600` permissions on Unix-like systems. They can contain command output, errors, or panic data derived from runtime configuration and must not default to group/world-readable files.
 
 Flush coordination is per instance:
 - `flush/requests/<request-id>.json` records the requested sync point
@@ -694,6 +695,8 @@ Mutable ownership is implemented by one daemon per worktree. CLI and TUI operati
 Daemon startup is serialized by a per-instance file lock under worktree state so concurrent CLI/TUI commands cannot start competing daemons for the same worktree.
 
 TUI daemon ownership is explicit. If bare `devflow` or `devflow tui` creates the daemon for that TUI session, TUI exit sends the normal all-work stop request so active services, managed databases, and the daemon shut down together. If the TUI connects to a daemon that already existed, TUI exit only disconnects the UI.
+
+The TUI process owns a separate per-instance diagnostic boundary at `.devflow/logs/<instance-id>/tui.log`. It records session boundaries and returned application errors. Panics on the application goroutine and Devflow-owned background workers are recovered, persisted with a stack, and converted to an error after stopping the screen. A Go runtime crash-output duplicate covers fatal failures and dependency-owned goroutines that cannot be recovered locally. The crash-output file descriptor is installed only for the TUI session and disabled during normal teardown. This surface is intentionally separate from the daemon log because the daemon may remain healthy when only the interactive client fails.
 
 The older hidden `__internal_exec` and `__internal_supervise` launcher paths are no longer user-facing execution routes. Their persisted supervisor/executor state and process-tree descendants can still be reconciled during `stop --all` so existing stale processes are not orphaned.
 

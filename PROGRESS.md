@@ -1,18 +1,27 @@
 # Progress
 
-Last updated: 2026-08-31
+Last updated: 2026-09-02
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: platform-neutral line-ending filtering for atomic repository repair is implemented and verified
-- Confidence: repeated real-Git CRLF/LF coverage, the full default/race suites, quality gates, and Linux/Windows cross-compilation pass
+- State: durable TUI error/crash diagnostics and recoverable panic handling are implemented and verified
+- Confidence: repeated application/background/runtime panic coverage, full default/race suites, quality gates, and Windows compilation pass
 
 ## In Progress
 
-- None for the repository-repair line-ending scope.
+- None for the TUI crash-diagnostic scope.
 
 ## Completed
+
+- Durable TUI crash diagnostics:
+  - added the per-instance `.devflow/logs/<instance-id>/tui.log` with session boundaries, returned terminal errors, recovered panic values/stacks, owner-only Unix permissions, and `devflow logs tui` retrieval using the existing text/JSON-lines log contract
+  - recover panics on the tview application goroutine after screen finalization, and route every Devflow-owned TUI background worker through a boundary that records the first panic and stops the application so the terminal can be restored
+  - installed Go's additional runtime crash output for the duration of the TUI session so fatal runtime errors and panics in dependency-owned goroutines are retained even when the terminal owns stderr
+  - added lock-faithful simulation coverage for application and background panics, a crashing subprocess regression for the unrecoverable runtime path, owner-only permission coverage, and CLI `logs tui --json` coverage
+  - the pre-fix operator crash left no artifact and did not reproduce in the focused or full suites; the retained diagnostic is now the evidence source for identifying that trigger if it recurs
+  - updated CLI, architecture, testing, user-development, and durable agent-memory documentation
+  - verified repeated focused race tests, `go test ./...`, `go test -race ./...`, `go vet ./...`, Staticcheck v0.7.0, govulncheck v1.6.0, tidy/format/diff checks, version JSON smoke, and Windows amd64 TUI/CLI test compilation plus command build
 
 - Platform-neutral atomic repository-repair line endings:
   - ignore tracked CRLF/LF-only changes by default across both permitted and unexpected paths by requiring both staged and unstaged Git patches to be empty under `--ignore-cr-at-eol`; substantive content, type, mode, deletion, addition, and binary changes remain material

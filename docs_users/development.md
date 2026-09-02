@@ -105,6 +105,12 @@ Use `devflow tui --instance <id>` only when you intentionally want to attach to 
 
 If that TUI launch had to start the worktree daemon, quitting the TUI also stops daemon-owned work and exits the daemon. If a daemon was already running before the TUI connected, quitting only closes the UI; after terminal restoration DevFlow prints exact status/stop commands for the background workflow that remains alive.
 
+Each TUI session appends start/stop diagnostics to the owner-only per-instance `tui.log`. If the UI panics, Devflow restores the terminal when recovery is possible, returns an error containing the exact log path, and writes the panic plus stack there. Fatal Go runtime failures and panics in dependency-owned goroutines are also duplicated to that file. Inspect the latest lines with:
+
+```bash
+devflow logs tui --tail 200
+```
+
 Useful TUI keys:
 - `?`: contextual help for the current view
 - `Tab`: switch task-table/log-pane focus
@@ -180,9 +186,10 @@ Use JSON status for automation and plain logs for fast inspection:
 devflow status --json
 devflow logs app
 devflow logs supervisor
+devflow logs tui --tail 200
 ```
 
-A failed `run --ci --json` already includes `error`, `failedNode`, `failedNodeLogPath`, a bounded `logTail`, every selected node's final run snapshot, and cache hit/miss lists. Each node reports duration and cache timing when applicable. Use the referenced full log only when the bounded tail is insufficient. Task, daemon, and event logs are owner-only on Unix-like systems.
+A failed `run --ci --json` already includes `error`, `failedNode`, `failedNodeLogPath`, a bounded `logTail`, every selected node's final run snapshot, and cache hit/miss lists. Each node reports duration and cache timing when applicable. Use the referenced full log only when the bounded tail is insufficient. `logs supervisor` reads the daemon log, while `logs tui` reads the interactive client's session/error/crash diagnostics. Task, daemon, TUI, and event logs are owner-only on Unix-like systems.
 
 For flush failures, start with the JSON `issues`, then inspect the referenced task logs. Do not rerun downstream tests until the relevant flush target reports `success=true`.
 

@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -431,6 +433,114 @@ func TestApplicationRunRestoresScreenAfterDrawPanic(t *testing.T) {
 	}
 	if !screen.finalized.Load() {
 		t.Fatal("screen was not finalized after draw panic")
+	}
+}
+
+func TestApplicationPanicReturnsDiagnosticAfterRestoringScreen(t *testing.T) {
+	d := prepareRunningDashboard(t)
+	screen := newObservedSimulationScreen(80, 24)
+	d.app.SetScreen(screen)
+	originalBeforeDraw := d.app.GetBeforeDrawFunc()
+	d.app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
+		originalBeforeDraw(screen)
+		panic("synthetic diagnosed draw panic")
+	})
+	diagnostics, err := startTUIDiagnostics(t.TempDir(), "draw-panic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { diagnostics.close(diagnostics.recordedFailure()) }()
+
+	runErr := runTUIApplicationWithDiagnostics(d.app, diagnostics)
+	if runErr == nil || !strings.Contains(runErr.Error(), diagnostics.path) {
+		t.Fatalf("application run error = %v, want diagnostic path %q", runErr, diagnostics.path)
+	}
+	if !screen.finalized.Load() {
+		t.Fatal("screen was not finalized after diagnosed draw panic")
+	}
+	data, err := os.ReadFile(diagnostics.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := string(data); !strings.Contains(text, "event=tui_panic") || !strings.Contains(text, "synthetic diagnosed draw panic") {
+		t.Fatalf("TUI diagnostic does not contain the draw panic:\n%s", text)
+	}
+}
+
+func TestBackgroundPanicStopsApplicationAndWritesDiagnostic(t *testing.T) {
+	d := prepareRunningDashboard(t)
+	screen := newObservedSimulationScreen(80, 24)
+	d.app.SetScreen(screen)
+	diagnostics, err := startTUIDiagnostics(t.TempDir(), "background-panic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { diagnostics.close(diagnostics.recordedFailure()) }()
+	d.diagnostics = diagnostics
+
+	done := make(chan error, 1)
+	go func() { done <- runTUIApplication(d.app) }()
+	screen.waitForFrame(t)
+	d.startBackground(func() { panic("synthetic background TUI panic") })
+	select {
+	case runErr := <-done:
+		if runErr != nil {
+			t.Fatalf("application run error = %v", runErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("background panic did not stop the TUI")
+	}
+	if !screen.finalized.Load() {
+		t.Fatal("screen was not finalized after background panic")
+	}
+	failure := diagnostics.recordedFailure()
+	if failure == nil || !strings.Contains(failure.Error(), diagnostics.path) {
+		t.Fatalf("recorded failure = %v, want diagnostic path %q", failure, diagnostics.path)
+	}
+	data, err := os.ReadFile(diagnostics.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "event=tui_panic") || !strings.Contains(text, "synthetic background TUI panic") {
+		t.Fatalf("TUI diagnostic does not contain the panic:\n%s", text)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(diagnostics.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("TUI diagnostic permissions = %03o, want 600", got)
+		}
+	}
+}
+
+func TestTUIDiagnosticsCaptureUnhandledDependencyPanic(t *testing.T) {
+	const helperEnv = "DEVFLOW_TEST_TUI_UNHANDLED_PANIC_ROOT"
+	if root := os.Getenv(helperEnv); root != "" {
+		if _, err := startTUIDiagnostics(root, "unhandled-panic"); err != nil {
+			panic(err)
+		}
+		go func() { panic("synthetic unhandled dependency panic") }()
+		select {}
+	}
+
+	root := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestTUIDiagnosticsCaptureUnhandledDependencyPanic$")
+	cmd.Env = append(os.Environ(), helperEnv+"="+root)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("crashing helper unexpectedly succeeded:\n%s", output)
+	}
+	path := instance.LogPath(root, "unhandled-panic", tuiDiagnosticTask)
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	text := string(data)
+	if !strings.Contains(text, "panic: synthetic unhandled dependency panic") {
+		t.Fatalf("fatal Go crash was not duplicated to the TUI diagnostic:\n%s\nhelper output:\n%s", text, output)
 	}
 }
 
