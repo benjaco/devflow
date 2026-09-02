@@ -2114,6 +2114,31 @@ func TestStatusDoesNotStartDaemon(t *testing.T) {
 	}
 }
 
+func TestLogsReadsTUIDiagnostic(t *testing.T) {
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := instance.LogPath(worktree, inst.ID, "tui")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("session started\npanic details\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout := &bytes.Buffer{}
+	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"logs", "tui", "--worktree", worktree, "--tail", "1", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	events := decodeJSONLines(t, stdout.Bytes())
+	if len(events) != 1 || events[0]["task"] != "tui" || events[0]["line"] != "panic details" {
+		t.Fatalf("unexpected TUI diagnostic log events: %+v", events)
+	}
+}
+
 var (
 	bootstrapBuildOnce sync.Once
 	bootstrapBinary    string

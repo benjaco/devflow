@@ -133,6 +133,7 @@ type dashboard struct {
 	retargetDetail    *tview.TextView
 	focusedPane       dashboardPane
 	compactLevel      int
+	diagnostics       *tuiDiagnostics
 }
 
 type dashboardPane uint8
@@ -173,32 +174,61 @@ var stopDaemonForTUI = func(ctx context.Context, client *daemon.Client) error {
 	return err
 }
 
-func Run(opts Options) error {
+func Run(opts Options) (runErr error) {
 	root, id, err := resolveInstance(opts.Worktree, opts.InstanceID)
 	if err != nil {
 		return err
 	}
-	client, started, err := daemon.Ensure(context.Background(), root, "")
+	diagnostics, err := startTUIDiagnostics(root, id)
 	if err != nil {
 		return err
 	}
-	stopDaemonOnExit := opts.StopDaemonOnExit || started
-	d := newDashboard(root, id)
-	if err := d.refresh(); err != nil {
+	var (
+		client           *daemon.Client
+		stopDaemonOnExit bool
+	)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			runErr = diagnostics.recordRecoveredPanic(recovered)
+		}
 		_ = maybeStopDaemonForTUI(client, stopDaemonOnExit)
+		if client != nil && !stopDaemonOnExit {
+			writeDetachedQuitMessage(opts.Output, root, id)
+		}
+		if recorded := diagnostics.recordedFailure(); recorded != nil {
+			runErr = recorded
+		} else if runErr != nil {
+			runErr = diagnostics.recordError(runErr)
+		}
+		diagnostics.close(runErr)
+	}()
+
+	var started bool
+	client, started, err = daemon.Ensure(context.Background(), root, "")
+	if err != nil {
+		return err
+	}
+	stopDaemonOnExit = opts.StopDaemonOnExit || started
+	d := newDashboard(root, id)
+	d.diagnostics = diagnostics
+	if err := d.refresh(); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go d.daemonEventLoop(ctx, client)
-	go d.eventLoop(ctx)
-	go d.fallbackRefreshLoop(ctx)
-	runErr := runTUIApplication(d.app)
-	cancel()
-	_ = maybeStopDaemonForTUI(client, stopDaemonOnExit)
-	if !stopDaemonOnExit {
-		writeDetachedQuitMessage(opts.Output, root, id)
-	}
-	return runErr
+	defer cancel()
+	d.startBackground(func() { d.daemonEventLoop(ctx, client) })
+	d.startBackground(func() { d.eventLoop(ctx) })
+	d.startBackground(func() { d.fallbackRefreshLoop(ctx) })
+	return runTUIApplicationWithDiagnostics(d.app, diagnostics)
+}
+
+func runTUIApplicationWithDiagnostics(app *tview.Application, diagnostics *tuiDiagnostics) (runErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			runErr = diagnostics.recordRecoveredPanic(recovered)
+		}
+	}()
+	return runTUIApplication(app)
 }
 
 func runTUIApplication(app *tview.Application) (err error) {
@@ -1254,7 +1284,7 @@ func (d *dashboard) triggerGeneratePrismaMigration(name string) {
 	}
 	d.busy = true
 	d.setStatus(fmt.Sprintf("[yellow]creating migration %q...", name))
-	go func() {
+	d.startBackground(func() {
 		progress := func(message string) {
 			message = strings.TrimSpace(message)
 			if message == "" {
@@ -1279,7 +1309,7 @@ func (d *dashboard) triggerGeneratePrismaMigration(name string) {
 			d.setStatus(fmt.Sprintf("[green]created migration %q", name))
 			_ = d.refresh()
 		})
-	}()
+	})
 }
 
 func (d *dashboard) triggerInvalidateSelected() {
@@ -1301,7 +1331,7 @@ func (d *dashboard) triggerInvalidateSelected() {
 func (d *dashboard) executeInvalidate(selected string) {
 	d.busy = true
 	d.setStatus(fmt.Sprintf("[yellow]rerun running for %s...", selected))
-	go func() {
+	d.startBackground(func() {
 		err := invalidateAndRerunDownstream(d.root, d.instanceID, selected, func() {
 			d.app.QueueUpdateDraw(func() {
 				d.setStatus(fmt.Sprintf("[yellow]rerun running: invalidated downstream from %s...", selected))
@@ -1316,7 +1346,7 @@ func (d *dashboard) executeInvalidate(selected string) {
 			d.setStatus(fmt.Sprintf("[green]rerun successful for %s", selected))
 			_ = d.refresh()
 		})
-	}()
+	})
 }
 
 func (d *dashboard) triggerRetargetSelected() {
@@ -1414,7 +1444,7 @@ func (d *dashboard) openRetargetChooser(current string, targets []string) {
 func (d *dashboard) planRetarget(selected string) {
 	d.busy = true
 	d.setStatus(fmt.Sprintf("[yellow]retarget request accepted for %s; planning scope...", selected))
-	go func() {
+	d.startBackground(func() {
 		plan, err := previewLifecycleForTUI(d.root, daemon.Request{Action: daemon.ActionRetarget, Target: selected})
 		d.app.QueueUpdateDraw(func() {
 			d.busy = false
@@ -1424,13 +1454,13 @@ func (d *dashboard) planRetarget(selected string) {
 			}
 			d.openLifecyclePlan(plan, func() { d.executeRetarget(selected) })
 		})
-	}()
+	})
 }
 
 func (d *dashboard) executeRetarget(selected string) {
 	d.busy = true
 	d.setStatus(fmt.Sprintf("[yellow]retarget running for %s...", selected))
-	go func() {
+	d.startBackground(func() {
 		err := retargetAndRelaunch(d.root, d.instanceID, selected)
 		d.app.QueueUpdateDraw(func() {
 			d.busy = false
@@ -1441,7 +1471,7 @@ func (d *dashboard) executeRetarget(selected string) {
 			d.setStatus(fmt.Sprintf("[green]retarget successful for %s", selected))
 			_ = d.refresh()
 		})
-	}()
+	})
 }
 
 func (d *dashboard) openLifecyclePlan(plan api.LifecyclePlan, execute func()) {
