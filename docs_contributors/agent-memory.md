@@ -140,7 +140,7 @@ Runtime env and secrets: instance env is persisted under `.devflow/state`. Adapt
 State is split deliberately:
 - per-worktree logs and instance snapshots live under the worktree `.devflow/`
 - all projects share one physical task cache under the OS user cache dir, with entries namespaced by project
-- daemon sockets live under a short per-user temp path such as `/tmp/devflow-daemon-<uid>/` to avoid Unix socket path length failures in nested worktrees
+- daemon sockets live under a short per-user temp path such as `/tmp/devflow-daemon-<uid>/` to avoid Unix socket path length failures in nested worktrees; request/response clients acknowledge a decoded terminal response and the daemon waits for that acknowledgment with a short bound before closing, because an immediate close can discard the final response on Windows Unix-domain sockets; keep the acknowledgment best-effort for compatibility with older clients and daemons
 - sibling git worktrees share port allocation through the Git common dir
 - non-git temp/test flows fall back to local/global safe defaults
 - `status --json` may retain the desired managed DB identity after `stop --all`; container liveness is not implied by the presence of `db` metadata
@@ -160,7 +160,7 @@ Default verification:
 ```bash
 go test ./...
 go vet ./...
-go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
 go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 ```
 

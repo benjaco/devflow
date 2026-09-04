@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -360,6 +361,78 @@ func TestSubscribeReturnsWhenContextCanceled(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Subscribe did not return after context cancellation")
+	}
+}
+
+func TestClientCallAcknowledgesFinalErrorResponse(t *testing.T) {
+	socketPath := filepath.Join(os.TempDir(), "df-response-ack-"+time.Now().Format("150405.000000000")+".sock")
+	defer os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+		dec := json.NewDecoder(conn)
+		enc := json.NewEncoder(conn)
+		var req Request
+		if err := dec.Decode(&req); err != nil {
+			serverDone <- err
+			return
+		}
+		result := api.FlushResult{
+			RequestID:  "flush-1",
+			InstanceID: "instance-1",
+			Worktree:   `C:\worktree`,
+			Target:     "build",
+			Mode:       api.ModeWatch,
+			Issues: []api.FlushIssue{{
+				Kind:    "target_mismatch",
+				Message: `live watch target is "gen", requested "build"`,
+			}},
+		}
+		resp := Response{ID: req.ID, OK: false, Error: "flush failed", Flush: &result}
+		if err := enc.Encode(frame{Type: responseFrameType, ID: req.ID, Response: &resp}); err != nil {
+			serverDone <- err
+			return
+		}
+		var ack frame
+		if err := dec.Decode(&ack); err != nil {
+			serverDone <- fmt.Errorf("read response acknowledgment: %w", err)
+			return
+		}
+		if ack.Type != responseAckFrameType || ack.ID != req.ID {
+			serverDone <- fmt.Errorf("unexpected response acknowledgment: %+v", ack)
+			return
+		}
+		serverDone <- nil
+	}()
+
+	client := &Client{socketPath: socketPath}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, callErr := client.Call(ctx, Request{Action: ActionFlush})
+	if callErr == nil || !strings.Contains(callErr.Error(), "flush failed") {
+		t.Fatalf("expected flush error, got %v", callErr)
+	}
+	if resp.Flush == nil || len(resp.Flush.Issues) != 1 || resp.Flush.Issues[0].Kind != "target_mismatch" {
+		t.Fatalf("error response lost structured flush result: %+v", resp)
+	}
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not acknowledge the final daemon response")
 	}
 }
 

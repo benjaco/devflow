@@ -1,18 +1,27 @@
 # Progress
 
-Last updated: 2026-09-02
+Last updated: 2026-09-04
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: Go 1.27.1 baseline upgrade is in progress
-- Confidence: official stable patch and repository-wide version pins have been inventoried; implementation and verification are pending
+- State: Go 1.27.1 baseline and Windows daemon-response delivery hardening are implemented and locally verified
+- Confidence: repeated focused coverage, full default/race suites, quality/security gates, and Windows amd64/arm64 compilation pass; native Windows execution awaits the next CI run
 
 ## In Progress
 
-- Upgrade the supported module, generated bootstrap, CI, release, and documented Go baseline from 1.26.6 to 1.27.1.
+- None for the Go 1.27.1 upgrade scope.
 
 ## Completed
+
+- Go 1.27.1 baseline and Windows CI follow-up:
+  - raised the module, generated project-local bootstrap, quality/test/race/Docker/release workflows, prerequisites, contributor guidance, testing contract, roadmap, and durable project memory from Go 1.26.6 to the current stable Go 1.27.1 patch
+  - refreshed the selected Docker CLI and Moby API/client dependencies, then removed their superseded checksums so `go mod tidy -diff` is clean
+  - upgraded the CI Staticcheck pin from v0.7.0, which cannot decode Go 1.27 export data, to Go-1.27-aware Staticcheck v0.8.1 and aligned contributor verification commands
+  - added a backward-compatible terminal daemon response acknowledgment: current clients acknowledge only after decoding the response, current daemons wait with a short bound before closing, and either side tolerates an older peer; this prevents immediate structured failures from being discarded by Windows Unix-domain socket close behavior
+  - made `flush --json` synthesize a contextual `daemon_error` result if a daemon call returns no `FlushResult`, preserving the one-document automation surface instead of returning empty stdout
+  - added protocol coverage proving an immediate structured error survives and is acknowledged, and passed both reported flush regressions 20 consecutive times
+  - verified `go test ./...`, `go test -race ./...`, `go vet ./...`, Staticcheck v0.8.1, govulncheck v1.6.0, tidy/format/diff checks, workflow parsing, native build/version JSON smoke, and Windows amd64/arm64 daemon/CLI test compilation plus command builds
 
 - Durable TUI crash diagnostics:
   - added the per-instance `.devflow/logs/<instance-id>/tui.log` with session boundaries, returned terminal errors, recovered panic values/stacks, owner-only Unix permissions, and `devflow logs tui` retrieval using the existing text/JSON-lines log contract
@@ -884,6 +893,7 @@ Last updated: 2026-09-02
 
 ## Next Steps
 
+- Confirm the immediate flush rejection regressions on the next native Windows GitHub Actions run
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
 - Convert bundled example adapters to the builder/component API so source examples match the new user-facing shape
 - Expand user docs/examples for script-to-Devflow convergence and fixed-port service guidance

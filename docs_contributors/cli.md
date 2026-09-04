@@ -188,7 +188,7 @@ Daemon behavior:
 - live daemon watch loop for a different target: fails with `target_mismatch`
 - live daemon non-watch work: fails with `non_watch_supervisor`
 
-`flush --json` returns `FlushResult` with the request ID, instance ID, worktree, project, target, mode, whether a daemon watch loop was started, sync/health success, node states, service health, and structured issues. The command exits non-zero when `success=false`, including timeout and health-check failures. Low-level watch-start, request-write, sync-write, and acknowledgement-read failures retain their daemon error as a phase-specific issue instead of returning an empty result; the CLI also adds a `daemon_error` issue when an older daemon returns an unstructured failed response.
+`flush --json` returns `FlushResult` with the request ID, instance ID, worktree, project, target, mode, whether a daemon watch loop was started, sync/health success, node states, service health, and structured issues. The command exits non-zero when `success=false`, including timeout and health-check failures. Low-level watch-start, request-write, sync-write, and acknowledgement-read failures retain their daemon error as a phase-specific issue instead of returning an empty result; the CLI also adds a `daemon_error` issue when an older daemon returns an unstructured failed response or a daemon call completes without a flush result.
 
 `action` is the generic foreground operation surface for explicit project operations that are not normal DAG targets. Actions are discovered from the project adapter through the daemon.
 

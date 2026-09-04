@@ -124,6 +124,12 @@ type frame struct {
 	Response *Response  `json:"response,omitempty"`
 }
 
+const (
+	responseFrameType    = "response"
+	responseAckFrameType = "response_ack"
+	responseAckTimeout   = time.Second
+)
+
 type Options struct {
 	Worktree string
 	Project  string
@@ -370,16 +376,23 @@ func (c *Client) Call(ctx context.Context, req Request, onEvent ...func(api.Even
 			}
 			continue
 		}
-		if fr.Type != "response" || fr.Response == nil {
+		if fr.Type != responseFrameType || fr.Response == nil {
 			continue
 		}
-		if !fr.Response.OK {
-			if fr.Response.Error == "" {
-				fr.Response.Error = "daemon request failed"
+		resp := *fr.Response
+		// A Windows Unix-domain socket can discard a just-written response when
+		// the server closes immediately afterward. Acknowledge the terminal
+		// frame after decoding it so a current daemon can close gracefully. The
+		// write is best-effort for compatibility with older daemons, which close
+		// immediately after their response.
+		_ = enc.Encode(frame{Type: responseAckFrameType, ID: req.ID})
+		if !resp.OK {
+			if resp.Error == "" {
+				resp.Error = "daemon request failed"
 			}
-			return *fr.Response, fmt.Errorf("%s", fr.Response.Error)
+			return resp, fmt.Errorf("%s", resp.Error)
 		}
-		return *fr.Response, nil
+		return resp, nil
 	}
 }
 
@@ -645,11 +658,30 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		}()
 	}
 	resp := s.handleRequest(ctx, req)
-	_ = writeFrame(frame{Type: "response", ID: req.ID, Response: &resp})
+	if err := writeFrame(frame{Type: responseFrameType, ID: req.ID, Response: &resp}); err != nil {
+		return
+	}
+	awaitResponseAck(conn, dec, req.ID)
 	// A stop-all preview is read-only. Only the executed action may tear down
 	// the daemon after its response has been delivered.
 	if req.Action == ActionStop && req.All && !req.Preview && resp.OK {
 		s.requestShutdown()
+	}
+}
+
+func awaitResponseAck(conn net.Conn, dec *json.Decoder, requestID string) {
+	if conn == nil || dec == nil {
+		return
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(responseAckTimeout)); err != nil {
+		return
+	}
+	var ack frame
+	if err := dec.Decode(&ack); err != nil {
+		return
+	}
+	if ack.Type != responseAckFrameType || ack.ID != requestID {
+		return
 	}
 }
 

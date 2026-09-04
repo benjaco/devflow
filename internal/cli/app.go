@@ -774,7 +774,11 @@ func (a *App) flushCmd(args []string) error {
 		result := preserveFlushCallError(*resp.Flush, callErr, root, id, *projectName, target, time.Since(callStarted))
 		return a.finishFlush(result, *jsonOut)
 	}
-	return callErr
+	if callErr == nil {
+		callErr = fmt.Errorf("daemon flush response did not include a result")
+	}
+	result := preserveFlushCallError(api.FlushResult{}, callErr, root, id, *projectName, target, time.Since(callStarted))
+	return a.finishFlush(result, *jsonOut)
 }
 
 func preserveFlushCallError(result api.FlushResult, callErr error, worktree, instanceID, projectName, target string, elapsed time.Duration) api.FlushResult {

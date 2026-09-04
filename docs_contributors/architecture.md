@@ -101,7 +101,7 @@ Current shared paths:
 Global coordination state that is not repo-specific still lives under the user cache directory:
 - `devflow/state/instance-index.json`
 
-The daemon Unix socket lives in a short per-user temp directory such as `/tmp/devflow-daemon-<uid>/<instance-id>.sock`. It is intentionally not stored under deeply nested worktree paths because Unix socket path length limits are easy to hit on macOS.
+The daemon Unix socket lives in a short per-user temp directory such as `/tmp/devflow-daemon-<uid>/<instance-id>.sock`. It is intentionally not stored under deeply nested worktree paths because Unix socket path length limits are easy to hit on macOS. Request/response clients acknowledge each terminal response after decoding it, and the daemon waits for that acknowledgment with a short bound before closing the connection. The acknowledgment is best-effort in both directions so upgraded clients and daemons remain compatible with older peers. This delivery handshake prevents Windows Unix-domain sockets from dropping an immediate final response when the server closes directly after writing it.
 
 This split keeps runtime logs and instance state local to the worktree, keeps task cache globally reusable, keeps port allocation coordinated for sibling git worktrees, and keeps socket paths short enough for real terminals and test worktrees.
 
