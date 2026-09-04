@@ -3217,7 +3217,7 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 	if status.Worktree != realWorktree {
 		t.Fatalf("unexpected status worktree: got %q want %q", status.Worktree, realWorktree)
 	}
-	if status.URLs["backend"] == "" || status.URLs["frontend"] == "" {
+	if !strings.HasPrefix(status.URLs["backend"], "http://localhost:") || !strings.HasPrefix(status.URLs["frontend"], "http://localhost:") {
 		t.Fatalf("expected status URLs to be populated: %+v", status.URLs)
 	}
 	if status.DB.Password != "" || status.DB.URL != "" {

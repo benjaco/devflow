@@ -2872,7 +2872,7 @@ func InstanceURLs(inst *api.Instance) map[string]string {
 	urls := map[string]string{}
 	for _, name := range []string{"backend", "frontend", "app"} {
 		if port := inst.Ports[name]; port > 0 {
-			urls[name] = fmt.Sprintf("http://127.0.0.1:%d", port)
+			urls[name] = fmt.Sprintf("http://localhost:%d", port)
 		}
 	}
 	return urls

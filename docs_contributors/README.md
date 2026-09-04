@@ -23,9 +23,12 @@ Read these first:
 Devflow is a Go 1.27.1 project. Use Go 1.27.1 or newer.
 
 ```bash
+go install github.com/go-delve/delve/cmd/dlv@v1.27.1
 go test ./...
 go build -o .devflow/bin/devflow ./cmd/devflow
 ```
+
+Real debug-service tests require `dlv` on `PATH`. `go install` writes it to `go env GOBIN`, or to `$(go env GOPATH)/bin` when `GOBIN` is empty. Verify `command -v dlv` and `dlv version` after installation, then restart any long-running Devflow daemon or editor so it inherits the updated `PATH`.
 
 The repo also has a source-local launcher:
 

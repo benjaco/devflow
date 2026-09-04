@@ -5,23 +5,29 @@ Last updated: 2026-09-04
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: Go 1.27.1 baseline and Windows daemon-response delivery hardening are implemented and locally verified
-- Confidence: repeated focused coverage, full default/race suites, quality/security gates, and Windows amd64/arm64 compilation pass; native Windows execution awaits the next CI run
+- State: Go 1.27.1 baseline, Delve 1.27.1 alignment, and Windows daemon-response delivery hardening are implemented; the Windows fix is CI-confirmed and the Delve patch alignment is locally verified
+- Confidence: repeated focused coverage, full default/race suites, real Delve lifecycle coverage, quality/security gates, Windows amd64/arm64 compilation, and successful native Windows CI for the response fix; the Delve v1.27.1 pin awaits the next CI run
 
 ## In Progress
 
-- None for the Go 1.27.1 upgrade scope.
+- None.
 
 ## Completed
+
+- Preview URL display hostname normalization:
+  - changed daemon status URLs and TUI preview/header URLs to render `http://localhost:<port>` instead of `http://127.0.0.1:<port>` while preserving the underlying loopback bind/listen addresses and non-preview host metadata
+  - updated focused TUI and CLI status regressions to pin the user-facing hostname change without hardcoding dynamic example-project ports
 
 - Go 1.27.1 baseline and Windows CI follow-up:
   - raised the module, generated project-local bootstrap, quality/test/race/Docker/release workflows, prerequisites, contributor guidance, testing contract, roadmap, and durable project memory from Go 1.26.6 to the current stable Go 1.27.1 patch
   - refreshed the selected Docker CLI and Moby API/client dependencies, then removed their superseded checksums so `go mod tidy -diff` is clean
   - upgraded the CI Staticcheck pin from v0.7.0, which cannot decode Go 1.27 export data, to Go-1.27-aware Staticcheck v0.8.1 and aligned contributor verification commands
+  - upgraded build/release Delve installs from v1.27.0 to v1.27.1 for the current Go 1.27 and Windows fixes, and documented that local installs must be resolved through the daemon's inherited `PATH`
   - added a backward-compatible terminal daemon response acknowledgment: current clients acknowledge only after decoding the response, current daemons wait with a short bound before closing, and either side tolerates an older peer; this prevents immediate structured failures from being discarded by Windows Unix-domain socket close behavior
   - made `flush --json` synthesize a contextual `daemon_error` result if a daemon call returns no `FlushResult`, preserving the one-document automation surface instead of returning empty stdout
   - added protocol coverage proving an immediate structured error survives and is acknowledged, and passed both reported flush regressions 20 consecutive times
-  - verified `go test ./...`, `go test -race ./...`, `go vet ./...`, Staticcheck v0.8.1, govulncheck v1.6.0, tidy/format/diff checks, workflow parsing, native build/version JSON smoke, and Windows amd64/arm64 daemon/CLI test compilation plus command builds
+  - verified Delve v1.27.1 was built with Go 1.27.1, both real debug-service lifecycle probes, `go test ./...`, `go test -race ./...`, `go vet ./...`, Staticcheck v0.8.1, govulncheck v1.6.0, tidy/format/diff checks, workflow parsing, native build/version JSON smoke, and Windows amd64/arm64 daemon/CLI test compilation plus command builds
+  - confirmed the committed Windows response fix in successful native GitHub Actions build run 33862073481 across the complete matrix
 
 - Durable TUI crash diagnostics:
   - added the per-instance `.devflow/logs/<instance-id>/tui.log` with session boundaries, returned terminal errors, recovered panic values/stacks, owner-only Unix permissions, and `devflow logs tui` retrieval using the existing text/JSON-lines log contract
@@ -893,7 +899,7 @@ Last updated: 2026-09-04
 
 ## Next Steps
 
-- Confirm the immediate flush rejection regressions on the next native Windows GitHub Actions run
+- Confirm the Delve v1.27.1 pin on the next native Linux/macOS/Windows GitHub Actions run
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
 - Convert bundled example adapters to the builder/component API so source examples match the new user-facing shape
 - Expand user docs/examples for script-to-Devflow convergence and fixed-port service guidance

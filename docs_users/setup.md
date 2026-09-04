@@ -258,6 +258,14 @@ Debug services are long-running service tasks, not cacheable tasks. On watch cha
 
 `GoDebugService` automatically marks `go` and `dlv` as required CLIs for the task, so `doctor --target debug --json` reports whether Delve is installed.
 
+For Go 1.27, install a compatible Delve release:
+
+```bash
+go install github.com/go-delve/delve/cmd/dlv@v1.27.1
+```
+
+The installed binary must be visible to the process that starts Devflow. Check `command -v dlv` and `dlv version`; if it is missing, add `go env GOBIN` (or `$(go env GOPATH)/bin` when `GOBIN` is empty) to `PATH`. Restart an existing Devflow daemon or editor after changing `PATH`, because long-running processes retain their original environment.
+
 On macOS, Delve also needs the normal Apple developer-tools permissions. If a debug service reports `stub exited while waiting for connection`, check `DevToolsSecurity -status` and follow Delve's macOS installation guidance; Devflow does not enable machine-wide developer security settings for you.
 
 Adapters that still return raw `[]project.Task` can use the same built-in handler without writing Delve lifecycle code:

@@ -615,14 +615,14 @@ func TestRenderHeaderIncludesStateSummary(t *testing.T) {
 			{Name: "db_prepare", State: api.StateMigrationNeeded},
 		},
 		supervisor: &api.SupervisorStatus{PID: 55, Alive: true},
-		urls:       map[string]string{"backend": "http://127.0.0.1:8080"},
+		urls:       map[string]string{"backend": "http://localhost:8080"},
 	}
 	lines := renderHeader(snap)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{
 		"instance",
 		"abc123",
-		"backend=http://127.0.0.1:8080",
+		"backend=http://localhost:8080",
 		"RUN=2",
 		"CACHE=1",
 		"DONE=1",

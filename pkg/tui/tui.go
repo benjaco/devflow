@@ -2444,10 +2444,10 @@ func instanceURLs(inst *api.Instance) map[string]string {
 	}
 	urls := map[string]string{}
 	if port := inst.Ports["backend"]; port > 0 {
-		urls["backend"] = fmt.Sprintf("http://127.0.0.1:%d", port)
+		urls["backend"] = fmt.Sprintf("http://localhost:%d", port)
 	}
 	if port := inst.Ports["frontend"]; port > 0 {
-		urls["frontend"] = fmt.Sprintf("http://127.0.0.1:%d", port)
+		urls["frontend"] = fmt.Sprintf("http://localhost:%d", port)
 	}
 	return urls
 }
