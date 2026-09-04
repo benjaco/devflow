@@ -2190,6 +2190,9 @@ func TestBootstrapWritesWorktreeLocalBuildModuleWithSourceReplace(t *testing.T) 
 	if !strings.Contains(text, "module github.com/benjaco/devflow/localbuild/") {
 		t.Fatalf("expected generated module path, got:\n%s", text)
 	}
+	if !strings.Contains(text, "\ngo 1.27.1\n") {
+		t.Fatalf("expected generated module to use the supported Go version, got:\n%s", text)
+	}
 	repoRoot, err := repoRoot()
 	if err != nil {
 		t.Fatal(err)

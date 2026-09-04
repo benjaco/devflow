@@ -28,7 +28,7 @@
 - target-scoped required CLI declarations plus `doctor --target <target> --json`
 - deterministic example adapters plus a real embedded-web-app adapter
 - GitHub Actions build/test workflow
-- supported Go 1.26.6 baseline with rolling current-stable Linux compatibility, cross-platform quality/security checks, a Linux race-detector gate, and monthly dependency update checks
+- supported Go 1.27.1 baseline with rolling current-stable Linux compatibility, cross-platform quality/security checks, a Linux race-detector gate, and monthly dependency update checks
 - finite pipeline validation with projected input/output sandboxes and exhaustive dependency-valid sequential order execution
 - shared bounded cache/validation filesystem projection with read-only directory handling and safe internal symlink preservation
 - credential-safe host and containerized PostgreSQL clone clients

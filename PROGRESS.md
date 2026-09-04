@@ -5,12 +5,12 @@ Last updated: 2026-09-02
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: durable TUI error/crash diagnostics and recoverable panic handling are implemented and verified
-- Confidence: repeated application/background/runtime panic coverage, full default/race suites, quality gates, and Windows compilation pass
+- State: Go 1.27.1 baseline upgrade is in progress
+- Confidence: official stable patch and repository-wide version pins have been inventoried; implementation and verification are pending
 
 ## In Progress
 
-- None for the TUI crash-diagnostic scope.
+- Upgrade the supported module, generated bootstrap, CI, release, and documented Go baseline from 1.26.6 to 1.27.1.
 
 ## Completed
 
@@ -887,7 +887,7 @@ Last updated: 2026-09-02
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
 - Convert bundled example adapters to the builder/component API so source examples match the new user-facing shape
 - Expand user docs/examples for script-to-Devflow convergence and fixed-port service guidance
-- Revisit the Go 1.26.6 minimum when Go 1.27 becomes the project's supported minimum; keep the pinned Delve line compatible with both minimum and rolling stable CI lanes
+- Revisit the pinned Go patch as Go 1.27 security releases ship; keep the pinned Delve line compatible with both minimum and rolling stable CI lanes
 - Add binary artifacts, npm/Homebrew/Scoop installers, or richer update channels later only if Go install stops being enough
 
 ## Deferred / Known Gaps
