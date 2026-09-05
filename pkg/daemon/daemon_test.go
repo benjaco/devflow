@@ -78,45 +78,42 @@ func TestPublishPersistsAndFansOutEvents(t *testing.T) {
 	}
 }
 
-func TestWaitForFlushAckRetouchesSyncSentinel(t *testing.T) {
-	worktree := t.TempDir()
-	instanceID := "abc123"
-	requestID := "flush-retouch"
-	syncPath := instance.FlushSyncPath(worktree, instanceID, requestID)
+func TestWaitForFlushAckDoesNotRewriteSyncSentinel(t *testing.T) {
+	s, active := newFlushGenerationFixture(t)
+	close(active.watchReady)
+	requestID := "flush-observed"
+	syncPath := instance.FlushSyncPath(s.worktree, s.instanceID, requestID)
 	if err := os.MkdirAll(filepath.Dir(syncPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(syncPath, []byte(requestID+"\n"), 0o644); err != nil {
+	contents := []byte(requestID + "\n")
+	if err := os.WriteFile(syncPath, contents, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
+	written := make(chan error, 1)
+	writeDone := make(chan struct{})
+	t.Cleanup(func() { <-writeDone })
 	go func() {
-		defer close(done)
-		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) {
-			data, err := os.ReadFile(syncPath)
-			if err == nil && strings.Count(string(data), "\n") >= 2 {
-				_ = instance.WriteFlushAck(worktree, instanceID, api.FlushResult{
-					RequestID:  requestID,
-					InstanceID: instanceID,
-					Worktree:   worktree,
-					Target:     "up",
-					Synced:     true,
-					Success:    true,
-				})
-				return
-			}
-			time.Sleep(25 * time.Millisecond)
-		}
+		defer close(writeDone)
+		time.Sleep(150 * time.Millisecond)
+		written <- instance.WriteFlushAck(s.worktree, s.instanceID, api.FlushResult{
+			RequestID: requestID, InstanceID: s.instanceID, Worktree: s.worktree,
+			Target: active.target, Synced: true, Success: true,
+		})
 	}()
-	result, ok, err := waitForFlushAck(worktree, instanceID, requestID, syncPath, 2*time.Second)
-	if err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := s.waitForFlushAck(ctx, active, requestID)
+	if err != nil || !result.Success || !result.Synced {
+		t.Fatalf("expected successful ack, result=%+v err=%v", result, err)
+	}
+	if err := <-written; err != nil {
 		t.Fatal(err)
 	}
-	if !ok || !result.Success || !result.Synced {
-		t.Fatalf("expected retouched sync sentinel to produce ack, ok=%v result=%+v", ok, result)
+	data, err := os.ReadFile(syncPath)
+	if err != nil || !bytes.Equal(data, contents) {
+		t.Fatalf("ack wait rewrote the sync sentinel: contents=%q err=%v", data, err)
 	}
-	<-done
 }
 
 func TestFlushRequestWriteFailureReturnsStructuredContext(t *testing.T) {
@@ -154,8 +151,12 @@ func TestFlushRequestWriteFailureReturnsStructuredContext(t *testing.T) {
 			projectName: projectName,
 			target:      "up",
 			mode:        api.ModeWatch,
+			done:        make(chan struct{}),
+			watchReady:  make(chan struct{}),
 		},
 	}
+
+	close(s.active.watchReady)
 
 	result, err := s.flush(context.Background(), projectName, "up", time.Second, 1)
 	if err == nil || !strings.Contains(err.Error(), "flush failed") {

@@ -125,7 +125,9 @@ Flush coordination is per instance:
 - `flush/requests/<request-id>.json` records the requested sync point
 - `flush/sync/<request-id>.sync` is the file-watcher sentinel
 - `flush/acks/<request-id>.json` stores the final `FlushResult`
-- `flush/watch.ready` is an internal readiness marker written after detached watch startup has reached the file-watching phase
+- `flush/watch.ready` records completion of initial watch execution and reconciliation, and is removed when that watch exits
+
+Daemon readiness uses the active execution's in-memory channel, closed immediately after the observer captures its baseline. The marker is useful for direct engine consumers and diagnostics; it does not identify a daemon watch generation.
 
 ## Runtime Env
 
@@ -170,7 +172,7 @@ When a file batch arrives, the engine:
 
 The dependency-barrier rule is important: if an intermediate candidate is blocked from the watch cycle, its downstream candidates are blocked too. Downstream tasks must not run in advance against stale intermediate outputs just because they are also reachable from the changed task.
 
-Normal ready-queue scheduling still applies to the final rerun set, so included downstream tasks become runnable only after included upstream dependencies finish or restore from cache.
+Normal ready-queue scheduling still applies to the final rerun set, so included downstream tasks become runnable only after included upstream dependencies finish or restore from cache. A changed task excluded by watch policy, or a downstream task blocked behind it, remains unresolved for flush. Its previous `done` or `running` state does not establish freshness. Flush reports `watch_restart_required` until that task executes successfully or the target is explicitly restarted; repeated flushes do not clear the condition.
 
 Ignore semantics are shared by watch matching and fingerprinting:
 - paths are slash-normalized before matching
@@ -181,7 +183,7 @@ Ignore semantics are shared by watch matching and fingerprinting:
 
 This lets adapters use either `internal/storage/sqlc` or `sqlc` to ignore generated files under `Inputs.Dirs: []string{"internal/storage"}`. `devflow graph affected --files <path> --explain --json` exposes which input matched or which ignore pattern suppressed a file.
 
-New user-facing adapters should normally use the builder API, where `Inputs("path")` populates `Inputs.Paths` and `project.Glob("internal/storage/**/*.sql")` populates `Inputs.Globs`. The older `Files`/`Dirs` fields remain the lower-level internal representation for existing engine tests and helpers.
+New user-facing adapters should normally use the builder API, where `Inputs("path")` populates `Inputs.Paths` and `project.Glob("internal/storage/**/*.sql")` populates `Inputs.Globs`. The `Files`/`Dirs` fields provide explicit file and directory declarations in the lower-level task representation.
 
 Current service restart policy meanings in watch mode:
 - `RestartNever`: never restart from file-change cascades
@@ -190,24 +192,27 @@ Current service restart policy meanings in watch mode:
 
 ## Flush Readiness Gate
 
-`devflow flush [target]` coordinates with detached watch mode through the per-instance flush files. The command writes a request file and then writes the sync sentinel under `.devflow/state/instances/<instance-id>/flush/sync/`. While waiting for the ack, the CLI periodically rewrites the sync sentinel. This makes the first flush after `watch --detach` resilient to watcher startup races where the file watcher has written `watch.ready` but has not completed its first polling scan yet.
+`devflow flush [target]` captures the daemon's active watch, verifies its project and target, and waits for that execution's observer baseline before publishing a request and sync sentinel. This applies both when flush starts watch and when a watch is already starting. Request publication is serialized with daemon transitions. Readiness and acknowledgement waits honor the request context and timeout, and a stopped or replaced watch fails with `watch_stopped`, including replacement by the same project and target. There is no fixed readiness sleep or sentinel-retouch loop.
 
-The watch runner normally ignores `.devflow`, but the engine explicitly includes the flush sync directory in its watcher inputs. When a batch arrives, the engine splits flush sync files out of normal changed files:
-- normal user file changes run through the existing watch cascade logic first
-- sync files are not treated as task inputs
-- after the cycle completes, the engine loads each matching request and writes an ack
-- sync-only batches still produce an ack after health evaluation
+The watcher normally ignores `.devflow`, but explicitly observes the flush sync directory. The engine separates sync files from task inputs and retains their request IDs while reconciling changes:
 
-This proves that edits completed before the `flush` command wrote the sentinel have crossed the watcher's file-change boundary before the command returns success.
+1. Take a fresh watcher snapshot and consume queued, debounced, and newly discovered changes.
+2. Run the eligible affected task slice, then repeat the fresh scan so edits during execution are processed.
+3. Evaluate target health when no rerun remains, then scan again to catch edits during readiness probes.
+4. Write acknowledgements only when that final scan reports no outstanding changes. Sync-only requests still receive health evaluation.
 
-Flush health is scoped to the selected target closure:
-- once, group, and warmup tasks must be `done` or `cached`
-- service tasks must be `running`
-- the registered service handle must still be alive; process-backed handles additionally require a live host PID
-- service readiness hooks must pass when defined
-- services outside the selected target closure are not part of flush success
+Observation starts before the initial DAG, and startup passes through the same reconciliation loop. Successful flush therefore accounts for observable declared-input edits during initial execution and subsequent rebuilds; an old successful node snapshot alone cannot satisfy the gate.
 
-Version 1 reports unhealthy in-chain services as `service_unhealthy` issues. It does not auto-restart unhealthy services during `flush`.
+`FlushResult.synced=true` means the observer processed the synchronization request and produced an acknowledgement. Only `success=true` establishes the selected target's freshness and health under its declared watch inputs and policies. Health requires:
+
+- no unresolved task excluded by watch policy
+- once, group, and warmup tasks in `done` or `cached` state
+- services in `running` state with a live registered handle; process-backed handles also require a live host PID
+- passing service readiness hooks when defined
+
+Services outside the selected target closure do not participate. Unhealthy in-chain services produce `service_unhealthy`; flush does not automatically restart them. Policy-blocked work produces `watch_restart_required` even if its old node state and service probes still look healthy.
+
+The boundary is the polling observer's final scan of declared inputs, not an atomic filesystem snapshot. Metadata-preserving edits, transient changes entirely between scans, and undeclared inputs are outside this guarantee. Flush also does not execute tests omitted from the selected target.
 
 ## Pipeline Validation
 
@@ -655,7 +660,7 @@ Service tasks have different command semantics depending on the run mode:
 - `run --ci` is deliberately direct and finite, not daemon-backed. Services are allowed as readiness probes: Devflow starts them, waits for readiness, stops them, clears persisted service PIDs, and records the service nodes as `stopped` before returning success.
 - `run --detach` asks the per-worktree daemon to start the target in the background and returns after launch. It does not prove the target closure is healthy.
 - `watch --detach` asks the daemon to start the development loop. It is the expected long-running mode for humans and agents that want automatic reruns after file edits.
-- `flush` is the daemon-backed watch readiness gate. It proves the watcher observed the post-edit sync sentinel, waits for the selected target closure to settle, and checks service health.
+- `flush` is the daemon-backed watch readiness gate. It reconciles observable declared-input changes through a fresh scan after execution and health probes, rejects unresolved policy-blocked work, and binds its result to the captured active watch.
 - `stop --all` asks the daemon to stop active work through its owning engine handles. When no live engine owns a resource, recovery uses explicitly recorded process refs, PID-bearing status nodes, and the instance-managed database container. Stopping the database container preserves its Docker volume. After sending the response, the daemon shuts itself down so stopped state is not reported as a live daemon.
 
 The current automation recommendation is intentionally explicit: use detached watch plus `flush` for "background environment is ready" workflows. Do not reinterpret attached `run` as a start-and-return command without adding a separate CLI contract.
@@ -683,7 +688,13 @@ The additive `RunResult.repositoryChanges` object is the audit surface. It carri
 
 Watch mode uses a polling watcher with debounced batches. The engine scopes the watcher to the selected target closure's declared file inputs plus the flush sync directory. It does not intentionally poll the whole worktree when the closure has concrete `Inputs(...)`, `Files`, `Dirs`, or `Globs`; common heavyweight folders such as `node_modules` are ignored by default unless explicitly watched by an input path.
 
-An explicit `.` input or a glob without a literal directory prefix requires a root scan, including when the watcher is restricted to declared inputs. That root scan retains the default ignores; separately declared paths under ignored directories remain explicit scan roots. Batch delivery applies backpressure while running, but cancellation interrupts a full batch queue and releases the watcher without requiring its consumer to drain it.
+An explicit `.` input or a glob without a literal directory prefix requires a root scan, including when the watcher is restricted to declared inputs. That root scan retains the default ignores; separately declared paths under ignored directories remain explicit scan roots.
+
+`Runner.Start` captures the baseline synchronously before task execution. `Runner.Sync` takes a fresh scan and consumes changes already queued for delivery, pending debounce, or not yet polled. Its caller must be the sole batch consumer and must not receive batches concurrently with `Sync`. The watcher can service synchronization and cancellation with a full batch queue. Failed scans do not consume outstanding changes; a background scanner failure cancels engine execution and follows normal resource cleanup before ownership is released.
+
+File polling compares modification time, size, mode, and type. Metadata-only changes to existing directories do not create parent events because children are observed individually; directory creation, deletion, type, and mode changes remain observable.
+
+Each executed or restored producer records its declared outputs' metadata when that attempt finishes. The next reconciliation excludes an output change only when the current state still matches that completion record. Files are matched exactly; directory trees and `Outputs.Paths` use the same per-path evidence. An edit after the producer finishes remains observable even while downstream tasks are running, including edits to a file declared as both input and output. Ancestor directory events are eligible for suppression only when the directory was missing before the attempt and exists afterward; existing ancestors and sibling source paths are never excluded wholesale. The evidence is consumed by that reconciliation, with no timed suppression window. As with polling itself, metadata-preserving edits cannot be distinguished.
 
 On each batch:
 - changed files are mapped to task inputs

@@ -2,13 +2,50 @@ package watch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"testing/synctest"
 	"time"
 )
+
+func TestDirectoryChildChangesDoNotReportUnchangedParent(t *testing.T) {
+	before := map[string]fileState{
+		"src": {mode: os.ModeDir | 0o755, isDir: true, modTime: time.Unix(1, 0), size: 32},
+	}
+	after := map[string]fileState{
+		"src":           {mode: os.ModeDir | 0o755, isDir: true, modTime: time.Unix(2, 0), size: 64},
+		"src/generated": {mode: 0o644, size: 1},
+	}
+	if got, want := changedFiles(before, after), []string{"src/generated"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("child creation reported the parent as a separate input change: got %v, want %v", got, want)
+	}
+	if got, want := changedFiles(after, before), []string{"src/generated"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("child deletion reported the parent as a separate input change: got %v, want %v", got, want)
+	}
+}
+
+func TestDirectoryStructuralChangesRemainObservable(t *testing.T) {
+	dir := fileState{mode: os.ModeDir | 0o755, isDir: true}
+	for _, tc := range []struct {
+		name          string
+		before, after map[string]fileState
+	}{
+		{"create", nil, map[string]fileState{"src": dir}},
+		{"delete", map[string]fileState{"src": dir}, nil},
+		{"mode", map[string]fileState{"src": dir}, map[string]fileState{"src": {mode: os.ModeDir | 0o700, isDir: true}}},
+		{"type", map[string]fileState{"src": dir}, map[string]fileState{"src": {mode: 0o644}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := changedFiles(tc.before, tc.after); !reflect.DeepEqual(got, []string{"src"}) {
+				t.Fatalf("lost directory structural change: %v", got)
+			}
+		})
+	}
+}
 
 func TestRunnerBatchesChangedFiles(t *testing.T) {
 	root := t.TempDir()
@@ -438,7 +475,7 @@ func TestRunnerWatchOnlyRetainsExplicitRoot(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			before, err := runner.snapshot()
+			before, err := runner.snapshot(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -455,7 +492,7 @@ func TestRunnerWatchOnlyRetainsExplicitRoot(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("changed source"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			after, err := runner.snapshot()
+			after, err := runner.snapshot(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -479,7 +516,7 @@ func TestRunnerRootWatchPreservesExplicitIgnoredSubtree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := runner.snapshot()
+	snapshot, err := runner.snapshot(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,4 +569,204 @@ func TestRunnerCancellationUnblocksFullBatchQueue(t *testing.T) {
 			t.Fatal("watcher remains blocked delivering a batch after cancellation")
 		}
 	})
+}
+
+func TestRunnerSyncIncludesChangesBeforeFirstPoll(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "input.txt")
+	if err := os.WriteFile(input, []byte("initial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		runner, err := New(Options{Root: root, PollInterval: time.Hour})
+		if err != nil {
+			t.Fatal(err)
+		}
+		batches, _, err := runner.Start(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(input, []byte("changed before the first poll"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		batch, err := runner.Sync(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(batch.Files, []string{"input.txt"}) {
+			t.Fatalf("fresh barrier missed input: %+v", batch)
+		}
+		if batch.StartedAt.IsZero() || batch.FinishedAt.Before(batch.StartedAt) {
+			t.Fatalf("invalid batch timing: %+v", batch)
+		}
+		assertRunnerSynced(t, runner, batches, ctx)
+	})
+}
+
+func TestRunnerSyncCombinesQueuedPendingAndUnpolledChanges(t *testing.T) {
+	root := t.TempDir()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		runner, err := New(Options{Root: root, PollInterval: 10 * time.Millisecond, Debounce: 50 * time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		batches, _, err := runner.Start(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeWatchInput(t, root, "queued")
+		time.Sleep(70 * time.Millisecond)
+		synctest.Wait()
+		if len(batches) != 1 {
+			t.Fatalf("expected a queued batch, got %d", len(batches))
+		}
+		writeWatchInput(t, root, "pending")
+		time.Sleep(10 * time.Millisecond)
+		synctest.Wait()
+		writeWatchInput(t, root, "unpolled")
+		batch, err := runner.Sync(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"pending", "queued", "unpolled"}
+		if !reflect.DeepEqual(batch.Files, want) {
+			t.Fatalf("barrier lost outstanding changes: got %v, want %v", batch.Files, want)
+		}
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+		assertRunnerSynced(t, runner, batches, ctx)
+	})
+}
+
+func TestRunnerSyncDrainsFullQueueWithoutLosingChanges(t *testing.T) {
+	root := t.TempDir()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		runner, err := New(Options{Root: root, PollInterval: time.Millisecond, Debounce: time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		batches, _, err := runner.Start(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := make([]string, 0, cap(batches)+3)
+		for i := 0; i < cap(batches)+3; i++ {
+			name := fmt.Sprintf("input-%02d", i)
+			want = append(want, name)
+			writeWatchInput(t, root, name)
+			time.Sleep(3 * time.Millisecond)
+			synctest.Wait()
+		}
+		if len(batches) != cap(batches) {
+			t.Fatalf("batch queue did not fill: %d/%d", len(batches), cap(batches))
+		}
+		canceled, cancelSync := context.WithCancel(ctx)
+		cancelSync()
+		if _, err := runner.Sync(canceled); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled barrier returned %v", err)
+		}
+		batch, err := runner.Sync(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(batch.Files, want) {
+			t.Fatalf("full-queue barrier lost changes: got %v, want %v", batch.Files, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+		synctest.Wait()
+		assertRunnerSynced(t, runner, batches, ctx)
+		cancel()
+		synctest.Wait()
+		if _, err := runner.Sync(context.Background()); !errors.Is(err, context.Canceled) {
+			t.Fatalf("stopped watcher barrier returned %v", err)
+		}
+	})
+}
+
+func TestRunnerSyncScanFailureRetainsOutstandingChanges(t *testing.T) {
+	root := t.TempDir()
+	broken := filepath.Join(root, "broken")
+	if err := os.Symlink("broken", broken); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	if err := os.Remove(broken); err != nil {
+		t.Fatal(err)
+	}
+	writeWatchInput(t, root, "broken")
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		runner, err := New(Options{Root: root, WatchPaths: []string{".", "broken"}, PollInterval: 10 * time.Millisecond, Debounce: 50 * time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		batches, _, err := runner.Start(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeWatchInput(t, root, "queued")
+		time.Sleep(70 * time.Millisecond)
+		synctest.Wait()
+		writeWatchInput(t, root, "pending")
+		time.Sleep(10 * time.Millisecond)
+		synctest.Wait()
+		if len(batches) != 1 {
+			t.Fatalf("expected a queued batch, got %d", len(batches))
+		}
+		if err := os.Remove(broken); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("broken", broken); err != nil {
+			t.Fatal(err)
+		}
+		if batch, err := runner.Sync(ctx); err == nil || len(batch.Files) != 0 {
+			t.Fatalf("failed snapshot reported successful work: batch=%+v, err=%v", batch, err)
+		}
+		if len(batches) != 1 {
+			t.Fatal("failed snapshot consumed queued changes")
+		}
+		if err := os.Remove(broken); err != nil {
+			t.Fatal(err)
+		}
+		writeWatchInput(t, root, "broken")
+		batch, err := runner.Sync(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"queued", "pending"} {
+			if !containsString(batch.Files, want) {
+				t.Fatalf("snapshot failure lost %s: %v", want, batch.Files)
+			}
+		}
+		assertRunnerSynced(t, runner, batches, ctx)
+	})
+}
+
+func writeWatchInput(t *testing.T, root, name string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertRunnerSynced(t *testing.T, runner *Runner, batches <-chan Batch, ctx context.Context) {
+	t.Helper()
+	batch, err := runner.Sync(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Files) != 0 {
+		t.Fatalf("barrier returned already consumed work: %+v", batch)
+	}
+	select {
+	case batch := <-batches:
+		t.Fatalf("barrier left duplicate delivery: %+v", batch)
+	default:
+	}
 }

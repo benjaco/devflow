@@ -82,17 +82,29 @@ Cache manifest output paths use native separators after normalization. Keep slas
 - sequential engine execution with cache hits/misses, per-node duration/cache timings including completed zero-tick measurements on coarse platform clocks, bounded failure log tails/excerpts, planned target-cache keys that match execution keys, and cache-key manifest creation/reuse/rejection including local/generated-input changes and one total semantic-callback invocation
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work, plus explicit `migration_needed` task-state classification for database migration authoring guards
 - scheduler error preservation so a canceled sibling does not replace the first actionable task failure with `context canceled`
-- polling watch batching, declared-input watch scoping including filtered-input glob bases, default `node_modules` ignore behavior, repeated flush-sentinel retouch debounce behavior, and selective watch reruns. Tests that edit files after startup should wait for the engine `watch.ready` marker before writing; initial task counters alone do not prove the polling watcher baseline has started.
-- root-level glob and explicit `.` watch inputs, preserved default ignores plus explicitly selected ignored subtrees, and cancellation while the batch queue is full; use virtual time for the queue regression so it proves shutdown without consuming buffered batches
+- polling watch batching, declared-input watch scoping including filtered-input glob bases, default `node_modules` ignore behavior, repeated writes without indefinite debounce postponement, and selective watch reruns. Ordinary post-startup tests wait for `watch.ready`, which now follows initial execution and reconciliation. Startup-freshness regressions deliberately pause task execution and edit before that marker; the observer baseline must already exist.
+- root-level glob and explicit `.` watch inputs, preserved default ignores plus explicitly selected ignored subtrees, cancellation while the batch queue is full, and `Runner.Sync` draining queued, pending, and unpolled changes without losses. Use virtual time for queue regressions. A failed fresh scan preserves outstanding changes; a background scan failure cancels the engine and cleans up registered resources.
 - graph affected explanations for path, file, directory, glob, filtered, ignored, and unmatched paths
-- watch cascade pruning so downstream tasks do not run past warmups or services that are blocked from watch execution, including full watch execution and mixed blocked/allowed branch coverage
+- watch cascade pruning so downstream tasks do not run past warmups or services that are blocked from watch execution, including mixed blocked/allowed branches and repeated flushes reporting `watch_restart_required` while old task/service state remains successful
 - watch service restart policies, including `RestartAlways` selection and full watch execution behavior
-- flush coordination coverage for request/ack path generation, watcher inclusion of the flush sync directory under `.devflow`, engine ack timing after reruns and sync-only batches, failed-task ack issues, service readiness health issues, CLI daemon/timeout behavior, structured low-level daemon failures, older-daemon error preservation, and sync-sentinel retouch while waiting for an ack
+- flush coordination coverage for request/ack paths, watcher inclusion of the flush sync directory under `.devflow`, startup and rebuild edits, a fresh scan after health probes, sync-only acknowledgements, task/readiness failure issues, and structured low-level daemon failures. Daemon tests require observer readiness before publication, bind both project and target to the captured active watch, reject same-target replacements, honor cancellation/deadlines, and verify that ACK waiting leaves the sentinel unchanged.
+- generated-output suppression requires current metadata to match the producer's completion record, covering explicit files, directory trees, and `Outputs.Paths` without duplicate service restarts. Sibling source edits and edits to input/output paths after producer completion must still rerun while downstream work is paused. Ancestor suppression applies only to directories missing before the attempt and created afterward. Directory metadata-only changes do not produce parent events; structural directory changes remain observable.
 - opt-in real Docker-backed database runtime snapshot/restore coverage in `pkg/database`
 - opt-in real Docker-backed managed-service coverage that follows Postgres logs, verifies the PID-less handle, executes SQL, and stops the container through the Engine API
 - opt-in real remote Postgres clone coverage using separate non-default source and destination host ports, the production `pg_dump`/`psql` source policy, and assertions over cloned schema plus row data
 - opt-in real PostGIS runtime coverage for PostgreSQL 16, 17, and 18 that verifies the server major, expected PostGIS line, geometry/geography functions, and persistence after container recreation
 - opt-in real Docker-backed Prisma snapshot metadata + restore coverage in `pkg/database`
+
+
+Watch freshness regressions can be run independently:
+
+```bash
+go test ./pkg/engine -run 'TestWatchFlushIncludesChangesDuring|TestWatchFlushReportsChangesBlockedByRestartPolicy|TestWatchGeneratedOutputDoesNotHideSiblingSourceEdits' -count=1
+go test ./pkg/watch -run 'TestRunnerSync|TestDirectory' -count=1
+go test ./pkg/daemon -run 'Test.*Flush' -count=1
+```
+
+`TestWatchFlushIncludesChangesDuringInitialRun` and `TestWatchFlushIncludesChangesDuringRebuild` pause execution after it reads input, change that input, then require the flushed artifact to contain the update. Initial baseline setup or passing old node state is insufficient evidence. `TestFlushRejectsReplacementWatchAcknowledgement` deliberately uses an unchanged target to prove that a different watch cannot supply the result. These tests verify declared, polling-visible inputs; they do not claim complete history of transient filesystem changes or coverage of undeclared sources.
 
 ## Example/Smoke Coverage
 

@@ -47,7 +47,11 @@ Recommended loop:
 3. If `success=true`, run focused tests or other validation commands.
 4. If `success=false`, inspect `issues`, `nodes`, `services`, and referenced logs before editing again.
 
-Do not run downstream tests before a successful flush when relying on detached watch/dev mode. The flush sync sentinel proves the watcher has observed the post-edit boundary and has settled the selected target closure.
+Require `success=true` before relying on detached watch results for downstream tests. Observation starts before the initial DAG, and flush reconciles queued and newly observed changes after startup, rebuilds, and health probes. Its result belongs to the captured daemon watch and selected project/target; a replacement watch, even with the same target, cannot satisfy the request.
+
+`synced` and `success` are distinct: JSON `synced=true` confirms observation processing and acknowledgement, while `success=true` also requires freshness and healthy services. `watch_restart_required` means a restart policy or blocked warmup prevented changed work from rerunning. It persists across flushes until that task executes successfully or the target is explicitly restarted. `watch_stopped` means the captured watch ended or was replaced; inspect the current execution and issue a new flush. Context cancellation and deadlines report `canceled` and `timeout`.
+
+This guarantee is limited to declared inputs visible to polling through the final scan. It cannot prove transient or metadata-preserving edits were observed, and it does not execute tests absent from the target. Generated task outputs are excluded only when their current metadata still matches the producer's completion record. Adjacent source edits and later edits to input/output paths remain observable, including changes made while downstream tasks are still running.
 
 For explicit service lifecycle changes, preview and then execute against the same per-worktree daemon:
 

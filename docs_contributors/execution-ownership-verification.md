@@ -24,7 +24,7 @@ contender changed owner file artifact.txt
 | `TestExecutionOwnershipCleanupFailureDoesNotPermitReplacement` | Failed resource cleanup produced `success=true`; a replacement executed | Report failure and retain recovery evidence |
 | `TestExecutionOwnershipChecksAliveAfterAcknowledgedStop` | A nil stop error was accepted even while the resource remained alive | Require confirmed exit |
 | `TestLifecycleRestartKeepsOwnerWhenStopCannotConfirmExit` | A replacement generation started while the old resource remained alive | Preserve the old handle and reject restart |
-| `TestExecutionOwnershipWatchStartupFailureCleansResources` | Watcher setup failure left a registered resource running | Clean resources on every post-preparation exit |
+| `TestExecutionOwnershipWatchScanFailureCleansResources` | Watcher setup failure left a registered resource running | Clean resources on every post-preparation exit |
 | `TestCacheKeyOwnershipRejectsBeforeConfigurationAndFingerprintCallbacks` | Cache-key inspection invoked configuration and fingerprint callbacks during another execution | Admit before mutating preparation |
 | `TestCacheKeyOwnershipRetainsResourceRegisteredByFailedFingerprint` | Failed fingerprinting did not clean its registered resource and allowed replacement | Clean or retain recovery evidence |
 | CLI cache/daemon ownership tests | Cache invalidation removed entries/stamps despite contention; cache-key and daemon-admission errors emitted no JSON | Reject before mutation and emit structured ownership errors |

@@ -112,9 +112,9 @@ When permitted material changes exist, Devflow runs Git directly without a comma
 
 `repositoryChanges` reports `status`, `pedantic`, exact path counts, bounded sorted `changedPaths`, `ignoredLineEndingPaths`, and `unexpectedTrackedPaths`, truncation flags, commit creation/SHA, push attempt/success, fail-after-commit request/trigger state, and a scoped error. Each path list is limited to 200 entries, 64 KiB total text, and 4 KiB per displayed path while the count remains exact. Final JSON remains the sole stdout document; DAG and repository progress stays on stderr. Final statuses are `precondition_failed`, `skipped_dag_failed`, `no_changes`, `repository_state_changed`, `unexpected_tracked_changes`, `commit_failed`, `committed`, `pushed`, `push_failed`, and `failed_after_commit`.
 
-`watch` connects to the per-worktree daemon, runs an initial watch-mode cycle, then keeps polling for changes and reruns only the affected downstream slice. In attached JSON mode it emits the typed event stream line-by-line.
+`watch` connects to the per-worktree daemon, captures its input baseline before the initial watch-mode cycle, then reconciles changes that arrived during execution and reruns only the affected downstream slice. In attached JSON mode it emits the typed event stream line-by-line.
 
-Watch file matching is driven by adapter task inputs. Changed files directly affect tasks whose `Inputs.Files`, `Inputs.Dirs`, `Inputs.Globs`, or `Inputs.Filtered` paths match the changed paths, then the engine cascades through downstream tasks that are eligible to rerun in watch mode.
+Watch file matching is driven by adapter task inputs. Changed files directly affect tasks whose `Inputs.Paths`, `Inputs.Files`, `Inputs.Dirs`, `Inputs.Globs`, or `Inputs.Filtered` paths match the changed paths, then the engine cascades through downstream tasks that are eligible to rerun in watch mode.
 
 The watcher is scoped to declared inputs in the selected target closure plus Devflow's flush sync directory. Root-level globs such as `*.go` or `**/*.go`, and an explicit `.` input, scan from the worktree root while retaining default ignores. This keeps idle watch daemons from recursively polling unrelated dependency trees such as `node_modules`. If a project truly needs to watch a normally ignored directory, declare it as an input path.
 
@@ -164,12 +164,12 @@ Every applicable validation phase emits an immediate start and completion event 
 For service restart policies, `RestartNever` blocks watch restarts, `RestartOnInputChange` follows the affected downstream slice, and `RestartAlways` restarts the service on any watch cycle that affects the selected target.
 
 For watch-cycle events:
-- `files` is the raw changed file list from the watcher batch
+- `files` contains reconciled task-input changes after removing sync sentinels and immediate task-output writes
 - `affectedTasks` is the directly affected task list derived from those file changes
 
 `watch` also supports `--detach`.
 
-`flush` is the AI readiness gate for detached watch workflows. It makes sure the per-worktree daemon is running a `watch` loop for the selected target, writes a flush request plus a sync sentinel, waits until the watcher acknowledges that sentinel after the current watch batch settles, and then returns the target-closure health result.
+`flush` is the readiness gate for detached watch workflows. It captures the selected project and target's active watch, waits for its observer baseline, and publishes a request plus sync sentinel. The engine reconciles queued, debounced, and newly observed changes after startup, rebuilds, and health probes before acknowledging the request. A replacement watch cannot satisfy the request, even when it selects the same target.
 
 Usage:
 
@@ -185,17 +185,24 @@ devflow flush [target] --max-parallel <n>
 
 Target resolution:
 - a positional `target` wins
-- without a positional target, a live daemon watch loop reuses `inst.LastRun.Target`
+- without a positional target, a live daemon watch loop supplies its actual active target
 - without a live watch loop, `inst.LastRun.Target` is reused when present
 - otherwise the project preferred target is used
 
 Daemon behavior:
 - no daemon-owned watch loop: starts `devflow watch <target> --detach` through the daemon
-- live daemon watch loop for the same target: reused
+- live daemon watch loop for the same project and target: reused after its observer baseline is ready
+- live daemon watch loop for a different project: fails with `project_mismatch`
 - live daemon watch loop for a different target: fails with `target_mismatch`
 - live daemon non-watch work: fails with `non_watch_execution`
+- captured watch stops or is replaced while waiting: fails with `watch_stopped`
+- request context is canceled or reaches its deadline: fails with `canceled` or `timeout`; timeout sets `timedOut=true`
 
 `flush --json` returns `FlushResult` with the request ID, instance ID, worktree, project, target, mode, whether a daemon watch loop was started, sync/health success, node states, service health, and structured issues. The command exits non-zero when `success=false`, including timeout and health-check failures. Low-level watch-start, request-write, sync-write, and acknowledgement-read failures retain their daemon error as a phase-specific issue instead of returning an empty result; the CLI adds a `daemon_error` issue when daemon communication fails or a response is missing its flush result.
+
+`synced=true` only confirms that observation processing produced an acknowledgement. Require `success=true` for freshness and health. A changed task excluded by `RestartNever`, a warmup without `AllowInWatch`, or a dependency barrier produces `watch_restart_required` and `success=false`, even if its previous state is successful. The issue persists across flushes until the task executes successfully or the target is explicitly restarted. For a complete target restart, stop the existing execution and start its watch again.
+
+The guarantee covers declared inputs visible to metadata-based polling through the final scan. It does not prove transient or metadata-preserving edits were observed, or execute checks outside the target. Scanner failures cancel watch execution and trigger normal cleanup. Generated-output changes are suppressed only when their current metadata matches the producer's completion record. Edits made after that producer finishes remain eligible for reruns, including edits to files the task also rewrites while downstream work is still running. Sibling source paths are not suppressed.
 
 `action` is the generic foreground operation surface for explicit project operations that are not normal DAG targets. Actions are discovered from the project adapter through the daemon.
 

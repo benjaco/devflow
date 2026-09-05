@@ -138,6 +138,67 @@ func (h *failedStopHandle) PID() int    { return 0 }
 func (h *failedStopHandle) Wait() error { return nil }
 func (h *failedStopHandle) Stop() error { h.calls.Add(1); return errors.New("resource still running") }
 
+type interruptedWatchStopHandle struct {
+	*genericServiceHandle
+	calls atomic.Int32
+	err   error
+}
+
+func (h *interruptedWatchStopHandle) Stop() error {
+	if h.calls.Add(1) == 1 {
+		return errors.Join(context.Canceled, h.err)
+	}
+	return h.genericServiceHandle.Stop()
+}
+
+func TestWatchPreservesInterruptedRestartFailure(t *testing.T) {
+	root := t.TempDir()
+	writeWatchFreshnessInput(t, root, "old")
+	stopErr := errors.New("restart stop failed")
+	handle := &interruptedWatchStopHandle{genericServiceHandle: newGenericServiceHandle(), err: stopErr}
+	p := watchPolicyFreshnessProject{tasks: []project.Task{{
+		Name: "serve", Kind: project.KindService,
+		Inputs: project.Inputs{Files: []string{"input.txt"}},
+		Run: func(_ context.Context, rt *project.Runtime) error {
+			rt.RegisterServiceHandle(handle)
+			return nil
+		},
+	}}}
+	eng, err := New(p, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var watchErr error
+	go func() {
+		defer close(done)
+		watchErr = eng.Watch(ctx, Request{Worktree: root, Target: "dev", Mode: api.ModeWatch})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("watch did not exit")
+		}
+	})
+	id := waitForEngineWatchReady(t, root)
+	writeWatchFreshnessInput(t, root, "changed input")
+	writeEngineFlushRequest(t, root, id)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch did not report its restart failure")
+	}
+	if !errors.Is(watchErr, stopErr) {
+		t.Errorf("watch error = %v; want restart failure even when final cleanup succeeds", watchErr)
+	}
+	if handle.Alive() {
+		t.Error("final cleanup did not stop the service")
+	}
+}
+
 func TestExecutionOwnershipCleanupFailureDoesNotPermitReplacement(t *testing.T) {
 	root := t.TempDir()
 	handle := &failedStopHandle{}
@@ -160,13 +221,13 @@ func TestExecutionOwnershipCleanupFailureDoesNotPermitReplacement(t *testing.T) 
 	}
 }
 
-func TestExecutionOwnershipWatchStartupFailureCleansResources(t *testing.T) {
+func TestExecutionOwnershipWatchScanFailureCleansResources(t *testing.T) {
 	root := t.TempDir()
 	handle := newGenericServiceHandle()
 	eng, err := New(ownershipProject{run: func(_ context.Context, rt *project.Runtime) error {
 		rt.RegisterServiceHandle(handle)
-		path := instance.FlushSyncDir(root, rt.Instance.ID)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		path := filepath.Dir(instance.FlushSyncDir(root, rt.Instance.ID))
+		if err := os.RemoveAll(path); err != nil {
 			return err
 		}
 		return os.WriteFile(path, []byte("not a directory"), 0o600)
@@ -175,9 +236,9 @@ func TestExecutionOwnershipWatchStartupFailureCleansResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := eng.Watch(context.Background(), Request{Target: "verify", Worktree: root, Mode: api.ModeWatch}); err == nil {
-		t.Fatal("expected watcher startup error")
+		t.Fatal("expected watcher scan error")
 	}
 	if !handle.stopped.Load() {
-		t.Fatal("watcher startup error left registered resource running")
+		t.Fatal("watcher scan error left registered resource running")
 	}
 }

@@ -148,7 +148,7 @@ Use `--component` when a project has more than one migration system.
 
 ## Watch Mode
 
-Watch mode maps changed files to task inputs, then reruns the affected downstream slice.
+Watch mode observes task inputs before initial execution, then reruns the affected downstream slice when those inputs change. Edits made during startup or a rebuild are reconciled before a successful flush. If a task also rewrites an input file, an edit made after that task finishes still triggers a rerun, even while downstream work is running; generated changes are excluded only when their metadata still matches what the producer left behind.
 
 Devflow watches the declared input paths for the selected target closure, not the whole project tree. This keeps folders such as `node_modules` out of the idle watch loop. If edits are not being picked up, add the missing source path to the relevant task inputs and check it with `graph affected --explain`.
 
@@ -164,9 +164,13 @@ Then after edits:
 devflow flush up --json
 ```
 
-`flush` proves the watcher has processed a sync sentinel written after your edits. It returns success only when the selected target closure has settled and in-chain services are healthy.
+`flush` waits for declared-input changes to settle and checks in-chain services. It scans again after rebuilds and health checks before returning success. Check `success=true`; `synced=true` alone only means the watcher processed the synchronization request.
 
-Important watch rules:
+If a watch policy prevents changed work from rerunning, flush reports `watch_restart_required` until that work executes successfully or you stop and restart the target. Repeating flush does not clear the issue. A stopped or replaced watcher reports `watch_stopped`, including replacement with the same target; run a new flush against the current watch.
+
+Freshness covers the selected target's declared inputs as observed by polling. It does not cover undeclared files or guarantee detection of transient changes or edits that preserve filesystem metadata. Tests outside the target still need to run separately.
+
+Watch rules:
 - downstream jobs do not run past blocked intermediate tasks
 - services default to affected-slice restarts
 - `RestartNever` prevents watch restarts

@@ -1,6 +1,6 @@
 # Agent verification: assessment and implementation plan
 
-Status: all seven items approved for sequential implementation with user review after each item. Item 1 is implemented; [regression evidence](execution-ownership-verification.md) and `PROGRESS.md` record verification. Items 2–7 remain queued. The original assessment below was made on 2026-09-05 against `a7fe4f8`, one commit after the supplied review's `b46220f`; source references describe that baseline and may move. This does not establish which binary is installed in the external project. The original planning pass changed documentation only; subsequent item-1 implementation changes are described in the ownership verification note.
+Status: all seven items approved for sequential implementation with user review after each item. Item 1 and its CI correction are accepted; item 2 is implemented and under verification for review. See [ownership evidence](execution-ownership-verification.md), [freshness evidence](watch-freshness-verification.md) and `PROGRESS.md`. Items 3–7 remain queued. The original assessment below was made on 2026-09-05 against `a7fe4f8`, one commit after the supplied review's `b46220f`; source references describe that baseline and may move. This does not establish which binary is installed in the external project.
 
 User review policy: implement one item at a time and stop for review. Devflow is current-only: update current callers and docs directly, remove retired APIs/state readers, and clear disposable task artifacts after successful upgrades instead of maintaining migrations. Older adapter compilation is not guaranteed. This supersedes the compatibility-preservation assumptions in the original assessment.
 
@@ -53,7 +53,7 @@ These are defect reproductions, not claims that the repository's existing test s
 | Inspect execution closure | `devflow graph show <target> --json` | Ordered names only; definitions still require adapter reading. |
 | Check prerequisites | `devflow doctor --target <target> --strict --json`; `clis status --target` | Reuse target-scoped CLI/env selection; do not invent a second prerequisite resolver. |
 | Run a focused check | `devflow run <task-or-target> --ci --json` | Use a separate worktree containing the edits when a watcher may conflict. Flushing first does not make later same-worktree CI safe. |
-| Synchronize an existing dev environment | `watch --detach`, then `flush --json` | Current startup freshness gap still applies. Waiting for observer readiness before editing mitigates that gap, but is not a permanent public guarantee. |
+| Synchronize an existing dev environment | `watch --detach`, then `flush --json` | Item 2 establishes observation before startup and reconciles through a fresh scan before acknowledgment. Require `success=true`; restart-policy blocks need explicit rerun/restart. Changes after the final scan need another flush. |
 | Validate adapter input/output/dependency declarations | `devflow validate <finite-target> --mode artifacts` or bounded `--mode all --details issues --json` | Specialized repeated sandbox execution; not a substitute for everyday checks or external-resource isolation. |
 | Discover explicit actions | `devflow action list --json`, action input flags, TUI prompts | Input schemas/effects already exist. Unexpected interactive questions still lack an unattended response protocol. |
 | Inspect failures and preserve immediate evidence | Save final stdout separately from stderr; inspect failure excerpts/node results before requesting logs | `jq` can reduce context now, but cannot reconstruct overwritten attempts or guarantee durable history. |
@@ -177,7 +177,7 @@ Acceptance: large healthy graph produces bounded requested summaries; failures r
 
 ## Delivery and verification
 
-Complete ownership review first, then deliver freshness and lifecycle parity individually. Continue with identity/input/error contracts, metadata/planning and compact retrieval in the sequence above; stop after each approved item for review.
+Review item 2 freshness next, then deliver item 3 lifecycle parity separately. Continue with identity/input/error contracts, metadata/planning and compact retrieval in the sequence above; stop after each approved item for review.
 
 Each change needs its targeted failing regression, subsystem docs, current JSON contract coverage where relevant, examples that still build, `go test ./...`, `go test -race ./...`, vet and the repository quality gates. Cross-process ownership/cancellation/log behavior needs native Linux/macOS/Windows CI; compilation alone cannot prove those behaviors. Use opt-in Docker coverage when resource ownership affects managed containers and a real daemon/TUI smoke for action interruption and prompt recovery.
 

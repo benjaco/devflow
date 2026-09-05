@@ -5,12 +5,12 @@ Last updated: 2026-09-05
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: approved agent-verification item 1 (execution ownership) implemented, revised to current-only contracts and ready for user review; items 2–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: local full default/race and quality checks passed for item 1. Actions run `33991168112` passed seven jobs, including Linux/macOS, race, quality/security and both Docker architectures; its sole Windows path-assertion failure is corrected locally and awaits native CI confirmation.
+- State: item 1 and its Windows CI correction accepted after green CI; implementing item 2 (startup/flush freshness) test-first. Items 3–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: user confirmed CI is green after the Windows assertion fix. Item 2 regressions and implementation are in progress; no new verification claims yet.
 
 ## In Progress
 
-- None. The Windows CI assertion fix is ready for review; item 2 remains paused.
+- Item 2: reproduce input changes missed during initial execution, establish input observation before the DAG, and reconcile pending changes before flush acknowledgment. Preserve watch policies, generated-output handling and resource cleanup; stop for review after this item.
 
 ## Completed
 

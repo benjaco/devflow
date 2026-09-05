@@ -2146,19 +2146,17 @@ func (p *watchGeneratedOutputProject) Tasks() []project.Task {
 	}
 }
 
-func TestWatchOutputSuppressorFiltersOutputFilesAndDirs(t *testing.T) {
-	g, err := graph.New((&watchGeneratedOutputProject{}).Tasks(), []project.Target{{Name: "dev", RootTasks: []string{"svc"}}})
-	if err != nil {
+func TestWatchOutputsFilterKeepsSiblingSourceChanges(t *testing.T) {
+	root := t.TempDir()
+	finish := beginWatchOutputs(context.Background(), root, project.Outputs{Files: []string{"generated/out.txt"}})
+	if err := os.MkdirAll(filepath.Join(root, "generated"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	suppressor := watchOutputSuppressor{
-		files: map[string]time.Time{},
-		dirs:  map[string]time.Time{},
+	if err := os.WriteFile(filepath.Join(root, "generated", "out.txt"), []byte("generated"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	suppressor.Record(g, []string{"bundle"}, time.Minute)
-
-	filtered := suppressor.Filter([]string{"generated/out.txt", "generated", "src.txt"})
-	if got := strings.Join(filtered, ","); got != "src.txt" {
+	filtered := filterProducedWatchOutputs(root, []string{"generated/out.txt", "generated", "generated/source.txt", "src.txt"}, []watchOutputEvidence{finish()})
+	if got := strings.Join(filtered, ","); got != "generated/source.txt,src.txt" {
 		t.Fatalf("unexpected filtered files %q", got)
 	}
 }

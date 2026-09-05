@@ -166,6 +166,7 @@ type activeRun struct {
 	maxParallel int
 	cancel      context.CancelFunc
 	done        chan struct{}
+	watchReady  chan struct{}
 	result      *api.RunResult
 	err         error
 	startedAt   time.Time
@@ -1029,7 +1030,7 @@ func (s *Server) beginRunLocked(ctx context.Context, projectName string, p proje
 	}
 	runCtx, cancel := context.WithCancel(execution.ContextWithLease(ctx, lease))
 	s.generation++
-	active := &activeRun{projectName: projectName, target: target, mode: mode, maxParallel: maxParallel, cancel: cancel, done: make(chan struct{}), startedAt: time.Now().UTC(), controller: engine.NewLifecycleController(), generation: s.generation, lease: lease}
+	active := &activeRun{projectName: projectName, target: target, mode: mode, maxParallel: maxParallel, cancel: cancel, done: make(chan struct{}), watchReady: make(chan struct{}), startedAt: time.Now().UTC(), controller: engine.NewLifecycleController(), generation: s.generation, lease: lease}
 	s.mu.Lock()
 	s.active = active
 	s.mu.Unlock()
@@ -1156,6 +1157,7 @@ func (s *Server) runEngine(ctx context.Context, p project.Project, target string
 		Mode:                mode,
 		MaxParallel:         maxParallel,
 		LifecycleController: active.controller,
+		WatchReady:          active.watchReady,
 	}
 	switch mode {
 	case api.ModeWatch:
@@ -1322,6 +1324,8 @@ func (s *Server) flush(ctx context.Context, projectName, target string, timeout 
 	unlock := sync.OnceFunc(s.transitionMu.Unlock)
 	defer unlock()
 	startedAt := time.Now().UTC()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	requestID := fmt.Sprintf("flush-%d-%d", startedAt.UnixNano(), os.Getpid())
 	inst, instErr := instance.Load(s.worktree, s.instanceID)
 	if strings.TrimSpace(projectName) == "" && instErr == nil && inst.LastRun.Project != "" {
@@ -1362,6 +1366,9 @@ func (s *Server) flush(ctx context.Context, projectName, target string, timeout 
 			})
 			return result, fmt.Errorf("flush failed")
 		}
+		if active.projectName != projectName {
+			return s.flushFailure(requestID, projectName, resolvedTarget, startedAt, false, "project_mismatch", fmt.Errorf("live watch project is %q, requested %q", active.projectName, projectName))
+		}
 		if active.target != resolvedTarget {
 			result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, resolvedTarget, startedAt)
 			result.Issues = append(result.Issues, api.FlushIssue{
@@ -1373,45 +1380,37 @@ func (s *Server) flush(ctx context.Context, projectName, target string, timeout 
 		}
 	} else {
 		// LastRun is a restart preference; only s.active proves work is running.
-		watchStartedAt := time.Now().UTC()
 		if _, err := s.startActiveLocked(ctx, projectName, resolvedTarget, api.ModeWatch, maxParallel); err != nil {
 			return s.flushFailure(requestID, projectName, resolvedTarget, startedAt, false, "watch_start_error", err)
 		}
 		startedWatch = true
-		unlock()
-		if !waitForWatchReady(s.worktree, s.instanceID, watchStartedAt, time.Until(startedAt.Add(timeout))) {
-			result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, resolvedTarget, startedAt)
-			result.Started = true
-			result.TimedOut = true
-			result.Issues = append(result.Issues, api.FlushIssue{Kind: "timeout", Message: "timed out waiting for detached watch daemon to become ready"})
-			return result, fmt.Errorf("flush failed")
-		}
+		s.mu.Lock()
+		active = s.active
+		s.mu.Unlock()
 	}
 	unlock()
+	if err := s.waitForActiveWatchReady(ctx, active); err != nil {
+		return s.flushWaitFailure(requestID, projectName, resolvedTarget, startedAt, startedWatch, err)
+	}
 	req := api.FlushRequest{
 		ID:        requestID,
 		CreatedAt: startedAt,
 		SyncPath:  instance.FlushSyncPath(s.worktree, s.instanceID, requestID),
 	}
-	if err := instance.WriteFlushRequest(s.worktree, s.instanceID, req); err != nil {
-		return s.flushFailure(requestID, projectName, resolvedTarget, startedAt, startedWatch, "request_write_error", err)
+	if kind, err := s.publishFlushRequest(ctx, active, req); err != nil {
+		if errors.Is(err, errFlushWatchStopped) || ctx.Err() != nil {
+			return s.flushWaitFailure(requestID, projectName, resolvedTarget, startedAt, startedWatch, err)
+		}
+		return s.flushFailure(requestID, projectName, resolvedTarget, startedAt, startedWatch, kind, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(req.SyncPath), 0o755); err != nil {
-		return s.flushFailure(requestID, projectName, resolvedTarget, startedAt, startedWatch, "sync_prepare_error", err)
-	}
-	if err := os.WriteFile(req.SyncPath, []byte(requestID+"\n"), 0o644); err != nil {
-		return s.flushFailure(requestID, projectName, resolvedTarget, startedAt, startedWatch, "sync_write_error", err)
-	}
-	result, ok, err := waitForFlushAck(s.worktree, s.instanceID, requestID, req.SyncPath, time.Until(startedAt.Add(timeout)))
+	result, err := s.waitForFlushAck(ctx, active, requestID)
 	if err != nil {
-		return s.flushFailure(requestID, projectName, resolvedTarget, startedAt, startedWatch, "ack_read_error", err)
+		return s.flushWaitFailure(requestID, projectName, resolvedTarget, startedAt, startedWatch, err)
 	}
-	if !ok {
-		result = newFlushResult(requestID, s.worktree, s.instanceID, projectName, resolvedTarget, startedAt)
-		result.Started = startedWatch
-		result.TimedOut = true
-		result.Issues = append(result.Issues, api.FlushIssue{Kind: "timeout", Message: "timed out waiting for flush acknowledgement"})
-		return result, fmt.Errorf("flush failed")
+	// An acknowledgement belongs to the captured watch, even if its replacement
+	// happens to select the same project and target.
+	if err := s.checkFlushWatch(ctx, active); err != nil {
+		return s.flushWaitFailure(requestID, projectName, resolvedTarget, startedAt, startedWatch, err)
 	}
 	result.Started = startedWatch
 	if result.Project == "" {
@@ -2047,47 +2046,96 @@ func (s *Server) flushFailure(requestID, projectName, target string, startedAt t
 	return result, fmt.Errorf("flush failed: %w", cause)
 }
 
-func waitForFlushAck(worktree, instanceID, requestID, syncPath string, timeout time.Duration) (api.FlushResult, bool, error) {
-	if timeout <= 0 {
-		return api.FlushResult{}, false, nil
+var errFlushWatchStopped = errors.New("watch stopped or was replaced before flush completed")
+
+func (s *Server) flushWaitFailure(requestID, projectName, target string, startedAt time.Time, started bool, cause error) (api.FlushResult, error) {
+	kind := "ack_read_error"
+	switch {
+	case errors.Is(cause, context.DeadlineExceeded):
+		kind = "timeout"
+	case errors.Is(cause, context.Canceled):
+		kind = "canceled"
+	case errors.Is(cause, errFlushWatchStopped):
+		kind = "watch_stopped"
 	}
-	deadline := time.Now().Add(timeout)
-	retouchInterval := 100 * time.Millisecond
-	nextTouch := time.Now().Add(retouchInterval)
-	for time.Now().Before(deadline) {
-		result, err := instance.LoadFlushAck(worktree, instanceID, requestID)
-		if err == nil {
-			return result, true, nil
-		}
-		if !os.IsNotExist(err) {
-			return api.FlushResult{}, false, err
-		}
-		if syncPath != "" && !time.Now().Before(nextTouch) {
-			_ = os.WriteFile(syncPath, []byte(requestID+"\n"+time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o644)
-			nextTouch = time.Now().Add(retouchInterval)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return api.FlushResult{}, false, nil
+	result, err := s.flushFailure(requestID, projectName, target, startedAt, started, kind, cause)
+	result.TimedOut = kind == "timeout"
+	return result, err
 }
 
-func waitForWatchReady(worktree, instanceID string, after time.Time, timeout time.Duration) bool {
-	if timeout <= 0 {
-		return false
+func (s *Server) checkFlushWatch(ctx context.Context, active *activeRun) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	deadline := time.Now().Add(timeout)
-	path := instance.FlushWatchReadyPath(worktree, instanceID)
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			readyAt, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
-			if parseErr == nil && !readyAt.Before(after) {
-				return true
-			}
+	s.mu.Lock()
+	current := active != nil && s.active == active && !active.stopping
+	s.mu.Unlock()
+	if !current {
+		return errFlushWatchStopped
+	}
+	select {
+	case <-active.done:
+		return errFlushWatchStopped
+	default:
+		return nil
+	}
+}
+
+func (s *Server) waitForActiveWatchReady(ctx context.Context, active *activeRun) error {
+	if err := s.checkFlushWatch(ctx, active); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-active.done:
+		return errFlushWatchStopped
+	case <-active.watchReady:
+		return s.checkFlushWatch(ctx, active)
+	}
+}
+
+func (s *Server) publishFlushRequest(ctx context.Context, active *activeRun, req api.FlushRequest) (string, error) {
+	// Retargeting cannot slip between ownership verification and publication.
+	s.transitionMu.Lock()
+	defer s.transitionMu.Unlock()
+	if err := s.checkFlushWatch(ctx, active); err != nil {
+		return "", err
+	}
+	if err := instance.WriteFlushRequest(s.worktree, s.instanceID, req); err != nil {
+		return "request_write_error", err
+	}
+	if err := os.MkdirAll(filepath.Dir(req.SyncPath), 0o755); err != nil {
+		return "sync_prepare_error", err
+	}
+	if err := os.WriteFile(req.SyncPath, []byte(req.ID+"\n"), 0o644); err != nil {
+		return "sync_write_error", err
+	}
+	return "", nil
+}
+
+func (s *Server) waitForFlushAck(ctx context.Context, active *activeRun, requestID string) (api.FlushResult, error) {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := s.checkFlushWatch(ctx, active); err != nil {
+			return api.FlushResult{}, err
 		}
-		time.Sleep(50 * time.Millisecond)
+		result, err := instance.LoadFlushAck(s.worktree, s.instanceID, requestID)
+		if err == nil {
+			return result, nil
+		}
+		if !os.IsNotExist(err) {
+			return api.FlushResult{}, err
+		}
+		select {
+		case <-ctx.Done():
+			return api.FlushResult{}, ctx.Err()
+		case <-active.done:
+			return api.FlushResult{}, errFlushWatchStopped
+		case <-ticker.C:
+		}
 	}
-	return false
 }
 
 func (s *Server) invalidateAndRelaunch(ctx context.Context, task string) (*api.LifecycleResult, error) {

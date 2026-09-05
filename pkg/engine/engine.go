@@ -38,6 +38,8 @@ type Request struct {
 	MaxParallel          int
 	CacheKeyManifestPath string
 	LifecycleController  *LifecycleController
+	// WatchReady closes once the input baseline exists, before the initial DAG.
+	WatchReady chan<- struct{}
 }
 
 type Outcome struct {
@@ -71,6 +73,8 @@ type runState struct {
 	manifest          *validatedCacheKeyManifest
 	manifestUsage     *api.CacheKeyManifestUsage
 	redactDiagnostic  func(string) string
+	watchOutputs      []watchOutputEvidence
+	watchBlocked      map[string]bool
 }
 
 type taskResult struct {
@@ -85,13 +89,6 @@ type serviceExit struct {
 	generation uint64
 	err        error
 }
-
-type watchOutputSuppressor struct {
-	files map[string]time.Time
-	dirs  map[string]time.Time
-}
-
-const watchOutputSuppressTTL = 2 * time.Second
 
 func New(p project.Project, worktree string) (*Engine, error) {
 	tasks := p.Tasks()
@@ -154,7 +151,6 @@ func (e *Engine) Watch(ctx context.Context, req Request) (runErr error) {
 	if err != nil {
 		return err
 	}
-
 	defer func() {
 		if cleanupErr := state.stopServices(req, sortedHandles(state.snapshotServices())); cleanupErr != nil {
 			lease.RequireRecovery()
@@ -169,23 +165,66 @@ func (e *Engine) Watch(ctx context.Context, req Request) (runErr error) {
 		e.publishRunFinished(result, req.Worktree, result.Error)
 	}()
 	e.publish(api.Event{
-		TS:         process.NowRFC3339Nano(),
-		Type:       api.EventRunStarted,
-		InstanceID: inst.ID,
-		Worktree:   req.Worktree,
-		Target:     req.Target,
-		Mode:       req.Mode,
+		TS: process.NowRFC3339Nano(), Type: api.EventRunStarted,
+		InstanceID: inst.ID, Worktree: req.Worktree, Target: req.Target, Mode: req.Mode,
 	})
-
 	order, err := e.graph.TargetClosure(req.Target)
 	if err != nil {
 		return err
 	}
-
-	initialSuccess := true
-	if err := e.runReadyQueue(ctx, func() {}, baseRT, state, order); err != nil {
-		initialSuccess = false
+	flushSyncDir := instance.FlushSyncDir(req.Worktree, inst.ID)
+	runner, err := watch.New(watch.Options{
+		Root: req.Worktree, WatchPaths: e.watchInputPaths(order),
+		WatchOnly: true, IncludePaths: []string{flushSyncDir},
+	})
+	if err != nil {
+		return err
 	}
+	// Baseline first: a task may read an input long before startup completes.
+	batches, errs, err := runner.Start(ctx)
+	if err != nil {
+		return err
+	}
+	watchErrors := make(chan error, 1)
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+		select {
+		case err, ok := <-errs:
+			if ok && err != nil {
+				if err == ctx.Err() {
+					return
+				}
+				watchErrors <- err
+				cancel()
+			}
+		case <-ctx.Done():
+		}
+	}()
+	defer func() {
+		cancel()
+		<-monitorDone
+		// Only a canceled observer wait is normal shutdown; wrapped stop errors
+		// must remain failures even if final cleanup subsequently succeeds.
+		if runErr == context.Canceled {
+			runErr = nil
+		}
+		select {
+		case err := <-watchErrors:
+			runErr = errors.Join(runErr, err)
+		default:
+		}
+	}()
+	if req.WatchReady != nil {
+		close(req.WatchReady)
+	}
+
+	initialErr := e.runReadyQueue(ctx, func() {}, baseRT, state, order)
+	e.publish(api.Event{
+		TS: process.NowRFC3339Nano(), Type: api.EventWatchCycleDone,
+		InstanceID: inst.ID, Worktree: req.Worktree, Target: req.Target, Mode: req.Mode,
+		Success: boolPtr(initialErr == nil),
+	})
 	serviceExits := make(chan serviceExit, len(e.graph.Tasks)+1)
 	watchedServices := map[string]uint64{}
 	watchServiceHandles(state, serviceExits, watchedServices)
@@ -193,50 +232,19 @@ func (e *Engine) Watch(ctx context.Context, req Request) (runErr error) {
 	if req.LifecycleController != nil {
 		lifecycleCommands = req.LifecycleController.commands
 	}
-	e.publish(api.Event{
-		TS:         process.NowRFC3339Nano(),
-		Type:       api.EventWatchCycleDone,
-		InstanceID: inst.ID,
-		Worktree:   req.Worktree,
-		Target:     req.Target,
-		Mode:       req.Mode,
-		Success:    boolPtr(initialSuccess),
-	})
-
-	flushSyncDir := instance.FlushSyncDir(req.Worktree, inst.ID)
-	if err := os.MkdirAll(flushSyncDir, 0o755); err != nil {
+	reconcile := func(batch watch.Batch) error {
+		return e.reconcileWatch(ctx, req, baseRT, state, runner, batch, func() {
+			watchServiceHandles(state, serviceExits, watchedServices)
+		})
+	}
+	if err := reconcile(watch.Batch{}); err != nil {
 		return err
 	}
-	runner, err := watch.New(watch.Options{
-		Root:         req.Worktree,
-		WatchPaths:   e.watchInputPaths(order),
-		WatchOnly:    true,
-		IncludePaths: []string{flushSyncDir},
-	})
-	if err != nil {
+	readyPath := instance.FlushWatchReadyPath(req.Worktree, inst.ID)
+	if err := os.WriteFile(readyPath, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o600); err != nil {
 		return err
 	}
-	batches, errs, err := runner.Start(ctx)
-	if err != nil {
-		return err
-	}
-	readyDelay := watch.DefaultPollInterval * 2
-	if readyDelay < 500*time.Millisecond {
-		readyDelay = 500 * time.Millisecond
-	}
-	select {
-	case <-ctx.Done():
-		return nil
-	case <-time.After(readyDelay):
-	}
-	if err := os.WriteFile(instance.FlushWatchReadyPath(req.Worktree, inst.ID), []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o644); err != nil {
-		return err
-	}
-	suppressor := watchOutputSuppressor{
-		files: map[string]time.Time{},
-		dirs:  map[string]time.Time{},
-	}
-
+	defer os.Remove(readyPath)
 	for {
 		select {
 		case <-ctx.Done():
@@ -245,59 +253,18 @@ func (e *Engine) Watch(ctx context.Context, req Request) (runErr error) {
 			result, commandErr := e.applyServiceLifecycleCommand(ctx, req, state, baseRT, command)
 			command.result <- serviceLifecycleResponse{result: result, err: commandErr}
 			watchServiceHandles(state, serviceExits, watchedServices)
+			if err := reconcile(watch.Batch{}); err != nil {
+				return err
+			}
 		case exited := <-serviceExits:
 			e.handleUnexpectedServiceExit(ctx, req, inst, state, exited)
-		case err, ok := <-errs:
-			if !ok {
-				return nil
-			}
-			if err == nil {
-				continue
-			}
-			return err
 		case batch, ok := <-batches:
 			if !ok {
 				return nil
 			}
-			userFiles, flushRequestIDs := splitFlushSyncFiles(req.Worktree, inst.ID, batch.Files)
-			files := suppressor.Filter(userFiles)
-			if len(files) == 0 && len(flushRequestIDs) == 0 {
-				continue
+			if err := reconcile(batch); err != nil {
+				return err
 			}
-			success := true
-			affectedOrder, changedTasks := e.affectedWatchOrder(req.Target, files)
-			if len(affectedOrder) > 0 {
-				e.publish(api.Event{
-					TS:            process.NowRFC3339Nano(),
-					Type:          api.EventWatchCycleStart,
-					InstanceID:    inst.ID,
-					Worktree:      req.Worktree,
-					Target:        req.Target,
-					Mode:          req.Mode,
-					Files:         append([]string(nil), files...),
-					AffectedTasks: changedTasks,
-				})
-				if err := state.stopServices(req, affectedOrder); err != nil {
-					return err
-				}
-				if err := e.runReadyQueue(ctx, func() {}, baseRT, state, affectedOrder); err != nil {
-					success = false
-				}
-				watchServiceHandles(state, serviceExits, watchedServices)
-				suppressor.Record(e.graph, affectedOrder, watchOutputSuppressTTL)
-				e.publish(api.Event{
-					TS:            process.NowRFC3339Nano(),
-					Type:          api.EventWatchCycleDone,
-					InstanceID:    inst.ID,
-					Worktree:      req.Worktree,
-					Target:        req.Target,
-					Mode:          req.Mode,
-					Files:         append([]string(nil), files...),
-					AffectedTasks: changedTasks,
-					Success:       boolPtr(success),
-				})
-			}
-			e.ackFlushRequests(ctx, req, baseRT, state, flushRequestIDs)
 		}
 	}
 }
@@ -587,6 +554,7 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 
 			if task.Kind == project.KindGroup {
 				state.setNodeState(name, api.StateDone, "", "", 0)
+				state.clearWatchBlocked(name)
 				for _, child := range dependents[name] {
 					pendingDeps[child]--
 					if pendingDeps[child] == 0 {
@@ -677,7 +645,21 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 	return runErr
 }
 
-func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.Runtime, task project.Task, depKeys []string) taskResult {
+func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.Runtime, task project.Task, depKeys []string) (result taskResult) {
+	var finishOutputs func() watchOutputEvidence
+	beginOutputs := func() {
+		if state.req.Mode == api.ModeWatch && finishOutputs == nil {
+			finishOutputs = beginWatchOutputs(ctx, rt.Worktree, task.Outputs)
+		}
+	}
+	defer func() {
+		if finishOutputs != nil {
+			state.recordWatchOutputs(finishOutputs())
+		}
+		if result.err == nil {
+			state.clearWatchBlocked(task.Name)
+		}
+	}()
 	if err := truncateTaskLog(rt); err != nil {
 		state.setErrorState(task.Name, ctx, "", err, 0)
 		return taskResult{name: task.Name, err: err}
@@ -706,6 +688,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 				return taskResult{name: task.Name, key: key}
 			}
 		}
+		beginOutputs()
 		if _, err := runTask(ctx, task, rt); err != nil {
 			state.setErrorState(task.Name, ctx, key, err, 0)
 			return taskResult{name: task.Name, key: key, err: err}
@@ -731,6 +714,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 		manifestDuration, manifestComponents := state.manifestTiming(computation)
 		state.setLastRunKey(task.Name, key)
 		restoreStarted := time.Now()
+		beginOutputs()
 		ok, restoreErr := e.cache.RestoreContext(ctx, rt.Worktree, task.Name, key, cacheCopyProgress(rt, "restore"))
 		readDuration := elapsedMilliseconds(restoreStarted)
 		if restoreErr != nil {
@@ -780,6 +764,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			Mode:       state.req.Mode,
 			CacheKey:   key,
 		})
+		beginOutputs()
 		if _, err := runTask(ctx, task, rt); err != nil {
 			state.setErrorState(task.Name, ctx, key, err, 0)
 			return taskResult{name: task.Name, key: key, err: err}
@@ -804,6 +789,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 		return taskResult{name: task.Name, key: key}
 	}
 
+	beginOutputs()
 	taskRuntime, err := runTask(ctx, task, rt)
 	if err != nil {
 		if project.IsServiceKind(task.Kind) {
@@ -1665,64 +1651,6 @@ func sortedHandles(m map[string]project.ServiceHandle) []string {
 	return names
 }
 
-func (s *watchOutputSuppressor) Record(g *graph.Graph, taskNames []string, ttl time.Duration) {
-	if ttl <= 0 {
-		return
-	}
-	expiresAt := time.Now().Add(ttl)
-	for _, name := range taskNames {
-		task, ok := g.Tasks[name]
-		if !ok {
-			continue
-		}
-		for _, file := range task.Outputs.Files {
-			normalized := normalizeWatchPath(file)
-			s.files[normalized] = expiresAt
-			if dir := normalizeWatchPath(filepath.Dir(normalized)); dir != "." && dir != "" {
-				s.dirs[dir] = expiresAt
-			}
-		}
-		for _, dir := range task.Outputs.Dirs {
-			s.dirs[normalizeWatchPath(dir)] = expiresAt
-		}
-	}
-}
-
-func (s *watchOutputSuppressor) Filter(files []string) []string {
-	now := time.Now()
-	for path, expiresAt := range s.files {
-		if !expiresAt.After(now) {
-			delete(s.files, path)
-		}
-	}
-	for path, expiresAt := range s.dirs {
-		if !expiresAt.After(now) {
-			delete(s.dirs, path)
-		}
-	}
-	filtered := make([]string, 0, len(files))
-	for _, file := range files {
-		normalized := normalizeWatchPath(file)
-		if expiresAt, ok := s.files[normalized]; ok && expiresAt.After(now) {
-			continue
-		}
-		suppressed := false
-		for dir, expiresAt := range s.dirs {
-			if !expiresAt.After(now) {
-				continue
-			}
-			if watchPathHasPrefix(normalized, dir) {
-				suppressed = true
-				break
-			}
-		}
-		if !suppressed {
-			filtered = append(filtered, file)
-		}
-	}
-	return filtered
-}
-
 func normalizeWatchPath(path string) string {
 	return filepath.ToSlash(filepath.Clean(path))
 }
@@ -1959,18 +1887,6 @@ func (e *Engine) watchDownstream(names []string) []string {
 	return sortedBoolKeys(seen)
 }
 
-func (e *Engine) ackFlushRequests(ctx context.Context, req Request, baseRT *project.Runtime, state *runState, requestIDs []string) {
-	for _, requestID := range requestIDs {
-		flushReq, err := instance.LoadFlushRequest(req.Worktree, state.inst.ID, requestID)
-		if err != nil {
-			continue
-		}
-		result := e.evaluateFlush(ctx, req, baseRT, state, flushReq)
-		_ = instance.WriteFlushAck(req.Worktree, state.inst.ID, result)
-		_ = instance.RemoveFlushRequest(req.Worktree, state.inst.ID, requestID)
-	}
-}
-
 func (e *Engine) evaluateFlush(ctx context.Context, req Request, baseRT *project.Runtime, state *runState, flushReq api.FlushRequest) api.FlushResult {
 	startedAt := flushReq.CreatedAt
 	if startedAt.IsZero() {
@@ -2003,6 +1919,14 @@ func (e *Engine) evaluateFlush(ctx context.Context, req Request, baseRT *project
 		task := e.graph.Tasks[name]
 		node := status[name]
 		result.Nodes = append(result.Nodes, node)
+		if state.isWatchBlocked(name) {
+			result.Success = false
+			result.Issues = append(result.Issues, api.FlushIssue{
+				Task: name, Kind: "watch_restart_required",
+				Message: "inputs changed but watch policy prevents rerunning this task; restart the target explicitly",
+				LogPath: node.LogPath,
+			})
+		}
 		if project.IsServiceKind(task.Kind) {
 			service := e.evaluateFlushService(ctx, req, baseRT, state, task, node)
 			result.Services = append(result.Services, service)
