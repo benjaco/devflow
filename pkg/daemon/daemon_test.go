@@ -364,6 +364,104 @@ func TestSubscribeReturnsWhenContextCanceled(t *testing.T) {
 	}
 }
 
+func TestClientCallReturnsWhenContextCanceledWithoutDeadline(t *testing.T) {
+	socketPath := filepath.Join(os.TempDir(), "df-call-cancel-"+time.Now().Format("150405.000000000")+".sock")
+	defer os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	connected := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		var req Request
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			_ = conn.Close()
+			return
+		}
+		connected <- conn
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := (&Client{socketPath: socketPath}).Call(ctx, Request{Action: ActionPing})
+		done <- err
+	}()
+	select {
+	case conn := <-connected:
+		defer conn.Close()
+	case <-time.After(time.Second):
+		t.Fatal("Call did not send its request to the test daemon")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Call cancellation error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Call did not return after context cancellation")
+	}
+}
+
+func TestHandleConnReturnsWhenCanceledBeforeRequest(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		(&Server{}).handleConn(ctx, serverConn)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("connection handler remained blocked on an unread request after cancellation")
+	}
+}
+
+func TestHandleConnRemovesIdleSubscriberAfterDisconnect(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Server{subscribers: map[chan api.Event]bool{}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleConn(ctx, serverConn)
+	}()
+	if err := json.NewEncoder(clientConn).Encode(Request{Action: ActionSubscribe}); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForDaemonCondition(time.Second, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return len(s.subscribers) == 1
+	}) {
+		t.Fatal("connection handler did not register the subscription")
+	}
+	_ = clientConn.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("idle subscriber remained registered after the client disconnected")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.subscribers) != 0 {
+		t.Fatalf("disconnected subscribers retained: %d", len(s.subscribers))
+	}
+}
+
 func TestClientCallAcknowledgesFinalErrorResponse(t *testing.T) {
 	socketPath := filepath.Join(os.TempDir(), "df-response-ack-"+time.Now().Format("150405.000000000")+".sock")
 	defer os.Remove(socketPath)
@@ -946,11 +1044,23 @@ func TestDetachedTargetStateDistinguishesStartingReadyAndFailed(t *testing.T) {
 }
 
 func TestInvalidateAndRelaunchForcesMatchingActiveRunToRestart(t *testing.T) {
+	cacheRoot := t.TempDir()
+	t.Setenv("HOME", cacheRoot)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv("LOCALAPPDATA", cacheRoot)
 	name := "daemon-invalidate-force-restart"
 	project.Register(daemonTestProject{
 		name: name,
 		tasks: []project.Task{
-			{Name: "build", Kind: project.KindOnce, Cache: true},
+			{
+				Name:    "build",
+				Kind:    project.KindOnce,
+				Cache:   true,
+				Outputs: project.Outputs{Files: []string{"build.out"}},
+				Run: func(_ context.Context, rt *project.Runtime) error {
+					return os.WriteFile(filepath.Join(rt.Worktree, "build.out"), []byte("built"), 0o644)
+				},
+			},
 		},
 		targets: []project.Target{{Name: "main", RootTasks: []string{"build"}}},
 	})
@@ -994,6 +1104,7 @@ func TestInvalidateAndRelaunchForcesMatchingActiveRunToRestart(t *testing.T) {
 			done:        oldDone,
 		},
 	}
+	defer s.stopActive(3 * time.Second)
 
 	if _, err := s.invalidateAndRelaunch(context.Background(), "build"); err != nil {
 		t.Fatal(err)
@@ -1002,6 +1113,16 @@ func TestInvalidateAndRelaunchForcesMatchingActiveRunToRestart(t *testing.T) {
 	case <-oldDone:
 	case <-time.After(time.Second):
 		t.Fatal("expected invalidate relaunch to stop the existing matching active run")
+	}
+	s.mu.Lock()
+	relaunched := s.active
+	s.mu.Unlock()
+	if relaunched != nil {
+		select {
+		case <-relaunched.done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("relaunched build did not finish")
+		}
 	}
 	state, err := instance.LoadStatus(worktree, inst.ID)
 	if err != nil {

@@ -147,6 +147,7 @@ Important details:
 - `sqlc` uses a glob, so generated Go files do not become inputs unless you declare them.
 - `backend_build` depends on `sqlc`, Prisma client generation, and database migration state.
 - `Outputs("bin/coach")` and `Outputs("dist")` make those finite tasks cacheable.
+- Cached tasks must declare at least one output. `OutputFiles` requires regular files and `OutputDirs` requires real directories; paths must remain inside the worktree without symlink parents. Duplicate declarations and children of an already declared output directory are supported. Restores stage all artifacts before replacing outputs and roll back failed publication; an unrecoverable rollback error identifies the retained backups.
 - Install/setup tasks such as `npm_install` should use `Stamp()` with local outputs like `node_modules` when they must run once per lockfile key without copying dependency folders into Devflow's global cache.
 - `unit.NoCache()` keeps tests as a live check even though they have declared inputs.
 - `database.Postgres("prisma")` defaults the snapshot directory; set `SnapshotRoot(...)` only when the default is wrong.

@@ -2,6 +2,8 @@ package cache
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -76,13 +78,35 @@ func (s *Store) manifestPath(task, key string) string {
 }
 
 func (s *Store) Load(task, key string) (*Manifest, bool, error) {
+	if err := validateEntryNames(task, key); err != nil {
+		return nil, false, err
+	}
 	path := s.manifestPath(task, key)
+	if err := validateParents(s.Root, path); err != nil {
+		return nil, false, err
+	}
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return nil, false, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, false, err
+	}
 	var manifest Manifest
 	if err := jsonutil.ReadFile(path, &manifest); err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
 		}
+		var syntaxError *json.SyntaxError
+		var typeError *json.UnmarshalTypeError
+		if !errors.As(err, &syntaxError) && !errors.As(err, &typeError) {
+			return nil, false, err
+		}
 		_ = fsutil.RemoveAllWritable(s.EntryDir(task, key))
+		return nil, false, nil
+	}
+	if manifest.Version != 1 || manifest.Task != task || manifest.Key != key {
+		return nil, false, nil
+	}
+	if err := validateOutputs(manifest.Outputs); err != nil {
 		return nil, false, nil
 	}
 	return &manifest, true, nil
@@ -93,6 +117,16 @@ func (s *Store) Snapshot(worktree string, task project.Task, key string) (*Manif
 }
 
 func (s *Store) SnapshotContext(ctx context.Context, worktree string, task project.Task, key string, onProgress func(fsutil.CopyProgress)) (*Manifest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateEntryNames(task.Name, key); err != nil {
+		return nil, err
+	}
+	files, dirs, err := classifyOutputs(worktree, task.Outputs)
+	if err != nil {
+		return nil, err
+	}
 	entryDir := s.EntryDir(task.Name, key)
 	if manifest, ok, err := s.Load(task.Name, key); err != nil {
 		return nil, err
@@ -114,10 +148,6 @@ func (s *Store) SnapshotContext(ctx context.Context, worktree string, task proje
 		return nil, err
 	}
 
-	files, dirs, err := classifyOutputs(worktree, task.Outputs)
-	if err != nil {
-		return nil, err
-	}
 	sort.Strings(files)
 	sort.Strings(dirs)
 
@@ -128,8 +158,8 @@ func (s *Store) SnapshotContext(ctx context.Context, worktree string, task proje
 		if err != nil {
 			return nil, fmt.Errorf("declared output file %q missing: %w", rel, err)
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("declared output file %q is a symlink; declare its containing directory to preserve relative link layout", rel)
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("declared output file %q is not a regular file", rel)
 		}
 		if err := copier.Copy(ctx, filepath.Dir(src), src, filepath.Join(tmpEntryDir, "files", strconv.Itoa(i))); err != nil {
 			return nil, err
@@ -137,8 +167,10 @@ func (s *Store) SnapshotContext(ctx context.Context, worktree string, task proje
 	}
 	for i, rel := range dirs {
 		src := filepath.Join(worktree, rel)
-		if _, err := os.Stat(src); err != nil {
+		if info, err := os.Lstat(src); err != nil {
 			return nil, fmt.Errorf("declared output dir %q missing: %w", rel, err)
+		} else if !info.IsDir() {
+			return nil, fmt.Errorf("declared output dir %q is not a directory", rel)
 		}
 		if err := copier.Copy(ctx, src, src, filepath.Join(tmpEntryDir, "dirs", strconv.Itoa(i))); err != nil {
 			return nil, err
@@ -163,6 +195,9 @@ func (s *Store) SnapshotContext(ctx context.Context, worktree string, task proje
 	if err := jsonutil.WriteFileAtomic(filepath.Join(tmpEntryDir, "manifest.json"), manifest); err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := os.Rename(tmpEntryDir, entryDir); err != nil {
 		if existing, ok, loadErr := s.Load(task.Name, key); loadErr == nil && ok {
 			return existing, nil
@@ -178,8 +213,17 @@ func (s *Store) SnapshotContext(ctx context.Context, worktree string, task proje
 func classifyOutputs(worktree string, outputs project.Outputs) ([]string, []string, error) {
 	files := append([]string(nil), outputs.Files...)
 	dirs := append([]string(nil), outputs.Dirs...)
+	all := append(append(append([]string(nil), files...), dirs...), outputs.Paths...)
+	for _, rel := range all {
+		if err := validateOutputPath(rel); err != nil {
+			return nil, nil, err
+		}
+		if err := validateParents(worktree, filepath.Join(worktree, rel)); err != nil {
+			return nil, nil, err
+		}
+	}
 	for _, rel := range outputs.Paths {
-		info, err := os.Stat(filepath.Join(worktree, rel))
+		info, err := os.Lstat(filepath.Join(worktree, rel))
 		if err != nil {
 			return nil, nil, fmt.Errorf("declared output path %q missing: %w", rel, err)
 		}
@@ -187,6 +231,25 @@ func classifyOutputs(worktree string, outputs project.Outputs) ([]string, []stri
 			dirs = append(dirs, rel)
 		} else {
 			files = append(files, rel)
+		}
+	}
+	declared := Outputs{Files: files, Dirs: dirs}
+	if err := validateOutputs(declared); err != nil {
+		return nil, nil, err
+	}
+	// Validate every declaration before removing redundant children. A wrong
+	// file/dir declaration must not be hidden by a containing directory.
+	for _, output := range outputArtifacts(declared, "", false) {
+		if err := validateArtifact(filepath.Join(worktree, output.rel), output.directory); err != nil {
+			return nil, nil, fmt.Errorf("declared output %q: %w", output.rel, err)
+		}
+	}
+	files, dirs = nil, nil
+	for _, output := range outputArtifacts(declared, "", true) {
+		if output.directory {
+			dirs = append(dirs, output.rel)
+		} else {
+			files = append(files, output.rel)
 		}
 	}
 	return files, dirs, nil
@@ -197,41 +260,16 @@ func (s *Store) Restore(worktree string, taskName, key string) (bool, error) {
 }
 
 func (s *Store) RestoreContext(ctx context.Context, worktree string, taskName, key string, onProgress func(fsutil.CopyProgress)) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	manifest, ok, err := s.Load(taskName, key)
 	if err != nil || !ok {
 		return ok, err
 	}
 	entryDir := s.EntryDir(taskName, key)
 
-	for _, rel := range manifest.Outputs.Files {
-		if err := fsutil.RemoveIfExists(filepath.Join(worktree, rel)); err != nil {
-			_ = fsutil.RemoveAllWritable(entryDir)
-			return false, nil
-		}
-	}
-	for _, rel := range manifest.Outputs.Dirs {
-		if err := fsutil.RemoveIfExists(filepath.Join(worktree, rel)); err != nil {
-			_ = fsutil.RemoveAllWritable(entryDir)
-			return false, nil
-		}
-	}
-
-	copier := fsutil.NewCopier(fsutil.CopyOptions{OnProgress: onProgress})
-	for i, rel := range manifest.Outputs.Files {
-		src := filepath.Join(entryDir, "files", strconv.Itoa(i))
-		if err := copier.Copy(ctx, filepath.Dir(src), src, filepath.Join(worktree, rel)); err != nil {
-			_ = fsutil.RemoveAllWritable(entryDir)
-			return false, nil
-		}
-	}
-	for i, rel := range manifest.Outputs.Dirs {
-		src := filepath.Join(entryDir, "dirs", strconv.Itoa(i))
-		if err := copier.Copy(ctx, src, src, filepath.Join(worktree, rel)); err != nil {
-			_ = fsutil.RemoveAllWritable(entryDir)
-			return false, nil
-		}
-	}
-	return true, nil
+	return restoreOutputs(ctx, worktree, entryDir, manifest.Outputs, onProgress)
 }
 
 func (s *Store) List() ([]EntrySummary, error) {
@@ -280,7 +318,13 @@ func (s *Store) List() ([]EntrySummary, error) {
 func (s *Store) Invalidate(task string) error {
 	path := s.entriesRoot()
 	if task != "" {
+		if err := validateComponent("task", task); err != nil {
+			return err
+		}
 		path = filepath.Join(path, task)
+	}
+	if err := validateParents(s.Root, path); err != nil {
+		return err
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil

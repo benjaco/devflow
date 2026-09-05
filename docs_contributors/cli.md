@@ -78,6 +78,8 @@ Implemented `run` flags include:
 
 The final `RunResult` includes top-level failure text, failed-node name and log path, an optional bounded terminal tail, `failureExcerpts`, cache hit/miss lists, optional `repositoryChanges`, and the final run snapshot of every selected node. Downstream work skipped after a dependency failure is `blocked` with the dependency in `lastError`; unrelated interrupted work is `canceled`. Each node includes `durationMs`; cacheable nodes also include cache outcome plus key/read/write/manifest/total timing. `failureExcerpts` scans the log as a stream and recognizes Go `--- FAIL:` blocks and `*_test.go:line:` diagnostics, panic/fatal output, compiler keywords or `file.go:line:column:` locations, `AssertionError`, conventional error/failed-test summaries, and process-failure markers. It keeps up to five context lines before and 30 after, merges nearby windows, removes overlap between adjacent windows, and is capped at five windows, 200 total lines, 64 KiB total text, and 8 KiB per line. A window is omitted if the aggregate cap cannot retain its triggering marker. For an early service exit with no recognized marker, one `process-exit-tail` window keeps the last 12 meaningful bounded lines. Excerpts and the terminal tail use the same environment-secret/PostgreSQL-URL redaction. Empty logs still produce `[]`.
 
+Engine configuration failures, including cached tasks without output declarations, also produce one failed `RunResult` for `run --ci --json`. They return before instance configuration or task execution; `nodes` is empty, and `repositoryChanges` is present only when repository repair was requested.
+
 ### Atomic repository repair
 
 `run --ci --commit-changes` turns a successful finite DAG into one tightly scoped repository repair transaction:
@@ -109,7 +111,7 @@ When permitted material changes exist, Devflow runs Git directly without a comma
 
 Watch file matching is driven by adapter task inputs. Changed files directly affect tasks whose `Inputs.Files`, `Inputs.Dirs`, `Inputs.Globs`, or `Inputs.Filtered` paths match the changed paths, then the engine cascades through downstream tasks that are eligible to rerun in watch mode.
 
-The watcher is scoped to declared inputs in the selected target closure plus Devflow's flush sync directory. This keeps idle watch daemons from recursively polling unrelated dependency trees such as `node_modules`. If a project truly needs to watch a normally ignored directory, declare it as an input path.
+The watcher is scoped to declared inputs in the selected target closure plus Devflow's flush sync directory. Root-level globs such as `*.go` or `**/*.go`, and an explicit `.` input, scan from the worktree root while retaining default ignores. This keeps idle watch daemons from recursively polling unrelated dependency trees such as `node_modules`. If a project truly needs to watch a normally ignored directory, declare it as an input path.
 
 Watch cascades respect dependency barriers. If an intermediate task in the affected slice is not allowed to run in watch mode, downstream tasks past that intermediate are not run in that cycle.
 

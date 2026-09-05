@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -414,4 +415,121 @@ func containsString(items []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestRunnerWatchOnlyRetainsExplicitRoot(t *testing.T) {
+	for _, absolute := range []bool{false, true} {
+		t.Run(fmt.Sprintf("absolute=%t", absolute), func(t *testing.T) {
+			root := t.TempDir()
+			for _, rel := range []string{"main.go", "src/app.go", "node_modules/pkg/index.js", ".devflow/logs/task.log"} {
+				path := filepath.Join(root, filepath.FromSlash(rel))
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("initial"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			watchRoot := "."
+			if absolute {
+				watchRoot = root
+			}
+			runner, err := New(Options{Root: root, WatchOnly: true, WatchPaths: []string{watchRoot}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := runner.snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, rel := range []string{"main.go", "src/app.go"} {
+				if _, ok := before[rel]; !ok {
+					t.Errorf("root watch omitted %s", rel)
+				}
+			}
+			for _, rel := range []string{"node_modules/pkg/index.js", ".devflow/logs/task.log"} {
+				if _, ok := before[rel]; ok {
+					t.Errorf("root watch included ignored path %s", rel)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("changed source"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			after, err := runner.snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := changedFiles(before, after); !containsString(got, "main.go") {
+				t.Fatalf("root source edit was not detected: %v", got)
+			}
+		})
+	}
+}
+
+func TestRunnerRootWatchPreservesExplicitIgnoredSubtree(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "node_modules", "pkg", "index.js")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("module"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner, err := New(Options{Root: root, WatchOnly: true, WatchPaths: []string{".", "node_modules/pkg"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := runner.snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := snapshot["node_modules/pkg/index.js"]; !ok {
+		t.Fatal("root watch swallowed the explicit ignored subtree")
+	}
+}
+
+func TestRunnerCancellationUnblocksFullBatchQueue(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "input.txt")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		runner, err := New(Options{Root: root, PollInterval: time.Millisecond, Debounce: time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		batches, errs, err := runner.Start(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Drain only during cleanup: cancellation must work without a consumer.
+		defer func() {
+			cancel()
+			for range batches {
+			}
+		}()
+		for i := 0; i <= cap(batches); i++ {
+			if err := os.WriteFile(path, make([]byte, i+1), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(3 * time.Millisecond)
+			synctest.Wait()
+		}
+		if len(batches) != cap(batches) {
+			t.Fatalf("batch queue did not fill: %d/%d", len(batches), cap(batches))
+		}
+		cancel()
+		synctest.Wait()
+		select {
+		case err, ok := <-errs:
+			if ok {
+				t.Fatalf("unexpected watch error: %v", err)
+			}
+		default:
+			t.Fatal("watcher remains blocked delivering a batch after cancellation")
+		}
+	})
 }

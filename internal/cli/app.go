@@ -446,14 +446,14 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	}
 	eng, err := engine.New(execProject, root)
 	if err != nil {
+		result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, err)
 		if repairRunner != nil {
 			repositoryResult := repairRunner.SkippedDAGFailure()
-			result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, err)
 			result.RepositoryChanges = &repositoryResult
-			if jsonOut {
-				if writeErr := writeJSON(a.Stdout, result); writeErr != nil {
-					return writeErr
-				}
+		}
+		if jsonOut {
+			if writeErr := writeJSON(a.Stdout, result); writeErr != nil {
+				return writeErr
 			}
 		}
 		return err

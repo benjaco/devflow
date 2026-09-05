@@ -3,6 +3,7 @@ package project
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -64,5 +65,67 @@ func TestResolveExecutionProjectRejectsUnknownName(t *testing.T) {
 	_, _, err := ResolveExecutionProject(resolveExecutionProject{}, "missing")
 	if err == nil {
 		t.Fatal("expected error for unknown target or task")
+	}
+}
+
+func TestResolveExecutionProjectPreservesCacheNamespace(t *testing.T) {
+	base := Define(func(_ context.Context, b *Builder) error {
+		b.Name("demo")
+		b.CacheNamespace("shared-build-cache")
+		build := b.Task("build")
+		b.Target("all", build)
+		return nil
+	})
+	resolved, _, err := ResolveExecutionProject(base, "build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := CacheNamespace(resolved), CacheNamespace(base); got != want {
+		t.Fatalf("direct task uses cache namespace %q, declared target uses %q", got, want)
+	}
+}
+
+type concurrentDetectionProject struct {
+	resolveExecutionProject
+	worktree string
+}
+
+func (concurrentDetectionProject) Name() string { return "concurrent-detection-test" }
+func (p concurrentDetectionProject) DetectWorktree(worktree string) bool {
+	return worktree == p.worktree
+}
+
+func TestDetectConcurrentRegistration(t *testing.T) {
+	p := concurrentDetectionProject{worktree: t.TempDir()}
+	registryMu.RLock()
+	previous, existed := registry[p.Name()]
+	registryMu.RUnlock()
+	t.Cleanup(func() {
+		registryMu.Lock()
+		defer registryMu.Unlock()
+		if existed {
+			registry[p.Name()] = previous
+		} else {
+			delete(registry, p.Name())
+		}
+	})
+	Register(p)
+	var workers sync.WaitGroup
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		for range 1000 {
+			Register(p)
+		}
+	}()
+	defer workers.Wait()
+	for range 1000 {
+		detected, err := Detect(p.worktree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if detected.Name() != p.Name() {
+			t.Fatalf("detected %q, want %q", detected.Name(), p.Name())
+		}
 	}
 }

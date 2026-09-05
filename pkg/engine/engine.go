@@ -91,9 +91,17 @@ type watchOutputSuppressor struct {
 const watchOutputSuppressTTL = 2 * time.Second
 
 func New(p project.Project, worktree string) (*Engine, error) {
-	g, err := graph.New(p.Tasks(), p.Targets())
+	tasks := p.Tasks()
+	g, err := graph.New(tasks, p.Targets())
 	if err != nil {
 		return nil, err
+	}
+	// Keep graph inspection and validation able to diagnose this contract,
+	// but reject it before any execution or instance provisioning occurs.
+	for _, task := range tasks {
+		if task.Cache && len(task.Outputs.Paths)+len(task.Outputs.Files)+len(task.Outputs.Dirs) == 0 {
+			return nil, fmt.Errorf("cacheable task %q must declare outputs", task.Name)
+		}
 	}
 	pm, err := ports.NewDefaultForWorktree(worktree)
 	if err != nil {
@@ -334,6 +342,9 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 	})
 
 	if err := e.runReadyQueue(runCtx, cancel, baseRT, state, order); err != nil {
+		// Registered handles include non-process resources whose Stop method
+		// cannot be replaced by canceling the task context.
+		state.stopServices(req, sortedHandles(state.snapshotServices()))
 		result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 		result.DurationMs = time.Since(started).Milliseconds()
 		finalizeRunResult(&result, state, err)
@@ -714,7 +725,11 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 		restoreStarted := time.Now()
 		ok, restoreErr := e.cache.RestoreContext(ctx, rt.Worktree, task.Name, key, cacheCopyProgress(rt, "restore"))
 		readDuration := elapsedMilliseconds(restoreStarted)
-		if restoreErr == nil && ok {
+		if restoreErr != nil {
+			state.setErrorState(task.Name, ctx, key, restoreErr, 0)
+			return taskResult{name: task.Name, key: key, err: restoreErr}
+		}
+		if ok {
 			state.setCacheTiming(task.Name, api.CacheTiming{
 				Outcome:                        "hit",
 				KeyDurationMs:                  keyDuration,
@@ -783,6 +798,12 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 
 	taskRuntime, err := runTask(ctx, task, rt)
 	if err != nil {
+		if project.IsServiceKind(task.Kind) {
+			if handle, ok := state.serviceHandle(task.Name); ok {
+				_ = handle.Stop()
+				state.removeService(task.Name)
+			}
+		}
 		state.setErrorState(task.Name, ctx, "", err, 0)
 		return taskResult{name: task.Name, err: err}
 	}
@@ -829,6 +850,19 @@ func (e *Engine) awaitServiceReady(ctx context.Context, rt *project.Runtime, tas
 		case err := <-readyCh:
 			if err != nil {
 				return err
+			}
+			if err := readyCtx.Err(); err != nil {
+				return err
+			}
+			// A successful probe can race the process exit. Do not commit
+			// AfterReady state for a service that is already known to be dead.
+			select {
+			case err := <-exitCh:
+				return &serviceEarlyExitError{cause: err}
+			default:
+			}
+			if !handle.Alive() {
+				return &serviceEarlyExitError{}
 			}
 		case err := <-exitCh:
 			return &serviceEarlyExitError{cause: err}
@@ -2053,12 +2087,37 @@ func (e *Engine) evaluateFlushService(ctx context.Context, req Request, baseRT *
 	readyCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	rt := baseRT.WithTask(task.Name, instance.LogPath(req.Worktree, state.inst.ID, task.Name))
-	if err := task.Ready(readyCtx, rt); err != nil {
-		service.Error = err.Error()
-		return service
+	ready := make(chan error, 1)
+	go func() { ready <- task.Ready(readyCtx, rt) }()
+	// Flush can probe the same generation repeatedly. Poll Alive rather than
+	// creating another uncancelable handle.Wait goroutine for every probe.
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-ready:
+			if !handle.Alive() {
+				service.Alive = false
+				service.Error = "service is not alive"
+			} else if err != nil {
+				service.Error = err.Error()
+			} else if err := readyCtx.Err(); err != nil {
+				service.Error = err.Error()
+			} else {
+				service.Ready = true
+			}
+			return service
+		case <-readyCtx.Done():
+			service.Error = readyCtx.Err().Error()
+			return service
+		case <-ticker.C:
+			if !handle.Alive() {
+				service.Alive = false
+				service.Error = "service is not alive"
+				return service
+			}
+		}
 	}
-	service.Ready = true
-	return service
 }
 
 func flushTaskIssueKind(state api.NodeState) string {

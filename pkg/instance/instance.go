@@ -53,6 +53,8 @@ func Resolve(worktree, label string) (*api.Instance, error) {
 			return nil, err
 		}
 		return &inst, nil
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read instance state %s: %w", filepath.Join(path, "instance.json"), err)
 	}
 
 	inst = api.Instance{

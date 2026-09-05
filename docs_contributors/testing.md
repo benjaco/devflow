@@ -24,8 +24,12 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - fingerprint determinism, including custom callback fingerprints that remain executable rather than being JSON-serialized and task-signature normalization that does not mutate adapter task definitions
 - filtered file-content fingerprints, including semantic no-op edits, Go `@` comments, Go struct declarations with doc comments, in-memory filtered-hash reuse for unchanged files, and engine-level cache behavior where irrelevant edits restore cache while relevant filtered edits rerun the task
 - cache snapshot and restore semantics, including read-only directory modes, preserved pnpm-style internal relative symlinks, external-link rejection, bounded entry/byte limits, progress callbacks, and writable cleanup
+- cache restore output preservation for missing/corrupt artifacts and cancellation, invalid manifest/path rejection, file/directory declaration checks, duplicate/ancestor normalization, and rollback/retry after a later output replacement fails
 - cache-key override stability and correctness
+- rejection of outputless cached tasks before execution, while retaining outputless local stamps and the validator's structured `missing_output_declaration` issue
+- CI engine-preflight JSON failures with exactly one failed result, no repository-repair metadata unless requested, and no instance configuration, task execution, or worktree mutation
 - instance identity and env persistence
+- malformed persisted-instance rejection without rewriting state or runtime env; concurrent project registration/detection and direct-task cache-namespace preservation
 - port allocation and reuse
 - atomic JSON/runtime-env replacement under repeated concurrent writes, failed-marshalling preservation, owner-only Unix permissions, bounded Windows destination-sharing retry for both writers and concurrent JSON readers, cross-platform file-lock serialization, and non-blocking concurrent event fanout
 
@@ -40,11 +44,13 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - CI-mode service targets act as readiness probes and stop services before returning
 - Go debug-service coverage includes builder API metadata, external debug binary build planning, status attach metadata, stable debug-port readiness, watch restart sequencing, and process-tree cleanup through fake `go`/`dlv` helper binaries. CI also installs real Delve and runs real `dlv exec` coverage on Linux, macOS, and Windows for both CI-mode readiness/stop and watch-mode source-edit restart back into a debug service. The real watch restart test starts an HTTP app under Delve, verifies the first response body, edits the source constant, waits for the restart, and verifies the endpoint returns the new body. Real editor attach coverage remains opt-in until the debug-service contract is proven in real projects.
 - daemon lifecycle coverage for per-worktree daemon startup locking, CLI connection, daemon event persistence/fanout, daemon executable refresh after source/local binary changes, daemon log path creation, and preserving legacy supervisor/executor PIDs for later cleanup
+- daemon transport cancellation without a deadline, canceled handlers blocked on request reads, and idle subscription cleanup after client disconnect
 - task-scoped stop JSON/preview coverage proving the exact affected set and no mutation during preview
 - stop cleanup for daemon-owned work, daemon shutdown after `stop --all`, legacy supervisor/executor refs and descendants, tracked service, and stale status process groups
 - read-only `status` coverage proving stopped-state inspection does not start a daemon
 - `stop --all` cleanup for the instance-managed database container while preserving the volume
 - service readiness success and timeout behavior
+- service startup/dependent-task failure cleanup for PID-less handles, rejecting dead-service readiness before `AfterReady`, prompt exit detection and enforced callback deadlines during flush, and immediate-exit lifecycle restart diagnostics while preserving independent services
 - built-binary helper build/run/start coverage and cache-restore coverage
 - database runtime command planning and snapshot-manifest coverage, including cold-image pull ordering, configured image/volume reconciliation, custom container ports, custom snapshot sidecars, escaped DSNs, PostgreSQL 16/17/18 PostGIS amd64 pull/arm64 build selection, version-specific volume destinations, extension readiness, unsupported-version rejection, legacy default fallback, and pre-destructive cache misses for legacy/cross-architecture/cross-image physical snapshots
 - builder API coverage for command tasks, services, target definitions, automatic cacheability from outputs, port env references, dotenv loading, path inputs, glob inputs, and filtered inputs
@@ -72,6 +78,7 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work, plus explicit `migration_needed` task-state classification for database migration authoring guards
 - scheduler error preservation so a canceled sibling does not replace the first actionable task failure with `context canceled`
 - polling watch batching, declared-input watch scoping including filtered-input glob bases, default `node_modules` ignore behavior, repeated flush-sentinel retouch debounce behavior, and selective watch reruns. Tests that edit files after startup should wait for the engine `watch.ready` marker before writing; initial task counters alone do not prove the polling watcher baseline has started.
+- root-level glob and explicit `.` watch inputs, preserved default ignores plus explicitly selected ignored subtrees, and cancellation while the batch queue is full; use virtual time for the queue regression so it proves shutdown without consuming buffered batches
 - graph affected explanations for path, file, directory, glob, filtered, ignored, and unmatched paths
 - watch cascade pruning so downstream tasks do not run past warmups or services that are blocked from watch execution, including full watch execution and mixed blocked/allowed branch coverage
 - watch service restart policies, including `RestartAlways` selection and full watch execution behavior

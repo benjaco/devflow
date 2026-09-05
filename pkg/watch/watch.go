@@ -71,7 +71,16 @@ func New(opts Options) (*Runner, error) {
 	ignorePaths = append(ignorePaths, opts.IgnorePaths...)
 	watchPaths := normalizeIncludePaths(root, opts.WatchPaths)
 	includePaths := normalizeIncludePaths(root, opts.IncludePaths)
-	explicitPaths := append(append([]string{}, includePaths...), watchPaths...)
+	explicitPaths := make([]string, 0, len(includePaths)+len(watchPaths))
+	for _, paths := range [][]string{includePaths, watchPaths} {
+		for _, path := range paths {
+			// Root-level inputs and globs require a root scan, but do not
+			// opt every ignored subtree into watching.
+			if path != "." {
+				explicitPaths = append(explicitPaths, path)
+			}
+		}
+	}
 	return &Runner{
 		root:          root,
 		debounce:      debounce,
@@ -110,6 +119,11 @@ func (r *Runner) Start(ctx context.Context) (<-chan Batch, <-chan error, error) 
 		)
 		ticker := time.NewTicker(r.pollInterval)
 		defer ticker.Stop()
+		defer func() {
+			if timer != nil {
+				timer.Stop()
+			}
+		}()
 
 		flush := func() {
 			if len(pending) == 0 {
@@ -120,10 +134,15 @@ func (r *Runner) Start(ctx context.Context) (<-chan Batch, <-chan error, error) 
 				files = append(files, file)
 			}
 			sort.Strings(files)
-			batches <- Batch{
+			batch := Batch{
 				Files:      files,
 				StartedAt:  startedAt,
 				FinishedAt: time.Now().UTC(),
+			}
+			select {
+			case batches <- batch:
+			case <-ctx.Done():
+				return
 			}
 			pending = map[string]bool{}
 			startedAt = time.Time{}
@@ -313,7 +332,7 @@ func normalizeIncludePaths(root string, paths []string) []string {
 			path = rel
 		}
 		path = filepath.ToSlash(filepath.Clean(path))
-		if path == "." || path == "" || strings.HasPrefix(path, "../") || path == ".." {
+		if path == "" || strings.HasPrefix(path, "../") || path == ".." {
 			continue
 		}
 		if seen[path] {
@@ -325,7 +344,9 @@ func normalizeIncludePaths(root string, paths []string) []string {
 	sort.Strings(out)
 	compacted := make([]string, 0, len(out))
 	for _, path := range out {
-		if pathIncluded(path, compacted) {
+		// Preserve explicit subtrees beside a root scan, since the root
+		// scan skips ignored directories that these paths can opt into.
+		if scanRootCovered(path, compacted) {
 			continue
 		}
 		compacted = append(compacted, path)

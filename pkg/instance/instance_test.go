@@ -30,6 +30,48 @@ func TestResolveSameWorktreeSameInstance(t *testing.T) {
 	}
 }
 
+func TestResolvePreservesUnreadableState(t *testing.T) {
+	for _, contents := range []string{`{"id":`, `{"ports":"invalid"}`} {
+		t.Run(contents, func(t *testing.T) {
+			cacheRoot := t.TempDir()
+			t.Setenv("HOME", cacheRoot)
+			t.Setenv("XDG_CACHE_HOME", cacheRoot)
+			t.Setenv("LOCALAPPDATA", cacheRoot)
+			worktree := t.TempDir()
+			inst, err := Resolve(worktree, "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			inst.Env["RECOVERY_VALUE"] = "keep-me"
+			if err := Save(inst); err != nil {
+				t.Fatal(err)
+			}
+			statePath := filepath.Join(instancePath(inst.Worktree, inst.ID), "instance.json")
+			envPath := filepath.Join(instancePath(inst.Worktree, inst.ID), "runtime.env")
+			if err := os.WriteFile(statePath, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Resolve(worktree, "replacement"); err == nil {
+				t.Error("Resolve silently replaced invalid persisted state")
+			}
+			state, err := os.ReadFile(statePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(state) != contents {
+				t.Errorf("invalid persisted state was overwritten: %q", state)
+			}
+			env, err := os.ReadFile(envPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(env) != "RECOVERY_VALUE=keep-me\n" {
+				t.Errorf("recovery environment was overwritten: %q", env)
+			}
+		})
+	}
+}
+
 func TestStopDaemonWorkDoesNotReportAbsentProcess(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	worktree := t.TempDir()

@@ -193,6 +193,8 @@ func SetStartDaemonFuncForTest(fn func(worktree, instanceID, projectName string)
 }
 
 func Serve(ctx context.Context, opts Options) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	root, id, err := resolveWorktreeAndID(opts.Worktree)
 	if err != nil {
 		return err
@@ -355,17 +357,25 @@ func (c *Client) Call(ctx context.Context, req Request, onEvent ...func(api.Even
 		return Response{}, err
 	}
 	defer conn.Close()
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancel()
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)
 	if err := enc.Encode(req); err != nil {
+		if ctx.Err() != nil {
+			return Response{}, ctx.Err()
+		}
 		return Response{}, err
 	}
 	for {
 		var fr frame
 		if err := dec.Decode(&fr); err != nil {
+			if ctx.Err() != nil {
+				return Response{}, ctx.Err()
+			}
 			return Response{}, err
 		}
 		if fr.Type == "event" && fr.Event != nil {
@@ -609,6 +619,8 @@ func daemonLockPath(worktree, instanceID string) string {
 
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancel()
 	dec := json.NewDecoder(conn)
 	enc := json.NewEncoder(conn)
 	var writeMu sync.Mutex
@@ -627,9 +639,20 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	if req.Action == ActionSubscribe {
 		ch := s.addSubscriber()
 		defer s.removeSubscriber(ch)
+		// Subscriptions have no further client frames. Observe the read side
+		// so disconnecting an idle client releases its subscription immediately,
+		// even if no later event would expose a failed write.
+		disconnected := make(chan struct{})
+		go func() {
+			var unexpected frame
+			_ = dec.Decode(&unexpected)
+			close(disconnected)
+		}()
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-disconnected:
 				return
 			case evt := <-ch:
 				if err := writeFrame(frame{Type: "event", ID: req.ID, Event: &evt}); err != nil {

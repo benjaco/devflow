@@ -90,7 +90,7 @@ Task cache storage is global for the user:
 Entries are namespaced inside that physical cache root:
 - `entries/<project-cache-namespace>/<task>/<fingerprint-key>/`
 
-Projects can implement `CacheNamespace() string`; otherwise the project name is used. This keeps one cache folder on the system while avoiding accidental collisions between project adapters.
+Projects can implement `CacheNamespace() string`; otherwise the project name is used. This keeps one cache folder on the system while avoiding accidental collisions between project adapters. Resolving an individual task as a synthetic target preserves the project's cache namespace, so direct task commands and declared targets share the same cache entries.
 
 Repo-shared coordination state for sibling git worktrees still lives under the Git common dir from:
 - `git rev-parse --git-common-dir`
@@ -103,9 +103,13 @@ Global coordination state that is not repo-specific still lives under the user c
 
 The daemon Unix socket lives in a short per-user temp directory such as `/tmp/devflow-daemon-<uid>/<instance-id>.sock`. It is intentionally not stored under deeply nested worktree paths because Unix socket path length limits are easy to hit on macOS. Request/response clients acknowledge each terminal response after decoding it, and the daemon waits for that acknowledgment with a short bound before closing the connection. The acknowledgment is best-effort in both directions so upgraded clients and daemons remain compatible with older peers. This delivery handshake prevents Windows Unix-domain sockets from dropping an immediate final response when the server closes directly after writing it.
 
+Client cancellation closes blocked socket I/O even when the context has no deadline. Server shutdown also closes connections waiting for requests, and an idle observer disconnect unregisters its subscription without waiting for another event. Disconnecting a caller does not change daemon ownership of active workflows.
+
 This split keeps runtime logs and instance state local to the worktree, keeps task cache globally reusable, keeps port allocation coordinated for sibling git worktrees, and keeps socket paths short enough for real terminals and test worktrees.
 
 Structured state files and `runtime.env` are replaced through unique temporary files in the same directory so a failed or concurrent write cannot expose a partially truncated destination. Same-destination replacements are serialized within a process. On Windows, the final `MoveFileEx(..., REPLACE_EXISTING)` operation and JSON readers both retry bounded transient access, sharing, and lock violations because concurrent daemon/engine operations and file scanners can briefly hold the destination. The existing destination is never removed first, so readers still see either the old complete file or the new complete file. On Unix-like systems these persisted files are owner-readable/writable only (`0600`), because instance JSON and runtime env can contain local database credentials or other sensitive development values. This is local hardening, not encryption.
+
+Instance resolution creates state only when `instance.json` is absent. Unreadable or malformed existing state returns a contextual error and preserves both that file and `runtime.env`, so a recovery attempt cannot silently discard persisted configuration or service references.
 
 Task, daemon, TUI, and event-stream log files are also created and repaired to owner-only `0600` permissions on Unix-like systems. They can contain command output, errors, or panic data derived from runtime configuration and must not default to group/world-readable files.
 
@@ -433,6 +437,14 @@ Managed Postgres target pattern:
 
 Do not unconditionally remove the DB container in normal startup. Docker port mappings are immutable, so `EnsureRuntime` removes and recreates only stale containers with a wrong published port while preserving the volume.
 
+## Cache Restore Safety
+
+Cacheable tasks must declare at least one output; engine construction rejects outputless cached tasks before execution or instance provisioning. Graph inspection remains available, and `validate --json` retains its structured `missing_output_declaration` issue. Local install stamps may still omit outputs. Snapshotting checks output path containment and file/directory kinds before publication. Cache manifests must match the supported version, task, key, and nonempty output declarations. Paths cannot escape the worktree, traverse symlink parents, or replace the worktree root, `.git`, or `.devflow` itself; existing `.devflow` child outputs remain supported.
+
+Restore validates cached artifacts and stages complete copies under a unique `.devflow/cache-restore-*` directory before replacing any output. Duplicate and descendant declarations normalize to the containing output, including entries written by older versions. Publication retains existing outputs as backups and rolls back completed replacements if a later replacement fails. If rollback itself fails, the returned error identifies the retained recovery directory. Cancellation and damaged entries leave existing outputs intact before publication; ordinary cache corruption is a miss, while filesystem or cancellation errors propagate to the engine instead of silently executing the task.
+
+Staging and output paths must be on the same filesystem; outputs on a separate mounted filesystem fail with their originals retained. This provides rollback for failures observed during the operation, not a crash-atomic transaction across multiple paths. A hard process or machine crash during publication can leave the staging directory and backups for recovery.
+
 ## Cache Keys
 
 The default cache key is derived automatically from:
@@ -610,6 +622,10 @@ Semantics:
 - `AfterReady`, when defined, runs after readiness and before the task is marked running; it requires an explicit readiness function
 - if readiness fails, times out, or the process exits first, the task becomes `failed`
 - a failed readiness or `AfterReady` attempt stops the service process before returning
+- a readiness probe that succeeds after the handle is already dead must fail before `AfterReady` can commit per-start state
+- a service task that registers a handle and then fails startup still has that handle stopped; failed finite runs also stop previously ready services before returning, including PID-less resources
+
+Flush health checks enforce the readiness deadline independently of the adapter callback and stop waiting promptly when the service dies. They recheck liveness after a successful probe and do not invoke `AfterReady`. Repeated flushes poll registered-handle liveness instead of accumulating `Wait` goroutines for the same service. Adapter callbacks should honor their context so canceled probes release their own resources.
 
 The current helper surface includes:
 - `ReadyAll(...)`
@@ -658,6 +674,8 @@ The additive `RunResult.repositoryChanges` object is the audit surface. It carri
 ## Watch Mode
 
 Watch mode uses a polling watcher with debounced batches. The engine scopes the watcher to the selected target closure's declared file inputs plus the flush sync directory. It does not intentionally poll the whole worktree when the closure has concrete `Inputs(...)`, `Files`, `Dirs`, or `Globs`; common heavyweight folders such as `node_modules` are ignored by default unless explicitly watched by an input path.
+
+An explicit `.` input or a glob without a literal directory prefix requires a root scan, including when the watcher is restricted to declared inputs. That root scan retains the default ignores; separately declared paths under ignored directories remain explicit scan roots. Batch delivery applies backpressure while running, but cancellation interrupts a full batch queue and releases the watcher without requiring its consumer to drain it.
 
 On each batch:
 - changed files are mapped to task inputs

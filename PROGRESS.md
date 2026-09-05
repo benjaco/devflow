@@ -1,18 +1,31 @@
 # Progress
 
-Last updated: 2026-09-04
+Last updated: 2026-09-05
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: Go 1.27.1 baseline, Delve 1.27.1 alignment, and Windows daemon-response delivery hardening are implemented; the Windows fix is CI-confirmed and the Delve patch alignment is locally verified
-- Confidence: repeated focused coverage, full default/race suites, real Delve lifecycle coverage, quality/security gates, Windows amd64/arm64 compilation, and successful native Windows CI for the response fix; the Delve v1.27.1 pin awaits the next CI run
+- State: core reliability review completed across cache recovery, service lifecycle, daemon cancellation, persisted state, watch polling, project registry, and CI error reporting; Go 1.27.1 and Delve 1.27.1 remain the baseline
+- Confidence: new regressions reproduce the reviewed defects; full default/race suites, examples, quality/security gates, native build/version JSON smoke, and Windows/Linux amd64 compilation pass. Native CI and opt-in Docker/PTY checks remain separate verification lanes.
 
 ## In Progress
 
 - None.
 
 ## Completed
+
+- Core reliability review:
+  - cache restore validates manifests/paths/artifact kinds, stages complete copies before output replacement, and retains backups for rollback; corruption, cancellation, and failed publication have output-preservation regressions
+  - preserved redundant output declarations, internal relative symlinks, read-only modes, legacy manifest indexes, and Unix colon names; operational restore errors now fail execution explicitly
+  - reject outputless cached tasks before execution while retaining local stamp semantics, graph inspection, and the validator's structured `missing_output_declaration` issue
+  - failed runs and failed service startups clean up registered handles, including PID-less resources; readiness rejects already-dead services and flush enforces timeout/exit detection
+  - daemon cancellation interrupts blocked socket I/O without a deadline, canceled request handlers close, and idle disconnected subscribers unregister
+  - unreadable/malformed instance state reports an error without overwriting persisted state or runtime env
+  - root-level input globs and explicit root watches now observe edits while retaining default ignores; full watcher queues no longer prevent cancellation
+  - project detection snapshots the registry under its mutex, and direct task execution preserves the project's cache namespace
+  - CI engine-preflight errors emit one failed JSON result without requiring repository repair or mutating the worktree
+  - updated architecture, CLI, adapter, testing, and durable memory docs; added regressions and kept the executing daemon cache fixture isolated with a real declared artifact and joined cleanup
+  - verified `go test ./...`, `go test -race ./...`, vet, Staticcheck v0.8.1, govulncheck v1.6.0, clean module metadata/format/diff checks, examples, native build/version JSON smoke, and Windows/Linux amd64 affected-package test compilation and CLI builds
 
 - Preview URL display hostname normalization:
   - changed daemon status URLs and TUI preview/header URLs to render `http://localhost:<port>` instead of `http://127.0.0.1:<port>` while preserving the underlying loopback bind/listen addresses and non-preview host metadata
@@ -899,6 +912,7 @@ Last updated: 2026-09-04
 
 ## Next Steps
 
+- Confirm the reliability changes on the native Linux/macOS/Windows CI matrix; retest the historical readiness symptom through the real daemon/TUI only if it recurs (the engine early-exit restart regression passes).
 - Confirm the Delve v1.27.1 pin on the next native Linux/macOS/Windows GitHub Actions run
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
 - Convert bundled example adapters to the builder/component API so source examples match the new user-facing shape
@@ -908,8 +922,9 @@ Last updated: 2026-09-04
 
 ## Deferred / Known Gaps
 
+- Cache restore rollback covers reported operation failures, not abrupt process/machine crashes; staging and output roots must share a filesystem. Failed rollback retains a recovery directory and reports its path.
 - Publishing maintained multi-architecture PostGIS images remains deferred until the project defines a registry, image provenance/signing, PostgreSQL/PostGIS patch cadence, and release ownership; native arm64 local builds remain the supported fallback
 - Round-1 release flow deliberately has no binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable
-- A real PTY rerun of a service whose process exits immediately while its custom readiness callback waits only on context remained at `rerun running` for more than eight seconds, despite status already exposing the failed process and bounded excerpt. This was discovered during R2-07 and is deliberately deferred to a focused lifecycle follow-up; restart readiness should race process exit and return the existing bounded failure promptly.
+- The historical R2-07 PTY rerun remained at `rerun running` after an immediate service exit. The new engine-level regression confirms prompt restart failure, readiness cancellation, terminal excerpts, and preservation of independent services, including before this review's fixes. No new PTY session was run; the original daemon/TUI symptom remains a separate follow-up if it recurs.
 - The example adapter still uses a deterministic fake-DB path in normal tests; the full real Docker-backed module suite remains opt-in, while the focused PostGIS case is required in CI on native Linux amd64/arm64
 - The `embedded-web-app` adapter is manually validated against a local repo for build, DB prep, detached runtime, health, and shutdown flows. Its shared production container supervision now has real Docker-backed package coverage; a full adapter-level Docker smoke remains manual, as does richer control UX.

@@ -63,10 +63,17 @@ func Names() []string {
 
 func Detect(worktree string) (Project, error) {
 	worktree = filepath.Clean(worktree)
-	names := Names()
+	registryMu.RLock()
+	projects := make([]Project, 0, len(registry))
+	for _, p := range registry {
+		projects = append(projects, p)
+	}
+	registryMu.RUnlock()
+	// Adapter callbacks run outside the registry lock so they can safely
+	// perform lookups or register another project.
+	sort.Slice(projects, func(i, j int) bool { return projects[i].Name() < projects[j].Name() })
 	matches := make([]Project, 0, 1)
-	for _, name := range names {
-		p := registry[name]
+	for _, p := range projects {
 		detector, ok := p.(WorktreeDetector)
 		if !ok {
 			continue
@@ -141,6 +148,9 @@ func ResolveExecutionProject(p Project, target string) (Project, string, error) 
 
 func (p syntheticTargetProject) Name() string  { return p.base.Name() }
 func (p syntheticTargetProject) Tasks() []Task { return p.base.Tasks() }
+func (p syntheticTargetProject) CacheNamespace() string {
+	return CacheNamespace(p.base)
+}
 func (p syntheticTargetProject) ConfigureInstance(ctx context.Context, worktree string) (InstanceConfig, error) {
 	return p.base.ConfigureInstance(ctx, worktree)
 }
