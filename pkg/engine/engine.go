@@ -19,6 +19,7 @@ import (
 	"github.com/benjaco/devflow/internal/executionconflict"
 	"github.com/benjaco/devflow/internal/executionstate"
 	"github.com/benjaco/devflow/internal/fsutil"
+	"github.com/benjaco/devflow/internal/taskexec"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/cache"
 	"github.com/benjaco/devflow/pkg/event"
@@ -696,7 +697,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			}
 		}
 		beginOutputs()
-		_, runErr := runTask(ctx, task, rt)
+		_, runErr := taskexec.Run(ctx, task, rt)
 		completeOutputs()
 		if runErr != nil {
 			state.setErrorState(task.Name, ctx, key, runErr, 0)
@@ -775,7 +776,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			CacheKey:   key,
 		})
 		beginOutputs()
-		_, runErr := runTask(ctx, task, rt)
+		_, runErr := taskexec.Run(ctx, task, rt)
 		// Cache persistence can be slow; edits after the producer returns must
 		// not be attributed to it while its artifacts are being copied.
 		completeOutputs()
@@ -804,7 +805,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 	}
 
 	beginOutputs()
-	taskRuntime, err := runTask(ctx, task, rt)
+	taskRuntime, err := taskexec.Run(ctx, task, rt)
 	if !project.IsServiceKind(task.Kind) {
 		completeOutputs()
 	}
@@ -902,22 +903,6 @@ func (e *serviceEarlyExitError) Unwrap() error {
 		return nil
 	}
 	return e.cause
-}
-
-func runTask(ctx context.Context, task project.Task, rt *project.Runtime) (*project.Runtime, error) {
-	taskRuntime := rt
-	if task.BeforeRun != nil {
-		clone := *rt
-		clone.Env = rt.CloneEnv()
-		taskRuntime = &clone
-		if err := task.BeforeRun(ctx, taskRuntime); err != nil {
-			return taskRuntime, err
-		}
-	}
-	if task.Run == nil {
-		return taskRuntime, nil
-	}
-	return taskRuntime, task.Run(ctx, taskRuntime)
 }
 
 func truncateTaskLog(rt *project.Runtime) error {

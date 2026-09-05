@@ -127,6 +127,8 @@ JSON defaults to `--details issues`: use exact count fields for totals, `samples
 
 Validation bypasses caches/stamps and runs tasks repeatedly in disposable worktree sandboxes. Phase/counter progress goes to stderr while the single final JSON stays on stdout. Check `metrics` for cumulative files/logical bytes, current/peak temporary storage, measured physical allocation where `temporaryPhysicalBytesMeasured=true`, remaining limits, and phase timing. A `resourceFailure` identifies the phase and exceeded budget/disk reserve. It rejects service/debug-service targets and does not isolate databases, networks, global caches, absolute paths, or unregistered background processes, so agents must choose finite targets with safe external effects.
 
+Validation includes each task's `BeforeRun` and optional `Run`, including hook-only tasks. Hook-provided runtime environment values stay local to the task, and a failing hook prevents `Run`. Artifact findings include final hook writes; task/order errors and captured logs include hook diagnostics. Treat those failures as evidence about the complete callback sequence. Prompts fail immediately, and service readiness and `AfterReady` are outside this finite validation path. A finite task that registers supervised handles fails validation; inspect its error for cleanup failures as well as the callback failure before assuming those resources stopped.
+
 `AGENTS.md` documents repository rules for coding agents. Future milestones can add project skills under `agents/skills/`.
 
 For agents contributing to this repository, `docs_contributors/agent-memory.md` is shared long-term project memory. Read it before substantial work and update it when durable project context, mental models, or recurring constraints change.

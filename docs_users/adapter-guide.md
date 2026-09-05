@@ -705,13 +705,17 @@ JSON validation defaults to `issues`, which preserves exact counts and returns b
 
 Artifact mode projects the filesystem separately for every task. Explicit `Inputs(...)`, file/dir/glob/filtered inputs, and normal ignore rules select source files. Declared outputs from every transitive dependency are also materialized, so a consumer does not need to duplicate its producer's output path as a file input merely to receive the dependency artifact. Only declared outputs are archived for downstream tasks.
 
-After the task returns, validation compares filesystem snapshots. A final changed file outside `Outputs(...)`, `OutputFiles(...)`, or `OutputDirs(...)` is an `undeclared_output`; a missing or wrong-kind declaration is a `missing_output`. If the task cannot run in the projected worktree, it is reported as `task_failed_with_projected_inputs`. That failure can still be an ordinary command failure, so inspect its captured log before assuming the absent declaration is the only cause.
+Both validation modes use the same `BeforeRun` then optional `Run` sequence as normal execution. A finite task can do all its work in `BeforeRun`. A hook failure prevents `Run`; hook logs and errors appear in the task's failure evidence. Declare the files a hook reads and writes just as you would for `Run`. Hook-provided values in `rt.Env` reach that task's `Run`, while siblings retain their original environment. This clones the task runtime value and its environment map only: keep task-scoped changes in `rt.Env`, and avoid mutating shared `rt.Instance.Env` or adapter globals.
+
+After both callbacks return, or a hook fails, artifact validation compares filesystem snapshots. A final changed file outside `Outputs(...)`, `OutputFiles(...)`, or `OutputDirs(...)` is an `undeclared_output`; a missing or wrong-kind declaration is a `missing_output`. If the task cannot run in the projected worktree, it is reported as `task_failed_with_projected_inputs`. That failure can still be an ordinary command or hook failure, so inspect its captured log before assuming the absent declaration is the only cause.
 
 Order mode starts each permutation with all ordinary worktree source files, but removes `.git`, `.devflow`, and declared generated outputs. It runs each topological order sequentially with caches and stamps bypassed. Producer outputs that are also that producer's inputs are restored for in-place transformations. All permutations must produce the same final declared-output snapshot.
 
 Adapter rules exposed by validation:
 
 - a target closure must be finite; services and debug services are not permutation-testable
+- validation does not run service readiness or `AfterReady`; prompts from hooks or `Run` fail immediately
+- a finite task that registers supervised handles fails validation; Devflow attempts to stop every handle, including after hook failure, and reports stop failures alongside the original task error
 - different tasks must not own overlapping output paths
 - input/output declarations must be worktree-relative and cannot point into `.git` or `.devflow`
 - the worktree root cannot be an output

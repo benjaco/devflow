@@ -1,6 +1,6 @@
 # Agent verification: assessment and implementation plan
 
-Status: all seven items approved for sequential implementation with user review after each item. Item 1 and its CI correction are accepted; item 2 is implemented and locally verified, awaiting review. See [ownership evidence](execution-ownership-verification.md), [freshness evidence](watch-freshness-verification.md) and `PROGRESS.md`. Items 3–7 remain queued. The original assessment below was made on 2026-09-05 against `a7fe4f8`, one commit after the supplied review's `b46220f`; source references describe that baseline and may move. This does not establish which binary is installed in the external project.
+Status: all seven items approved for sequential implementation with user review after each item. Items 1–2 and their CI corrections are accepted; item 3 is implemented and locally verified, awaiting review. See [ownership evidence](execution-ownership-verification.md), [freshness evidence](watch-freshness-verification.md), [lifecycle evidence](validation-lifecycle-verification.md) and `PROGRESS.md`. Items 4–7 remain queued. The original assessment below was made on 2026-09-05 against `a7fe4f8`, one commit after the supplied review's `b46220f`; source references describe that baseline and may move. This does not establish which binary is installed in the external project.
 
 User review policy: implement one item at a time and stop for review. Devflow is current-only: update current callers and docs directly, remove retired APIs/state readers, and clear disposable task artifacts after successful upgrades instead of maintaining migrations. Older adapter compilation is not guaranteed. This supersedes the compatibility-preservation assumptions in the original assessment.
 
@@ -177,7 +177,7 @@ Acceptance: large healthy graph produces bounded requested summaries; failures r
 
 ## Delivery and verification
 
-Review item 2 freshness next, then deliver item 3 lifecycle parity separately. Continue with identity/input/error contracts, metadata/planning and compact retrieval in the sequence above; stop after each approved item for review.
+Review item 3 lifecycle parity next, then deliver item 4 log/error-path fixes separately. Continue with identity/input/error contracts, metadata/planning and compact retrieval in the sequence above; stop after each approved item for review.
 
 Each change needs its targeted failing regression, subsystem docs, current JSON contract coverage where relevant, examples that still build, `go test ./...`, `go test -race ./...`, vet and the repository quality gates. Cross-process ownership/cancellation/log behavior needs native Linux/macOS/Windows CI; compilation alone cannot prove those behaviors. Use opt-in Docker coverage when resource ownership affects managed containers and a real daemon/TUI smoke for action interruption and prompt recovery.
 

@@ -5,14 +5,22 @@ Last updated: 2026-09-06
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: item 2 Windows scanner test correction implemented and locally verified; startup/flush freshness remains under review. Items 3–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: Actions run `33995892365` passed Linux/macOS, race, quality/security and both Docker jobs; Windows failed only the two scanner error-fixture cases. The corrected watcher suite passes normally and under race, plus vet, Staticcheck, formatting/diff checks and Windows amd64 test compilation. Native Windows execution of the correction awaits CI.
+- State: item 2 and its Windows correction accepted; item 3 (validation lifecycle parity) implemented and locally verified; awaiting user review. Items 4–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: item 3 full default/race suites and examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0, module/format/diff checks, version JSON and Linux/Windows compilation pass. Native CI has not run this local change. The previous Windows correction was accepted at `f55be34`.
 
 ## In Progress
 
-- Await review and the next Windows CI run for the test-only correction. Item 2 is committed through `58fe3f6`; this correction remains local. Item 3 has not started.
+- Await user review of item 3 and its recorded red-to-green evidence. Changes remain local and uncommitted; item 4 has not started.
 
 ## Completed
+
+- Agent-verification item 3 — validation lifecycle parity:
+  - shared `BeforeRun` then optional `Run` through `internal/taskexec.Run`, removed the engine-local implementation, and kept the effective runtime available to service readiness
+  - validation now executes hook-only tasks, passes hook-local environment to `Run`, prevents `Run` after hook failure and includes hook writes/logs in existing artifact/order evidence
+  - retained validation sandbox/budget/prompt/service restrictions and engine cache/stamp/status/readiness boundaries; cleanup attempts every registered handle and preserves callback, Stop and still-alive diagnostics
+  - recorded observed pre-fix failures for both validation modes and nine CLI cases, plus additional cleanup/cancellation/engine guards, in `docs_contributors/validation-lifecycle-verification.md`; updated subsystem docs, shared memory and roadmap
+  - passed `go test -count=1 ./...`, `go test -race -count=1 ./...` and examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), module/format/diff checks, version JSON and Linux/Windows amd64 engine/validation/CLI test-binary and CLI compilation
+  - local changes only; no commits, pushes, installs, existing-service operations or external-project changes. Stop for review before item 4
 
 - Windows scanner test CI correction:
   - [run `33995892365`, job `101386261330`](https://github.com/benjaco/devflow/actions/runs/33995892365/job/101386261330) at `58fe3f6` failed only the walk/info `not_directory` cases in `TestScanEntryHandlesConcurrentDisappearance`; other Windows packages and all other jobs passed
@@ -962,7 +970,7 @@ Last updated: 2026-09-06
 
 ## Next Steps
 
-- Review item 2 and its final corrections, then implement item 3 (validation lifecycle parity) test-first; continue the approved plan one item at a time with review after each.
+- Review item 3 (validation lifecycle parity), then implement item 4 (log following and JSON error paths) test-first; continue the approved plan one item at a time with review after each.
 - Confirm the reliability changes on the native Linux/macOS/Windows CI matrix; retest the historical readiness symptom through the real daemon/TUI only if it recurs (the engine early-exit restart regression passes).
 - Confirm the Delve v1.27.1 pin on the next native Linux/macOS/Windows GitHub Actions run
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
