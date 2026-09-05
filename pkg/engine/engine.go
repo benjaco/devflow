@@ -164,6 +164,11 @@ func (e *Engine) Watch(ctx context.Context, req Request) (runErr error) {
 		finalizeRunResult(&result, state, runErr)
 		e.publishRunFinished(result, req.Worktree, result.Error)
 	}()
+	readyPath := instance.FlushWatchReadyPath(req.Worktree, inst.ID)
+	if err := os.Remove(readyPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	defer os.Remove(readyPath)
 	e.publish(api.Event{
 		TS: process.NowRFC3339Nano(), Type: api.EventRunStarted,
 		InstanceID: inst.ID, Worktree: req.Worktree, Target: req.Target, Mode: req.Mode,
@@ -240,11 +245,9 @@ func (e *Engine) Watch(ctx context.Context, req Request) (runErr error) {
 	if err := reconcile(watch.Batch{}); err != nil {
 		return err
 	}
-	readyPath := instance.FlushWatchReadyPath(req.Worktree, inst.ID)
 	if err := os.WriteFile(readyPath, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o600); err != nil {
 		return err
 	}
-	defer os.Remove(readyPath)
 	for {
 		select {
 		case <-ctx.Done():
@@ -652,10 +655,14 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			finishOutputs = beginWatchOutputs(ctx, rt.Worktree, task.Outputs)
 		}
 	}
-	defer func() {
+	completeOutputs := func() {
 		if finishOutputs != nil {
 			state.recordWatchOutputs(finishOutputs())
+			finishOutputs = nil
 		}
+	}
+	defer func() {
+		completeOutputs()
 		if result.err == nil {
 			state.clearWatchBlocked(task.Name)
 		}
@@ -689,9 +696,11 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			}
 		}
 		beginOutputs()
-		if _, err := runTask(ctx, task, rt); err != nil {
-			state.setErrorState(task.Name, ctx, key, err, 0)
-			return taskResult{name: task.Name, key: key, err: err}
+		_, runErr := runTask(ctx, task, rt)
+		completeOutputs()
+		if runErr != nil {
+			state.setErrorState(task.Name, ctx, key, runErr, 0)
+			return taskResult{name: task.Name, key: key, err: runErr}
 		}
 		if err := instance.WriteTaskStamp(rt.Worktree, state.inst.ID, task.Name, key); err != nil {
 			state.setErrorState(task.Name, ctx, key, err, 0)
@@ -722,6 +731,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			return taskResult{name: task.Name, key: key, err: restoreErr}
 		}
 		if ok {
+			completeOutputs()
 			state.setCacheTiming(task.Name, api.CacheTiming{
 				Outcome:                        "hit",
 				KeyDurationMs:                  keyDuration,
@@ -765,9 +775,13 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			CacheKey:   key,
 		})
 		beginOutputs()
-		if _, err := runTask(ctx, task, rt); err != nil {
-			state.setErrorState(task.Name, ctx, key, err, 0)
-			return taskResult{name: task.Name, key: key, err: err}
+		_, runErr := runTask(ctx, task, rt)
+		// Cache persistence can be slow; edits after the producer returns must
+		// not be attributed to it while its artifacts are being copied.
+		completeOutputs()
+		if runErr != nil {
+			state.setErrorState(task.Name, ctx, key, runErr, 0)
+			return taskResult{name: task.Name, key: key, err: runErr}
 		}
 		writeStarted := time.Now()
 		if _, err := e.cache.SnapshotContext(ctx, rt.Worktree, task, key, cacheCopyProgress(rt, "snapshot")); err != nil {
@@ -791,6 +805,9 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 
 	beginOutputs()
 	taskRuntime, err := runTask(ctx, task, rt)
+	if !project.IsServiceKind(task.Kind) {
+		completeOutputs()
+	}
 	if err != nil {
 		if project.IsServiceKind(task.Kind) {
 			err = errors.Join(err, state.stopServices(state.req, []string{task.Name}))

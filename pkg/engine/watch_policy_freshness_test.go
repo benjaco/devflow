@@ -354,6 +354,84 @@ func TestWatchFlushPreservesInPlaceInputEditAfterFormatterCompletes(t *testing.T
 	}
 }
 
+func TestWatchFlushPreservesInPlaceEditDuringCacheSnapshot(t *testing.T) {
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "source.txt")
+	if err := os.WriteFile(sourcePath, []byte("initial source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var formatRuns atomic.Int32
+	var snapshotPaused atomic.Bool
+	snapshotEntered := make(chan struct{}, 1)
+	resumeSnapshot := make(chan struct{})
+	tasks := []project.Task{{
+		Name:    "format",
+		Kind:    project.KindOnce,
+		Inputs:  project.Inputs{Files: []string{"source.txt"}},
+		Outputs: project.Outputs{Paths: []string{"source.txt", "checked.txt"}},
+		Cache:   true,
+		Run: func(ctx context.Context, rt *project.Runtime) error {
+			attempt := formatRuns.Add(1)
+			data, err := os.ReadFile(rt.Abs("source.txt"))
+			if err != nil {
+				return err
+			}
+			formatted := []byte(strings.ToUpper(string(data)))
+			for _, path := range []string{"source.txt", "checked.txt"} {
+				if err := os.WriteFile(rt.Abs(path), formatted, 0o600); err != nil {
+					return err
+				}
+			}
+			if attempt == 2 {
+				originalEventFn := rt.EventFn
+				rt.EventFn = func(event api.Event) {
+					// Cache progress runs after Run returns, before SnapshotContext completes.
+					if event.Type == api.EventLogLine && strings.HasPrefix(event.Line, "cache snapshot:") && snapshotPaused.CompareAndSwap(false, true) {
+						snapshotEntered <- struct{}{}
+						select {
+						case <-resumeSnapshot:
+						case <-ctx.Done():
+						}
+					}
+					originalEventFn(event)
+				}
+			}
+			return nil
+		},
+	}}
+	id := startWatchPolicyFreshnessTest(t, root, tasks)
+	if err := os.WriteFile(sourcePath, []byte("first edit"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-snapshotEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cache snapshot did not reach its progress barrier")
+	}
+	if data, err := os.ReadFile(sourcePath); err != nil || string(data) != "FIRST EDIT" {
+		t.Fatalf("task had not finished formatting before cache snapshot: source=%q error=%v", data, err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("newest edit during cache snapshot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requestID := writeEngineFlushRequest(t, root, id)
+	close(resumeSnapshot)
+
+	result := waitForEngineFlushAck(t, root, id, requestID)
+	if !result.Success || !result.Synced {
+		t.Errorf("flush failed after source edit during cache snapshot: %+v", result)
+	}
+	for _, path := range []string{"source.txt", "checked.txt"} {
+		data, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil || string(data) != "NEWEST EDIT DURING CACHE SNAPSHOT" {
+			t.Errorf("flush lost the edit made after Run returned: %s=%q error=%v", path, data, err)
+		}
+	}
+	if got := formatRuns.Load(); got != 3 {
+		t.Errorf("expected initial formatting and both source edits, got %d runs", got)
+	}
+}
+
 func startWatchPolicyFreshnessTest(t *testing.T, root string, tasks []project.Task) string {
 	t.Helper()
 	isolateEngineUserCache(t)

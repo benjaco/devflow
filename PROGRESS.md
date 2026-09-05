@@ -1,18 +1,28 @@
 # Progress
 
-Last updated: 2026-09-05
+Last updated: 2026-09-06
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: item 1 and its Windows CI correction accepted after green CI; implementing item 2 (startup/flush freshness) test-first. Items 3–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: user confirmed CI is green after the Windows assertion fix. Item 2 regressions and implementation are in progress; no new verification claims yet.
+- State: item 1 and its Windows CI correction accepted after green CI; item 2 (startup/flush freshness) implemented and locally verified; awaiting user review. Items 3–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: item 2 targeted regressions, full default/race suites and examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), version JSON, module/format/diff checks and Linux/Windows affected-package compilation pass. Native CI has not verified the final local changes.
 
 ## In Progress
 
-- Item 2: reproduce input changes missed during initial execution, establish input observation before the DAG, and reconcile pending changes before flush acknowledgment. Preserve watch policies, generated-output handling and resource cleanup; stop for review after this item.
+- Await user review of item 2 and its recorded red-to-green evidence. The main change was committed externally as `207f146` during implementation; final review corrections and evidence remain local. Item 3 has not started.
 
 ## Completed
+
+- Agent-verification item 2 — startup and flush freshness:
+  - established the scoped polling baseline before the initial DAG and added `Runner.Sync` to drain queued, pending and newly scanned changes without blocking on full queues
+  - reconciled startup, rebuilds and health-probe edits before flush acknowledgment; bound daemon flush to one captured watch/project/target and removed timestamp waiting and sentinel retouching
+  - retained `RestartNever` and excluded-warmup policies while reporting persistent `watch_restart_required`; `synced=true` records acknowledgment, while `success=true` additionally requires freshness and health
+  - replaced timed output masking with producer-completion metadata captured before finite-task cache persistence; preserved later input/output edits and neighboring source files, restricted ancestor handling and kept incomplete/symlink evidence conservative
+  - kept disappearing directory entries observable without treating normal replacement as scanner failure; preserved permission/non-directory errors and cross-platform failure cleanup, and retained restart errors containing cancellation even when final cleanup succeeds
+  - recorded observed red-to-green regressions and focused commands in `docs_contributors/watch-freshness-verification.md`; updated subsystem docs, adapter guidance, roadmap and shared memory
+  - passed `go test -count=1 ./...`, `go test -race -count=1 ./...`, vet, Staticcheck v0.8.1, govulncheck v1.6.0, module/format/diff checks, version JSON and Linux/Windows amd64 watcher/engine/daemon test-binary and CLI compilation; removed the unused generated-output fixture identified by Staticcheck
+  - main work was committed externally as `207f146` during this turn; final review fixes and evidence remain local. No agent commits, pushes, installs, existing-service operations or external-project changes; item 3 remains queued for review
 
 - Windows cache assertion CI fix:
   - [Actions run `33991168112`](https://github.com/benjaco/devflow/actions/runs/33991168112/job/101373548031) failed `TestSnapshotClassifiesOutputPaths`: expected `bin/tool`, received `bin\tool`; the preceding run had the same failure
@@ -945,7 +955,7 @@ Last updated: 2026-09-05
 
 ## Next Steps
 
-- Review item 1, then implement item 2 (startup freshness) test-first; continue the approved plan one item at a time with review after each.
+- Review item 2 and its final corrections, then implement item 3 (validation lifecycle parity) test-first; continue the approved plan one item at a time with review after each.
 - Confirm the reliability changes on the native Linux/macOS/Windows CI matrix; retest the historical readiness symptom through the real daemon/TUI only if it recurs (the engine early-exit restart regression passes).
 - Confirm the Delve v1.27.1 pin on the next native Linux/macOS/Windows GitHub Actions run
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
@@ -956,6 +966,7 @@ Last updated: 2026-09-05
 
 ## Deferred / Known Gaps
 
+- Flush proves a processed observation boundary for declared, metadata-visible inputs and selected-target health; it cannot cover transient/metadata-preserving edits, undeclared dependencies, writes made inside a producer-owned output scope during its execution, or edits after the final scan. Restart/warmup policy blocks require explicit rerun/restart.
 - Execution admission is conservative and cooperative: same-worktree overlap is rejected; finer resource scheduling, run histories, planner, broader JSON/input protocols and scoped cancellation remain later approved items. Unresolved orphan/PID-less resources require explicit reconciliation. Current recovery still uses recorded PIDs rather than OS process-birth identities; do not interpret process-exit/lease release as proof that arbitrary external resources stopped.
 - Successful upgrade clears the global task artifact cache without coordinating active cache operations; run upgrades between executions. It does not clear worktree state, outputs or database volumes.
 - Interrupted snapshots can record different PIDs for one task in instance/status maps; current name-based cleanup may retain only one reference. This pre-existing reconciliation gap remains separate follow-up work.

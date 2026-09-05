@@ -38,7 +38,7 @@
 
 ## Next Milestones
 
-The CM Navigator agent-integration review has an approved engineering sequence in [Agent verification: assessment and implementation plan](agent-verification-plan.md). Item 1 (execution ownership), its current-only revision and CI correction are accepted. Item 2 (startup/flush freshness) is implemented and under verification for review; see [regression evidence](watch-freshness-verification.md). Successful upgrades discard the shared task artifact cache; future work targets the current API/state contracts directly. Continue one item at a time after review; the original assessment baseline is `a7fe4f8`.
+The CM Navigator agent-integration review has an approved engineering sequence in [Agent verification: assessment and implementation plan](agent-verification-plan.md). Item 1 (execution ownership), its current-only revision and CI correction are accepted. Item 2 (startup/flush freshness) is implemented and locally verified, awaiting review; see [regression evidence](watch-freshness-verification.md). Successful upgrades discard the shared task artifact cache; future work targets the current API/state contracts directly. Continue one item at a time after review; the original assessment baseline is `a7fe4f8`.
 
 1. Review startup/flush freshness, then share finite task lifecycle with validation as item 3.
 2. Repair log following and JSON error paths; propagate direct execution cancellation.

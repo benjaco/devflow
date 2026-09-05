@@ -88,7 +88,7 @@ Cache manifest output paths use native separators after normalization. Keep slas
 - watch cascade pruning so downstream tasks do not run past warmups or services that are blocked from watch execution, including mixed blocked/allowed branches and repeated flushes reporting `watch_restart_required` while old task/service state remains successful
 - watch service restart policies, including `RestartAlways` selection and full watch execution behavior
 - flush coordination coverage for request/ack paths, watcher inclusion of the flush sync directory under `.devflow`, startup and rebuild edits, a fresh scan after health probes, sync-only acknowledgements, task/readiness failure issues, and structured low-level daemon failures. Daemon tests require observer readiness before publication, bind both project and target to the captured active watch, reject same-target replacements, honor cancellation/deadlines, and verify that ACK waiting leaves the sentinel unchanged.
-- generated-output suppression requires current metadata to match the producer's completion record, covering explicit files, directory trees, and `Outputs.Paths` without duplicate service restarts. Sibling source edits and edits to input/output paths after producer completion must still rerun while downstream work is paused. Ancestor suppression applies only to directories missing before the attempt and created afterward. Directory metadata-only changes do not produce parent events; structural directory changes remain observable.
+- generated-output suppression requires current metadata to match the producer's completion record, covering explicit files, directory trees, and `Outputs.Paths` without duplicate service restarts. Sibling source edits and edits to input/output paths after producer completion must still rerun while downstream work is paused. Ancestor suppression applies only to directories missing before the attempt and created afterward. Directory child-induced mtime/size changes do not produce parent events; structural directory changes remain observable.
 - opt-in real Docker-backed database runtime snapshot/restore coverage in `pkg/database`
 - opt-in real Docker-backed managed-service coverage that follows Postgres logs, verifies the PID-less handle, executes SQL, and stops the container through the Engine API
 - opt-in real remote Postgres clone coverage using separate non-default source and destination host ports, the production `pg_dump`/`psql` source policy, and assertions over cloned schema plus row data
@@ -96,11 +96,11 @@ Cache manifest output paths use native separators after normalization. Keep slas
 - opt-in real Docker-backed Prisma snapshot metadata + restore coverage in `pkg/database`
 
 
-Watch freshness regressions can be run independently:
+The [freshness verification note](watch-freshness-verification.md) records observed red failures, including edits during cache snapshots and disappearing directory entries. Watch freshness regressions can be run independently:
 
 ```bash
-go test ./pkg/engine -run 'TestWatchFlushIncludesChangesDuring|TestWatchFlushReportsChangesBlockedByRestartPolicy|TestWatchGeneratedOutputDoesNotHideSiblingSourceEdits' -count=1
-go test ./pkg/watch -run 'TestRunnerSync|TestDirectory' -count=1
+go test ./pkg/engine -run 'TestWatch(FlushIncludesChanges|ConcurrentFlushes|FlushRechecksInputs|FlushPreservesInPlace|FlushReportsChangesBlocked|GeneratedOutput|Output|PreservesInterrupted)' -count=1
+go test ./pkg/watch -run 'TestRunnerSync|TestDirectory|TestScanEntry|TestRunnerRejects|TestRunnerAllows' -count=1
 go test ./pkg/daemon -run 'Test.*Flush' -count=1
 ```
 

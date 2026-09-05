@@ -212,6 +212,8 @@ Observation starts before the initial DAG, and startup passes through the same r
 
 Services outside the selected target closure do not participate. Unhealthy in-chain services produce `service_unhealthy`; flush does not automatically restart them. Policy-blocked work produces `watch_restart_required` even if its old node state and service probes still look healthy.
 
+An enumerated child disappearing during a scan is ordinary input deletion. Permission errors and non-directory ancestors remain scanner failures and trigger watch cancellation and cleanup.
+
 The boundary is the polling observer's final scan of declared inputs, not an atomic filesystem snapshot. Metadata-preserving edits, transient changes entirely between scans, and undeclared inputs are outside this guarantee. Flush also does not execute tests omitted from the selected target.
 
 ## Pipeline Validation
@@ -694,7 +696,7 @@ An explicit `.` input or a glob without a literal directory prefix requires a ro
 
 File polling compares modification time, size, mode, and type. Metadata-only changes to existing directories do not create parent events because children are observed individually; directory creation, deletion, type, and mode changes remain observable.
 
-Each executed or restored producer records its declared outputs' metadata when that attempt finishes. The next reconciliation excludes an output change only when the current state still matches that completion record. Files are matched exactly; directory trees and `Outputs.Paths` use the same per-path evidence. An edit after the producer finishes remains observable even while downstream tasks are running, including edits to a file declared as both input and output. Ancestor directory events are eligible for suppression only when the directory was missing before the attempt and exists afterward; existing ancestors and sibling source paths are never excluded wholesale. The evidence is consumed by that reconciliation, with no timed suppression window. As with polling itself, metadata-preserving edits cannot be distinguished.
+Each executed or restored producer records its declared outputs' metadata when it finishes writing, before finite-task cache persistence. The next reconciliation excludes an output change only when the current state still matches that completion record. Files are matched exactly; directory trees and `Outputs.Paths` use the same per-path evidence. An edit after the producer finishes remains observable even while downstream tasks are running, including edits to a file declared as both input and output. Ancestor directory events are eligible for suppression only when the directory was missing before the attempt and exists afterward; existing ancestors and sibling source paths are never excluded wholesale. The evidence is consumed by that reconciliation, with no timed suppression window. Output declarations establish producer ownership during its own execution; completion metadata cannot attribute external writes made inside that interval. As with polling itself, metadata-preserving edits cannot be distinguished.
 
 On each batch:
 - changed files are mapped to task inputs

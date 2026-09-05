@@ -235,7 +235,9 @@ func TestExecutionOwnershipWatchScanFailureCleansResources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.Watch(context.Background(), Request{Target: "verify", Worktree: root, Mode: api.ModeWatch}); err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := eng.Watch(ctx, Request{Target: "verify", Worktree: root, Mode: api.ModeWatch}); err == nil || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal("expected watcher scan error")
 	}
 	if !handle.stopped.Load() {

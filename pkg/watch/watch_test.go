@@ -7,10 +7,89 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
 )
+
+func TestScanEntryHandlesConcurrentDisappearance(t *testing.T) {
+	runner, err := New(Options{Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []string{"walk", "info"} {
+		for _, test := range []struct {
+			name string
+			err  error
+			want error
+		}{
+			{"disappeared", os.ErrNotExist, nil},
+			{"permission", os.ErrPermission, os.ErrPermission},
+			{"not_directory", syscall.ENOTDIR, syscall.ENOTDIR},
+		} {
+			t.Run(phase+"/"+test.name, func(t *testing.T) {
+				path := filepath.Join(runner.root, "child.txt")
+				pathErr := &os.PathError{Op: phase, Path: path, Err: test.err}
+				var entry os.DirEntry = scanInfoErrorEntry{err: pathErr}
+				var walkErr error
+				if phase == "walk" {
+					entry, walkErr = nil, pathErr
+				}
+				current := map[string]fileState{}
+				if err := runner.scanEntry(context.Background(), path, entry, walkErr, current); !errors.Is(err, test.want) {
+					t.Fatalf("scan error = %v, want %v", err, test.want)
+				}
+				if test.want == nil {
+					before := map[string]fileState{"child.txt": {mode: 0o600, size: 1}}
+					if got := changedFiles(before, current); !reflect.DeepEqual(got, []string{"child.txt"}) {
+						t.Fatalf("disappeared child did not become an input change: %v", got)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRunnerRejectsInputUnderNonDirectoryAncestor(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "blocked"), []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner, err := New(Options{Root: root, WatchOnly: true, WatchPaths: []string{"blocked/missing/input.txt"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := checkMissingScanRoot(ctx, filepath.Join(root, "blocked", "input.txt")); err == nil {
+		t.Fatal("missing-root classification accepted a regular-file parent")
+	}
+	if _, _, err := runner.Start(ctx); err == nil {
+		t.Fatal("watch accepted an unobservable input below a regular file")
+	}
+}
+
+func TestRunnerAllowsMissingInputAncestors(t *testing.T) {
+	runner, err := New(Options{Root: t.TempDir(), WatchOnly: true, WatchPaths: []string{"missing/parent/input.txt"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, _, err := runner.Start(ctx); err != nil {
+		t.Fatalf("watch rejected a not-yet-created input: %v", err)
+	}
+}
+
+type scanInfoErrorEntry struct {
+	err error
+}
+
+func (scanInfoErrorEntry) Name() string                 { return "child.txt" }
+func (scanInfoErrorEntry) IsDir() bool                  { return false }
+func (scanInfoErrorEntry) Type() os.FileMode            { return 0 }
+func (e scanInfoErrorEntry) Info() (os.FileInfo, error) { return nil, e.err }
 
 func TestDirectoryChildChangesDoNotReportUnchangedParent(t *testing.T) {
 	before := map[string]fileState{

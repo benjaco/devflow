@@ -690,6 +690,8 @@ devflow graph affected --files internal/storage/sqlc/users.sql.go --explain --js
 
 This gives you a standard way to compile helper binaries once, cache them by input hash, and run the restored artifact later from downstream tasks.
 
+Declared outputs also identify task-owned writes during watch execution. Devflow records their metadata when the producer finishes, before finite-task cache persistence, so later edits to an input/output file remain eligible for rebuilding while downstream work runs. Keep output scopes narrow: declaring a whole source tree as output assigns that tree to the producer during its execution. Flush observes declared inputs; `watch_restart_required` means restart/warmup policy prevented required work from refreshing.
+
 ### Validation Mode
 
 Use the finite validation runner while tuning an adapter:

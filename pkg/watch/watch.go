@@ -3,6 +3,7 @@ package watch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -310,7 +311,7 @@ func (r *Runner) scanPath(ctx context.Context, rel string, out map[string]fileSt
 	info, err := os.Stat(full)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return checkMissingScanRoot(ctx, full)
 		}
 		return err
 	}
@@ -319,33 +320,68 @@ func (r *Runner) scanPath(ctx context.Context, rel string, out map[string]fileSt
 		return nil
 	}
 	return filepath.WalkDir(full, func(path string, entry os.DirEntry, err error) error {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		if err != nil {
+		return r.scanEntry(ctx, path, entry, err, out)
+	})
+}
+
+func checkMissingScanRoot(ctx context.Context, path string) error {
+	// A missing input may be created later, but a regular-file ancestor makes
+	// it unobservable. Some filesystems report both cases as "not found".
+	for ancestor := filepath.Dir(path); ; ancestor = filepath.Dir(ancestor) {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		itemRel, err := filepath.Rel(r.root, path)
-		if err != nil {
-			return err
-		}
-		itemRel = filepath.ToSlash(filepath.Clean(itemRel))
-		if itemRel == "." {
-			return nil
-		}
-		if r.ignored(itemRel) {
-			if entry.IsDir() {
-				return filepath.SkipDir
+		info, err := os.Stat(ancestor)
+		if err == nil {
+			if !info.IsDir() {
+				return fmt.Errorf("watch input %q has non-directory ancestor %q", path, ancestor)
 			}
 			return nil
 		}
-		r.addState(itemRel, info, out)
+		if !os.IsNotExist(err) {
+			return err
+		}
+		if filepath.Dir(ancestor) == ancestor {
+			return err
+		}
+	}
+}
+
+func (r *Runner) scanEntry(ctx context.Context, path string, entry os.DirEntry, err error, out map[string]fileState) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	info, err := entry.Info()
+	if err != nil {
+		// Atomic saves and generated-tree replacement can remove an enumerated
+		// entry before its metadata is read; its absence is an input change.
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	itemRel, err := filepath.Rel(r.root, path)
+	if err != nil {
+		return err
+	}
+	itemRel = filepath.ToSlash(filepath.Clean(itemRel))
+	if itemRel == "." {
 		return nil
-	})
+	}
+	if r.ignored(itemRel) {
+		if entry.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	}
+	r.addState(itemRel, info, out)
+	return nil
 }
 
 func (r *Runner) addState(rel string, info os.FileInfo, out map[string]fileState) {
