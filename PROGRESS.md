@@ -5,14 +5,21 @@ Last updated: 2026-09-06
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: item 1 and its Windows CI correction accepted after green CI; item 2 (startup/flush freshness) implemented and locally verified; awaiting user review. Items 3–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: item 2 targeted regressions, full default/race suites and examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), version JSON, module/format/diff checks and Linux/Windows affected-package compilation pass. Native CI has not verified the final local changes.
+- State: item 2 Windows scanner test correction implemented and locally verified; startup/flush freshness remains under review. Items 3–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: Actions run `33995892365` passed Linux/macOS, race, quality/security and both Docker jobs; Windows failed only the two scanner error-fixture cases. The corrected watcher suite passes normally and under race, plus vet, Staticcheck, formatting/diff checks and Windows amd64 test compilation. Native Windows execution of the correction awaits CI.
 
 ## In Progress
 
-- Await user review of item 2 and its recorded red-to-green evidence. The main change was committed externally as `207f146` during implementation; final review corrections and evidence remain local. Item 3 has not started.
+- Await review and the next Windows CI run for the test-only correction. Item 2 is committed through `58fe3f6`; this correction remains local. Item 3 has not started.
 
 ## Completed
+
+- Windows scanner test CI correction:
+  - [run `33995892365`, job `101386261330`](https://github.com/benjaco/devflow/actions/runs/33995892365/job/101386261330) at `58fe3f6` failed only the walk/info `not_directory` cases in `TestScanEntryHandlesConcurrentDisappearance`; other Windows packages and all other jobs passed
+  - replaced the synthetic `syscall.ENOTDIR` fixture with portable `os.ErrInvalid`: Windows maps `ENOTDIR` to a not-found error, so the old assertion misclassified it; retained disappearance/permission checks and the real non-directory-ancestor fixture
+  - updated testing guidance, shared memory and freshness evidence; no runtime or JSON changes and no test skips
+  - passed `go test ./pkg/watch -count=1 -v`, `go test -race ./pkg/watch -count=1`, `go vet ./pkg/watch`, Staticcheck v0.8.1 for the watcher, formatting/diff checks and Windows amd64 watcher-test compilation
+  - local changes only; no commits, pushes or workflow reruns. The corrected test still needs native Windows CI; item 3 remains queued
 
 - Agent-verification item 2 — startup and flush freshness:
   - established the scoped polling baseline before the initial DAG and added `Runner.Sync` to drain queued, pending and newly scanned changes without blocking on full queues

@@ -33,6 +33,12 @@ go test ./pkg/daemon -run 'Test(Flush|WaitForFlushAck)' -count=1 -v
 
 Passed on Go 1.27.1 darwin/arm64: `go test -count=1 ./...`, `go test -race -count=1 ./...`, `go vet ./...`, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), clean module/format/diff checks and the version JSON smoke. Both full suites include the examples. Linux/Windows amd64 watcher, engine and daemon test binaries and the CLI compile successfully. Staticcheck initially found the unused generated-output fixture; it was removed and the check passed. Native Linux/Windows execution remains a CI check; compilation is not execution. `PROGRESS.md` records completion and the review handoff.
 
+## Windows CI correction
+
+[Run `33995892365`, Windows job `101386261330`](https://github.com/benjaco/devflow/actions/runs/33995892365/job/101386261330) tested `58fe3f6` and failed only `TestScanEntryHandlesConcurrentDisappearance/walk/not_directory` and `/info/not_directory`: the scanner returned nil where the synthetic fixture expected an error. Windows aliases `syscall.ENOTDIR` to `ERROR_PATH_NOT_FOUND`, which `os.IsNotExist` accepts. The fixture assumed Unix error categories were portable.
+
+The corrected fixture uses `os.ErrInvalid` for an unambiguous error that must propagate, alongside permission/disappearance cases. `TestRunnerRejectsInputUnderNonDirectoryAncestor` still tests the actual filesystem condition. Runtime code is unchanged. The existing run passed Linux/macOS tests, race detection, quality/security and both Docker jobs; the corrected Windows test still needs a new native CI run. Focused verification results are recorded in `PROGRESS.md`.
+
 ## Resulting boundary
 
 The observer baseline precedes the initial DAG. Reconciliation combines queued and pending events with a fresh scan after execution and after health probes before acknowledging flush. Daemon flush waits for and remains bound to its captured watch. The timestamp-readiness and sentinel-retouch workaround is removed.

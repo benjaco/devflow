@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -19,6 +18,8 @@ func TestScanEntryHandlesConcurrentDisappearance(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, phase := range []string{"walk", "info"} {
+		// Windows aliases syscall.ENOTDIR to a not-found error. Use portable
+		// categories here; real non-directory ancestors are tested below.
 		for _, test := range []struct {
 			name string
 			err  error
@@ -26,7 +27,7 @@ func TestScanEntryHandlesConcurrentDisappearance(t *testing.T) {
 		}{
 			{"disappeared", os.ErrNotExist, nil},
 			{"permission", os.ErrPermission, os.ErrPermission},
-			{"not_directory", syscall.ENOTDIR, syscall.ENOTDIR},
+			{"invalid", os.ErrInvalid, os.ErrInvalid},
 		} {
 			t.Run(phase+"/"+test.name, func(t *testing.T) {
 				path := filepath.Join(runner.root, "child.txt")
