@@ -1572,66 +1572,66 @@ func TestDetachedStartResultJSONPreservesAuthoritativeLaunchState(t *testing.T) 
 		{
 			name: "ready",
 			start: daemon.StartResult{
-				InstanceID:        "instance-ready",
-				Target:            "dev",
-				Mode:              api.ModeWatch,
-				DaemonPID:         1234,
-				LogPath:           "/tmp/daemon.log",
-				Accepted:          true,
-				SupervisorStarted: true,
-				Ready:             true,
-				State:             "ready",
+				InstanceID:    "instance-ready",
+				Target:        "dev",
+				Mode:          api.ModeWatch,
+				DaemonPID:     1234,
+				LogPath:       "/tmp/daemon.log",
+				Accepted:      true,
+				DaemonStarted: true,
+				Ready:         true,
+				State:         "ready",
 			},
 		},
 		{
 			name: "slow-starting",
 			start: daemon.StartResult{
-				InstanceID:        "instance-starting",
-				Target:            "dev",
-				Mode:              api.ModeWatch,
-				DaemonPID:         2345,
-				Accepted:          true,
-				SupervisorStarted: true,
-				Ready:             false,
-				State:             "starting",
+				InstanceID:    "instance-starting",
+				Target:        "dev",
+				Mode:          api.ModeWatch,
+				DaemonPID:     2345,
+				Accepted:      true,
+				DaemonStarted: true,
+				Ready:         false,
+				State:         "starting",
 			},
 		},
 		{
 			name: "already-failed",
 			start: daemon.StartResult{
-				InstanceID:        "instance-failed",
-				Target:            "broken",
-				Mode:              api.ModeWatch,
-				DaemonPID:         3456,
-				Accepted:          true,
-				SupervisorStarted: true,
-				Ready:             false,
-				State:             "failed",
+				InstanceID:    "instance-failed",
+				Target:        "broken",
+				Mode:          api.ModeWatch,
+				DaemonPID:     3456,
+				Accepted:      true,
+				DaemonStarted: true,
+				Ready:         false,
+				State:         "failed",
 			},
 		},
 		{
 			name: "rejected",
 			start: daemon.StartResult{
-				InstanceID:        "instance-rejected",
-				Target:            "missing",
-				Mode:              api.ModeWatch,
-				Accepted:          false,
-				SupervisorStarted: false,
-				Ready:             false,
-				State:             "rejected",
+				InstanceID:    "instance-rejected",
+				Target:        "missing",
+				Mode:          api.ModeWatch,
+				Accepted:      false,
+				DaemonStarted: false,
+				Ready:         false,
+				State:         "rejected",
 			},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var output bytes.Buffer
-			if err := writeJSON(&output, newDetachedStartResult(&test.start)); err != nil {
+			if err := writeJSON(&output, &test.start); err != nil {
 				t.Fatal(err)
 			}
 			var payload map[string]any
 			if err := json.Unmarshal(output.Bytes(), &payload); err != nil {
 				t.Fatal(err)
 			}
-			for _, field := range []string{"instanceId", "target", "mode", "daemonPid", "pid", "logPath", "detached", "accepted", "supervisorStarted", "ready", "state"} {
+			for _, field := range []string{"instanceId", "target", "mode", "daemonPid", "logPath", "accepted", "daemonStarted", "ready", "state"} {
 				if _, ok := payload[field]; !ok {
 					t.Fatalf("detached JSON omitted %q: %s", field, output.String())
 				}
@@ -1642,8 +1642,10 @@ func TestDetachedStartResultJSONPreservesAuthoritativeLaunchState(t *testing.T) 
 			if got, ok := payload["ready"].(bool); !ok || got != test.start.Ready {
 				t.Fatalf("ready = %#v, want %v", payload["ready"], test.start.Ready)
 			}
-			if payload["pid"] != payload["daemonPid"] {
-				t.Fatalf("legacy pid and authoritative daemonPid differ: %s", output.String())
+			for _, removed := range []string{"pid", "supervisorStarted", "detached"} {
+				if _, exists := payload[removed]; exists {
+					t.Fatalf("retired field %s in current start response", removed)
+				}
 			}
 		})
 	}
@@ -1733,7 +1735,7 @@ func TestFlushNoTargetUsesLastRunTarget(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	worktree := t.TempDir()
-	recordCLITestSupervisor(t, worktree, api.RunConfig{
+	recordCLITestDaemon(t, worktree, api.RunConfig{
 		Project:  "cli-task-target-project",
 		Target:   "build",
 		Mode:     api.ModeWatch,
@@ -1755,57 +1757,11 @@ func TestFlushNoTargetUsesLastRunTarget(t *testing.T) {
 	}
 }
 
-func TestFlushLiveWatchTargetMismatchFails(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	worktree := t.TempDir()
-	recordCLITestSupervisor(t, worktree, api.RunConfig{
-		Project:  "cli-task-target-project",
-		Target:   "gen",
-		Mode:     api.ModeWatch,
-		Detached: true,
-	})
-
-	stdout := &bytes.Buffer{}
-	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
-	err := app.Run([]string{"flush", "build", "--json", "--project", "cli-task-target-project", "--worktree", worktree})
-	if err == nil {
-		t.Fatal("expected target mismatch error")
-	}
-	result := decodeCLIFlushResult(t, stdout.Bytes())
-	if len(result.Issues) != 1 || result.Issues[0].Kind != "target_mismatch" {
-		t.Fatalf("unexpected mismatch result: %+v", result)
-	}
-}
-
-func TestFlushLiveNonWatchSupervisorFails(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	worktree := t.TempDir()
-	recordCLITestSupervisor(t, worktree, api.RunConfig{
-		Project:  "cli-task-target-project",
-		Target:   "build",
-		Mode:     api.ModeDev,
-		Detached: true,
-	})
-
-	stdout := &bytes.Buffer{}
-	app := &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
-	err := app.Run([]string{"flush", "build", "--json", "--project", "cli-task-target-project", "--worktree", worktree})
-	if err == nil {
-		t.Fatal("expected non-watch supervisor error")
-	}
-	result := decodeCLIFlushResult(t, stdout.Bytes())
-	if len(result.Issues) != 1 || result.Issues[0].Kind != "non_watch_supervisor" {
-		t.Fatalf("unexpected non-watch result: %+v", result)
-	}
-}
-
 func TestFlushTimeoutReturnsStructuredFailure(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	worktree := t.TempDir()
-	recordCLITestSupervisor(t, worktree, api.RunConfig{
+	recordCLITestDaemon(t, worktree, api.RunConfig{
 		Project:  "cli-task-target-project",
 		Target:   "build",
 		Mode:     api.ModeWatch,
@@ -1824,7 +1780,7 @@ func TestFlushTimeoutReturnsStructuredFailure(t *testing.T) {
 	}
 }
 
-func TestDepsStatusAndInstallJSON(t *testing.T) {
+func TestCLIsStatusAndInstallJSON(t *testing.T) {
 	marker := filepath.Join(os.TempDir(), "devflow-cli-deps-installed.txt")
 	_ = os.Remove(marker)
 	bin := filepath.Join(os.TempDir(), cliMissingToolCommand())
@@ -1833,7 +1789,7 @@ func TestDepsStatusAndInstallJSON(t *testing.T) {
 
 	statusOut := &bytes.Buffer{}
 	app := &App{Stdout: statusOut, Stderr: &bytes.Buffer{}}
-	if err := app.Run([]string{"deps", "status", "--json", "--project", "cli-deps-project", "--worktree", t.TempDir()}); err != nil {
+	if err := app.Run([]string{"clis", "status", "--json", "--project", "cli-deps-project", "--worktree", t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
 	var statusPayload map[string]any
@@ -1847,7 +1803,7 @@ func TestDepsStatusAndInstallJSON(t *testing.T) {
 
 	installOut := &bytes.Buffer{}
 	app = &App{Stdout: installOut, Stderr: &bytes.Buffer{}}
-	if err := app.Run([]string{"deps", "install", "--json", "--project", "cli-deps-project", "--worktree", t.TempDir()}); err != nil {
+	if err := app.Run([]string{"clis", "install", "--json", "--project", "cli-deps-project", "--worktree", t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(marker); err != nil {
@@ -1961,7 +1917,7 @@ func shellQuote(value string) string {
 	return "'" + value + "'"
 }
 
-func TestDefaultLaunchPlanStartsDetachedForFreshDetectedWorktree(t *testing.T) {
+func TestDefaultLaunchPlanSelectsFreshDetectedWorktree(t *testing.T) {
 	worktree := t.TempDir()
 	if err := seedExampleWorktree(worktree); err != nil {
 		t.Fatal(err)
@@ -1977,12 +1933,12 @@ func TestDefaultLaunchPlanStartsDetachedForFreshDetectedWorktree(t *testing.T) {
 	if plan.target != "fullstack" {
 		t.Fatalf("unexpected target %q", plan.target)
 	}
-	if !plan.startDetached {
-		t.Fatal("expected fresh worktree to start detached")
+	if plan.instanceID == "" {
+		t.Fatal("expected canonical worktree instance identity")
 	}
 }
 
-func TestDefaultLaunchPlanRestartsExistingNonWatchSupervisorAsWatch(t *testing.T) {
+func TestDefaultLaunchPlanDoesNotReadExecutionState(t *testing.T) {
 	worktree := t.TempDir()
 	if err := embeddedwebapp.SeedWorktree(worktree); err != nil {
 		t.Fatal(err)
@@ -1991,13 +1947,8 @@ func TestDefaultLaunchPlanRestartsExistingNonWatchSupervisorAsWatch(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	pid := os.Getpid()
-	if err := instance.RecordDetachedRun(inst, api.RunConfig{
-		Project:  "embedded-web-app",
-		Target:   "up",
-		Mode:     api.ModeDev,
-		Detached: true,
-	}, pid, filepath.Join(worktree, ".devflow", "logs", inst.ID, "supervisor.log")); err != nil {
+	path := filepath.Join(worktree, ".devflow", "state", "instances", inst.ID, "instance.json")
+	if err := os.WriteFile(path, []byte(`{"id":`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
@@ -2005,41 +1956,11 @@ func TestDefaultLaunchPlanRestartsExistingNonWatchSupervisorAsWatch(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.projectName != "embedded-web-app" {
-		t.Fatalf("unexpected project %q", plan.projectName)
+	if plan.projectName != "embedded-web-app" || plan.target != "up" || plan.instanceID != inst.ID {
+		t.Fatalf("unexpected project launch selection: %+v", plan)
 	}
-	if plan.target != "up" {
-		t.Fatalf("unexpected target %q", plan.target)
-	}
-	if !plan.startDetached {
-		t.Fatal("expected existing live non-watch supervisor to restart as watch")
-	}
-}
-
-func TestDefaultLaunchPlanReusesExistingWatchDaemon(t *testing.T) {
-	worktree := t.TempDir()
-	if err := embeddedwebapp.SeedWorktree(worktree); err != nil {
-		t.Fatal(err)
-	}
-	inst, err := instance.Resolve(worktree, filepath.Base(worktree))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := instance.RecordDetachedRun(inst, api.RunConfig{
-		Project:  "embedded-web-app",
-		Target:   "up",
-		Mode:     api.ModeWatch,
-		Detached: true,
-	}, os.Getpid(), filepath.Join(worktree, ".devflow", "logs", inst.ID, "daemon.log")); err != nil {
-		t.Fatal(err)
-	}
-	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
-	plan, err := app.defaultLaunchPlan(worktree)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.startDetached {
-		t.Fatal("expected existing live watch daemon to be reused")
+	if data, err := os.ReadFile(path); err != nil || string(data) != `{"id":` {
+		t.Fatalf("launch selection changed execution evidence: %q, %v", data, err)
 	}
 }
 
@@ -2106,8 +2027,8 @@ func TestStatusDoesNotStartDaemon(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
 		t.Fatal(err)
 	}
-	if status.Supervisor != nil {
-		t.Fatalf("expected no supervisor in direct status, got %+v", status.Supervisor)
+	if status.Daemon != nil {
+		t.Fatalf("expected no daemon in direct status, got %+v", status.Daemon)
 	}
 	if !hasNodeState(status.Nodes, "build", api.StateStopped) {
 		t.Fatalf("expected persisted node state in status: %+v", status.Nodes)
@@ -2584,6 +2505,13 @@ func appendFile(path, value string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build fake go: %v\n%s", err, string(out))
 	}
+	if mode == "upgrade" {
+		// Upgrade removes task artifacts; isolate every platform's user cache.
+		cacheHome := t.TempDir()
+		t.Setenv("HOME", cacheHome)
+		t.Setenv("XDG_CACHE_HOME", cacheHome)
+		t.Setenv("LOCALAPPDATA", cacheHome)
+	}
 	return output
 }
 
@@ -2903,130 +2831,6 @@ func TestStopCommandStopsTrackedProcess(t *testing.T) {
 	}
 }
 
-func TestStopAllStopsDetachedSupervisorExecutorAndStaleStatusProcesses(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell process-group test is Unix-only")
-	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	worktree := t.TempDir()
-	inst, err := instance.Resolve(worktree, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	supervisorHandle := startCLILoopProcess(t, worktree)
-	executorHandle := startCLILoopProcess(t, worktree)
-	serviceHandle := startCLILoopProcess(t, worktree)
-	staleHandle := startCLILoopProcess(t, worktree)
-	logPath := filepath.Join(worktree, ".devflow", "logs", inst.ID, "supervisor.log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(logPath, []byte(fmt.Sprintf("old child pid=1\nnew child pid=%d\n", executorHandle.PID())), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	inst.Supervisor = api.SupervisorRef{
-		PID:       supervisorHandle.PID(),
-		ExecPID:   executorHandle.PID(),
-		StartedAt: time.Now().UTC(),
-		LogPath:   logPath,
-	}
-	inst.Processes["svc"] = api.ProcessRef{PID: serviceHandle.PID(), StartedAt: time.Now().UTC()}
-	if err := instance.Save(inst); err != nil {
-		t.Fatal(err)
-	}
-	if err := instance.SaveStatus(worktree, inst.ID, "dev", api.ModeWatch, map[string]api.NodeStatus{
-		"svc":   {Name: "svc", Kind: "service", State: api.StateRunning, PID: serviceHandle.PID()},
-		"stale": {Name: "stale", Kind: "service", State: api.StateRunning, PID: staleHandle.PID()},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	previewOut := &bytes.Buffer{}
-	app := &App{Stdout: previewOut, Stderr: &bytes.Buffer{}}
-	if err := app.Run([]string{"stop", "--worktree", worktree, "--all", "--preview", "--json"}); err != nil {
-		t.Fatal(err)
-	}
-	var preview struct {
-		Plan api.LifecyclePlan `json:"plan"`
-	}
-	if err := json.Unmarshal(previewOut.Bytes(), &preview); err != nil {
-		t.Fatal(err)
-	}
-
-	stdout := &bytes.Buffer{}
-	app = &App{Stdout: stdout, Stderr: &bytes.Buffer{}}
-	if err := app.Run([]string{"stop", "--worktree", worktree, "--all", "--json"}); err != nil {
-		t.Fatal(err)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
-		t.Fatal(err)
-	}
-	stopped := stringSetFromJSONList(t, payload["stopped"])
-	for _, name := range []string{"supervisor", "executor", "svc", "stale", "daemon"} {
-		if !stopped[name] {
-			t.Fatalf("expected %q in stopped payload: %v", name, payload["stopped"])
-		}
-	}
-	if got := strings.Join(preview.Plan.ProcessesToStop, ","); got != strings.Join(sortedStringSetForTest(stopped), ",") {
-		t.Fatalf("successful stop-all preview/result differ: plan=%q actual=%q", got, strings.Join(sortedStringSetForTest(stopped), ","))
-	}
-
-	waitForProcessExit(t, supervisorHandle)
-	waitForProcessExit(t, executorHandle)
-	waitForProcessExit(t, serviceHandle)
-	waitForProcessExit(t, staleHandle)
-
-	loaded, err := instance.Load(worktree, inst.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Supervisor.PID != 0 {
-		t.Fatalf("expected daemon supervisor to be cleared, got %+v", loaded.Supervisor)
-	}
-	if loaded.Supervisor.ExecPID != 0 {
-		t.Fatalf("expected executor ref to be cleared, got %+v", loaded.Supervisor)
-	}
-	if len(loaded.Processes) != 0 {
-		t.Fatalf("expected process refs to be cleared, got %+v", loaded.Processes)
-	}
-	state, err := instance.LoadStatus(worktree, inst.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"svc", "stale"} {
-		node := state.Nodes[name]
-		if node.State != api.StateStopped || node.PID != 0 {
-			t.Fatalf("expected %s stopped with no pid, got %+v", name, node)
-		}
-	}
-
-	repeatedOut := &bytes.Buffer{}
-	app = &App{Stdout: repeatedOut, Stderr: &bytes.Buffer{}}
-	if err := app.Run([]string{"stop", "--worktree", worktree, "--all", "--json"}); err != nil {
-		t.Fatal(err)
-	}
-	var repeated map[string]any
-	if err := json.Unmarshal(repeatedOut.Bytes(), &repeated); err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Join(sortedStringSetForTest(stringSetFromJSONList(t, repeated["stopped"])), ","); got != "daemon" {
-		t.Fatalf("repeated stop-all reported phantom resources: %s", got)
-	}
-}
-
-func sortedStringSetForTest(values map[string]bool) []string {
-	result := make([]string, 0, len(values))
-	for value := range values {
-		result = append(result, value)
-	}
-	sort.Strings(result)
-	return result
-}
-
 func TestStopAllStopsManagedDatabaseContainer(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -3101,46 +2905,6 @@ func TestStopAllStopsManagedDatabaseContainer(t *testing.T) {
 	if !strings.HasSuffix(stopRequest.path, "/containers/devflow-pg-test/stop") || stopRequest.query != "t=10" {
 		t.Fatalf("unexpected Docker Engine stop request: %+v", stopRequest)
 	}
-}
-
-func TestStopAllUsesSupervisorLogChildPIDFallback(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell process-group test is Unix-only")
-	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	worktree := t.TempDir()
-	inst, err := instance.Resolve(worktree, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	supervisorHandle := startCLILoopProcess(t, worktree)
-	executorHandle := startCLILoopProcess(t, worktree)
-	logPath := filepath.Join(worktree, ".devflow", "logs", inst.ID, "supervisor.log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(logPath, []byte(fmt.Sprintf("child pid=%d\n", executorHandle.PID())), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	inst.Supervisor = api.SupervisorRef{
-		PID:       supervisorHandle.PID(),
-		StartedAt: time.Now().UTC(),
-		LogPath:   logPath,
-	}
-	if err := instance.Save(inst); err != nil {
-		t.Fatal(err)
-	}
-	if err := instance.SaveStatus(worktree, inst.ID, "dev", api.ModeWatch, map[string]api.NodeStatus{}); err != nil {
-		t.Fatal(err)
-	}
-
-	app := &App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
-	if err := app.Run([]string{"stop", "--worktree", worktree, "--all"}); err != nil {
-		t.Fatal(err)
-	}
-	waitForProcessExit(t, supervisorHandle)
-	waitForProcessExit(t, executorHandle)
 }
 
 func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
@@ -3277,25 +3041,25 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	supervisorCtx, supervisorCancel := context.WithCancel(context.Background())
-	defer supervisorCancel()
-	supervisorHandle, err := process.Start(supervisorCtx, process.CommandSpec{Name: cliLoopBinary(t, worktree), Dir: worktree})
+	daemonCtx, daemonCancel := context.WithCancel(context.Background())
+	defer daemonCancel()
+	daemonHandle, err := process.Start(daemonCtx, process.CommandSpec{Name: cliLoopBinary(t, worktree), Dir: worktree})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		supervisorCancel()
-		_ = supervisorHandle.Wait()
+		daemonCancel()
+		_ = daemonHandle.Wait()
 	}()
-	if err := instance.RecordDetachedRun(inst, api.RunConfig{
+	if err := recordCLIRunState(inst, api.RunConfig{
 		Project:  "go-next-monorepo",
 		Target:   "fullstack",
 		Mode:     api.ModeDev,
 		Detached: true,
-	}, supervisorHandle.PID(), filepath.Join(worktree, ".devflow", "logs", runResult.InstanceID, "supervisor.log")); err != nil {
+	}, daemonHandle.PID(), filepath.Join(worktree, ".devflow", "logs", runResult.InstanceID, "daemon.log")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(worktree, ".devflow", "logs", runResult.InstanceID, "supervisor.log"), []byte("supervisor line\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(worktree, ".devflow", "logs", runResult.InstanceID, "daemon.log"), []byte("daemon line\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3307,24 +3071,24 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 	if err := json.Unmarshal(statusStdout.Bytes(), &status); err != nil {
 		t.Fatal(err)
 	}
-	if status.Supervisor == nil || !status.Supervisor.Alive {
-		t.Fatalf("expected live supervisor in status: %+v", status.Supervisor)
+	if status.Daemon == nil || !status.Daemon.Alive {
+		t.Fatalf("expected live daemon in status: %+v", status.Daemon)
 	}
 
-	supervisorLogsStdout := &bytes.Buffer{}
-	app = &App{Stdout: supervisorLogsStdout, Stderr: &bytes.Buffer{}}
-	if err := app.Run([]string{"logs", "supervisor", "--json", "--worktree", worktree, "--tail", "5"}); err != nil {
+	daemonLogsStdout := &bytes.Buffer{}
+	app = &App{Stdout: daemonLogsStdout, Stderr: &bytes.Buffer{}}
+	if err := app.Run([]string{"logs", "daemon", "--json", "--worktree", worktree, "--tail", "5"}); err != nil {
 		t.Fatal(err)
 	}
-	supervisorLogEvents := decodeJSONLines(t, supervisorLogsStdout.Bytes())
-	if len(supervisorLogEvents) == 0 {
-		t.Fatal("expected supervisor log events from logs command")
+	daemonLogEvents := decodeJSONLines(t, daemonLogsStdout.Bytes())
+	if len(daemonLogEvents) == 0 {
+		t.Fatal("expected daemon log events from logs command")
 	}
-	if got := supervisorLogEvents[0]["task"]; got != "supervisor" {
-		t.Fatalf("unexpected supervisor logs task: %v", got)
+	if got := daemonLogEvents[0]["task"]; got != "daemon" {
+		t.Fatalf("unexpected daemon logs task: %v", got)
 	}
-	if supervisorLogEvents[0]["line"] != "supervisor line" {
-		t.Fatalf("unexpected supervisor log line: %q", supervisorLogEvents[0]["line"])
+	if daemonLogEvents[0]["line"] != "daemon line" {
+		t.Fatalf("unexpected daemon log line: %q", daemonLogEvents[0]["line"])
 	}
 
 	instancesStdout := &bytes.Buffer{}
@@ -3380,7 +3144,7 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 			stoppedSet[name] = true
 		}
 	}
-	for _, name := range []string{"supervisor"} {
+	for _, name := range []string{"daemon"} {
 		if !stoppedSet[name] {
 			t.Fatalf("expected %q in stop payload: %v", name, stopPayload)
 		}
@@ -3414,22 +3178,6 @@ func waitForProcessExit(t *testing.T, handle *process.Handle) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for process exit")
 	}
-}
-
-func startCLILoopProcess(t *testing.T, worktree string) *process.Handle {
-	t.Helper()
-	handle, err := process.Start(context.Background(), process.CommandSpec{
-		Name: cliLoopBinary(t, worktree),
-		Dir:  worktree,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = handle.Stop()
-		_ = handle.Wait()
-	})
-	return handle
 }
 
 func cliLoopBinary(t *testing.T, worktree string) string {
@@ -3510,7 +3258,7 @@ func containsInstance(items []api.InstanceSummary, id string) bool {
 	return false
 }
 
-func recordCLITestSupervisor(t *testing.T, worktree string, run api.RunConfig) string {
+func recordCLITestDaemon(t *testing.T, worktree string, run api.RunConfig) string {
 	t.Helper()
 	inst, err := instance.Resolve(worktree, filepath.Base(worktree))
 	if err != nil {
@@ -3526,11 +3274,11 @@ func recordCLITestSupervisor(t *testing.T, worktree string, run api.RunConfig) s
 		_, _ = client.Call(ctx, daemon.Request{Action: daemon.ActionStop, All: true})
 		waitForDaemonDisconnect(client, 3*time.Second)
 	})
-	logPath := filepath.Join(worktree, ".devflow", "logs", inst.ID, "supervisor.log")
+	logPath := filepath.Join(worktree, ".devflow", "logs", inst.ID, "daemon.log")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := instance.RecordDetachedRun(inst, run, os.Getpid(), logPath); err != nil {
+	if err := recordCLIRunState(inst, run, os.Getpid(), logPath); err != nil {
 		t.Fatal(err)
 	}
 	return inst.ID
@@ -3699,4 +3447,12 @@ func seedExampleWorktree(dst string) error {
 		}
 		return os.WriteFile(target, data, 0o644)
 	})
+}
+
+func recordCLIRunState(inst *api.Instance, run api.RunConfig, pid int, logPath string) error {
+	inst.LastRun = run
+	if err := instance.Save(inst); err != nil {
+		return err
+	}
+	return instance.RecordDaemon(inst, pid, logPath)
 }

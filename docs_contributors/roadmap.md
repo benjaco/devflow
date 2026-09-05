@@ -12,6 +12,7 @@
 - typed event stream
 - polling watch mode with selective reruns
 - per-worktree daemon flow for mutable dev/watch/operator commands
+- exclusive worktree execution leases shared by CI/daemon, serialized daemon transitions, cleanup-aware recovery and structured ownership conflicts
 - first usable TUI with task/log panes and selected-task actions
 - project-scoped required CLI checks and installers
 - interactive prompt plumbing for prompt-driven subprocesses
@@ -22,7 +23,7 @@
 - global OS user task cache with project namespaces
 - explicit documentation split between project adoption and Devflow contributor workflows
 - per-worktree localbuild locking for concurrent project-local binary builds
-- reliable `stop --all` cleanup for daemon-owned work, legacy detached supervisors, child executors, service process groups, and stale status PIDs
+- reliable `stop --all` cleanup for daemon-owned work, recorded service process groups, and stale status PIDs
 - explicit service lifecycle contract for attached run, CI readiness probes, detached run/watch, flush, status, and stop
 - graph affected explanations plus aligned ignore semantics for watch matching and fingerprinting
 - target-scoped required CLI declarations plus `doctor --target <target> --json`
@@ -37,7 +38,15 @@
 
 ## Next Milestones
 
-The BikeCoach real-project integration moved the next focus from generic operator expansion to adoption hardening. The next work should make the installed CLI safe and understandable in a real repository where humans and agents call commands quickly, stale detached state can exist, and the current workflow may still be script-based.
+The CM Navigator agent-integration review has an approved engineering sequence in [Agent verification: assessment and implementation plan](agent-verification-plan.md). Item 1 (execution ownership) is implemented and revised for user review. The revision removes backward-compatibility paths and makes successful upgrades discard the shared task artifact cache. Future work targets the current API/state contracts directly. Continue one item at a time after review; the original assessment baseline is `a7fe4f8`.
+
+1. After ownership review, close the reproduced startup/flush freshness gap, then share finite task lifecycle with validation as a separate item.
+2. Repair log following and JSON error paths; propagate direct execution cancellation.
+3. Introduce consistent run/attempt identities, retained evidence, scoped cancellation and a recoverable prompt protocol.
+4. Expose existing graph metadata and add a conservative verification planner using declared purposes/effects and bootstrap-aware configuration-change detection.
+5. Add opt-in compact results, progress control and cursor retrieval; defer broader same-worktree concurrency and MCP until the underlying contracts are proven.
+
+The earlier BikeCoach adoption work remains useful alongside that sequence:
 
 1. User adoption docs and examples
    - Add a full "converge from scripts to Devflow" user guide based on the BikeCoach integration pattern.
@@ -59,7 +68,7 @@ The BikeCoach real-project integration moved the next focus from generic operato
 ## Feedback Disposition
 
 - Completed from BikeCoach feedback: per-worktree localbuild locking for concurrent CLI commands.
-- Completed from BikeCoach feedback: reliable `stop --all` cleanup for daemon-owned work, legacy detached supervisors, child executors, tracked services, and stale status process groups.
+- Completed from BikeCoach feedback: reliable `stop --all` cleanup for daemon-owned work, tracked services, and recorded status process groups.
 - Completed from BikeCoach feedback: service lifecycle contract documentation plus CI-mode service readiness probes that stop services before returning.
 - Completed from BikeCoach feedback: watch/debug ergonomics via `graph affected --explain` and aligned root-relative/directory-relative ignore matching between watch and fingerprinting.
 - Completed from BikeCoach feedback: target-scoped required CLI declarations plus `doctor --target <target> --json`.

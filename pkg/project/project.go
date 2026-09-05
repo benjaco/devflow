@@ -173,10 +173,8 @@ type Runtime struct {
 	TaskName string
 	LogPath  string
 	EventFn  func(api.Event)
-	// OnService is the legacy process-only registration hook. New engine
-	// integrations use OnServiceHandle so managed resources need no wrapper
-	// process.
-	OnService       func(task string, handle *process.Handle)
+	// Processes and PID-less resources share one registration path so lifecycle
+	// ownership never depends on the resource's concrete implementation.
 	OnServiceHandle func(task string, handle ServiceHandle)
 	DepKeys         []string
 	OnPrompt        func(task string, req process.PromptRequest) (process.PromptResponse, error)
@@ -335,10 +333,6 @@ func (rt *Runtime) RegisterServiceHandle(handle ServiceHandle) {
 	}
 	if rt.OnServiceHandle != nil {
 		rt.OnServiceHandle(rt.TaskName, handle)
-		return
-	}
-	if processHandle, ok := handle.(*process.Handle); ok && rt.OnService != nil {
-		rt.OnService(rt.TaskName, processHandle)
 	}
 }
 

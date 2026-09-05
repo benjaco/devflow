@@ -7,6 +7,10 @@ Devflow is designed so humans and agents use the same execution surface:
 - one per-worktree daemon owns mutable dev/watch/operator work and publishes a typed event stream for live consumers
 - `run --ci` is the exception: it stays direct and finite for CI-style validation
 
+Executions are exclusive within a worktree. While a watcher owns it, `run --ci --json` returns `code: "resource_conflict"` with the owner's target/PID and leaves the development execution intact. Run independent verification in a separate worktree containing the actual edits and relevant untracked files, or explicitly stop development first. Flushing does not make concurrent CI safe. Worktrees do not automatically isolate a shared external database.
+
+`resourceConflict.recoveryRequired` means a prior execution ended without confirmed cleanup. Inspect the recorded owner and use explicit `stop --all --json` to reconcile known resources; unresolved resources remain conflicts. Do not delete execution lock or owner files as an automatic retry strategy. Read-only status, graph and log inspection remains available. Run histories and scoped run cancellation are separate planned capabilities.
+
 Agents should use the normal installed command:
 
 ```bash
@@ -19,6 +23,8 @@ Updates are intentionally Go-first:
 ```bash
 devflow upgrade
 ```
+
+Successful upgrades clear the global task artifact cache; `upgrade --json` reports `cacheCleared`. Installation failure preserves cached artifacts, and a cleanup failure is reported even if installation succeeded. APIs and worktree state follow the installed version without migrations for older formats.
 
 Because project graph definitions are Go code, Go is expected to be available on machines where agents use Devflow.
 
@@ -52,9 +58,9 @@ devflow stop --task backend_debug --preview --json
 devflow stop --task backend_debug --json
 ```
 
-The preview/result contract is `api.LifecyclePlan` plus `api.LifecycleResult`. A plan names the selected task/target and exact invalidate, stop, execute, preserve, and restart sets. The actual result reports exact affected/confirmed-stopped/restarted tasks and old/new PID plus generation; optional lifecycle `issues` explain a partial plan/result difference. Restart success means the replacement passed readiness. A restart from an already-stopped service has an empty stopped set and no previous identity. A known already-stopped task returns an empty successful stop result. An unknown task or a restart that did not create a replacement is non-success. `stop --task` leaves the daemon and independent services running; only `stop --all` performs complete cleanup. Detached launch JSON always contains `accepted`, `supervisorStarted`, `ready`, and `state`; acceptance is not readiness, so continue to use `flush` as the agent readiness gate.
+The preview/result contract is `api.LifecyclePlan` plus `api.LifecycleResult`. A plan names the selected task/target and exact invalidate, stop, execute, preserve, and restart sets. The actual result reports exact affected/confirmed-stopped/restarted tasks and old/new PID plus generation; optional lifecycle `issues` explain a partial plan/result difference. Restart success means the replacement passed readiness. A restart from an already-stopped service has an empty stopped set and no previous identity. A known already-stopped task returns an empty successful stop result. An unknown task or a restart that did not create a replacement is non-success. `stop --task` leaves the daemon and independent services running; only `stop --all` performs complete cleanup. Detached launch JSON always contains `accepted`, `daemonStarted`, `daemonPid`, `ready`, and `state`; acceptance is not readiness, so continue to use `flush` as the agent readiness gate. Status exposes the daemon through `daemon`, and `logs daemon --json` retrieves its log.
 
-Embedded engine users that intentionally provide their own long-lived supervisor can use the same ownership primitive directly:
+Embedded engine users that provide their own long-lived execution owner can use the same ownership primitive directly:
 
 ```go
 controller := engine.NewLifecycleController()
@@ -151,7 +157,7 @@ outcome, err := eng.Run(ctx, engine.Request{
 
 Use `keyResult.Key` for external cache restore. Inspect `outcome.Result.CacheKeyManifest` for reuse. Do not persist or edit the manifest, reuse it across jobs, or trust its preflight final task keys as durable keys; Devflow validates and rebuilds the execution keys.
 
-Embedded validation callers should set bounded details explicitly because the zero value preserves historical exhaustive output:
+Embedded validation callers use the same `issues` default as JSON commands. Set `Details: api.ValidationDetailsFull` only when exhaustive paths are needed; bounded details can also be explicit:
 
 ```go
 result, err := validator.Run(ctx, validation.Request{

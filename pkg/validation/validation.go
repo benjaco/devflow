@@ -111,10 +111,9 @@ func (v *Validator) Run(ctx context.Context, req Request) (*api.ValidationResult
 		req.MaxOrders = DefaultMaxOrders
 	}
 	if req.Details == "" {
-		// Library callers historically received exhaustive path lists. The CLI
-		// explicitly selects its bounded default; preserving this zero-value
-		// behavior avoids silently changing embedded validator integrations.
-		req.Details = api.ValidationDetailsFull
+		// Embedded callers and JSON commands share a bounded default; exhaustive
+		// successful-path evidence requires an explicit full-details request.
+		req.Details = api.ValidationDetailsIssues
 	}
 	if req.Details != api.ValidationDetailsSummary && req.Details != api.ValidationDetailsIssues && req.Details != api.ValidationDetailsFull {
 		return nil, fmt.Errorf("unknown validation details %q (want summary, issues, or full)", req.Details)

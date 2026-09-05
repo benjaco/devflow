@@ -21,7 +21,6 @@ Implemented commands:
 - `devflow instances`
 - `devflow doctor`
 - `devflow clis`
-- `devflow deps` (compatibility alias for `devflow clis`)
 - `devflow tui`
 - `devflow version`
 - `devflow upgrade`
@@ -50,12 +49,18 @@ There is currently no built-in adapter fallback. Missing `devflow.project.go` is
 
 `run` provisions an instance, executes the target closure, and restores cacheable one-shot tasks when possible.
 
+Only one execution may own a worktree at a time. Direct `run --ci` remains daemon-independent, but returns a nonzero `resource_conflict` if a watcher or another run owns that worktree. Rejected execution leaves its owner's task status, task logs, environment and outputs intact. `cache key` (which prepares instance configuration) and direct `cache invalidate` use the same admission boundary. Status/graph/log inspection remains available; existing parallel tasks within one DAG are unaffected.
+
+Ownership failures add `code: "resource_conflict"` and `resourceConflict` to JSON without replacing existing successful response shapes. `resourceConflict` identifies the worktree and, when available, owner PID, target, mode and kind; `recoveryRequired: true` distinguishes abandoned/incompletely cleaned execution. CI retains its failed `RunResult` shape with empty task results when rejected before execution. Daemon mutations propagate the same typed conflict over the socket and CLI.
+
+Use a separate worktree containing the changes to run CI while keeping development active, or explicitly stop the development execution first. A successful flush does not grant concurrent CI admission. Stop timeouts reject replacement and preserve ownership. `stop --all` can reconcile known abandoned resources, but reports a conflict when it cannot establish that resources stopped; it never kills a competing live direct-CI owner to obtain admission.
+
 Service lifecycle contract:
 - attached non-CI `devflow run <target>` connects to the per-worktree daemon, waits for service readiness, and then keeps supervised services alive until interrupted or until a service exits
 - if a service exits during attached `run`, the command returns a service-exited error
 - `devflow run <target> --ci --json` is finite and deliberately bypasses the daemon; service tasks are started, readiness is checked, services are stopped, and status records those services as `stopped`
 - in that CI/JSON mode, task state, cache hit/miss, and task-log progress streams to stderr while stdout remains exactly one final JSON document
-- `devflow run <target> --detach --json` returns after asking the daemon to launch the target; it is not a health/readiness gate. The additive `accepted`, `supervisorStarted`, `ready`, and `state` fields distinguish daemon acceptance, supervisor startup, and the response-time `starting|ready|failed|degraded` target snapshot; the legacy `detached`, `pid`, and other launch fields remain present.
+- `devflow run <target> --detach --json` returns after asking the daemon to launch the target; it is not a health/readiness gate. `accepted`, `daemonStarted`, `ready`, and `state` distinguish daemon acceptance, daemon startup, and the response-time `starting|ready|failed|degraded` target snapshot. `daemonPid` identifies the daemon; the result also includes `instanceId`, `target`, `mode`, and `logPath`.
 - use `devflow watch <target> --detach --json` plus `devflow flush <target> --json` when automation needs a detached environment that is proven settled and healthy
 - finite check/test targets with service dependencies should generally use `devflow run <target> --ci --json`
 - `devflow stop --all --json` also stops the instance-managed database container when one is recorded; it does not remove the Docker volume
@@ -125,9 +130,9 @@ devflow validate build --mode orders --max-orders 1000 --json
 devflow validate build --mode all --details issues --max-listed-paths 200 --json
 ```
 
-`--mode all` is the default. `permutations` is accepted as an alias for `orders`, and `--max-permutations` is an alias for `--max-orders`.
+`--mode all` is the default. Use `orders` and `--max-orders` to select and bound exhaustive order validation.
 
-`--details summary|issues|full` controls response volume. JSON defaults to `issues`, text output defaults to `summary`, and embedded Go API callers retain the historical exhaustive zero-value behavior unless they set `validation.Request.Details`. `summary` keeps pass/fail, exact counts, timings, byte/resource metrics, and phase data. `issues` adds bounded actionable samples but removes exhaustive successful-path arrays. `full` explicitly requests the legacy exhaustive arrays. `--max-listed-paths` defaults to 200 per issue category; all listed issue/path/log text also shares a 512 KiB default bound, so unusually long paths cannot bypass the count limit.
+`--details summary|issues|full` controls response volume. JSON and omitted `validation.Request.Details` both default to `issues`; text output defaults to `summary`. `summary` keeps pass/fail, exact counts, timings, byte/resource metrics, and phase data. `issues` adds bounded actionable samples but removes exhaustive successful-path arrays. `full` explicitly requests exhaustive arrays. `--max-listed-paths` defaults to 200 per issue category; all listed issue/path/log text also shares a 512 KiB default bound, so unusually long paths cannot bypass the count limit.
 
 Artifact mode resets a disposable sandbox before each task, copies only the task's declared worktree inputs plus declared outputs from transitive dependencies, executes the task with caches and stamps bypassed, and reports:
 
@@ -188,9 +193,9 @@ Daemon behavior:
 - no daemon-owned watch loop: starts `devflow watch <target> --detach` through the daemon
 - live daemon watch loop for the same target: reused
 - live daemon watch loop for a different target: fails with `target_mismatch`
-- live daemon non-watch work: fails with `non_watch_supervisor`
+- live daemon non-watch work: fails with `non_watch_execution`
 
-`flush --json` returns `FlushResult` with the request ID, instance ID, worktree, project, target, mode, whether a daemon watch loop was started, sync/health success, node states, service health, and structured issues. The command exits non-zero when `success=false`, including timeout and health-check failures. Low-level watch-start, request-write, sync-write, and acknowledgement-read failures retain their daemon error as a phase-specific issue instead of returning an empty result; the CLI also adds a `daemon_error` issue when an older daemon returns an unstructured failed response or a daemon call completes without a flush result.
+`flush --json` returns `FlushResult` with the request ID, instance ID, worktree, project, target, mode, whether a daemon watch loop was started, sync/health success, node states, service health, and structured issues. The command exits non-zero when `success=false`, including timeout and health-check failures. Low-level watch-start, request-write, sync-write, and acknowledgement-read failures retain their daemon error as a phase-specific issue instead of returning an empty result; the CLI adds a `daemon_error` issue when daemon communication fails or a response is missing its flush result.
 
 `action` is the generic foreground operation surface for explicit project operations that are not normal DAG targets. Actions are discovered from the project adapter through the daemon.
 
@@ -236,15 +241,17 @@ If exactly one migration-create action exists, the component flag can be omitted
 go install github.com/benjaco/devflow/cmd/devflow@latest
 ```
 
-`upgrade --version v0.1.2` installs that specific tag. `upgrade --direct` sets `GOPROXY=direct` for testing freshly pushed commits before the public Go proxy catches up. Upgrade emits immediate start/finish progress and streams the underlying `go install` stdout/stderr instead of buffering it until exit. In text mode the child keeps its stdout/stderr destinations. With `upgrade --json`, live progress and combined child output go to stderr while stdout remains one final JSON document containing the command, package, version target, success flag, duration, and captured `output`. It exits non-zero when the underlying `go install` fails. In text mode, `upgrade` warns when `go install` writes a binary somewhere other than the `devflow` command currently found on `PATH`.
+`upgrade --version v0.1.2` installs that specific tag. `upgrade --direct` sets `GOPROXY=direct` for testing freshly pushed commits before the public Go proxy catches up. After installation succeeds, upgrade clears the global task artifact cache at `<os.UserCacheDir()>/devflow/cache` so subsequent runs rebuild artifacts with the installed code. Failed installation leaves the cache intact. Cache cleanup failure returns an error even though the binary was installed. Run upgrades between executions: this global cleanup is not coordinated with active task-cache reads or writes. Upgrade does not migrate older APIs or worktree state.
+
+Upgrade emits immediate start/finish progress and streams the underlying `go install` stdout/stderr instead of buffering it until exit. In text mode the child keeps its stdout/stderr destinations. With `upgrade --json`, live progress and combined child output go to stderr while stdout remains one final JSON document containing the command, package, version target, success flag, `cacheCleared`, duration, and captured `output`. It exits non-zero when installation or cache cleanup fails. In text mode, `upgrade` warns when `go install` writes a binary somewhere other than the `devflow` command currently found on `PATH`.
 
 `docs setup` prints the setup/pipeline user docs bundle. `docs development` prints the day-to-day CLI/TUI/operator user docs bundle.
 
 Bare `docs` is intentionally a usage error so agents and users do not accidentally pull both context lanes into one prompt. The docs commands are projectless, have no flags, have no JSON mode, and do not print contributor docs.
 
-`restart` connects to the daemon. A service restart is handled by the active engine that owns the service handle: it stops only the planned service set, preserves unrelated services, assigns a new process generation, waits through the task readiness probe, and reports success only after a different ready identity exists. Repeated requests are serialized. A failed or stopped service can be started again while its watch supervisor remains active. `restart --preview` returns the same `LifecyclePlan` without changing execution state. Non-service restart slices retain their finite attached execution behavior.
+`restart` connects to the daemon. A service restart is handled by the active engine that owns the service handle: it stops only the planned service set, preserves unrelated services, assigns a new process generation, waits through the task readiness probe, and reports success only after a different ready identity exists. Repeated requests are serialized. A failed or stopped service can be started again while its daemon watch loop remains active. `restart --preview` returns the same `LifecyclePlan` without changing execution state. Non-service restart slices retain their finite attached execution behavior.
 
-`stop` is daemon-backed; if no daemon is running, it may start a short-lived daemon to reconcile persisted runtime state. `stop --task` is genuinely task-scoped: the active engine stops the named service and any planned active service dependents without canceling the active run or unrelated services. An already-stopped known task succeeds idempotently with an empty stopped set; an unknown task fails before changing processes. `stop --preview` returns the plan without mutation and never shuts down the daemon. With `--all`, DevFlow snapshots the live stop scope before cancellation, then reports only confirmed active services, legacy supervisor/executor processes, a running managed database, and daemon cleanup. A partial failure retains confirmed `stopped` entries and adds per-resource `issues`; repeated cleanup does not claim absent resources.
+`stop` is daemon-backed; if no daemon is running, it may start a short-lived daemon to reconcile persisted runtime state. `stop --task` is task-scoped: the active engine stops the named service and any planned active service dependents without canceling the active run or unrelated services. An already-stopped known task succeeds idempotently with an empty stopped set; an unknown task fails before changing processes. `stop --preview` returns the plan without mutation and never shuts down the daemon. With `--all`, DevFlow snapshots the live stop scope before cancellation, then reports confirmed stops of engine-owned services, explicitly recorded process/status refs, a running managed database, and the daemon. A partial failure retains confirmed `stopped` entries and adds per-resource `issues`; repeated cleanup does not claim absent resources. Recovery never discovers processes by scanning old launcher commands or parsing logs.
 
 Lifecycle JSON is additive and shared across CLI/TUI daemon actions. `LifecyclePlan` contains `requestedAction`, selected task/target, `tasksToInvalidate`, `processesToStop`, `tasksToExecute`, `servicesToPreserve`, `servicesToRestart`, and `confirmationRecommended`. `LifecycleResult` adds exact `affected`, confirmed `stopped`, and `restarted` sets plus old/new PID and generation identities, readiness, and optional `{resource,reason}` `issues`. A restart from an already-stopped service has no previous identity and an empty `stopped` set. Existing top-level stop/run fields remain present. Use:
 
@@ -257,9 +264,9 @@ devflow stop --task backend_debug --json
 
 `doctor` supports `--target <target>` and `--strict`. Without a target it checks the full adapter required CLI catalog and project/task required-env metadata. With a target it resolves the target or task name and checks only `RequiredCLIs` and `RequiredEnv` attached to that target and its task closure, plus project-wide required env. JSON includes `project`, `target`, `cliScope`, `checksPassed`, and `requiredEnv` entries with `name`, `set`, and the detected source. Normal doctor remains report-only; `--strict` emits the same complete text/JSON result and exits nonzero when any check fails.
 
-`clis status` reports adapter-defined required CLIs, whether they are already installed, and whether a platform install script is available. `clis status --target <target>` uses the same CLI scope as target-scoped doctor. JSON includes `requiredCLIs`; the older `dependencies` field is still emitted for compatibility.
+`clis status` reports adapter-defined required CLIs, whether they are already installed, and whether a platform install script is available. `clis status --target <target>` uses the same CLI scope as target-scoped doctor. JSON includes `requiredCLIs`.
 
-`clis install` runs adapter-defined install scripts only for missing required CLIs and then re-checks that each installed command is now available on `PATH`. `clis install --target <target>` installs only CLIs needed for that target closure. `deps status/install` remains available as a compatibility alias.
+`clis install` runs adapter-defined install scripts only for missing required CLIs and then re-checks that each installed command is now available on `PATH`. `clis install --target <target>` installs only CLIs needed for that target closure.
 
 `status` is read-only: it uses a live daemon when one is already running, otherwise it reads the persisted instance/status files without starting a daemon. It reports instance metadata in both text and JSON forms, including:
 - worktree
@@ -267,10 +274,10 @@ devflow stop --task backend_debug --json
 - assigned ports
 - sanitized DB details
 - derived local URLs such as `backend`
-- daemon/supervisor PID, liveness, and log path when present
+- `daemon` metadata with PID, liveness, and log path when present
 - per-node debug metadata for `debug_service` tasks, including host, port, port name, binary path, package, protocol, and a Go remote-attach shape
 
-`NodeStatus.pid` is a host-process identifier, not a universal service identity. `generation` is the monotonic engine-owned service identity and also works for PID-less handles; `attempt` exposes the corresponding attempt number. `ready` is set only after the service readiness callback succeeds. Process-backed services report a positive PID. Engine-managed resources such as the managed Postgres container report PID `0` while running; their liveness is held by the daemon's registered service handle and verified by `flush`, and their output still uses the normal task log/typed log-event surfaces. Detached start JSON always emits boolean `accepted`, `supervisorStarted`, and `ready`, plus the response-time `state`; use status/flush as the continuing health gate.
+`NodeStatus.pid` is a host-process identifier, not a universal service identity. `generation` is the monotonic engine-owned service identity and also works for PID-less handles; `attempt` exposes the corresponding attempt number. `ready` is set only after the service readiness callback succeeds. Process-backed services report a positive PID. Engine-managed resources such as the managed Postgres container report PID `0` while running; their liveness is held by the daemon's registered service handle and verified by `flush`, and their output still uses the normal task log/typed log-event surfaces. Detached start JSON always emits boolean `accepted`, `daemonStarted`, and `ready`, plus `daemonPid` and the response-time `state`; use status/flush as the continuing health gate.
 
 Task states now distinguish:
 - `pending`, `starting`, `running`, `ready`, and `restarting`
@@ -282,7 +289,7 @@ Task states now distinguish:
 - `canceled`: the task was interrupted because another task failed or the run was canceled
 - `stopped` and `dirty`
 
-`logs` supports task logs as before and also accepts the reserved sources `supervisor` and `tui`. `logs supervisor` reads the daemon/supervisor log directly. `logs tui` reads `.devflow/logs/<instance-id>/tui.log`, including session boundaries, returned terminal errors, recovered panic stacks, and any Go fatal output duplicated while the TUI owned stderr. JSON mode retains the existing JSON-lines shape with `task: "tui"`.
+`logs` accepts task names and the reserved sources `daemon` and `tui`. `logs daemon` reads the daemon log directly. `logs tui` reads `.devflow/logs/<instance-id>/tui.log`, including session boundaries, returned terminal errors, recovered panic stacks, and any Go fatal output duplicated while the TUI owned stderr. JSON mode uses JSON lines with `task: "daemon"` or `task: "tui"` for those sources.
 
 Task log files now represent the current run attempt for that task. The engine truncates the log at task-attempt start before adapter code can emit progress, and subprocess output appends within that attempt. Older successful, failed, or canceled output must not stay mixed into a newer running attempt. Task, daemon, TUI, and event-stream logs are owner-only (`0600`) on Unix-like systems.
 
@@ -293,7 +300,7 @@ The operator console includes:
 - live task list with selection
 - selected-task metadata
 - a bounded live tail of the selected task log; running logs open at the tail in `FOLLOWING`, upward/Page Up scrolling switches to `PAUSED`, End or `f` resumes, and `o` loads older retained lines up to a fixed bound
-- toggle to the daemon/supervisor log
+- toggle to the daemon log
 - `d` toggles a database/Prisma panel with managed Postgres identity, persisted flavor (`postgres` or `postgis`), the selected PostgreSQL major when configured, configured/automatic image selection, and recent cached Prisma migration-prefix snapshots; `F2` is a backup key
 - the database/Prisma panel flags schema/migration drift and `m` asks for a migration name, then sends a daemon action with kind `devflow.database.migration.create` through the daemon-owned engine and relaunches the previously detached target; `F4` is a backup key
 - while the TUI creates a Prisma migration, the footer status reports target/task state and the latest task output line

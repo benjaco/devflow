@@ -1,7 +1,6 @@
 package instance
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,7 +79,6 @@ func TestStopDaemonWorkDoesNotReportAbsentProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst.Processes["already-stopped"] = api.ProcessRef{PID: 1 << 30, StartedAt: time.Now().UTC()}
-	inst.Supervisor = api.SupervisorRef{PID: (1 << 30) + 1, ExecPID: (1 << 30) + 2}
 	if err := Save(inst); err != nil {
 		t.Fatal(err)
 	}
@@ -97,9 +95,6 @@ func TestStopDaemonWorkDoesNotReportAbsentProcess(t *testing.T) {
 	}
 	if len(loaded.Processes) != 0 {
 		t.Fatalf("stale process reference was not removed: %+v", loaded.Processes)
-	}
-	if loaded.Supervisor.PID != 0 || loaded.Supervisor.ExecPID != 0 {
-		t.Fatalf("stale supervisor references were not removed: %+v", loaded.Supervisor)
 	}
 }
 
@@ -123,90 +118,6 @@ func TestSaveWritesRuntimeEnv(t *testing.T) {
 	}
 	if string(data) != "FOO=bar\n" {
 		t.Fatalf("runtime env contents = %q", string(data))
-	}
-}
-
-func TestRecordDetachedRunPersistsSupervisorAndLastRun(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	worktree := t.TempDir()
-	inst, err := Resolve(worktree, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := RecordDetachedRun(inst, api.RunConfig{
-		Project:     "go-next-monorepo",
-		Target:      "fullstack",
-		Mode:        api.ModeWatch,
-		MaxParallel: 2,
-		Detached:    true,
-	}, 4321, filepath.Join(worktree, "supervisor.log")); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := Load(worktree, inst.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Supervisor.PID != 4321 {
-		t.Fatalf("unexpected supervisor pid: %d", loaded.Supervisor.PID)
-	}
-	if loaded.LastRun.Target != "fullstack" || !loaded.LastRun.Detached {
-		t.Fatalf("unexpected last run: %+v", loaded.LastRun)
-	}
-}
-
-func TestRecordSupervisorExecPersistsChildPID(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	worktree := t.TempDir()
-	inst, err := Resolve(worktree, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := RecordSupervisorExec(worktree, 5678); !errors.Is(err, ErrSupervisorNotRecorded) {
-		t.Fatalf("expected supervisor-not-recorded error, got %v", err)
-	}
-	if err := RecordDetachedRun(inst, api.RunConfig{
-		Project:  "go-next-monorepo",
-		Target:   "fullstack",
-		Mode:     api.ModeWatch,
-		Detached: true,
-	}, 4321, filepath.Join(worktree, "supervisor.log")); err != nil {
-		t.Fatal(err)
-	}
-	if err := RecordSupervisorExec(worktree, 5678); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := Load(worktree, inst.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Supervisor.ExecPID != 5678 {
-		t.Fatalf("unexpected executor pid: %d", loaded.Supervisor.ExecPID)
-	}
-}
-
-func TestStopSupervisorIgnoresMissingProcess(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	worktree := t.TempDir()
-	inst, err := Resolve(worktree, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	inst.Supervisor = api.SupervisorRef{PID: 999999}
-	if err := Save(inst); err != nil {
-		t.Fatal(err)
-	}
-	if err := StopSupervisor(inst); err != nil {
-		t.Fatalf("expected missing supervisor process to be ignored, got %v", err)
-	}
-	loaded, err := Load(worktree, inst.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Supervisor.PID != 0 {
-		t.Fatalf("expected supervisor to be cleared, got %+v", loaded.Supervisor)
 	}
 }
 

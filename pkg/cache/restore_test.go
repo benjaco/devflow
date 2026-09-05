@@ -259,7 +259,7 @@ func TestCacheRejectsSymlinkAncestors(t *testing.T) {
 	assertFileContent(t, filepath.Join(external, "out"), "outside")
 }
 
-func TestRestoreLegacyRedundantOutputsRetainsManifestIndexes(t *testing.T) {
+func TestRestoreRedundantOutputsRetainsManifestIndexes(t *testing.T) {
 	worktree := t.TempDir()
 	store := New(t.TempDir())
 	entry := store.EntryDir("build", "key")
@@ -276,7 +276,7 @@ func TestRestoreLegacyRedundantOutputsRetainsManifestIndexes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if ok, err := store.Restore(worktree, "build", "key"); !ok || err != nil {
-		t.Fatalf("restore legacy overlapping outputs: %v, %v", ok, err)
+		t.Fatalf("restore overlapping outputs: %v, %v", ok, err)
 	}
 	assertFileContent(t, filepath.Join(worktree, "dist", "sub", "out"), "cached")
 }

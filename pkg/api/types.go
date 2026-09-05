@@ -77,16 +77,14 @@ type ProcessRef struct {
 	Generation uint64    `json:"generation,omitempty"`
 }
 
-type SupervisorRef struct {
+type DaemonRef struct {
 	PID       int       `json:"pid"`
-	ExecPID   int       `json:"execPid,omitempty"`
 	StartedAt time.Time `json:"startedAt"`
 	LogPath   string    `json:"logPath,omitempty"`
 }
 
-type SupervisorStatus struct {
+type DaemonStatus struct {
 	PID       int       `json:"pid,omitempty"`
-	ExecPID   int       `json:"execPid,omitempty"`
 	Alive     bool      `json:"alive"`
 	StartedAt time.Time `json:"startedAt,omitempty"`
 	LogPath   string    `json:"logPath,omitempty"`
@@ -101,16 +99,16 @@ type RunConfig struct {
 }
 
 type Instance struct {
-	ID         string                `json:"id"`
-	Label      string                `json:"label"`
-	Worktree   string                `json:"worktree"`
-	CreatedAt  time.Time             `json:"createdAt"`
-	Ports      map[string]int        `json:"ports"`
-	Env        map[string]string     `json:"env"`
-	DB         DBInstance            `json:"db"`
-	Processes  map[string]ProcessRef `json:"processes"`
-	Supervisor SupervisorRef         `json:"supervisor,omitempty"`
-	LastRun    RunConfig             `json:"lastRun,omitempty"`
+	ID        string                `json:"id"`
+	Label     string                `json:"label"`
+	Worktree  string                `json:"worktree"`
+	CreatedAt time.Time             `json:"createdAt"`
+	Ports     map[string]int        `json:"ports"`
+	Env       map[string]string     `json:"env"`
+	DB        DBInstance            `json:"db"`
+	Processes map[string]ProcessRef `json:"processes"`
+	Daemon    DaemonRef             `json:"-"`
+	LastRun   RunConfig             `json:"lastRun,omitempty"`
 }
 
 type NodeStatus struct {
@@ -276,6 +274,8 @@ type RunResult struct {
 	Success           bool                    `json:"success"`
 	DurationMs        int64                   `json:"durationMs"`
 	Error             string                  `json:"error,omitempty"`
+	Code              string                  `json:"code,omitempty"`
+	ResourceConflict  *ResourceConflict       `json:"resourceConflict,omitempty"`
 	FailedNode        string                  `json:"failedNode,omitempty"`
 	FailedNodeLogPath string                  `json:"failedNodeLogPath,omitempty"`
 	LogTail           []string                `json:"logTail,omitempty"`
@@ -288,6 +288,17 @@ type RunResult struct {
 	CacheMisses       []string                `json:"cacheMisses"`
 	StartedAt         string                  `json:"startedAt"`
 	FinishedAt        string                  `json:"finishedAt"`
+}
+
+// ResourceConflict identifies the worktree owner that prevented a mutation.
+// It contains no task environment or credentials.
+type ResourceConflict struct {
+	Worktree         string `json:"worktree"`
+	PID              int    `json:"pid,omitempty"`
+	Target           string `json:"target,omitempty"`
+	Mode             string `json:"mode,omitempty"`
+	Kind             string `json:"kind,omitempty"`
+	RecoveryRequired bool   `json:"recoveryRequired,omitempty"`
 }
 
 type RepositoryChangeStatus string
@@ -488,21 +499,23 @@ type FlushRequest struct {
 }
 
 type FlushResult struct {
-	RequestID  string         `json:"requestId"`
-	InstanceID string         `json:"instanceId"`
-	Worktree   string         `json:"worktree"`
-	Project    string         `json:"project,omitempty"`
-	Target     string         `json:"target"`
-	Mode       RunMode        `json:"mode"`
-	Started    bool           `json:"started"`
-	Synced     bool           `json:"synced"`
-	Success    bool           `json:"success"`
-	TimedOut   bool           `json:"timedOut,omitempty"`
-	DurationMs int64          `json:"durationMs"`
-	UpdatedAt  time.Time      `json:"updatedAt,omitempty"`
-	Nodes      []NodeStatus   `json:"nodes,omitempty"`
-	Services   []FlushService `json:"services,omitempty"`
-	Issues     []FlushIssue   `json:"issues,omitempty"`
+	Code             string            `json:"code,omitempty"`
+	ResourceConflict *ResourceConflict `json:"resourceConflict,omitempty"`
+	RequestID        string            `json:"requestId"`
+	InstanceID       string            `json:"instanceId"`
+	Worktree         string            `json:"worktree"`
+	Project          string            `json:"project,omitempty"`
+	Target           string            `json:"target"`
+	Mode             RunMode           `json:"mode"`
+	Started          bool              `json:"started"`
+	Synced           bool              `json:"synced"`
+	Success          bool              `json:"success"`
+	TimedOut         bool              `json:"timedOut,omitempty"`
+	DurationMs       int64             `json:"durationMs"`
+	UpdatedAt        time.Time         `json:"updatedAt,omitempty"`
+	Nodes            []NodeStatus      `json:"nodes,omitempty"`
+	Services         []FlushService    `json:"services,omitempty"`
+	Issues           []FlushIssue      `json:"issues,omitempty"`
 }
 
 type FlushService struct {
@@ -531,7 +544,7 @@ type StatusResult struct {
 	Ports      map[string]int    `json:"ports,omitempty"`
 	DB         DBInstance        `json:"db,omitempty"`
 	URLs       map[string]string `json:"urls,omitempty"`
-	Supervisor *SupervisorStatus `json:"supervisor,omitempty"`
+	Daemon     *DaemonStatus     `json:"daemon,omitempty"`
 	Nodes      []NodeStatus      `json:"nodes"`
 }
 
@@ -603,6 +616,7 @@ type UpgradeResult struct {
 	Package       string   `json:"package"`
 	VersionTarget string   `json:"versionTarget"`
 	Success       bool     `json:"success"`
+	CacheCleared  bool     `json:"cacheCleared"`
 	DurationMs    int64    `json:"durationMs"`
 	Error         string   `json:"error,omitempty"`
 	Output        string   `json:"output,omitempty"`

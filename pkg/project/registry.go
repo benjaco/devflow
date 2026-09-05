@@ -155,15 +155,7 @@ func (p syntheticTargetProject) ConfigureInstance(ctx context.Context, worktree 
 	return p.base.ConfigureInstance(ctx, worktree)
 }
 func (p syntheticTargetProject) RequiredCLIs() []RequiredCLI {
-	provider, ok := p.base.(RequiredCLIProvider)
-	if ok {
-		return provider.RequiredCLIs()
-	}
-	legacy, ok := p.base.(DependencyProvider)
-	if !ok {
-		return nil
-	}
-	return legacy.Dependencies()
+	return RequiredCLIsFor(p.base)
 }
 func (p syntheticTargetProject) RequiredEnvs() []string {
 	provider, ok := p.base.(RequiredEnvProvider)

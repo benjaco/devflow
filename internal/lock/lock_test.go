@@ -1,10 +1,42 @@
 package lock
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestTryAcquireRejectsContendedLockWithoutWaiting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "execution.lock")
+	first, err := TryAcquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Release()
+	started := time.Now()
+	second, err := TryAcquire(path)
+	if second != nil {
+		_ = second.Release()
+		t.Fatal("contending owner acquired the lock")
+	}
+	if !errors.Is(err, ErrLocked) {
+		t.Fatalf("want ErrLocked, got %v", err)
+	}
+	if time.Since(started) > time.Second {
+		t.Fatal("nonblocking acquire waited")
+	}
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	second, err = TryAcquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestFileLockSerializesAndReleaseIsIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "state.lock")

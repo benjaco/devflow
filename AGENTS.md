@@ -39,7 +39,11 @@ Devflow is a local-first DAG runner for development workflows. Keep the core gen
 
 ## Engineering Rules
 
+- Keep the code current-only. Do not add or retain backward-compatibility aliases, old state readers, migration shims, or retired execution paths unless the user explicitly requests them. Update callers, tests and docs together when a contract changes.
+- Older Devflow state and adapter compilation are not compatibility commitments. Successful `devflow upgrade` clears the shared task artifact cache; prefer rebuilding disposable artifacts to migrating them.
+- Add short comments where they explain a non-obvious invariant or tradeoff; describe why the code exists rather than restating what it does.
 - Every user-facing command must support stable JSON output, except `devflow docs setup` and `devflow docs development`, which intentionally print scoped plain bundled user Markdown only.
+- Stable JSON means a documented, tested current contract; it does not require preserving retired fields across releases.
 - Service tasks are supervised, not cached.
 - Cached tasks must declare outputs.
 - Worktree is the isolation boundary.

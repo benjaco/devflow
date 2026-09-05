@@ -523,6 +523,8 @@ return nil
 
 The handle has no host PID because Docker owns the container process. Devflow still follows its logs, detects exit, checks it during `flush`, and stops it during watch restarts, CI cleanup, and normal shutdown. Do not add a `docker info` prerequisite or launch `docker logs -f` as a wrapper service; the database package connects to the Docker Engine directly and supports Unix sockets, Windows named pipes, and configured TCP/TLS or SSH contexts.
 
+A custom `ServiceHandle.Stop()` must join cleanup and return an error if it cannot stop the resource; after successful stop, `Alive()` must return false. Devflow preserves failed handles and blocks replacement until cleanup is confirmed. This applies to handles registered by finite tasks as well as services. `Runtime.RegisterServiceHandle` uses the same `OnServiceHandle` callback for OS processes and PID-less managed resources. Keep `ConfigureInstance` declarative: resources that need cleanup belong in task execution and must register a handle. The worktree execution lease protects cooperating Devflow operations; adapters still need explicit isolation for external resources shared by different worktrees.
+
 Custom low-level migration tasks can read a SQL file and call `database.New().ExecSQL(ctx, rt.Instance.DB, sql)`. This runs `psql` inside the managed container through the Engine exec API and returns its output even on failure, so adapters can forward it with `Runtime.EmitLogLine` without depending on `docker exec` or host path syntax.
 
 `EnsureRuntime` preserves the data volume, but recreates a stale container when its published host/container port mapping or resolved Postgres image does not match the current Devflow instance. Avoid unconditional container removal in normal startup paths. The default `postgres:16.14` runtime and `alpine:3.24.1` snapshot sidecar are official multi-architecture images, so Docker selects `linux/arm64` natively on Apple Silicon. Custom images must publish the architecture they are expected to run on; adapters should not force `linux/amd64` unless emulation is an intentional project requirement. The high-level component exposes `Image(...)`, `SidecarImage(...)`, and `ContainerPort(...)` for compatible custom runtimes.
@@ -567,7 +569,7 @@ When a daemon-owned run is active, `devflow tui` has a `d` database/Prisma panel
 
 If `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but no new migration appears, the Prisma migration task returns an explicit migration-needed error instead of pretending the database is current. Devflow records that task as `migration_needed` so the TUI can show an authoring action instead of a generic failure.
 
-Custom migration guards can get the same task state by returning an error that implements `MigrationNeeded() bool`. Devflow also recognizes the built-in Prisma "generate one with GeneratePrismaMigration" guard text for compatibility.
+Custom migration guards get the same task state by returning an error that implements `MigrationNeeded() bool` and returns true. Wrapped errors retain that signal. Ordinary error messages remain failures regardless of their wording, so diagnostic text cannot accidentally offer migration actions for an unrelated problem.
 
 For a plain SQL migration folder, use the generic migration workflow and an apply function:
 

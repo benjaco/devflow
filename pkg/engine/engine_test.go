@@ -735,10 +735,23 @@ func TestMigrationNeededErrorUsesMigrationNeededState(t *testing.T) {
 	}
 }
 
-func TestMigrationNeededMessageUsesMigrationNeededState(t *testing.T) {
-	err := fmt.Errorf("prisma schema changed without a new migration; generate one with GeneratePrismaMigration before preparing the database")
+func TestTaskErrorClassificationRequiresTypedMigrationSignal(t *testing.T) {
+	for _, message := range []string{
+		"generate one with GeneratePrismaMigration",
+		"generate a migration failed: disk full",
+		"needs new migration task: command not found",
+		"could not read migration_needed fixture",
+	} {
+		t.Run(message, func(t *testing.T) {
+			if got := classifyTaskError(context.Background(), errors.New(message)); got != api.StateFailed {
+				t.Fatalf("ordinary task error was reclassified from its wording: got %q, want %q", got, api.StateFailed)
+			}
+		})
+	}
+
+	err := fmt.Errorf("prepare database: %w", testMigrationNeededError{message: "schema changed"})
 	if got := classifyTaskError(context.Background(), err); got != api.StateMigrationNeeded {
-		t.Fatalf("expected migration-needed state from Prisma guard message, got %q", got)
+		t.Fatalf("wrapped typed migration error = %q, want %q", got, api.StateMigrationNeeded)
 	}
 }
 

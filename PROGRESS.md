@@ -5,14 +5,41 @@ Last updated: 2026-09-05
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: core reliability review completed across cache recovery, service lifecycle, daemon cancellation, persisted state, watch polling, project registry, and CI error reporting; Go 1.27.1 and Delve 1.27.1 remain the baseline
-- Confidence: new regressions reproduce the reviewed defects; full default/race suites, examples, quality/security gates, native build/version JSON smoke, and Windows/Linux amd64 compilation pass. Native CI and opt-in Docker/PTY checks remain separate verification lanes.
+- State: approved agent-verification item 1 (execution ownership) implemented, revised to current-only contracts and ready for user review; items 2–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: ownership regressions recorded before fixes; final full default/race suites, examples, vet, Staticcheck, vulnerability scan, formatting/module/diff checks, version JSON smoke and Windows/Linux amd64 compilation pass. Native CI and opt-in Docker/PTY checks remain separate verification lanes.
 
 ## In Progress
 
-- None.
+- None. Item 1 and its current-only revision await user review; item 2 has not started.
 
 ## Completed
+
+- Item 1 review revision — current-only code and upgrades:
+  - removed supervisor/executor migration, launcher-log/process-table discovery, old project/service providers, retired CLI/JSON aliases and unused launch-state inference; current control uses only `daemon.json`, `daemon`/`daemonStarted` and `logs daemon`
+  - made daemon lookup/log diagnostics independent of execution snapshots; TUI reads preserve crash/resource evidence for explicit cleanup
+  - successful `upgrade` clears the shared task artifact cache and reports `cacheCleared`; failed installs preserve it, unrelated state/outputs/database volumes stay outside cleanup, and cache-clear failures are reported
+  - retained typed migration-needed classification only and aligned omitted validation API details with JSON's bounded `issues` default; exhaustive callers now request `full`
+  - documented the current-only policy and brief rationale-comment expectations in `AGENTS.md`, subsystem docs and shared memory; older adapters may require source fixes instead of compatibility shims
+  - recorded eight observed red-to-green regressions in `docs_contributors/execution-ownership-verification.md`; upgrade uses fake Go plus fully isolated OS cache paths
+  - passed full default/race suites and examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), formatting/module/diff checks, version JSON smoke, and affected Linux/Windows amd64 test/CLI compilation; removed two unused test helpers flagged by Staticcheck
+  - local changes only; no actual upgrade, install, commit or operations on existing development services. Item 2 remains queued for separate review.
+
+- Agent-verification item 1 — worktree execution ownership:
+  - added nonblocking canonical-worktree leases shared by direct CI, daemon engines and mutating cache operations; admit before configuration/state/env changes and retain through cleanup, temporary-env restoration and repository finalization
+  - serialized daemon transitions, retained ownership after stop timeout, released failed-initialization slots, and prevented old action completion from relaunching over newer intent
+  - separated daemon control from execution snapshots and blocked recorded live/unknown current resources before admission; review removed old supervisor/executor recovery
+  - made cleanup require successful Stop plus confirmed non-aliveness; preserve failed handles/recovery markers, clean every watcher exit, protect finalization with the lease and report cleanup failures in terminal results/events
+  - added structured resource_conflict JSON including owner metadata, safe explicit recovery, task-cache/stamp preservation and protection against the daemon appearing in its own stop aliases
+  - recorded observed red failures and focused rerun commands in `docs_contributors/execution-ownership-verification.md`; updated architecture, CLI, adapter, operator, agent, testing, roadmap and shared-memory contracts
+  - verified final `go test ./...`, `go test -race ./...`, `go vet ./...`, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), clean module metadata/format/diff checks, examples, `go run ./cmd/devflow version --json`, and Linux/Windows amd64 affected test-binary/CLI compilation
+  - local changes only; no commits, installs, existing development-service operations or external-project changes; native Linux/Windows execution and opt-in Docker/PTY smoke remain separate checks
+
+- Agent-verification feedback assessment and implementation plan:
+  - assessed the supplied `b46220f` review against current `a7fe4f8`; saved dispositions, existing alternatives, staged scope/reasons and acceptance tests in `docs_contributors/agent-verification-plan.md`, and linked the proposal from the roadmap
+  - reproduced stale startup artifacts after a successful flush, validation hook mismatches, empty unknown-target JSON, and log replay/truncation failures using isolated temporary Go-overlay tests
+  - source-confirmed competing execution ownership, daemon transition/stop-timeout gaps, and run/task prompt-ID collision risks; concurrency reproductions are specified for implementation
+  - prioritize ownership, startup freshness and validation parity; reuse current graph impact/prerequisite/action facilities, and defer broad concurrency/MCP/storage redesign
+  - planning only: no runtime source changes, installs, existing-service operations or external-project edits; full product tests were not rerun for documentation-only changes
 
 - Core reliability review:
   - cache restore validates manifests/paths/artifact kinds, stages complete copies before output replacement, and retains backups for rollback; corruption, cancellation, and failed publication have output-preservation regressions
@@ -912,6 +939,7 @@ Last updated: 2026-09-05
 
 ## Next Steps
 
+- Review item 1, then implement item 2 (startup freshness) test-first; continue the approved plan one item at a time with review after each.
 - Confirm the reliability changes on the native Linux/macOS/Windows CI matrix; retest the historical readiness symptom through the real daemon/TUI only if it recurs (the engine early-exit restart regression passes).
 - Confirm the Delve v1.27.1 pin on the next native Linux/macOS/Windows GitHub Actions run
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
@@ -922,6 +950,9 @@ Last updated: 2026-09-05
 
 ## Deferred / Known Gaps
 
+- Execution admission is conservative and cooperative: same-worktree overlap is rejected; finer resource scheduling, run histories, planner, broader JSON/input protocols and scoped cancellation remain later approved items. Unresolved orphan/PID-less resources require explicit reconciliation. Current recovery still uses recorded PIDs rather than OS process-birth identities; do not interpret process-exit/lease release as proof that arbitrary external resources stopped.
+- Successful upgrade clears the global task artifact cache without coordinating active cache operations; run upgrades between executions. It does not clear worktree state, outputs or database volumes.
+- Interrupted snapshots can record different PIDs for one task in instance/status maps; current name-based cleanup may retain only one reference. This pre-existing reconciliation gap remains separate follow-up work.
 - Cache restore rollback covers reported operation failures, not abrupt process/machine crashes; staging and output roots must share a filesystem. Failed rollback retains a recovery directory and reports its path.
 - Publishing maintained multi-architecture PostGIS images remains deferred until the project defines a registry, image provenance/signing, PostgreSQL/PostGIS patch cadence, and release ownership; native arm64 local builds remain the supported fallback
 - Round-1 release flow deliberately has no binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable

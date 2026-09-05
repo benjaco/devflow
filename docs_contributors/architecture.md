@@ -75,14 +75,22 @@ Per-worktree state lives under `.devflow/`:
 - `.devflow/state/instances/<instance-id>/`
 - `.devflow/state/instances/<instance-id>/flush/`
 - `.devflow/state/instances/<instance-id>/payload-schema/` for password-free Payload schema-push fingerprints
+- `.devflow/execution.lock` for cross-process execution admission; never unlink this lock file during operation
+- `.devflow/execution-owner.json` for owner identity and retained recovery evidence
+- `.devflow/state/instances/<instance-id>/daemon.json` for daemon transport metadata, independent of execution snapshots
 
-Daemon/supervisor state is also per worktree. The instance snapshot records:
-- the per-worktree daemon PID as the supervisor PID
-- legacy child executor PIDs when old supervisor state is being reconciled
+Daemon state is also per worktree. Instance loading combines the execution snapshot with `daemon.json`, the sole daemon control record. These records expose:
+- the per-worktree daemon PID and start time from `daemon.json`, exposed by status under `daemon`
 - service task PIDs when the supervised service is an operating-system process; managed resources such as database containers have no host PID entry
 - the daemon log path
 
 The engine, not the CLI or persisted PID registry, owns live service handles. Each daemon active run therefore carries an `engine.LifecycleController`. Task-scoped stop/restart commands are serialized through the engine loop, which verifies a monotonic service generation and readiness before returning. Late `Wait` results from a replaced handle are ignored by generation. Watch mode monitors every current generation after readiness, so an unexpected Delve/service exit becomes terminal status without tearing down independent services. Direct OS process termination remains only the recovery path when no live owning engine exists; `stop --all` remains the complete cleanup boundary.
+
+Execution admission is deliberately conservative: one executor owns a canonical worktree at a time, regardless of project or target. `internal/execution` uses nonblocking OS file locking plus an owner-only marker. Direct CI, daemon execution, cache-key preparation and local cache/stamp invalidation participate. The lease spans configuration, environment/port/state changes, task execution, cleanup, temporary-env restoration and CI repository finalization. Engine callers borrow only a valid enclosing lease for the same worktree; otherwise the engine acquires its own. Existing parallel DAG scheduling remains inside that ownership boundary.
+
+Daemon admission and stop/replace/retarget/invalidate transitions have a separate transition mutex. Foreground execution and lifecycle readiness waits release it; status and stop remain available. A monotonically increasing selection generation prevents a completed action from relaunching over newer operator intent. Stop timeout preserves the active owner. The active completion signal is closed only after environment restoration and lease finalization. Starting or refreshing daemon control metadata never rewrites `instance.json` or `runtime.env`.
+
+`ServiceHandle.Stop` must both succeed and leave `Alive()==false`. Failed cleanup retains the handle/process identity, reports degraded state, and marks ownership as requiring recovery. The OS lock remains held through final persistence; releasing it retains the marker on incomplete cleanup. Owner process exit alone does not authorize replacement: explicit stop-all recovery must reconcile known resources, and unresolved resources remain conflicts. This is cooperative Devflow ownership, not a sandbox for arbitrary external commands or a scheduler for shared external databases across worktrees.
 
 Task cache storage is global for the user:
 - `<os.UserCacheDir()>/devflow/cache`
@@ -101,7 +109,7 @@ Current shared paths:
 Global coordination state that is not repo-specific still lives under the user cache directory:
 - `devflow/state/instance-index.json`
 
-The daemon Unix socket lives in a short per-user temp directory such as `/tmp/devflow-daemon-<uid>/<instance-id>.sock`. It is intentionally not stored under deeply nested worktree paths because Unix socket path length limits are easy to hit on macOS. Request/response clients acknowledge each terminal response after decoding it, and the daemon waits for that acknowledgment with a short bound before closing the connection. The acknowledgment is best-effort in both directions so upgraded clients and daemons remain compatible with older peers. This delivery handshake prevents Windows Unix-domain sockets from dropping an immediate final response when the server closes directly after writing it.
+The daemon Unix socket lives in a short per-user temp directory such as `/tmp/devflow-daemon-<uid>/<instance-id>.sock`. It is intentionally not stored under deeply nested worktree paths because Unix socket path length limits are easy to hit on macOS. Request/response clients acknowledge each terminal response after decoding it, and the daemon waits for that acknowledgment with a short bound before closing the connection. The bound prevents an unresponsive caller from holding a connection indefinitely. This delivery handshake prevents Windows Unix-domain sockets from dropping an immediate final response when the server closes directly after writing it.
 
 Client cancellation closes blocked socket I/O even when the context has no deadline. Server shutdown also closes connections waiting for requests, and an idle observer disconnect unregisters its subscription without waiting for another event. Disconnecting a caller does not change daemon ownership of active workflows.
 
@@ -134,11 +142,11 @@ The important rule is precedence:
 
 Devflow deliberately selects only project-relevant process variables instead of persisting the entire caller environment. That allows projects to keep normal local app settings in `.env`, lets CI override those defaults, and still ensures launched processes point at the correct per-instance Postgres runtime and leased ports.
 
-Instance env is persisted under `.devflow/state` so detached supervisors, status, and relaunches can recover the same runtime configuration. Do not treat it as encrypted secret storage. Adapters should avoid storing long-lived production secrets there, avoid logging full env maps, and override runtime values such as `PORT` for unit-test tasks when those tests should not inherit the service runtime port.
+Instance env is persisted under `.devflow/state` so daemon execution, status, and relaunches can recover the same runtime configuration. Do not treat it as encrypted secret storage. Adapters should avoid storing long-lived production secrets there, avoid logging full env maps, and override runtime values such as `PORT` for unit-test tasks when those tests should not inherit the service runtime port.
 
 ## Service Supervision Boundary
 
-The engine supervises `project.ServiceHandle`, not only child processes. A handle reports liveness, waits for termination, stops idempotently, and may expose a host PID. `process.Handle` implements that contract for command-backed services. Concurrent calls to its `Stop` method join the same bounded terminate/kill operation; a context watcher cannot make engine cleanup return before the child has been reaped. Engine-managed resources can return PID `0`; the engine retains their in-memory handle for readiness, flush health, watch restarts, CI cleanup, and attached-run shutdown without persisting a false OS-process reference.
+The engine supervises `project.ServiceHandle`, not only child processes. A handle reports liveness, waits for termination, stops idempotently, and may expose a host PID. `Runtime.OnServiceHandle` is the single registration callback for both command processes and PID-less resources. `process.Handle` implements that contract for command-backed services. Concurrent calls to its `Stop` method join the same bounded terminate/kill operation; a context watcher cannot make engine cleanup return before the child has been reaped. Engine-managed resources can return PID `0`; the engine retains their in-memory handle for readiness, flush health, watch restarts, CI cleanup, and attached-run shutdown without persisting a false OS-process reference.
 
 Database adapters use `database.Manager.StartRuntimeService` for this path. It ensures the container, follows stdout/stderr through the Docker Engine log API, waits for container termination through the Engine API, and stops the container through the Engine API. Adapters register the returned handle with `Runtime.RegisterServiceHandle` and route its log callback through `Runtime.LineEmitter`. A wrapper process running `docker logs -f` is neither required nor permitted by the managed-database portability contract.
 
@@ -229,7 +237,7 @@ Policy:
 - adapters should prefer explicit non-interactive flags such as `-y`, `--yes`, `--force`, or `CI=1` where that is safe
 - if a task would require a destructive or ambiguous choice, the adapter should model that as an explicit action or separate target instead of letting the process block on stdin
 
-This keeps DAG execution deterministic and prevents background runs, detached supervisors, and watch mode from hanging on hidden prompts.
+This keeps DAG execution deterministic and prevents background runs, detached daemon execution, and watch mode from hanging on hidden prompts.
 
 ### Prisma-Specific Rules
 
@@ -282,7 +290,7 @@ Current limitation:
 
 Adapters define required command-line tools together with platform-specific install scripts.
 
-`RequiredCLIs()` is the project-level catalog at the engine boundary. New adapters normally populate it through `project.Builder.RequiredCLIs` or `RequiredCLI`. Builder command tasks automatically select a matching catalog entry when the command name matches it. Tasks and targets select from that catalog with `RequiredCLIs`, allowing target-scoped commands to avoid over-reporting tools that belong only to unrelated flows. The older `Dependencies()` provider remains as a compatibility shim for early adapters.
+`RequiredCLIs()` is the project-level catalog at the engine boundary. Adapters normally populate it through `project.Builder.RequiredCLIs` or `RequiredCLI`. Builder command tasks automatically select a matching catalog entry when the command name matches it. Tasks and targets select from that catalog with `RequiredCLIs`, allowing target-scoped commands to avoid over-reporting tools that belong only to unrelated flows. Direct task execution uses the same catalog through its synthetic target.
 
 Current shape:
 
@@ -308,7 +316,7 @@ type Target struct {
 
 Semantics:
 - required CLI status is determined by checking whether the command is available on `PATH`
-- `devflow doctor` checks the full project required CLI catalog for backward compatibility
+- `devflow doctor` checks the full project required CLI catalog when no target is selected
 - `devflow doctor --target <target>` checks only CLIs required by the target and its task closure
 - `devflow clis status/install --target <target>` use the same scoped selection
 - `RequiredCLIs` entries may reference either required CLI `Name` or `Command`
@@ -346,7 +354,7 @@ Long-lived database service supervision uses the same client. `StartRuntimeServi
 
 PostGIS volume identity includes `-pg<major>` so changing the parameter cannot attach an older physical cluster to a newer PostgreSQL server. Versions 16 and 17 mount their named volume at `/var/lib/postgresql/data`; version 18 mounts at `/var/lib/postgresql`, following the official image's breaking `PGDATA`/`VOLUME` layout change. Existing containers are reconciled when the named volume or destination differs. This is isolation, not a major-version migration facility; use logical dumps or an explicit `pg_upgrade` flow to carry data forward.
 
-Volume snapshots are physical Postgres cluster archives. Snapshot and restore stream tar data through the Engine container archive API and gzip locally; they do not expose host paths to a sidecar bind mount. This removes host-path syntax and sharing differences between Unix, Docker Desktop, and Windows. Snapshot keys must be one directory name rather than an absolute, nested, or parent-relative path; validate them before any Docker call or filesystem removal. Snapshot manifest version 3 records the resolved Docker image, its OS/architecture, and the PostgreSQL major when configured. Managed Prisma/migration restore treats legacy manifests without required platform/version metadata, manifests whose platform or PostgreSQL major differs, and manifests produced by another resolved image as cache misses before any container or volume is destroyed. This protects Intel-to-ARM moves, Postgres-to-PostGIS flavor changes, and custom-image aliases reused across PostgreSQL majors. Direct `RestoreSnapshot` returns `ErrSnapshotIncompatible` for the same conditions. Do not turn `.devflow/db-snapshots` into a cross-machine data transfer format; use logical dumps for that purpose.
+Volume snapshots are physical Postgres cluster archives. Snapshot and restore stream tar data through the Engine container archive API and gzip locally; they do not expose host paths to a sidecar bind mount. This removes host-path syntax and sharing differences between Unix, Docker Desktop, and Windows. Snapshot keys must be one directory name rather than an absolute, nested, or parent-relative path; validate them before any Docker call or filesystem removal. Snapshot manifest version 3 records the resolved Docker image, its OS/architecture, and the PostgreSQL major when configured. Managed Prisma/migration restore treats manifests without required platform/version metadata, manifests whose platform or PostgreSQL major differs, and manifests produced by another resolved image as cache misses before any container or volume is destroyed. This protects Intel-to-ARM moves, Postgres-to-PostGIS flavor changes, and custom-image aliases reused across PostgreSQL majors. Direct `RestoreSnapshot` returns `ErrSnapshotIncompatible` for the same conditions. Do not turn `.devflow/db-snapshots` into a cross-machine data transfer format; use logical dumps for that purpose.
 
 Engine control-plane calls such as inspect, create/start, stop, and remove are bounded by short context deadlines. Cold image acquisition is resolved explicitly with image inspection plus a separately bounded long Engine pull; do not let a first-machine image download happen implicitly inside the short container-start deadline. Image builds and streaming snapshot/restore work use the longer data deadline. Context cancellation closes attached exec streams, so an unavailable or stuck Engine surfaces as a database task error instead of leaving a task in `running` forever.
 
@@ -648,7 +656,7 @@ Service tasks have different command semantics depending on the run mode:
 - `run --detach` asks the per-worktree daemon to start the target in the background and returns after launch. It does not prove the target closure is healthy.
 - `watch --detach` asks the daemon to start the development loop. It is the expected long-running mode for humans and agents that want automatic reruns after file edits.
 - `flush` is the daemon-backed watch readiness gate. It proves the watcher observed the post-edit sync sentinel, waits for the selected target closure to settle, and checks service health.
-- `stop --all` asks the daemon to stop active work. It reconciles legacy supervisors, child executors and their process trees, tracked services, stale status PIDs, and the instance-managed database container. Stopping the database container preserves its Docker volume. After sending the response, the daemon shuts itself down so stopped state is not reported as a live daemon.
+- `stop --all` asks the daemon to stop active work through its owning engine handles. When no live engine owns a resource, recovery uses explicitly recorded process refs, PID-bearing status nodes, and the instance-managed database container. Stopping the database container preserves its Docker volume. After sending the response, the daemon shuts itself down so stopped state is not reported as a live daemon.
 
 The current automation recommendation is intentionally explicit: use detached watch plus `flush` for "background environment is ready" workflows. Do not reinterpret attached `run` as a start-and-return command without adding a separate CLI contract.
 
@@ -716,30 +724,29 @@ TUI daemon ownership is explicit. If bare `devflow` or `devflow tui` creates the
 
 The TUI process owns a separate per-instance diagnostic boundary at `.devflow/logs/<instance-id>/tui.log`. It records session boundaries and returned application errors. Panics on the application goroutine and Devflow-owned background workers are recovered, persisted with a stack, and converted to an error after stopping the screen. A Go runtime crash-output duplicate covers fatal failures and dependency-owned goroutines that cannot be recovered locally. The crash-output file descriptor is installed only for the TUI session and disabled during normal teardown. This surface is intentionally separate from the daemon log because the daemon may remain healthy when only the interactive client fails.
 
-The older hidden `__internal_exec` and `__internal_supervise` launcher paths are no longer user-facing execution routes. Their persisted supervisor/executor state and process-tree descendants can still be reconciled during `stop --all` so existing stale processes are not orphaned.
+Devflow maintains one current API, daemon protocol, and state model. It has no old-state migration, retired launcher discovery, process-command scanning, or supervisor-log parsing. Recovery reconciles current explicitly recorded resources; it does not infer ownership from a process name or log message.
 
 The daemon persists:
-- daemon PID as the supervisor PID
+- daemon PID and start time in `daemon.json`
 - daemon log path
 - last run config
-- legacy supervisor/executor PIDs as process refs when replacing old state
 
 This is enough for:
 - `run --detach`
 - `watch --detach`
-- `stop --all` against daemon-owned work; it snapshots live resources before engine cancellation clears references, terminates legacy supervisor/executor process groups and descendants, tracked service process groups and PID-bearing status nodes, stops the managed database only when its container is running, and reports only confirmed actual stops before shutting the daemon down
-- service `restart` by asking the daemon to relaunch the last active target
+- `stop --all` against daemon-owned work; it snapshots live resources before engine cancellation clears references, stops owned handles or explicitly recorded processes and their process trees, stops the managed database only when its container is running, and reports only confirmed actual stops before shutting the daemon down
+- service `restart` through the owning engine's lifecycle controller
 
 The operator surface now also reconciles detached state when queried:
 - `status` uses the daemon when one is already running, otherwise reads persisted state without starting a new daemon; it includes daemon PID/liveness plus sanitized instance metadata such as ports, URLs, and DB identity when present
-- `logs supervisor` reads the daemon/supervisor log directly
+- `logs daemon` reads the daemon log directly
 
 The first usable TUI slice is now implemented as a local terminal console connected to the per-worktree daemon, with persisted state as fallback. It currently provides:
 - live daemon event subscription plus fallback persisted-event refresh
 - task selection
 - selected-task details
 - task log tail
-- daemon/supervisor log toggle
+- daemon log toggle
 - database/Prisma panel showing managed Postgres identity and recent Prisma migration-prefix snapshots
 - explicit migration generation from inside the TUI by asking for a migration name, sending a daemon migration-create action through the daemon-owned engine, surfacing declared prompts, and relaunching the previously detached target after success
 - instance/worktree/runtime header

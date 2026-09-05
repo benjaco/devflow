@@ -18,6 +18,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/benjaco/devflow/internal/execution"
+	"github.com/benjaco/devflow/internal/executionconflict"
+	"github.com/benjaco/devflow/internal/executionstate"
+	"github.com/benjaco/devflow/internal/fsutil"
 	"github.com/benjaco/devflow/internal/reporepair"
 	"github.com/benjaco/devflow/internal/version"
 	"github.com/benjaco/devflow/pkg/api"
@@ -71,8 +75,8 @@ func (a *App) Run(args []string) error {
 		return a.instancesCmd(args[1:])
 	case "doctor":
 		return a.doctorCmd(args[1:])
-	case "deps", "clis", "required-clis":
-		return a.depsCmd(args[1:])
+	case "clis":
+		return a.clisCmd(args[1:])
 	case "graph":
 		return a.graphCmd(args[1:])
 	case "validate":
@@ -124,10 +128,9 @@ func (a *App) launchDefaultTUI(root string) error {
 }
 
 type launchPlan struct {
-	projectName   string
-	target        string
-	instanceID    string
-	startDetached bool
+	projectName string
+	target      string
+	instanceID  string
 }
 
 func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
@@ -143,23 +146,13 @@ func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
 	if err != nil {
 		return launchPlan{}, err
 	}
-	plan := launchPlan{
+	// The daemon decides whether existing work can be reused when it admits
+	// ActionWatch; persisted status is not evidence of a live engine.
+	return launchPlan{
 		projectName: p.Name(),
 		target:      target,
 		instanceID:  instanceID,
-	}
-	inst, err := instance.Load(root, instanceID)
-	if err != nil {
-		if os.IsNotExist(err) {
-			plan.startDetached = true
-			return plan, nil
-		}
-		return launchPlan{}, err
-	}
-	if !instance.ProcessAlive(inst.Supervisor.PID) || inst.LastRun.Mode != api.ModeWatch || inst.LastRun.Target != target {
-		plan.startDetached = true
-	}
-	return plan, nil
+	}, nil
 }
 
 func (a *App) usage() error {
@@ -183,7 +176,6 @@ func (a *App) validateCmd(args []string) error {
 	maxListedPaths := fs.Int("max-listed-paths", validation.DefaultMaxListedPaths, "maximum paths listed per validation issue category")
 	maxOrders := validation.DefaultMaxOrders
 	fs.IntVar(&maxOrders, "max-orders", validation.DefaultMaxOrders, "maximum valid task orders to enumerate exhaustively")
-	fs.IntVar(&maxOrders, "max-permutations", validation.DefaultMaxOrders, "alias for --max-orders")
 	maxFiles := fs.Int64("max-files", validation.DefaultValidationMaxFiles, "validation-wide maximum files processed")
 	maxBytes := fs.Int64("max-bytes", validation.DefaultValidationMaxBytes, "validation-wide maximum logical bytes processed")
 	maxTemporaryBytes := fs.Int64("max-temporary-bytes", validation.DefaultValidationMaxTemp, "maximum validation-specific temporary logical bytes")
@@ -209,9 +201,6 @@ func (a *App) validateCmd(args []string) error {
 		return fmt.Errorf("validation resource limits must be positive and --disk-reserve-bytes must not be negative")
 	}
 	modeValue := api.ValidationMode(strings.ToLower(strings.TrimSpace(*mode)))
-	if modeValue == "permutations" {
-		modeValue = api.ValidationModeOrders
-	}
 	detailsValue := api.ValidationDetails(strings.ToLower(strings.TrimSpace(*details)))
 	if detailsValue == "" {
 		if *jsonOut {
@@ -340,7 +329,7 @@ func (a *App) runCmd(args []string) error {
 	worktree := fs.String("worktree", "", "project worktree path; defaults to the current directory")
 	modeWatch := fs.Bool("watch", false, "(--watch) run in watch mode; for detached automation prefer devflow watch <target> --detach plus devflow flush")
 	ciMode := fs.Bool("ci", false, "(--ci) run as a finite CI/readiness probe; service tasks start, pass readiness, then stop before returning")
-	detach := fs.Bool("detach", false, "(--detach) launch a detached supervisor and return after it starts; this is not a readiness gate")
+	detach := fs.Bool("detach", false, "(--detach) launch a detached daemon and return after it starts; this is not a readiness gate")
 	maxParallel := fs.Int("max-parallel", 0, "maximum parallel tasks; 0 uses the engine default")
 	cacheKeyManifest := fs.String("cache-key-manifest", "", "owner-only cache-key manifest created by devflow cache key --manifest-out")
 	commitChanges := fs.Bool("commit-changes", false, "after a successful finite CI run, atomically commit changes allowed by --commit-path")
@@ -432,18 +421,8 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	var repairRunner *reporepair.Runner
 	if repairOptions != nil {
 		repairRunner = reporepair.New(root, *repairOptions, a.Stderr)
-		repositoryResult, preflightErr := repairRunner.Preflight(context.Background())
-		if preflightErr != nil {
-			result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, preflightErr)
-			result.RepositoryChanges = &repositoryResult
-			if jsonOut {
-				if writeErr := writeJSON(a.Stdout, result); writeErr != nil {
-					return writeErr
-				}
-			}
-			return preflightErr
-		}
 	}
+
 	eng, err := engine.New(execProject, root)
 	if err != nil {
 		result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, err)
@@ -458,7 +437,30 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 		}
 		return err
 	}
-	runCtx := context.Background()
+	lease, err := executionstate.Acquire(root, execution.Owner{Target: resolvedTarget, Mode: string(mode), Kind: "ci"})
+	if err != nil {
+		if jsonOut {
+			if writeErr := writeJSON(a.Stdout, newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, err)); writeErr != nil {
+				return writeErr
+			}
+		}
+		return err
+	}
+	defer lease.Release()
+	runCtx := execution.ContextWithLease(context.Background(), lease)
+	if repairRunner != nil {
+		repositoryResult, preflightErr := repairRunner.Preflight(runCtx)
+		if preflightErr != nil {
+			result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, preflightErr)
+			result.RepositoryChanges = &repositoryResult
+			if jsonOut {
+				if writeErr := writeJSON(a.Stdout, result); writeErr != nil {
+					return writeErr
+				}
+			}
+			return preflightErr
+		}
+	}
 	progressCtx, stopProgress := context.WithCancel(context.Background())
 	var progressWG sync.WaitGroup
 	if mode == api.ModeCI && jsonOut {
@@ -534,7 +536,7 @@ func newDirectRunFailureResult(worktree, target string, mode api.RunMode, starte
 	if durationMs == 0 && !finished.Before(started) {
 		durationMs = 1
 	}
-	return api.RunResult{
+	result := api.RunResult{
 		Target:          target,
 		Mode:            mode,
 		InstanceID:      instanceID,
@@ -548,6 +550,31 @@ func newDirectRunFailureResult(worktree, target string, mode api.RunMode, starte
 		StartedAt:       started.Format(time.RFC3339),
 		FinishedAt:      finished.Format(time.RFC3339),
 	}
+	result.ResourceConflict = executionconflict.Details(runErr)
+	if result.ResourceConflict != nil {
+		result.Code = "resource_conflict"
+	}
+	return result
+}
+
+// Admission can fail before a command result exists. Keep ownership details
+// available on stdout so callers can distinguish contention from task failure.
+func (a *App) reportResourceConflict(err error, jsonOut bool, extraFields ...map[string]any) error {
+	detail := executionconflict.Details(err)
+	if jsonOut && detail != nil {
+		payload := map[string]any{"success": false, "error": err.Error(), "code": "resource_conflict", "resourceConflict": detail}
+		for _, fields := range extraFields {
+			for key, value := range fields {
+				if value != nil {
+					payload[key] = value
+				}
+			}
+		}
+		if writeErr := writeJSON(a.Stdout, payload); writeErr != nil {
+			return writeErr
+		}
+	}
+	return err
 }
 
 func streamCIProgress(ctx context.Context, out io.Writer, events <-chan api.Event) {
@@ -597,11 +624,11 @@ func streamCIProgress(ctx context.Context, out io.Writer, events <-chan api.Even
 func (a *App) runViaDaemon(target string, jsonOut bool, worktreeFlag, projectName string, detach bool, maxParallel int) error {
 	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
 	client, _, err := daemon.Ensure(context.Background(), root, projectName)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
 	resp, err := client.Call(context.Background(), daemon.Request{
 		Action:      daemon.ActionRun,
@@ -612,11 +639,11 @@ func (a *App) runViaDaemon(target string, jsonOut bool, worktreeFlag, projectNam
 		Detach:      detach,
 	})
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
 	if detach {
 		if resp.Started != nil {
-			payload := newDetachedStartResult(resp.Started)
+			payload := resp.Started
 			if jsonOut {
 				return writeJSON(a.Stdout, payload)
 			}
@@ -667,11 +694,11 @@ func (a *App) watchCmd(args []string) error {
 func (a *App) watchViaDaemon(target string, jsonOut bool, worktreeFlag, projectName string, detach bool, maxParallel int) error {
 	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
 	client, _, err := daemon.Ensure(context.Background(), root, projectName)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
 	resp, err := client.Call(context.Background(), daemon.Request{
 		Action:      daemon.ActionWatch,
@@ -680,12 +707,12 @@ func (a *App) watchViaDaemon(target string, jsonOut bool, worktreeFlag, projectN
 		MaxParallel: maxParallel,
 	})
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
 	if resp.Started == nil {
 		return fmt.Errorf("daemon did not return watch start metadata")
 	}
-	payload := newDetachedStartResult(resp.Started)
+	payload := resp.Started
 	if detach {
 		if jsonOut {
 			return writeJSON(a.Stdout, payload)
@@ -706,23 +733,6 @@ func (a *App) watchViaDaemon(target string, jsonOut bool, worktreeFlag, projectN
 			_ = writeJSONLine(a.Stdout, evt)
 		}
 	})
-}
-
-// detachedStartResult embeds the daemon's authoritative launch result while
-// retaining the historical CLI-only detached and pid fields. This avoids the
-// two JSON surfaces drifting when launch-state fields are added to the daemon.
-type detachedStartResult struct {
-	daemon.StartResult
-	Detached bool `json:"detached"`
-	PID      int  `json:"pid"`
-}
-
-func newDetachedStartResult(started *daemon.StartResult) detachedStartResult {
-	return detachedStartResult{
-		StartResult: *started,
-		Detached:    true,
-		PID:         started.DaemonPID,
-	}
 }
 
 func (a *App) flushCmd(args []string) error {
@@ -758,7 +768,7 @@ func (a *App) flushCmd(args []string) error {
 	}
 	client, _, err := daemon.Ensure(context.Background(), root, *projectName)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, *jsonOut)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout+5*time.Second)
 	defer cancel()
@@ -782,12 +792,15 @@ func (a *App) flushCmd(args []string) error {
 }
 
 func preserveFlushCallError(result api.FlushResult, callErr error, worktree, instanceID, projectName, target string, elapsed time.Duration) api.FlushResult {
+	if detail := executionconflict.Details(callErr); detail != nil {
+		result.Code = "resource_conflict"
+		result.ResourceConflict = detail
+	}
 	if callErr == nil || result.Success || len(result.Issues) > 0 {
 		return result
 	}
-	// A newly upgraded CLI can still be connected to an older daemon. Older
-	// daemons returned an empty FlushResult for some low-level failures, so retain
-	// the transport error and invocation context until that daemon is restarted.
+	// A transport failure may arrive before any result. Preserve invocation
+	// context so callers can identify the failed operation without stderr.
 	if result.Worktree == "" {
 		result.Worktree = worktree
 	}
@@ -870,7 +883,7 @@ func (a *App) restartCmd(args []string) error {
 	_ = id
 	client, _, err := daemon.Ensure(context.Background(), root, *projectName)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, *jsonOut)
 	}
 	resp, runErr := client.Call(context.Background(), daemon.Request{
 		Action:      daemon.ActionRestart,
@@ -881,6 +894,15 @@ func (a *App) restartCmd(args []string) error {
 		MaxParallel: *maxParallel,
 		Preview:     *preview,
 	})
+	if detail := executionconflict.Details(runErr); detail != nil {
+		if *jsonOut {
+			if err := writeJSON(a.Stdout, map[string]any{"success": false, "code": "resource_conflict", "error": runErr.Error(), "resourceConflict": detail, "lifecycle": resp.Lifecycle}); err != nil {
+				return err
+			}
+		}
+		return runErr
+	}
+
 	if *preview {
 		if resp.Lifecycle == nil {
 			if runErr != nil {
@@ -947,14 +969,21 @@ func (a *App) stopCmd(args []string) error {
 	}
 	root, id, err := resolveInstance(*worktree, *instanceID)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, *jsonOut)
 	}
 	_ = id
 	client, _, err := daemon.Ensure(context.Background(), root, "")
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, *jsonOut)
 	}
 	resp, err := client.Call(context.Background(), daemon.Request{Action: daemon.ActionStop, All: *all, Task: *task, Preview: *preview})
+	if executionconflict.Details(err) != nil {
+		fields := map[string]any{"instanceId": id, "lifecycle": resp.Lifecycle}
+		if resp.Stop != nil {
+			fields["stopped"] = resp.Stop.Stopped
+		}
+		return a.reportResourceConflict(err, *jsonOut, fields)
+	}
 	if err != nil && resp.Stop == nil && resp.Lifecycle == nil {
 		return err
 	}
@@ -1132,11 +1161,11 @@ func (a *App) migrationCreateCmd(args []string) error {
 func (a *App) runAction(actionID, kind, component string, inputs map[string]string, jsonOut bool, worktreeFlag, projectName string) error {
 	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
 	client, _, err := daemon.Ensure(context.Background(), root, projectName)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
 	resp, callErr := client.Call(context.Background(), daemon.Request{
 		Action:       daemon.ActionRunAction,
@@ -1153,6 +1182,9 @@ func (a *App) runAction(actionID, kind, component string, inputs map[string]stri
 			}
 		}
 	})
+	if executionconflict.Details(callErr) != nil {
+		return a.reportResourceConflict(callErr, jsonOut, map[string]any{"actionResult": resp.ActionResult})
+	}
 	if resp.ActionResult != nil {
 		if jsonOut {
 			if err := writeJSON(a.Stdout, resp.ActionResult); err != nil {
@@ -1212,11 +1244,16 @@ func (a *App) cacheKeyCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	lease, err := executionstate.Acquire(root, execution.Owner{Target: resolvedTarget, Kind: "cache_key"})
+	if err != nil {
+		return a.reportResourceConflict(err, *jsonOut)
+	}
+	defer lease.Release()
 	eng, err := engine.New(executionProject, root)
 	if err != nil {
 		return err
 	}
-	result, manifest, err := eng.CacheKeyWithManifest(context.Background(), engine.Request{Target: resolvedTarget, Worktree: root, Mode: api.ModeCI})
+	result, manifest, err := eng.CacheKeyWithManifest(execution.ContextWithLease(context.Background(), lease), engine.Request{Target: resolvedTarget, Worktree: root, Mode: api.ModeCI})
 	if err != nil {
 		return err
 	}
@@ -1325,6 +1362,11 @@ func (a *App) cacheInvalidateCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	lease, err := executionstate.Acquire(root, execution.Owner{Target: *task, Kind: "cache_invalidate"})
+	if err != nil {
+		return a.reportResourceConflict(err, *jsonOut)
+	}
+	defer lease.Release()
 	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p))
 	if err := store.Invalidate(*task); err != nil {
 		return err
@@ -1420,12 +1462,12 @@ func (a *App) statusCmd(args []string) error {
 	if out.DB.Name != "" {
 		_, _ = fmt.Fprintf(a.Stdout, "db: %s host=%s port=%d container=%s\n", out.DB.Name, out.DB.Host, out.DB.Port, out.DB.ContainerName)
 	}
-	if out.Supervisor != nil {
+	if out.Daemon != nil {
 		state := "stopped"
-		if out.Supervisor.Alive {
+		if out.Daemon.Alive {
 			state = "running"
 		}
-		_, _ = fmt.Fprintf(a.Stdout, "supervisor: %s pid=%d log=%s\n", state, out.Supervisor.PID, out.Supervisor.LogPath)
+		_, _ = fmt.Fprintf(a.Stdout, "daemon: %s pid=%d log=%s\n", state, out.Daemon.PID, out.Daemon.LogPath)
 	}
 	_, _ = fmt.Fprintln(a.Stdout)
 	for _, node := range out.Nodes {
@@ -1474,7 +1516,7 @@ func statusResult(root, instanceID string) (api.StatusResult, error) {
 		Ports:      inst.Ports,
 		DB:         instance.DisplayDB(inst.DB),
 		URLs:       daemon.InstanceURLs(inst),
-		Supervisor: daemon.SupervisorStatus(inst),
+		Daemon:     daemon.DaemonStatus(inst),
 		Nodes:      nodes,
 	}, nil
 }
@@ -1683,21 +1725,21 @@ func (a *App) doctorCmd(args []string) error {
 	return nil
 }
 
-func (a *App) depsCmd(args []string) error {
+func (a *App) clisCmd(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: devflow clis <status|install>")
 	}
 	switch args[0] {
 	case "status":
-		return a.depsStatusCmd(args[1:])
+		return a.clisStatusCmd(args[1:])
 	case "install":
-		return a.depsInstallCmd(args[1:])
+		return a.clisInstallCmd(args[1:])
 	default:
 		return fmt.Errorf("usage: devflow clis <status|install>")
 	}
 }
 
-func (a *App) depsStatusCmd(args []string) error {
+func (a *App) clisStatusCmd(args []string) error {
 	fs := flag.NewFlagSet("clis status", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
@@ -1723,7 +1765,6 @@ func (a *App) depsStatusCmd(args []string) error {
 	payload := map[string]any{
 		"worktree":     root,
 		"project":      p.Name(),
-		"dependencies": statuses,
 		"requiredCLIs": statuses,
 	}
 	if resolvedTarget != "" {
@@ -1749,7 +1790,7 @@ func (a *App) depsStatusCmd(args []string) error {
 	return nil
 }
 
-func (a *App) depsInstallCmd(args []string) error {
+func (a *App) clisInstallCmd(args []string) error {
 	fs := flag.NewFlagSet("clis install", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
@@ -1928,6 +1969,15 @@ func (a *App) upgradeCmd(args []string) error {
 		cmd.Stderr = a.Stderr
 	}
 	err := cmd.Run()
+	cacheCleared := false
+	if err == nil {
+		// Upgrades invalidate artifacts so cache changes need no migration path.
+		if clearErr := fsutil.RemoveAllWritable(instance.CacheRoot()); clearErr != nil {
+			err = fmt.Errorf("installed Devflow, but clearing task cache: %w", clearErr)
+		} else {
+			cacheCleared = true
+		}
+	}
 	duration := time.Since(started)
 	_, _ = fmt.Fprintf(a.Stderr, "[devflow] upgrade finished success=%t duration_ms=%d\n", err == nil, duration.Milliseconds())
 	result := api.UpgradeResult{
@@ -1935,6 +1985,7 @@ func (a *App) upgradeCmd(args []string) error {
 		Package:       version.CommandPackage,
 		VersionTarget: target,
 		Success:       err == nil,
+		CacheCleared:  cacheCleared,
 		DurationMs:    duration.Milliseconds(),
 		Output:        strings.TrimSpace(output.String()),
 	}
@@ -2321,17 +2372,17 @@ func resolveInstance(worktreeFlag, instanceID string) (string, string, error) {
 }
 
 func resolveLogPath(worktree, instanceID, task string) (string, error) {
-	if task != "supervisor" {
+	if task != "daemon" {
 		return instance.LogPath(worktree, instanceID, task), nil
 	}
-	inst, err := instance.Load(worktree, instanceID)
+	ref, err := instance.LoadDaemon(worktree, instanceID)
 	if err != nil {
 		return "", err
 	}
-	if inst.Supervisor.LogPath != "" {
-		return inst.Supervisor.LogPath, nil
+	if ref.LogPath != "" {
+		return ref.LogPath, nil
 	}
-	return filepath.Join(worktree, ".devflow", "logs", instanceID, "supervisor.log"), nil
+	return filepath.Join(worktree, ".devflow", "logs", instanceID, "daemon.log"), nil
 }
 
 func writeJSON(w io.Writer, v any) error {

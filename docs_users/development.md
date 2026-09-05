@@ -32,6 +32,8 @@ If `flush` fails, inspect `issues`, `nodes`, `services`, and referenced log path
 
 ## Service Lifecycle
 
+One execution owns each worktree. A running watcher and `run --ci` cannot overlap there: the second executor returns `resource_conflict` without replacing the first one's task status, logs or outputs. For independent checks, use another worktree containing your changes, or explicitly stop development first. A stop timeout retains ownership. Abandoned execution requires confirmed resource cleanup before a new run; `stop --all --json` reports resources it cannot safely reconcile.
+
 Use the lifecycle command that matches the job:
 
 - Dev/watch/operator commands use one daemon per worktree. The daemon owns file watching, services, status, and live TUI updates. Sibling worktrees get separate daemons but still share the global task cache.
@@ -119,7 +121,7 @@ Useful TUI keys:
 - `Home` / `End`: task top/bottom or log beginning/resume-follow, depending on focus
 - `f`: resume live-log following
 - `o`: load an older bounded block of retained log lines
-- `l`: selected task log or supervisor log
+- `l`: selected task log or daemon log
 - `d`: database/Prisma panel
 - `a`: toggle the explicit active/failure attention view
 - `m`: create a migration through the project migration-create action
@@ -185,11 +187,11 @@ Use JSON status for automation and plain logs for fast inspection:
 ```bash
 devflow status --json
 devflow logs app
-devflow logs supervisor
+devflow logs daemon
 devflow logs tui --tail 200
 ```
 
-A failed `run --ci --json` already includes `error`, `failedNode`, `failedNodeLogPath`, a bounded `logTail`, every selected node's final run snapshot, and cache hit/miss lists. Each node reports duration and cache timing when applicable. Use the referenced full log only when the bounded tail is insufficient. `logs supervisor` reads the daemon log, while `logs tui` reads the interactive client's session/error/crash diagnostics. Task, daemon, TUI, and event logs are owner-only on Unix-like systems.
+A failed `run --ci --json` already includes `error`, `failedNode`, `failedNodeLogPath`, a bounded `logTail`, every selected node's final run snapshot, and cache hit/miss lists. Each node reports duration and cache timing when applicable. Use the referenced full log only when the bounded tail is insufficient. `logs daemon` reads the daemon log, while `logs tui` reads the interactive client's session/error/crash diagnostics. Task, daemon, TUI, and event logs are owner-only on Unix-like systems.
 
 For flush failures, start with the JSON `issues`, then inspect the referenced task logs. Do not rerun downstream tests until the relevant flush target reports `success=true`.
 

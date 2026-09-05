@@ -169,6 +169,50 @@ func TestFlushRequestWriteFailureReturnsStructuredContext(t *testing.T) {
 	}
 }
 
+func TestFlushStartsWatchAfterCompletedDetachedRun(t *testing.T) {
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const projectName = "daemon-flush-completed-detached-run"
+	var runs atomic.Int32
+	project.Register(daemonTestProject{
+		name: projectName,
+		tasks: []project.Task{{
+			Name: "check",
+			Kind: project.KindOnce,
+			Run: func(context.Context, *project.Runtime) error {
+				runs.Add(1)
+				return nil
+			},
+		}},
+		targets: []project.Target{{Name: "up", RootTasks: []string{"check"}}},
+	})
+	inst.LastRun = api.RunConfig{Project: projectName, Target: "up", Mode: api.ModeDev, Detached: true}
+	if err := instance.Save(inst); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(worktree, "daemon.log")
+	if err := instance.RecordDaemon(inst, os.Getpid(), logPath); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{
+		worktree:    worktree,
+		instanceID:  inst.ID,
+		projectName: projectName,
+		logPath:     logPath,
+		subscribers: map[chan api.Event]bool{},
+	}
+	defer s.stopActive(3 * time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := s.flush(ctx, projectName, "up", 4*time.Second, 1)
+	if err != nil || !result.Started || !result.Success || runs.Load() != 1 {
+		t.Fatalf("completed run prevented a fresh watch: result=%+v runs=%d err=%v", result, runs.Load(), err)
+	}
+}
+
 func TestEnsureSerializesDaemonStartup(t *testing.T) {
 	worktree := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -591,48 +635,30 @@ func TestDaemonNeedsRestartWhenCopiedExecutableIsMissingOrStale(t *testing.T) {
 	}
 }
 
-func TestLegacyDevflowProcessRefsIncludesDescendants(t *testing.T) {
+func TestStopAllUsesRecordedTaskOwnershipOnly(t *testing.T) {
 	worktree := t.TempDir()
-	previous := listProcessesForLegacy
-	listProcessesForLegacy = func() []legacyProcess {
-		return []legacyProcess{
-			{pid: 100, ppid: 1, command: filepath.Join(worktree, ".devflow", "bin", "devflow-launcher") + " __internal_supervise"},
-			{pid: 101, ppid: 100, command: "/bin/sh -c npx tsx src/server.ts"},
-			{pid: 102, ppid: 101, command: "node src/server.ts"},
-			{pid: 200, ppid: 1, command: "/bin/sh -c npx tsx src/server.ts"},
-			{pid: 300, ppid: 1, command: filepath.Join(t.TempDir(), ".devflow", "bin", "devflow-launcher") + " __internal_supervise"},
-		}
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
 	}
-	defer func() { listProcessesForLegacy = previous }()
-
-	refs := legacyDevflowProcessRefs(worktree)
-	for name, pid := range map[string]int{
-		"legacy-100":       100,
-		"legacy-child-101": 101,
-		"legacy-child-102": 102,
-	} {
-		if refs[name] != pid {
-			t.Fatalf("expected %s=%d in refs, got %v", name, pid, refs)
-		}
+	trackedPID, orphanPID, logPID := os.Getpid()+1, os.Getpid()+2, os.Getpid()+3
+	inst.Processes["tracked"] = api.ProcessRef{PID: trackedPID}
+	if err := instance.SaveStatus(worktree, inst.ID, "dev", api.ModeWatch, map[string]api.NodeStatus{
+		"tracked": {Name: "tracked", PID: trackedPID},
+		"orphan":  {Name: "orphan", PID: orphanPID},
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if refs["legacy-child-200"] != 0 {
-		t.Fatalf("did not expect unrelated process in refs: %v", refs)
+	logPath := filepath.Join(worktree, ".devflow", "logs", inst.ID, "supervisor.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if refs["legacy-300"] != 0 {
-		t.Fatalf("did not expect other worktree process in refs: %v", refs)
+	if err := os.WriteFile(logPath, fmt.Appendf(nil, "child pid=%d\n", logPID), 0o600); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestParseLegacyProcesses(t *testing.T) {
-	processes := parseLegacyProcesses("  10     1 /bin/sh -c npx tsx src/server.ts\nbad\n  11 10 node src/server.ts\n")
-	if len(processes) != 2 {
-		t.Fatalf("expected 2 parsed processes, got %+v", processes)
-	}
-	if processes[0].pid != 10 || processes[0].ppid != 1 || processes[0].command != "/bin/sh -c npx tsx src/server.ts" {
-		t.Fatalf("unexpected first process: %+v", processes[0])
-	}
-	if processes[1].pid != 11 || processes[1].ppid != 10 || processes[1].command != "node src/server.ts" {
-		t.Fatalf("unexpected second process: %+v", processes[1])
+	refs := additionalRecordedProcessRefs(worktree, inst.ID, inst)
+	if len(refs) != 1 || refs["orphan"] != orphanPID {
+		t.Fatalf("stop scope must contain only additional recorded task PIDs, got %v", refs)
 	}
 }
 
@@ -836,7 +862,7 @@ func TestDaemonRestartAndScopedStopPreserveIndependentService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !started.Accepted || !started.SupervisorStarted || started.Ready || started.State != "starting" {
+	if !started.Accepted || !started.DaemonStarted || started.Ready || started.State != "starting" {
 		t.Fatalf("detached start did not distinguish acceptance from readiness: %+v", started)
 	}
 	defer s.stopActive(3 * time.Second)

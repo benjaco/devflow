@@ -12,11 +12,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/benjaco/devflow/internal/execution"
+	"github.com/benjaco/devflow/internal/executionconflict"
+	"github.com/benjaco/devflow/internal/executionstate"
 	"github.com/benjaco/devflow/internal/fsutil"
 	"github.com/benjaco/devflow/internal/lock"
 	"github.com/benjaco/devflow/pkg/api"
@@ -69,29 +71,31 @@ type Request struct {
 }
 
 type Response struct {
-	ID           string               `json:"id,omitempty"`
-	OK           bool                 `json:"ok"`
-	Error        string               `json:"error,omitempty"`
-	Started      *StartResult         `json:"started,omitempty"`
-	Run          *api.RunResult       `json:"run,omitempty"`
-	Flush        *api.FlushResult     `json:"flush,omitempty"`
-	Stop         *StopResult          `json:"stop,omitempty"`
-	Status       *api.StatusResult    `json:"status,omitempty"`
-	Actions      *ActionListResult    `json:"actions,omitempty"`
-	ActionResult *ActionRunResult     `json:"actionResult,omitempty"`
-	Lifecycle    *api.LifecycleResult `json:"lifecycle,omitempty"`
+	ID               string                `json:"id,omitempty"`
+	OK               bool                  `json:"ok"`
+	Error            string                `json:"error,omitempty"`
+	Code             string                `json:"code,omitempty"`
+	ResourceConflict *api.ResourceConflict `json:"resourceConflict,omitempty"`
+	Started          *StartResult          `json:"started,omitempty"`
+	Run              *api.RunResult        `json:"run,omitempty"`
+	Flush            *api.FlushResult      `json:"flush,omitempty"`
+	Stop             *StopResult           `json:"stop,omitempty"`
+	Status           *api.StatusResult     `json:"status,omitempty"`
+	Actions          *ActionListResult     `json:"actions,omitempty"`
+	ActionResult     *ActionRunResult      `json:"actionResult,omitempty"`
+	Lifecycle        *api.LifecycleResult  `json:"lifecycle,omitempty"`
 }
 
 type StartResult struct {
-	InstanceID        string      `json:"instanceId"`
-	Target            string      `json:"target"`
-	Mode              api.RunMode `json:"mode"`
-	DaemonPID         int         `json:"daemonPid"`
-	LogPath           string      `json:"logPath"`
-	Accepted          bool        `json:"accepted"`
-	SupervisorStarted bool        `json:"supervisorStarted"`
-	Ready             bool        `json:"ready"`
-	State             string      `json:"state"`
+	InstanceID    string      `json:"instanceId"`
+	Target        string      `json:"target"`
+	Mode          api.RunMode `json:"mode"`
+	DaemonPID     int         `json:"daemonPid"`
+	LogPath       string      `json:"logPath"`
+	Accepted      bool        `json:"accepted"`
+	DaemonStarted bool        `json:"daemonStarted"`
+	Ready         bool        `json:"ready"`
+	State         string      `json:"state"`
 }
 
 type StopResult struct {
@@ -143,12 +147,16 @@ type Server struct {
 	logPath     string
 	socketPath  string
 
-	mu          sync.Mutex
-	active      *activeRun
-	subscribers map[chan api.Event]bool
-	eventMu     sync.Mutex
-	shutdown    chan struct{}
-	shutdownMu  sync.Once
+	// transitionMu covers admission and persisted mutation, never foreground execution.
+	transitionMu sync.Mutex
+	generation   uint64
+	closing      bool
+	mu           sync.Mutex
+	active       *activeRun
+	subscribers  map[chan api.Event]bool
+	eventMu      sync.Mutex
+	shutdown     chan struct{}
+	shutdownMu   sync.Once
 }
 
 type activeRun struct {
@@ -162,6 +170,9 @@ type activeRun struct {
 	err         error
 	startedAt   time.Time
 	controller  *engine.LifecycleController
+	generation  uint64
+	lease       *execution.Lease
+	stopping    bool
 }
 
 type Client struct {
@@ -173,7 +184,6 @@ type Client struct {
 var (
 	startDaemonForEnsure         = startDaemonProcess
 	skipDaemonBinaryCheckForTest bool
-	listProcessesForLegacy       = listSystemProcessesForLegacy
 )
 
 func SetStartDaemonFuncForTest(fn func(worktree, instanceID, projectName string) error) func() {
@@ -216,13 +226,7 @@ func Serve(ctx context.Context, opts Options) error {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return err
 	}
-	inst, err := instance.Resolve(root, filepath.Base(root))
-	if err != nil {
-		return err
-	}
-	if err := preserveLegacyProcessRefs(root, id, inst, os.Getpid()); err != nil {
-		return err
-	}
+	inst := &api.Instance{ID: id, Worktree: root}
 	if err := instance.RecordDaemon(inst, os.Getpid(), logPath); err != nil {
 		return err
 	}
@@ -292,7 +296,9 @@ func Ensure(ctx context.Context, worktree, projectName string) (*Client, bool, e
 			_ = ensureDaemonLog(root, id)
 			return client, false, nil
 		}
-		_ = stopExistingDaemon(ctx, root, id, client)
+		if err := stopExistingDaemon(ctx, root, id, client); err != nil {
+			return nil, false, err
+		}
 	}
 	if err := startDaemonForEnsure(root, id, projectName); err != nil {
 		return nil, false, err
@@ -308,26 +314,30 @@ func Ensure(ctx context.Context, worktree, projectName string) (*Client, bool, e
 }
 
 func stopExistingDaemon(ctx context.Context, worktree, instanceID string, client *Client) error {
-	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	callCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
-	_, _ = client.Call(callCtx, Request{Action: ActionStop, All: true})
-	inst, err := instance.Load(worktree, instanceID)
-	if err == nil {
-		_, _ = instance.StopAll(inst, stopAllExtraProcessRefs(worktree, instanceID, inst))
+	if _, err := client.Call(callCtx, Request{Action: ActionStop, All: true}); err != nil {
+		return fmt.Errorf("cannot replace active daemon: %w", err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		pingCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		pingCtx, pingCancel := context.WithTimeout(ctx, 200*time.Millisecond)
 		err := client.Ping(pingCtx)
-		cancel()
-		if err != nil {
-			_ = os.Remove(client.socketPath)
+		pingCancel()
+		if err != nil && ctx.Err() == nil {
 			return nil
 		}
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for previous daemon to stop; ownership retained")
+		case <-ticker.C:
+		}
 	}
-	_ = os.Remove(client.socketPath)
-	return nil
 }
 
 func Dial(worktree string) (*Client, error) {
@@ -392,13 +402,21 @@ func (c *Client) Call(ctx context.Context, req Request, onEvent ...func(api.Even
 		resp := *fr.Response
 		// A Windows Unix-domain socket can discard a just-written response when
 		// the server closes immediately afterward. Acknowledge the terminal
-		// frame after decoding it so a current daemon can close gracefully. The
-		// write is best-effort for compatibility with older daemons, which close
-		// immediately after their response.
+		// frame after decoding it so the daemon can close gracefully. A failed
+		// ACK cannot undo the received result or make a completed mutation fail.
 		_ = enc.Encode(frame{Type: responseAckFrameType, ID: req.ID})
 		if !resp.OK {
 			if resp.Error == "" {
 				resp.Error = "daemon request failed"
+			}
+			if resp.Code == "resource_conflict" {
+				conflict := &execution.ConflictError{Cause: errors.New(resp.Error)}
+				if detail := resp.ResourceConflict; detail != nil {
+					conflict.Worktree = detail.Worktree
+					conflict.Owner = &execution.Owner{Worktree: detail.Worktree, PID: detail.PID, Target: detail.Target, Mode: detail.Mode, Kind: detail.Kind}
+					conflict.RecoveryRequired = detail.RecoveryRequired
+				}
+				return resp, conflict
 			}
 			return resp, fmt.Errorf("%s", resp.Error)
 		}
@@ -445,13 +463,7 @@ func (c *Client) Subscribe(ctx context.Context, onEvent func(api.Event)) error {
 }
 
 func startDaemonProcess(worktree, instanceID, projectName string) error {
-	inst, err := instance.Resolve(worktree, filepath.Base(worktree))
-	if err != nil {
-		return err
-	}
-	if err := preserveLegacyProcessRefs(worktree, instanceID, inst, os.Getpid()); err != nil {
-		return err
-	}
+	inst := &api.Instance{ID: instanceID, Worktree: worktree}
 	executable, err := daemonExecutable(worktree)
 	if err != nil {
 		return err
@@ -478,31 +490,6 @@ func startDaemonProcess(worktree, instanceID, projectName string) error {
 		return err
 	}
 	return instance.RecordDaemon(inst, cmd.Process.Pid, logPath)
-}
-
-func preserveLegacyProcessRefs(worktree, instanceID string, inst *api.Instance, currentPID int) error {
-	_ = instanceID
-	if inst == nil || inst.Supervisor.PID <= 0 || inst.Supervisor.PID == currentPID || !instance.ProcessAlive(inst.Supervisor.PID) {
-		return nil
-	}
-	if inst.Processes == nil {
-		inst.Processes = map[string]api.ProcessRef{}
-	}
-	inst.Processes["supervisor"] = api.ProcessRef{PID: inst.Supervisor.PID, StartedAt: inst.Supervisor.StartedAt}
-	if inst.Supervisor.ExecPID > 0 {
-		inst.Processes["executor"] = api.ProcessRef{PID: inst.Supervisor.ExecPID, StartedAt: inst.Supervisor.StartedAt}
-	} else if pid := supervisorChildPIDFromLog(inst.Supervisor.LogPath); pid > 0 {
-		inst.Processes["executor"] = api.ProcessRef{PID: pid, StartedAt: inst.Supervisor.StartedAt}
-	} else {
-		logPath := inst.Supervisor.LogPath
-		if logPath == "" {
-			logPath = filepath.Join(worktree, ".devflow", "logs", inst.ID, "supervisor.log")
-		}
-		if pid := supervisorChildPIDFromLog(logPath); pid > 0 {
-			inst.Processes["executor"] = api.ProcessRef{PID: pid, StartedAt: inst.Supervisor.StartedAt}
-		}
-	}
-	return instance.Save(inst)
 }
 
 func daemonExecutable(worktree string) (string, error) {
@@ -565,15 +552,14 @@ func sameFileContents(left, right string) bool {
 }
 
 func ensureDaemonLog(worktree, instanceID string) error {
-	inst, err := instance.Load(worktree, instanceID)
+	daemonRef, err := instance.LoadDaemon(worktree, instanceID)
 	if err != nil {
 		return err
 	}
-	logPath := inst.Supervisor.LogPath
+	logPath := daemonRef.LogPath
 	if logPath == "" {
 		logPath = filepath.Join(worktree, ".devflow", "logs", instanceID, "daemon.log")
-		inst.Supervisor.LogPath = logPath
-		if err := instance.Save(inst); err != nil {
+		if err := instance.RecordDaemon(&api.Instance{ID: instanceID, Worktree: worktree}, daemonRef.PID, logPath); err != nil {
 			return err
 		}
 	}
@@ -845,12 +831,16 @@ func (s *Server) handleRequest(ctx context.Context, req Request) Response {
 }
 
 func errorResponse(id string, err error) Response {
-	return Response{ID: id, OK: false, Error: err.Error()}
+	return responseWithError(Response{ID: id}, err)
 }
 
 func responseWithError(resp Response, err error) Response {
 	resp.OK = false
 	resp.Error = err.Error()
+	if detail := executionconflict.Details(err); detail != nil {
+		resp.Code = "resource_conflict"
+		resp.ResourceConflict = detail
+	}
 	return resp
 }
 
@@ -982,6 +972,15 @@ func (s *Server) resolveTarget(p project.Project, target string) (project.Projec
 }
 
 func (s *Server) startActive(ctx context.Context, projectName, target string, mode api.RunMode, maxParallel int) (*StartResult, error) {
+	s.transitionMu.Lock()
+	defer s.transitionMu.Unlock()
+	return s.startActiveLocked(ctx, projectName, target, mode, maxParallel)
+}
+
+func (s *Server) startActiveLocked(ctx context.Context, projectName, target string, mode api.RunMode, maxParallel int) (*StartResult, error) {
+	if s.closing {
+		return nil, errors.New("daemon is shutting down")
+	}
 	projectName, p, err := s.resolveProject(projectName)
 	if err != nil {
 		return nil, err
@@ -992,53 +991,75 @@ func (s *Server) startActive(ctx context.Context, projectName, target string, mo
 	}
 	s.mu.Lock()
 	active := s.active
-	if active != nil && active.projectName == projectName && active.target == resolvedTarget && active.mode == mode {
-		s.mu.Unlock()
-		result := &StartResult{
-			InstanceID:        s.instanceID,
-			Target:            resolvedTarget,
-			Mode:              mode,
-			DaemonPID:         os.Getpid(),
-			LogPath:           s.logPath,
-			Accepted:          true,
-			SupervisorStarted: true,
+	matches := active != nil && !active.stopping && active.projectName == projectName && active.target == resolvedTarget && active.mode == mode
+	s.mu.Unlock()
+	if !matches {
+		if _, err := s.beginRunLocked(ctx, projectName, execProject, resolvedTarget, mode, maxParallel, true, nil); err != nil {
+			return nil, err
 		}
-		result.Ready, result.State = s.detachedTargetState(resolvedTarget)
-		return result, nil
 	}
-	s.mu.Unlock()
-	s.stopActive(5 * time.Second)
-
-	runCtx, cancel := context.WithCancel(context.Background())
-	newActive := &activeRun{
-		projectName: projectName,
-		target:      resolvedTarget,
-		mode:        mode,
-		maxParallel: maxParallel,
-		cancel:      cancel,
-		done:        make(chan struct{}),
-		startedAt:   time.Now().UTC(),
-		controller:  engine.NewLifecycleController(),
-	}
-	s.mu.Lock()
-	s.active = newActive
-	s.mu.Unlock()
-	if err := s.recordRun(projectName, resolvedTarget, mode, maxParallel, true); err != nil {
-		cancel()
-		return nil, err
-	}
-	go s.runEngine(runCtx, execProject, resolvedTarget, mode, maxParallel, newActive)
-	result := &StartResult{
-		InstanceID:        s.instanceID,
-		Target:            resolvedTarget,
-		Mode:              mode,
-		DaemonPID:         os.Getpid(),
-		LogPath:           s.logPath,
-		Accepted:          true,
-		SupervisorStarted: true,
-	}
+	result := &StartResult{InstanceID: s.instanceID, Target: resolvedTarget, Mode: mode, DaemonPID: os.Getpid(), LogPath: s.logPath, Accepted: true, DaemonStarted: true}
 	result.Ready, result.State = s.detachedTargetState(resolvedTarget)
 	return result, nil
+}
+
+// beginRunLocked reserves the full mutation lifetime, including environment restoration.
+// Callers release transitionMu before waiting on done so stop and status remain available.
+func (s *Server) beginRunLocked(ctx context.Context, projectName string, p project.Project, target string, mode api.RunMode, maxParallel int, detached bool, env map[string]string) (*activeRun, error) {
+	if s.closing {
+		return nil, errors.New("daemon is shutting down")
+	}
+	if !s.stopActiveLocked(5 * time.Second) {
+		return nil, s.activeStopConflict()
+	}
+	lease := execution.FromContext(ctx)
+	var err error
+	if lease == nil || !lease.ValidFor(s.worktree) {
+		lease, err = executionstate.Acquire(s.worktree, execution.Owner{Kind: "daemon", Target: target, Mode: string(mode)})
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := s.recordRun(projectName, target, mode, maxParallel, detached); err != nil {
+		_ = lease.Release()
+		return nil, err
+	}
+	if detached {
+		ctx = context.Background()
+	}
+	runCtx, cancel := context.WithCancel(execution.ContextWithLease(ctx, lease))
+	s.generation++
+	active := &activeRun{projectName: projectName, target: target, mode: mode, maxParallel: maxParallel, cancel: cancel, done: make(chan struct{}), startedAt: time.Now().UTC(), controller: engine.NewLifecycleController(), generation: s.generation, lease: lease}
+	s.mu.Lock()
+	s.active = active
+	s.mu.Unlock()
+	go func() {
+		defer s.finishActiveRun(active)
+		restore, err := applyTemporaryInstanceEnv(s.worktree, s.instanceID, env)
+		if err != nil {
+			active.err = err
+			return
+		}
+		s.runEngine(runCtx, p, target, mode, maxParallel, active)
+		if err := restore(); err != nil {
+			active.err = errors.Join(active.err, err)
+			lease.RequireRecovery()
+		}
+	}()
+	return active, nil
+}
+
+func (s *Server) finishActiveRun(active *activeRun) {
+	active.cancel()
+	if active.lease != nil {
+		active.err = errors.Join(active.err, active.lease.Release())
+	}
+	s.mu.Lock()
+	if s.active == active {
+		s.active = nil
+	}
+	close(active.done)
+	s.mu.Unlock()
 }
 
 // detachedTargetState is a response-time snapshot, not a promise that the
@@ -1084,45 +1105,25 @@ func (s *Server) runAttached(ctx context.Context, projectName, target string, mo
 }
 
 func (s *Server) runAttachedProject(ctx context.Context, projectName string, p project.Project, target string, mode api.RunMode, maxParallel int, env map[string]string) (*api.RunResult, error) {
+	s.transitionMu.Lock()
+	active, err := s.startAttachedProjectLocked(ctx, projectName, p, target, mode, maxParallel, env)
+	s.transitionMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	<-active.done
+	return active.result, active.err
+}
+
+func (s *Server) startAttachedProjectLocked(ctx context.Context, projectName string, p project.Project, target string, mode api.RunMode, maxParallel int, env map[string]string) (*activeRun, error) {
 	execProject, resolvedTarget, err := s.resolveTarget(p, target)
 	if err != nil {
 		return nil, err
 	}
-	s.stopActive(5 * time.Second)
-	if err := s.recordRun(projectName, resolvedTarget, mode, maxParallel, false); err != nil {
-		return nil, err
-	}
-	runFn := func() (*api.RunResult, error) {
-		runCtx, cancel := context.WithCancel(ctx)
-		active := &activeRun{
-			projectName: projectName,
-			target:      resolvedTarget,
-			mode:        mode,
-			maxParallel: maxParallel,
-			cancel:      cancel,
-			done:        make(chan struct{}),
-			startedAt:   time.Now().UTC(),
-		}
-		s.mu.Lock()
-		s.active = active
-		s.mu.Unlock()
-		s.runEngine(runCtx, execProject, resolvedTarget, mode, maxParallel, active)
-		return active.result, active.err
-	}
-	if len(env) == 0 {
-		return runFn()
-	}
-	var result *api.RunResult
-	err = withTemporaryInstanceEnv(s.worktree, s.instanceID, env, func() error {
-		var runErr error
-		result, runErr = runFn()
-		return runErr
-	})
-	return result, err
+	return s.beginRunLocked(ctx, projectName, execProject, resolvedTarget, mode, maxParallel, false, env)
 }
 
 func (s *Server) runEngine(ctx context.Context, p project.Project, target string, mode api.RunMode, maxParallel int, active *activeRun) {
-	defer close(active.done)
 	eng, err := engine.New(p, s.worktree)
 	if err != nil {
 		active.err = err
@@ -1168,31 +1169,137 @@ func (s *Server) runEngine(ctx context.Context, p project.Project, target string
 	}
 	close(stopEvents)
 	<-doneEvents
-	s.mu.Lock()
-	if s.active == active {
-		s.active = nil
-	}
-	s.mu.Unlock()
 }
 
 func (s *Server) stopActive(timeout time.Duration) bool {
+	s.transitionMu.Lock()
+	defer s.transitionMu.Unlock()
+	return s.stopActiveLocked(timeout)
+}
+
+func (s *Server) stopActiveLocked(timeout time.Duration) bool {
 	s.mu.Lock()
 	active := s.active
+	if active != nil {
+		active.stopping = true
+	}
 	s.mu.Unlock()
 	if active == nil {
 		return true
 	}
-	active.cancel()
+	if active.cancel != nil {
+		active.cancel()
+	}
 	if timeout <= 0 {
 		<-active.done
 		return true
 	}
 	select {
 	case <-active.done:
+		s.mu.Lock()
+		if s.active == active {
+			s.active = nil
+		}
+		s.mu.Unlock()
 		return true
 	case <-time.After(timeout):
 		return false
 	}
+}
+
+func (s *Server) activeStopConflict() error {
+	s.mu.Lock()
+	active := s.active
+	s.mu.Unlock()
+	owner := execution.Owner{Worktree: s.worktree, PID: os.Getpid(), Kind: "daemon"}
+	if active != nil {
+		owner.Target = active.target
+		owner.Mode = string(active.mode)
+	}
+	return &execution.ConflictError{Owner: &owner, Cause: errors.New("timed out waiting for active execution to stop; ownership retained")}
+}
+
+// acquireStopLease permits explicit stop-all recovery only when all remaining
+// resources can be identified and confirmed stopped while the lock is held.
+func (s *Server) acquireStopLease(ctx context.Context, all bool) (*execution.Lease, []string, error) {
+	var recovered []string
+	var options []execution.Option
+	if all {
+		options = append(options, execution.WithRecovery(func(previous execution.Owner) error {
+			if previous.PID != os.Getpid() && instance.ProcessAlive(previous.PID) {
+				return errors.New("previous execution process is still alive")
+			}
+			inst, err := instance.Load(s.worktree, s.instanceID)
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			if os.IsNotExist(err) {
+				return errors.New("previous execution has no recoverable resource inventory")
+			}
+			if err := s.validateStopInventory(true); err != nil {
+				return err
+			}
+			refs := additionalRecordedProcessRefs(s.worktree, s.instanceID, inst)
+			names, err := instance.StopDaemonWork(inst, refs, os.Getpid())
+			recovered = append(recovered, names...)
+			if err != nil {
+				return err
+			}
+			if inst.DB.ContainerName != "" {
+				stopped, err := database.New().StopRuntimeIfRunning(ctx, inst.DB)
+				if err != nil {
+					return err
+				}
+				if stopped {
+					recovered = append(recovered, "database")
+				}
+			}
+			if err := markAllStoppedNodes(s.worktree, s.instanceID); err != nil {
+				return err
+			}
+			return nil
+		}))
+	}
+	lease, err := execution.Acquire(s.worktree, execution.Owner{Kind: "daemon-stop"}, options...)
+	if err == nil && all {
+		if inventoryErr := s.validateStopInventory(false); inventoryErr != nil {
+			owner := lease.Owner()
+			return nil, recovered, errors.Join(&execution.ConflictError{Owner: &owner, RecoveryRequired: true, Cause: inventoryErr}, lease.Release())
+		}
+	}
+	return lease, recovered, err
+}
+
+func (s *Server) validateStopInventory(required bool) error {
+	status, err := instance.LoadStatus(s.worktree, s.instanceID)
+	if os.IsNotExist(err) {
+		if required {
+			return errors.New("previous execution has no recoverable task inventory")
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(status.Nodes))
+	for name := range status.Nodes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		node := status.Nodes[name]
+		if node.PID > 0 {
+			continue
+		}
+		if required && node.Generation > 0 && node.State != api.StateStopped {
+			return fmt.Errorf("cannot confirm cleanup of PID-less resource %q; reconcile its external resource before recovery", name)
+		}
+		switch node.State {
+		case api.StateRunning, api.StateStarting, api.StateReady, api.StateRestarting, api.StateDegraded:
+			return fmt.Errorf("cannot confirm subprocess cleanup for interrupted task %q", name)
+		}
+	}
+	return nil
 }
 
 func (s *Server) recordRun(projectName, target string, mode api.RunMode, maxParallel int, detached bool) error {
@@ -1207,18 +1314,15 @@ func (s *Server) recordRun(projectName, target string, mode api.RunMode, maxPara
 		MaxParallel: maxParallel,
 		Detached:    detached,
 	}
-	inst.Supervisor = api.SupervisorRef{
-		PID:       os.Getpid(),
-		StartedAt: time.Now().UTC(),
-		LogPath:   s.logPath,
-	}
 	return instance.Save(inst)
 }
 
 func (s *Server) flush(ctx context.Context, projectName, target string, timeout time.Duration, maxParallel int) (api.FlushResult, error) {
+	s.transitionMu.Lock()
+	unlock := sync.OnceFunc(s.transitionMu.Unlock)
+	defer unlock()
 	startedAt := time.Now().UTC()
 	requestID := fmt.Sprintf("flush-%d-%d", startedAt.UnixNano(), os.Getpid())
-	requestedTarget := strings.TrimSpace(target) != ""
 	inst, instErr := instance.Load(s.worktree, s.instanceID)
 	if strings.TrimSpace(projectName) == "" && instErr == nil && inst.LastRun.Project != "" {
 		projectName = inst.LastRun.Project
@@ -1252,7 +1356,7 @@ func (s *Server) flush(ctx context.Context, projectName, target string, timeout 
 		if active.mode != api.ModeWatch {
 			result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, resolvedTarget, startedAt)
 			result.Issues = append(result.Issues, api.FlushIssue{
-				Kind:    "non_watch_supervisor",
+				Kind:    "non_watch_execution",
 				Message: fmt.Sprintf("live daemon work is running mode %q, want %q", active.mode, api.ModeWatch),
 				LogPath: s.logPath,
 			})
@@ -1268,31 +1372,13 @@ func (s *Server) flush(ctx context.Context, projectName, target string, timeout 
 			return result, fmt.Errorf("flush failed")
 		}
 	} else {
-		if requestedTarget && instErr == nil && inst.LastRun.Detached && inst.LastRun.Target != "" && instance.ProcessAlive(inst.Supervisor.PID) {
-			if inst.LastRun.Mode != api.ModeWatch {
-				result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, resolvedTarget, startedAt)
-				result.Issues = append(result.Issues, api.FlushIssue{
-					Kind:    "non_watch_supervisor",
-					Message: fmt.Sprintf("live daemon work is running mode %q, want %q", inst.LastRun.Mode, api.ModeWatch),
-					LogPath: s.logPath,
-				})
-				return result, fmt.Errorf("flush failed")
-			}
-			if inst.LastRun.Target != resolvedTarget {
-				result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, resolvedTarget, startedAt)
-				result.Issues = append(result.Issues, api.FlushIssue{
-					Kind:    "target_mismatch",
-					Message: fmt.Sprintf("live watch target is %q, requested %q", inst.LastRun.Target, resolvedTarget),
-					LogPath: s.logPath,
-				})
-				return result, fmt.Errorf("flush failed")
-			}
-		}
+		// LastRun is a restart preference; only s.active proves work is running.
 		watchStartedAt := time.Now().UTC()
-		if _, err := s.startActive(ctx, projectName, resolvedTarget, api.ModeWatch, maxParallel); err != nil {
+		if _, err := s.startActiveLocked(ctx, projectName, resolvedTarget, api.ModeWatch, maxParallel); err != nil {
 			return s.flushFailure(requestID, projectName, resolvedTarget, startedAt, false, "watch_start_error", err)
 		}
 		startedWatch = true
+		unlock()
 		if !waitForWatchReady(s.worktree, s.instanceID, watchStartedAt, time.Until(startedAt.Add(timeout))) {
 			result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, resolvedTarget, startedAt)
 			result.Started = true
@@ -1301,6 +1387,7 @@ func (s *Server) flush(ctx context.Context, projectName, target string, timeout 
 			return result, fmt.Errorf("flush failed")
 		}
 	}
+	unlock()
 	req := api.FlushRequest{
 		ID:        requestID,
 		CreatedAt: startedAt,
@@ -1337,11 +1424,37 @@ func (s *Server) flush(ctx context.Context, projectName, target string, timeout 
 }
 
 func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResult, error) {
+	s.transitionMu.Lock()
+	defer s.transitionMu.Unlock()
+	return s.stopWorkLocked(ctx, all, task)
+}
+
+func (s *Server) stopWorkLocked(ctx context.Context, all bool, task string) (_ *StopResult, resultErr error) {
+	s.generation++
+	var mutationLease *execution.Lease
+	var stopped []string
+	mutationStarted := false
+	defer func() {
+		if mutationLease == nil {
+			return
+		}
+		if resultErr != nil && mutationStarted {
+			resultErr = errors.Join(resultErr, mutationLease.Abandon())
+		} else {
+			resultErr = errors.Join(resultErr, mutationLease.Release())
+		}
+	}()
 	inst, err := instance.Load(s.worktree, s.instanceID)
+	if os.IsNotExist(err) {
+		mutationLease, stopped, err = s.acquireStopLease(ctx, all)
+		if err != nil {
+			return nil, err
+		}
+		inst, err = instance.Resolve(s.worktree, filepath.Base(s.worktree))
+	}
 	if err != nil {
 		return nil, err
 	}
-	var stopped []string
 	var lifecycle *api.LifecycleResult
 	if all {
 		snapshot := s.captureStopAll(inst)
@@ -1354,7 +1467,7 @@ func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResu
 			Processes: []api.LifecycleProcessChange{},
 			Success:   false,
 		}
-		activeStopped := s.stopActive(5 * time.Second)
+		activeStopped := s.stopActiveLocked(5 * time.Second)
 		for name, candidate := range snapshot.processes {
 			if !candidate.active {
 				continue
@@ -1368,8 +1481,23 @@ func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResu
 			}
 		}
 		if !activeStopped {
-			err = fmt.Errorf("timed out waiting for active services to stop")
+			err = s.activeStopConflict()
+			lifecycle.Error = err.Error()
+			lifecycle.Stopped = uniqueSortedStrings(stopped)
+			lifecycle.Affected = append([]string(nil), lifecycle.Stopped...)
+			addUnconfirmedLifecycleIssues(lifecycle, err)
+			return &StopResult{InstanceID: s.instanceID, Stopped: lifecycle.Stopped, Lifecycle: lifecycle}, err
 		}
+		if mutationLease == nil {
+			var recovered []string
+			mutationLease, recovered, err = s.acquireStopLease(ctx, true)
+			stopped = append(stopped, recovered...)
+			if err != nil {
+				lifecycle.Error = err.Error()
+				return &StopResult{InstanceID: s.instanceID, Lifecycle: lifecycle}, err
+			}
+		}
+		mutationStarted = true
 		var loadErr error
 		inst, loadErr = instance.Load(s.worktree, s.instanceID)
 		if loadErr != nil {
@@ -1405,6 +1533,16 @@ func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResu
 		s.mu.Lock()
 		active := s.active
 		s.mu.Unlock()
+		if active == nil || active.controller == nil {
+			if mutationLease == nil {
+				mutationLease, _, err = s.acquireStopLease(ctx, false)
+				if err != nil {
+					lifecycle.Error = err.Error()
+					return &StopResult{InstanceID: s.instanceID, Lifecycle: lifecycle}, err
+				}
+			}
+			mutationStarted = true
+		}
 		for _, name := range plan.ProcessesToStop {
 			if active != nil && active.controller != nil {
 				change, stopErr := active.controller.Stop(ctx, name)
@@ -1471,10 +1609,15 @@ func (s *Server) stopWork(ctx context.Context, all bool, task string) (*StopResu
 		}
 	}
 	if all {
+		s.closing = true
 		stopped = append(stopped, "daemon")
-		inst.Supervisor = api.SupervisorRef{}
 		inst.Processes = map[string]api.ProcessRef{}
-		_ = instance.Save(inst)
+		if err := instance.ClearDaemon(inst); err != nil {
+			return nil, err
+		}
+		if err := instance.Save(inst); err != nil {
+			return nil, err
+		}
 		stopped = uniqueSortedStrings(stopped)
 		lifecycle.Stopped = append([]string(nil), stopped...)
 		lifecycle.Affected = append([]string(nil), stopped...)
@@ -1502,7 +1645,7 @@ type stopAllSnapshot struct {
 // captureStopAll freezes the intended stop scope before cancellation clears
 // the engine-owned service registry and persisted process references.
 func (s *Server) captureStopAll(inst *api.Instance) stopAllSnapshot {
-	extra := stopAllExtraProcessRefs(s.worktree, s.instanceID, inst)
+	extra := additionalRecordedProcessRefs(s.worktree, s.instanceID, inst)
 	status, _ := instance.LoadStatus(s.worktree, s.instanceID)
 	s.mu.Lock()
 	hasActiveRun := s.active != nil
@@ -1555,10 +1698,6 @@ func (s *Server) captureStopAll(inst *api.Instance) stopAllSnapshot {
 			}
 		}
 	}
-	if inst.Supervisor.PID > 0 && inst.Supervisor.PID != os.Getpid() {
-		addPID("supervisor", inst.Supervisor.PID, false)
-	}
-	addPID("executor", inst.Supervisor.ExecPID, false)
 	extraNames := make([]string, 0, len(extra))
 	for name := range extra {
 		extraNames = append(extraNames, name)
@@ -1872,7 +2011,7 @@ func (s *Server) statusResult() (*api.StatusResult, error) {
 		Ports:      inst.Ports,
 		DB:         instance.DisplayDB(inst.DB),
 		URLs:       InstanceURLs(inst),
-		Supervisor: SupervisorStatus(inst),
+		Daemon:     DaemonStatus(inst),
 		Nodes:      nodes,
 	}, nil
 }
@@ -1897,6 +2036,9 @@ func (s *Server) flushFailure(requestID, projectName, target string, startedAt t
 	// Go error here would make the daemon protocol serialize an all-zero result.
 	result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, target, startedAt)
 	result.Started = started
+	if executionconflict.Details(cause) != nil {
+		kind = "resource_conflict"
+	}
 	result.Issues = append(result.Issues, api.FlushIssue{
 		Kind:    kind,
 		Message: cause.Error(),
@@ -1949,6 +2091,13 @@ func waitForWatchReady(worktree, instanceID string, after time.Time, timeout tim
 }
 
 func (s *Server) invalidateAndRelaunch(ctx context.Context, task string) (*api.LifecycleResult, error) {
+	s.transitionMu.Lock()
+	unlock := sync.OnceFunc(s.transitionMu.Unlock)
+	defer unlock()
+	return s.invalidateAndRelaunchLocked(ctx, task, unlock)
+}
+
+func (s *Server) invalidateAndRelaunchLocked(ctx context.Context, task string, unlock func()) (*api.LifecycleResult, error) {
 	task = strings.TrimSpace(task)
 	if task == "" {
 		return nil, fmt.Errorf("no task selected")
@@ -1973,7 +2122,7 @@ func (s *Server) invalidateAndRelaunch(ctx context.Context, task string) (*api.L
 		return nil, fmt.Errorf("unknown task %q", task)
 	}
 	if project.IsServiceKind(selectedDef.Kind) {
-		_, lifecycle, restartErr := s.restart(ctx, projectName, task, false, false, inst.LastRun.MaxParallel)
+		_, lifecycle, restartErr := s.restartLocked(ctx, projectName, task, false, false, inst.LastRun.MaxParallel, unlock)
 		if lifecycle != nil {
 			lifecycle.Plan.RequestedAction = "rerun"
 		}
@@ -2006,7 +2155,23 @@ func (s *Server) invalidateAndRelaunch(ctx context.Context, task string) (*api.L
 		Processes: []api.LifecycleProcessChange{},
 		Success:   false,
 	}
-	s.stopActive(5 * time.Second)
+	if !s.stopActiveLocked(5 * time.Second) {
+		err := s.activeStopConflict()
+		lifecycle.Error = err.Error()
+		return lifecycle, err
+	}
+	lease, err := executionstate.Acquire(s.worktree, execution.Owner{Kind: "daemon", Target: resolvedTarget, Mode: string(inst.LastRun.Mode)})
+	if err != nil {
+		lifecycle.Error = err.Error()
+		return lifecycle, err
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			_ = lease.Release()
+		}
+	}()
+	ctx = execution.ContextWithLease(ctx, lease)
 	if err := writeInvalidateTransition(s.worktree, s.instanceID, resolvedTarget, g, toInvalidate); err != nil {
 		lifecycle.Error = err.Error()
 		return lifecycle, err
@@ -2023,7 +2188,8 @@ func (s *Server) invalidateAndRelaunch(ctx context.Context, task string) (*api.L
 			return lifecycle, err
 		}
 	}
-	_, err = s.startActive(ctx, projectName, inst.LastRun.Target, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+	_, err = s.startActiveLocked(ctx, projectName, inst.LastRun.Target, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+	transferred = err == nil
 	lifecycle.Affected = append(lifecycle.Affected, toInvalidate...)
 	lifecycle.Stopped = append(lifecycle.Stopped, plan.ProcessesToStop...)
 	lifecycle.Restarted = append(lifecycle.Restarted, plan.ServicesToRestart...)
@@ -2035,6 +2201,13 @@ func (s *Server) invalidateAndRelaunch(ctx context.Context, task string) (*api.L
 }
 
 func (s *Server) restart(ctx context.Context, projectName, task string, upstream, downstream bool, maxParallel int) (*api.RunResult, *api.LifecycleResult, error) {
+	s.transitionMu.Lock()
+	unlock := sync.OnceFunc(s.transitionMu.Unlock)
+	defer unlock()
+	return s.restartLocked(ctx, projectName, task, upstream, downstream, maxParallel, unlock)
+}
+
+func (s *Server) restartLocked(ctx context.Context, projectName, task string, upstream, downstream bool, maxParallel int, unlock func()) (*api.RunResult, *api.LifecycleResult, error) {
 	task = strings.TrimSpace(task)
 	if task == "" {
 		return nil, nil, fmt.Errorf("usage: devflow restart <task>")
@@ -2087,11 +2260,12 @@ func (s *Server) restart(ctx context.Context, projectName, task string, upstream
 			// A prior startup failure has no live engine left to own a
 			// service-local replacement. Relaunch the recorded detached target;
 			// unlike the old same-target path this always starts real work.
-			started, startErr := s.startActive(ctx, projectName, inst.LastRun.Target, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+			started, startErr := s.startActiveLocked(ctx, projectName, inst.LastRun.Target, inst.LastRun.Mode, inst.LastRun.MaxParallel)
 			if startErr != nil {
 				lifecycle.Error = startErr.Error()
 				return nil, lifecycle, startErr
 			}
+			unlock()
 			readyTimeout := taskDef.ReadyTimeout
 			if readyTimeout <= 0 {
 				readyTimeout = 10 * time.Second
@@ -2112,6 +2286,7 @@ func (s *Server) restart(ctx context.Context, projectName, task string, upstream
 			lifecycle.Success = started.Accepted
 			return nil, lifecycle, nil
 		}
+		unlock()
 		for _, name := range plan.ServicesToRestart {
 			change, restartErr := active.controller.Restart(ctx, name)
 			if restartErr != nil {
@@ -2147,7 +2322,13 @@ func (s *Server) restart(ctx context.Context, projectName, task string, upstream
 	}
 	targetName := "__restart_" + task
 	wrapped := restartProject{base: p, target: project.Target{Name: targetName, RootTasks: selected}}
-	result, runErr := s.runAttachedProject(ctx, projectName, wrapped, targetName, api.ModeDev, maxParallel, nil)
+	active, runErr := s.startAttachedProjectLocked(ctx, projectName, wrapped, targetName, api.ModeDev, maxParallel, nil)
+	unlock()
+	var result *api.RunResult
+	if runErr == nil {
+		<-active.done
+		result, runErr = active.result, active.err
+	}
 	lifecycle.Affected = append(lifecycle.Affected, selected...)
 	lifecycle.Success = runErr == nil
 	if runErr != nil {
@@ -2235,6 +2416,12 @@ func restartLifecyclePlan(g *graph.Graph, inst *api.Instance, status *instance.S
 }
 
 func (s *Server) retarget(ctx context.Context, target string) (*api.LifecycleResult, error) {
+	s.transitionMu.Lock()
+	defer s.transitionMu.Unlock()
+	return s.retargetLocked(ctx, target)
+}
+
+func (s *Server) retargetLocked(ctx context.Context, target string) (*api.LifecycleResult, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return nil, fmt.Errorf("no target selected")
@@ -2285,7 +2472,7 @@ func (s *Server) retarget(ctx context.Context, target string) (*api.LifecycleRes
 		lifecycle.Error = err.Error()
 		return lifecycle, err
 	}
-	_, err = s.startActive(ctx, projectName, resolvedTarget, inst.LastRun.Mode, inst.LastRun.MaxParallel)
+	_, err = s.startActiveLocked(ctx, projectName, resolvedTarget, inst.LastRun.Mode, inst.LastRun.MaxParallel)
 	lifecycle.Affected = append(lifecycle.Affected, closure...)
 	lifecycle.Stopped = append(lifecycle.Stopped, plan.ProcessesToStop...)
 	lifecycle.Restarted = append(lifecycle.Restarted, plan.ServicesToRestart...)
@@ -2348,7 +2535,13 @@ func (s *Server) runProjectAction(ctx context.Context, projectName, actionID, ki
 			Inputs:    normalizedInputs,
 		}, err
 	}
+	s.transitionMu.Lock()
+	unlock := sync.OnceFunc(s.transitionMu.Unlock)
+	defer unlock()
 	inst, err := instance.Load(s.worktree, s.instanceID)
+	if os.IsNotExist(err) {
+		inst, err = &api.Instance{}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2371,7 +2564,14 @@ func (s *Server) runProjectAction(ctx context.Context, projectName, actionID, ki
 		return result, fmt.Errorf("action %q does not define an executable task", action.ID)
 	}
 	beforeWrites := snapshotActionWriteFiles(s.worktree, action.Effects.Writes)
-	runResult, err := s.runAttached(ctx, projectName, action.Task, api.ModeCI, 0, runEnv)
+	active, err := s.startAttachedProjectLocked(ctx, projectName, p, action.Task, api.ModeCI, 0, runEnv)
+	if err != nil {
+		result.Status = "failed"
+		return result, err
+	}
+	unlock()
+	<-active.done
+	runResult, err := active.result, active.err
 	result.Run = runResult
 	result.CreatedFiles = diffCreatedActionFiles(beforeWrites, snapshotActionWriteFiles(s.worktree, action.Effects.Writes))
 	if err != nil {
@@ -2384,8 +2584,14 @@ func (s *Server) runProjectAction(ctx context.Context, projectName, actionID, ki
 	}
 	result.Status = "succeeded"
 	if shouldRelaunch {
+		s.transitionMu.Lock()
+		defer s.transitionMu.Unlock()
+		if s.generation != active.generation {
+			// A newer operator selection or stop owns the worktree now.
+			return result, nil
+		}
 		s.publishStatus("relaunching detached target %s after action %s", relaunchTarget, action.ID)
-		started, err := s.startActive(ctx, projectName, relaunchTarget, relaunchMode, relaunchMaxParallel)
+		started, err := s.startActiveLocked(ctx, projectName, relaunchTarget, relaunchMode, relaunchMaxParallel)
 		if err != nil {
 			result.Status = "succeeded_with_relaunch_failed"
 			return result, err
@@ -2659,10 +2865,13 @@ func impactedRerunTasks(g *graph.Graph, target string, invalidated []string) ([]
 	return out, nil
 }
 
-func withTemporaryInstanceEnv(root, instanceID string, env map[string]string, fn func() error) error {
+func applyTemporaryInstanceEnv(root, instanceID string, env map[string]string) (func() error, error) {
+	if len(env) == 0 {
+		return func() error { return nil }, nil
+	}
 	inst, err := instance.Load(root, instanceID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	previous := map[string]string{}
 	had := map[string]bool{}
@@ -2674,12 +2883,12 @@ func withTemporaryInstanceEnv(root, instanceID string, env map[string]string, fn
 		inst.Env[key] = value
 	}
 	if err := instance.Save(inst); err != nil {
-		return err
+		return nil, err
 	}
-	defer func() {
+	return func() error {
 		current, err := instance.Load(root, instanceID)
 		if err != nil {
-			return
+			return fmt.Errorf("restore action environment: %w", err)
 		}
 		if current.Env == nil {
 			current.Env = map[string]string{}
@@ -2691,9 +2900,11 @@ func withTemporaryInstanceEnv(root, instanceID string, env map[string]string, fn
 				delete(current.Env, key)
 			}
 		}
-		_ = instance.Save(current)
-	}()
-	return fn()
+		if err := instance.Save(current); err != nil {
+			return fmt.Errorf("restore action environment: %w", err)
+		}
+		return nil
+	}, nil
 }
 
 func markStoppedNodes(worktree, instanceID string, names []string) error {
@@ -2722,8 +2933,15 @@ func markAllStoppedNodes(worktree, instanceID string) error {
 		return nil
 	}
 	for name, node := range state.Nodes {
+		if node.PID > 0 && node.Generation > 0 && !instance.ProcessAlive(node.PID) {
+			node.State = api.StateStopped
+			node.PID = 0
+			node.Ready = false
+			state.Nodes[name] = node
+			continue
+		}
 		switch node.State {
-		case api.StatePending, api.StateReady, api.StateRunning, api.StateDirty:
+		case api.StatePending, api.StateStarting, api.StateReady, api.StateRunning, api.StateRestarting, api.StateDegraded, api.StateDirty:
 			node.State = api.StateStopped
 			node.PID = 0
 			state.Nodes[name] = node
@@ -2732,159 +2950,43 @@ func markAllStoppedNodes(worktree, instanceID string) error {
 	return instance.SaveStatus(worktree, instanceID, state.Target, state.Mode, state.Nodes)
 }
 
-func stopAllExtraProcessRefs(worktree, instanceID string, inst *api.Instance) map[string]int {
+// Status retains task PIDs after an interrupted engine loses its live registry.
+// Logs and process command lines are diagnostics, not proof of resource ownership.
+func additionalRecordedProcessRefs(worktree, instanceID string, inst *api.Instance) map[string]int {
 	refs := map[string]int{}
-	knownPIDs := map[int]bool{}
+	knownPIDs := map[int]bool{os.Getpid(): true}
 	if inst != nil {
-		knownPIDs[inst.Supervisor.PID] = inst.Supervisor.PID > 0
-		knownPIDs[inst.Supervisor.ExecPID] = inst.Supervisor.ExecPID > 0
+		knownPIDs[inst.Daemon.PID] = true
 		for _, ref := range inst.Processes {
-			if ref.PID > 0 {
-				knownPIDs[ref.PID] = true
-			}
-		}
-	}
-	if inst != nil && inst.Supervisor.ExecPID <= 0 {
-		logPath := inst.Supervisor.LogPath
-		if logPath == "" {
-			logPath = filepath.Join(worktree, ".devflow", "logs", instanceID, "supervisor.log")
-		}
-		if pid := supervisorChildPIDFromLog(logPath); pid > 0 {
-			refs["executor"] = pid
-			knownPIDs[pid] = true
+			knownPIDs[ref.PID] = true
 		}
 	}
 	if state, err := instance.LoadStatus(worktree, instanceID); err == nil {
-		for name, node := range state.Nodes {
+		names := make([]string, 0, len(state.Nodes))
+		for name := range state.Nodes {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			node := state.Nodes[name]
 			if node.PID > 0 && !knownPIDs[node.PID] {
 				refs[name] = node.PID
 				knownPIDs[node.PID] = true
 			}
 		}
 	}
-	for name, pid := range legacyDevflowProcessRefs(worktree) {
-		if knownPIDs[pid] {
-			continue
-		}
-		refs[name] = pid
-		knownPIDs[pid] = true
-	}
 	return refs
 }
 
-func legacyDevflowProcessRefs(worktree string) map[string]int {
-	refs := map[string]int{}
-	if strings.TrimSpace(worktree) == "" {
-		return refs
-	}
-	processes := listProcessesForLegacy()
-	legacyPIDs := map[int]bool{}
-	for _, proc := range processes {
-		if proc.pid <= 0 || proc.pid == os.Getpid() || !strings.Contains(proc.command, worktree) {
-			continue
-		}
-		if !isLegacyDevflowCommand(proc.command) {
-			continue
-		}
-		legacyPIDs[proc.pid] = true
-		refs[fmt.Sprintf("legacy-%d", proc.pid)] = proc.pid
-	}
-	for {
-		changed := false
-		for _, proc := range processes {
-			if proc.pid <= 0 || proc.pid == os.Getpid() || legacyPIDs[proc.pid] || !legacyPIDs[proc.ppid] {
-				continue
-			}
-			legacyPIDs[proc.pid] = true
-			refs[fmt.Sprintf("legacy-child-%d", proc.pid)] = proc.pid
-			changed = true
-		}
-		if !changed {
-			break
-		}
-	}
-	return refs
-}
-
-func isLegacyDevflowCommand(command string) bool {
-	return strings.Contains(command, "devflow-launcher") ||
-		strings.Contains(command, "__internal_exec") ||
-		strings.Contains(command, "__internal_supervise") ||
-		strings.Contains(command, "devflow-daemon")
-}
-
-type legacyProcess struct {
-	pid     int
-	ppid    int
-	command string
-}
-
-func listSystemProcessesForLegacy() []legacyProcess {
-	out, err := exec.Command("ps", "-axo", "pid=,ppid=,command=").Output()
-	if err != nil {
+func DaemonStatus(inst *api.Instance) *api.DaemonStatus {
+	if inst == nil || inst.Daemon.PID <= 0 {
 		return nil
 	}
-	return parseLegacyProcesses(string(out))
-}
-
-func parseLegacyProcesses(out string) []legacyProcess {
-	var processes []legacyProcess
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue
-		}
-		ppid, err := strconv.Atoi(fields[1])
-		if err != nil {
-			continue
-		}
-		withoutPID := strings.TrimSpace(strings.TrimPrefix(line, fields[0]))
-		command := strings.TrimSpace(strings.TrimPrefix(withoutPID, fields[1]))
-		processes = append(processes, legacyProcess{pid: pid, ppid: ppid, command: command})
-	}
-	return processes
-}
-
-func supervisorChildPIDFromLog(path string) int {
-	if path == "" {
-		return 0
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	pid := 0
-	for _, line := range strings.Split(string(data), "\n") {
-		idx := strings.LastIndex(line, "child pid=")
-		if idx < 0 {
-			continue
-		}
-		var candidate int
-		if _, err := fmt.Sscanf(line[idx:], "child pid=%d", &candidate); err == nil && candidate > 0 {
-			pid = candidate
-		}
-	}
-	return pid
-}
-
-func SupervisorStatus(inst *api.Instance) *api.SupervisorStatus {
-	if inst == nil || inst.Supervisor.PID <= 0 {
-		return nil
-	}
-	return &api.SupervisorStatus{
-		PID:       inst.Supervisor.PID,
-		ExecPID:   inst.Supervisor.ExecPID,
-		Alive:     instance.ProcessAlive(inst.Supervisor.PID),
-		StartedAt: inst.Supervisor.StartedAt,
-		LogPath:   inst.Supervisor.LogPath,
+	return &api.DaemonStatus{
+		PID:       inst.Daemon.PID,
+		Alive:     instance.ProcessAlive(inst.Daemon.PID),
+		StartedAt: inst.Daemon.StartedAt,
+		LogPath:   inst.Daemon.LogPath,
 	}
 }
 
