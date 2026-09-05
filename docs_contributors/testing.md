@@ -18,6 +18,8 @@ Real Delve app-readiness tests on macOS require the normal Delve prerequisites, 
 
 Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS user cache root. Set `HOME`, `XDG_CACHE_HOME`, and `LOCALAPPDATA`; Windows uses `LOCALAPPDATA` for `os.UserCacheDir()`, so `HOME` alone is not enough.
 
+Cache manifest output paths use native separators after normalization. Keep slash-form adapter declarations in fixtures, but build native expected paths with `filepath.Join`; continue verifying restored bytes. Cross-compilation alone cannot catch a Windows path assertion mismatch.
+
 ## Unit Tests
 
 - graph validation and closures

@@ -6,13 +6,19 @@ Last updated: 2026-09-05
 
 - Phase: post-bootstrap reliability and adoption hardening
 - State: approved agent-verification item 1 (execution ownership) implemented, revised to current-only contracts and ready for user review; items 2–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: ownership regressions recorded before fixes; final full default/race suites, examples, vet, Staticcheck, vulnerability scan, formatting/module/diff checks, version JSON smoke and Windows/Linux amd64 compilation pass. Native CI and opt-in Docker/PTY checks remain separate verification lanes.
+- Confidence: local full default/race and quality checks passed for item 1. Actions run `33991168112` passed seven jobs, including Linux/macOS, race, quality/security and both Docker architectures; its sole Windows path-assertion failure is corrected locally and awaits native CI confirmation.
 
 ## In Progress
 
-- None. Item 1 and its current-only revision await user review; item 2 has not started.
+- None. The Windows CI assertion fix is ready for review; item 2 remains paused.
 
 ## Completed
+
+- Windows cache assertion CI fix:
+  - [Actions run `33991168112`](https://github.com/benjaco/devflow/actions/runs/33991168112/job/101373548031) failed `TestSnapshotClassifiesOutputPaths`: expected `bin/tool`, received `bin\tool`; the preceding run had the same failure
+  - changed the expected manifest path to `filepath.Join("bin", "tool")`, retaining slash-form adapter input and restore/content assertions; added a brief rationale comment and testing guidance
+  - passed `go test ./pkg/cache -count=1 -v`, `go vet ./pkg/cache`, formatting/diff checks and Windows amd64 cache-test compilation; native Windows execution awaits the next CI run
+  - no production code changes, commits, pushes or workflow reruns; item 2 has not started
 
 - Item 1 review revision — current-only code and upgrades:
   - removed supervisor/executor migration, launcher-log/process-table discovery, old project/service providers, retired CLI/JSON aliases and unused launch-state inference; current control uses only `daemon.json`, `daemon`/`daemonStarted` and `logs daemon`

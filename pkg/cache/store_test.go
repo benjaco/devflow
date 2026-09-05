@@ -133,7 +133,8 @@ func TestSnapshotClassifiesOutputPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(manifest.Outputs.Files, []string{"bin/tool"}) {
+	// Snapshot paths use native separators even when declarations use slashes.
+	if !reflect.DeepEqual(manifest.Outputs.Files, []string{filepath.Join("bin", "tool")}) {
 		t.Fatalf("unexpected files: %+v", manifest.Outputs.Files)
 	}
 	if !reflect.DeepEqual(manifest.Outputs.Dirs, []string{"dist"}) {
