@@ -13,10 +13,11 @@ import (
 // RequestRunCancellation addresses one retained run. It never falls back to the
 // current instance owner, so an old command cannot stop a replacement watcher.
 func RequestRunCancellation(ctx context.Context, worktree, instanceID, runID string) error {
-	if _, err := RunPath(worktree, instanceID, runID); err != nil {
+	runPath, err := RunPath(worktree, instanceID, runID)
+	if err != nil {
 		return err
 	}
-	err := withRunStoreLock(ctx, worktree, instanceID, false, func() error {
+	err = withRunStoreLock(ctx, worktree, instanceID, false, func() error {
 		record, err := loadRunLocked(worktree, instanceID, runID)
 		if err != nil {
 			return err
@@ -29,13 +30,16 @@ func RequestRunCancellation(ctx context.Context, worktree, instanceID, runID str
 			return err
 		}
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if os.IsExist(err) {
-			return nil
-		}
-		if err != nil {
+		if err != nil && !os.IsExist(err) {
 			return err
 		}
-		return file.Close()
+		var closeErr error
+		if file != nil {
+			closeErr = file.Close()
+		}
+		// The owner may have exited before consuming an accepted answer. The
+		// marker and store lock exclude new responses while we erase delivery data.
+		return errors.Join(closeErr, os.RemoveAll(filepath.Join(runPath, "prompts", "answers")))
 	})
 	if os.IsNotExist(err) {
 		return ErrRunUnknown

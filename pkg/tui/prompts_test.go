@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/benjaco/devflow/pkg/api"
@@ -17,7 +18,7 @@ func TestDashboardRecoversAndQueuesPersistedPrompts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := &api.RunRecord{Project: "prompt-test", Target: "verify", Mode: api.ModeCI}
+	record := &api.RunRecord{Project: "prompt-test", Target: "verify", Mode: api.ModeCI, OwnerPID: os.Getpid()}
 	if err := instance.CreateRun(root, inst.ID, record); err != nil {
 		t.Fatal(err)
 	}

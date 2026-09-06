@@ -1131,8 +1131,8 @@ func (e *Engine) applyServiceLifecycleCommand(ctx context.Context, req Request, 
 }
 
 func (e *Engine) startStoppedService(ctx context.Context, state *runState, baseRT *project.Runtime, task project.Task, result ServiceLifecycleResult) (ServiceLifecycleResult, error) {
-	node := state.statusSnapshot()[task.Name]
-	state.setNodeState(task.Name, api.StateStarting, node.LastRunKey, "", 0)
+	// beginAttempt allocates the replacement identity before publishing starting;
+	// changing the node here would rewrite the completed predecessor's evidence.
 	runtime := baseRT.WithTask(task.Name, "")
 	depKeys := state.depKeySnapshot(task.Deps)
 	runtime.DepKeys = append([]string(nil), depKeys...)

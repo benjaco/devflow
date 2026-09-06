@@ -1,8 +1,8 @@
 # Metadata and verification planning evidence
 
 Item 6 adds declaration-based inspection and an advisory verification planner.
-It does not address the five outstanding item 5 review findings recorded in
-`PROGRESS.md`.
+Its original change left the five item 5 review findings open; those are now
+addressed with item 7 in [compact evidence verification](compact-evidence-verification.md).
 
 ## Observed failures before implementation
 

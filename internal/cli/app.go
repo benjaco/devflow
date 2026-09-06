@@ -50,6 +50,8 @@ type App struct {
 	jsonStream              bool
 	outputFailed            bool
 	result                  any
+	details                 string
+	progress                string
 }
 
 func New() *App {
@@ -345,6 +347,7 @@ func (a *App) runCmd(args []string) error {
 	}
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
+	addResultFlags(fs)
 	jsonOut := fs.Bool("json", false, "(--json) emit stable JSON output")
 	worktree := fs.String("worktree", "", "project worktree path; defaults to the current directory")
 	modeWatch := fs.Bool("watch", false, "(--watch) run in watch mode; for detached automation prefer devflow watch <target> --detach plus devflow flush")
@@ -448,7 +451,7 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	}
 	var repairRunner *reporepair.Runner
 	if repairOptions != nil {
-		repairRunner = reporepair.New(root, *repairOptions, a.Stderr)
+		repairRunner = reporepair.New(root, *repairOptions, a.progressWriter())
 	}
 
 	eng, err := engine.New(execProject, root)
@@ -501,11 +504,16 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 			retainedResult.Success = false
 			retainedResult.Error = clierror.Describe(returnErr, "evidence_write_failed", "execution")
 		}
-		if mode == api.ModeCI && jsonOut {
+		if mode == api.ModeCI && jsonOut && a.progress != "quiet" {
 			_, _ = fmt.Fprintf(a.Stderr, "[devflow] run %s finished success=%t\n", retainedResult.Target, retainedResult.Success)
 		}
 		if jsonOut && !a.outputFailed {
 			returnErr = errors.Join(returnErr, a.writeResult(retainedResult))
+		} else if a.compactOutput() && !a.outputFailed {
+			returnErr = errors.Join(returnErr, writeExecutionView(a.Stdout, a.resultView(retainedResult).(*api.ExecutionView)))
+		} else if !jsonOut && !a.outputFailed {
+			// Human output must wait for the same evidence commit as JSON.
+			returnErr = errors.Join(returnErr, writeRunText(a.Stdout, retainedResult))
 		}
 	}()
 	observedCtx, observeCancel, err := instance.ObserveRunCancellation(operationCtx, root, id, record.RunID)
@@ -540,7 +548,7 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	}
 	progressCtx, stopProgress := context.WithCancel(context.Background())
 	var progressWG sync.WaitGroup
-	if mode == api.ModeCI && jsonOut {
+	if mode == api.ModeCI && jsonOut && a.progress != "quiet" {
 		// Subscribe synchronously so a fast run cannot publish run_started
 		// before the progress goroutine has been scheduled. Direct CI output is
 		// lossless because stderr is the only live execution record.
@@ -548,7 +556,7 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 		progressWG.Add(1)
 		go func() {
 			defer progressWG.Done()
-			streamCIProgress(progressCtx, a.Stderr, progressEvents)
+			streamCIProgress(progressCtx, a.Stderr, progressEvents, a.progress)
 		}()
 	}
 	outcome, runErr := eng.Run(runCtx, engine.Request{
@@ -603,11 +611,6 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 			}
 			return runErr
 		}
-		_, _ = fmt.Fprintf(a.Stdout, "target=%s instance=%s success=%v cache_hits=%d", outcome.Result.Target, outcome.Result.InstanceID, outcome.Result.Success, len(outcome.Result.CacheHits))
-		if outcome.Result.RepositoryChanges != nil {
-			_, _ = fmt.Fprintf(a.Stdout, " repository_status=%s commit=%s push_attempted=%t push_succeeded=%t", outcome.Result.RepositoryChanges.Status, outcome.Result.RepositoryChanges.CommitSHA, outcome.Result.RepositoryChanges.PushAttempted, outcome.Result.RepositoryChanges.PushSucceeded)
-		}
-		_, _ = fmt.Fprintln(a.Stdout)
 	}
 	return runErr
 }
@@ -657,7 +660,7 @@ func (a *App) reportResourceConflict(err error, jsonOut bool, extraFields ...map
 	return err
 }
 
-func streamCIProgress(ctx context.Context, out io.Writer, events <-chan api.Event) {
+func streamCIProgress(ctx context.Context, out io.Writer, events <-chan api.Event, progress string) {
 	write := func(evt api.Event) {
 		switch evt.Type {
 		case api.EventRunStarted:
@@ -673,7 +676,9 @@ func streamCIProgress(ctx context.Context, out io.Writer, events <-chan api.Even
 		case api.EventCacheMiss:
 			_, _ = fmt.Fprintf(out, "[devflow] cache %s: miss\n", evt.Task)
 		case api.EventLogLine:
-			_, _ = fmt.Fprintf(out, "[devflow] %s %s: %s\n", evt.Task, evt.Stream, evt.Line)
+			if progress != "states" {
+				_, _ = fmt.Fprintf(out, "[devflow] %s %s: %s\n", evt.Task, evt.Stream, evt.Line)
+			}
 		case api.EventRunFinished:
 			_, _ = fmt.Fprintf(out, "[devflow] run %s finished success=%t\n", evt.Target, evt.Success != nil && *evt.Success)
 		}
@@ -738,6 +743,9 @@ func (a *App) runViaDaemon(target string, jsonOut bool, worktreeFlag, projectNam
 				return writeErr
 			}
 			return err
+		}
+		if a.compactOutput() {
+			return errors.Join(err, writeExecutionView(a.Stdout, a.resultView(resp.Run).(*api.ExecutionView)))
 		}
 		_, _ = fmt.Fprintf(a.Stdout, "target=%s instance=%s success=%v cache_hits=%d\n", resp.Run.Target, resp.Run.InstanceID, resp.Run.Success, len(resp.Run.CacheHits))
 	}
@@ -850,6 +858,7 @@ func (a *App) flushCmd(args []string) error {
 	}
 	fs := flag.NewFlagSet("flush", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
+	addResultFlags(fs)
 	jsonOut := fs.Bool("json", false, "")
 	worktree := fs.String("worktree", "", "")
 	instanceID := fs.String("instance", "", "")
@@ -1550,6 +1559,7 @@ func (a *App) cacheGCCmd(args []string) error {
 func (a *App) statusCmd(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
+	addResultFlags(fs)
 	jsonOut := fs.Bool("json", false, "")
 	worktree := fs.String("worktree", "", "")
 	instanceID := fs.String("instance", "", "")
@@ -1566,6 +1576,9 @@ func (a *App) statusCmd(args []string) error {
 	}
 	if *jsonOut {
 		return a.writeResult(out)
+	}
+	if a.compactOutput() {
+		return writeExecutionView(a.Stdout, a.resultView(out).(*api.ExecutionView))
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "instance: %s  target: %s  mode: %s\n", out.InstanceID, out.Target, out.Mode)
 	_, _ = fmt.Fprintf(a.Stdout, "worktree: %s\n", out.Worktree)
@@ -1671,6 +1684,8 @@ func (a *App) logsCmd(args []string) error {
 	attemptID := fs.String("attempt", "", "specific task attempt in --run; defaults to its latest attempt")
 	tail := fs.Int("tail", 50, "")
 	follow := fs.Bool("follow", false, "")
+	cursor := fs.String("cursor", "", "resume a retained log page")
+	maxBytes := fs.Int("max-bytes", logstream.DefaultPageBytes, "return one bounded JSON page (4 to 1048576 bytes)")
 	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -1680,7 +1695,18 @@ func (a *App) logsCmd(args []string) error {
 	if *tail < 0 {
 		return clierror.Wrap(logstream.ErrInvalidTail, "invalid_arguments", "parsing")
 	}
-	a.jsonStream = *jsonOut
+	pageMode, explicitTail := *cursor != "", false
+	fs.Visit(func(f *flag.Flag) {
+		pageMode = pageMode || f.Name == "max-bytes" || f.Name == "cursor"
+		explicitTail = explicitTail || f.Name == "tail"
+	})
+	if pageMode && (!*jsonOut || *follow || explicitTail) {
+		return clierror.Wrap(errors.New("log pages require --json and cannot combine with --follow or --tail"), "invalid_arguments", "parsing")
+	}
+	if pageMode && (*maxBytes < 4 || *maxBytes > logstream.MaxPageBytes) {
+		return clierror.Wrap(logstream.ErrInvalidPageSize, "invalid_arguments", "parsing")
+	}
+	a.jsonStream = *jsonOut && !pageMode
 	if task == "" {
 		if fs.NArg() != 1 {
 			return clierror.Wrap(fmt.Errorf("usage: devflow logs <task>"), "invalid_arguments", "parsing")
@@ -1694,38 +1720,17 @@ func (a *App) logsCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	var logPath string
-	selectedRun, selectedAttempt := *runID, *attemptID
 	if *attemptID != "" && *runID == "" {
 		return clierror.Wrap(errors.New("--attempt requires --run"), "invalid_arguments", "parsing")
 	}
-	if *runID != "" {
-		var record *api.RunRecord
-		record, err = instance.LoadRun(root, id, *runID)
-		if err != nil {
-			return runEvidenceError(err)
-		}
-		for _, attempt := range record.Attempts {
-			if attempt.Task == task && (*attemptID == "" || attempt.AttemptID == *attemptID) {
-				logPath = attempt.LogPath
-				selectedAttempt = attempt.AttemptID
-			}
-		}
-		if logPath == "" {
-			return clierror.Wrap(fmt.Errorf("no matching attempt for task %q in run %s", task, *runID), "unknown_attempt", "resolution")
-		}
-	} else {
-		logPath, err = resolveLogPath(root, id, task)
-		if task != "daemon" && task != "tui" {
-			if state, stateErr := instance.LoadStatus(root, id); stateErr == nil {
-				selectedRun = state.RunID
-				selectedAttempt = state.Nodes[task].AttemptID
-			}
-		}
-	}
+	selection, err := resolveLogSelection(root, id, task, *runID, *attemptID, *cursor)
 	if err != nil {
 		return err
 	}
+	if pageMode {
+		return a.logPage(root, selection, *cursor, *maxBytes)
+	}
+	logPath, selectedRun, selectedAttempt := selection.path, selection.RunID, selection.AttemptID
 	logCtx := a.context()
 	if *follow && selectedRun != "" {
 		observed, stop, observeErr := observeLogEvidence(logCtx, root, id, selectedRun)
@@ -2554,20 +2559,9 @@ func resolveInstance(worktreeFlag, instanceID string) (string, string, error) {
 	return real, id, nil
 }
 
-func resolveLogPath(worktree, instanceID, task string) (string, error) {
+func resolveDiagnosticLogPath(worktree, instanceID, task string) (string, error) {
 	if task == "tui" {
 		return instance.LogPath(worktree, instanceID, task), nil
-	}
-	if task != "daemon" {
-		state, err := instance.LoadStatus(worktree, instanceID)
-		if err != nil {
-			return "", err
-		}
-		node, ok := state.Nodes[task]
-		if !ok || node.LogPath == "" {
-			return "", clierror.Wrap(fmt.Errorf("task %q has no attempt log", task), "unknown_attempt", "resolution")
-		}
-		return node.LogPath, nil
 	}
 	ref, err := instance.LoadDaemon(worktree, instanceID)
 	if err != nil {
@@ -2651,6 +2645,9 @@ func (a *App) finishFlush(result api.FlushResult, jsonOut bool) error {
 func (a *App) writeFlushResult(result api.FlushResult, jsonOut bool) error {
 	if jsonOut {
 		return a.writeResult(result)
+	}
+	if a.compactOutput() {
+		return writeExecutionView(a.Stdout, a.resultView(result).(*api.ExecutionView))
 	}
 	if result.Success {
 		_, _ = fmt.Fprintf(a.Stdout, "flush ok target=%s instance=%s synced=%v duration_ms=%d\n", result.Target, result.InstanceID, result.Synced, result.DurationMs)

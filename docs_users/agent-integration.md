@@ -59,6 +59,28 @@ Changes to the root entrypoint or compiled `devflow_*.go` companions set `config
 
 `graphDigest`, `configDigest` and `scopeDigest` identify declarations, inspected adapter sources and the supplied changed-path set. They are not proof that later edits are verified; refresh the plan after the change scope or adapter changes. This command is advisory and has no saved-plan execution mode. Actual runs supply the retained result/attempt evidence described below. `graph show` also exposes safe metadata without provisioning an instance or running task hooks/probes.
 
+## Compact results
+
+Use compact JSON and quiet progress when tool output shares a context budget:
+
+```bash
+devflow run verify --ci --details issues --progress quiet --json
+devflow status --details summary --json
+devflow flush --details summary --progress quiet --json
+```
+
+`summary` keeps exact counts, outcome, identity and a small set of actionable
+failures. `issues` includes larger failure samples and bounded log excerpts.
+Inspect `truncated` and use the returned `evidence` command argument vectors to
+retrieve full run or prompt records. Full output remains the default; compact
+presentation never reduces stored evidence. A full status read is a new snapshot,
+not a replay of an earlier flush acknowledgment.
+
+For CI JSON, `--progress states` retains task/cache transitions without task log
+lines; `logs` includes those lines. `quiet` suppresses progress while preserving
+the final error/result. Validation retains its own existing details and progress
+behavior. A summary of status describes observed states, not a new health check.
+
 ## Retained Results and Unattended Control
 
 Engine runs, watches and actions have a `runId`; every task attempt has an `attemptId`, including finite tasks and cache decisions. Keep the IDs returned by execution or detached acceptance. An action's outer result and nested run share one run ID; a subsequent development relaunch has its own ID. An idempotent detached start returns the existing execution's ID.
@@ -87,7 +109,7 @@ devflow prompts list --run <run-id> --json
 devflow prompts respond <prompt-id> --run <run-id> --task <task> --attempt <attempt-id> --confirm true --json
 ```
 
-Status includes `runId` and `pendingPrompts`. Responses must match the complete run/task/attempt/prompt identity and provide the declared answer type: `--confirm true|false`, `--text <value>`, or `--stdin` for text input without putting the answer in process arguments. Stale, duplicate, expired, canceled and mismatched answers fail. A diagnostic prompt from a failed run cannot be answered. Secret answers are transient and do not appear in ordinary prompt metadata or result/event output; adapters must avoid echoing them. Devflow never automatically confirms a question.
+Status includes `runId` and `pendingPrompts`. Responses must match the complete run/task/attempt/prompt identity and provide the declared answer type: `--confirm true|false`, `--text <value>`, or `--stdin` for text input without putting the answer in process arguments. Stale, duplicate, expired, canceled and mismatched answers fail, as do answers without a live recorded owner. A diagnostic prompt from a failed run cannot be answered. Cancellation removes undelivered answers, including accepted answers left by an exited owner, without claiming external resources stopped. Secret answers are transient and do not appear in ordinary prompt metadata or result/event output; adapters must avoid echoing them. Devflow never automatically confirms a question.
 
 ## Readiness Workflow
 
@@ -150,7 +172,18 @@ For finite test/check targets that depend on services, use `devflow run <target>
 
 In `--ci --json` mode, progress and task log lines stream to stderr and stdout remains exactly one final `RunResult`. On failure, inspect `error`, `failedNode`, `failedNodeLogPath`, and `failureExcerpts` before the terminal `logTail`. Excerpts find early test assertions, panic/fatal output, compiler errors, `AssertionError`, conventional errors/summaries, and process-failure markers even when hundreds of cleanup lines follow. An unclassified early service exit instead gets a `process-exit-tail` excerpt with up to 12 meaningful terminal lines. All excerpts remain within five windows, 200 lines, 64 KiB total, and 8 KiB per line and redact known environment secrets and PostgreSQL URLs; empty logs produce `[]`. The `nodes` array supplies every selected node's final state and duration; downstream work skipped after a dependency failure is `blocked` with the dependency named in `lastError`, while unrelated interrupted work is `canceled`. Cacheable nodes include hit/miss and key/read/write/manifest timing. Use `devflow logs` only when both bounded diagnostics are insufficient.
 
-`devflow logs <task> --tail 100 --follow --json` emits JSONL records containing `task`, `line` and available run/attempt identity, preserving blank lines and continuing after the initial tail without replay. Omit `--follow` for a finite read; `--tail 0` streams all currently available lines. Use `--run` and optionally `--attempt` to retrieve a retained attempt instead of the current one. Selection happens once: `--follow` stays on that attempt after a restart; reissue the command or select the newer attempt to see its output. A finite read includes the last partial line, while follow waits for its newline so characters split across writes stay intact. Cancellation stops this reader without stopping development services. Individual lines above 4 MiB fail explicitly instead of silently losing text. Following detects observed truncation/replacement, but polling cannot recover external rewrites; normal task attempts now have separate retained logs. Following across attempts and resumable log cursors remain planned for item 7.
+`devflow logs <task> --tail 100 --follow --json` emits JSONL records containing `task`, `line` and available run/attempt identity, preserving blank lines and continuing after the initial tail without replay. Omit `--follow` for a finite read; `--tail 0` streams all currently available lines. Use `--run` and optionally `--attempt` to retrieve a retained attempt instead of the current one. Selection happens once: `--follow` stays on that attempt after a restart; reissue the command or select the newer attempt to see its output. A finite read includes the last partial line, while follow waits for its newline so characters split across writes stay intact. Cancellation stops this reader without stopping development services. Individual lines above 4 MiB fail explicitly instead of silently losing text. Following detects observed truncation/replacement, but polling cannot recover external rewrites; normal task attempts have separate retained logs.
+
+For agent tools with limited output or for resuming after a lost context, use one JSON page at a time:
+
+```bash
+devflow logs build --run RUN_ID --max-bytes 65536 --json
+devflow logs build --cursor NEXT_CURSOR --json
+```
+
+Append each response's `text` and save its `nextCursor` after consuming it. Keep the same task and worktree/instance selection; the cursor supplies the original run and attempt even after a restart. Repeating a cursor rereads its starting offset for retries; a newer append may extend a previously short page. Advancing to `nextCursor` avoids replay. Pages include byte offsets and `atEnd`, which means the available snapshot was consumed. Poll that final cursor for later appends. Partial lines remain in `text`; `pendingBytes` keeps an incomplete UTF-8 character at the cursor until it is complete. Terminal incomplete or otherwise invalid UTF-8 fails with `log_invalid_utf8` instead of looping indefinitely.
+
+Cursor-only reads default to 64 KiB. `--max-bytes` accepts 4 bytes through 1 MiB of source text before JSON escaping; pages require `--json` and cannot combine with `--tail` or `--follow`. Only retained task attempts support pages. A mismatched cursor returns `invalid_cursor` (`parsing`), changed/replaced evidence returns `log_reset_required` (`execution`), and pruned evidence returns `run_expired` (`resolution`). Cursors never silently move to another attempt. Start a new read explicitly after a reset. The normal guarantee relies on Devflow's append-only attempt logs, immutable after completion; bounded checks detect observed changes but cannot recover arbitrary external rewrites. See the [CLI contract](../docs_contributors/cli.md) for all fields, limits, and errors.
 
 For CI jobs that intentionally repair generated or formatted repository files, use the atomic repository mode instead of scripting status/add/commit/push around Devflow:
 

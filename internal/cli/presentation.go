@@ -15,6 +15,7 @@ import (
 
 	"github.com/benjaco/devflow/internal/clierror"
 	"github.com/benjaco/devflow/internal/executionconflict"
+	"github.com/benjaco/devflow/pkg/api"
 )
 
 var errFlagsDiscovered = errors.New("flags discovered")
@@ -66,6 +67,10 @@ func (a *App) Run(args []string) error {
 		probeErr = probe.dispatch(args)
 	}
 	call.jsonOutput = jsonRequested(args, probe.flagSet)
+	var outputOptionsErr error
+	if errors.Is(probeErr, errFlagsDiscovered) {
+		outputOptionsErr = call.configureResultOutput(probe.flagSet)
+	}
 	if probe.flagSet != nil {
 		switch probe.flagSet.Name() {
 		case "validate":
@@ -97,6 +102,8 @@ func (a *App) Run(args []string) error {
 		err = clierror.Wrap(probeErr, "invalid_arguments", "parsing")
 	case ctx.Err() != nil:
 		err = ctx.Err()
+	case outputOptionsErr != nil:
+		err = outputOptionsErr
 	case worktreeErr != nil:
 		err = clierror.Wrap(worktreeErr, "invalid_worktree", "resolution")
 	case shouldExecLocalProject(args, worktree):
@@ -114,6 +121,7 @@ func (a *App) Run(args []string) error {
 	if call.outputFailed {
 		return err
 	}
+	call.result = call.resultView(call.result)
 	if err != nil {
 		payload := map[string]json.RawMessage{}
 		if call.result != nil {
@@ -129,9 +137,28 @@ func (a *App) Run(args []string) error {
 			payload = map[string]json.RawMessage{}
 		}
 		payload["success"] = json.RawMessage("false")
-		payload["error"], _ = json.Marshal(clierror.Describe(err, "operation_failed", "execution"))
+		failure := clierror.Describe(err, "operation_failed", "execution")
+		truncated := api.ExecutionTruncation{}
+		if view, ok := call.result.(*api.ExecutionView); ok {
+			truncated = view.Truncated
+		}
+		if call.compactOutput() {
+			sample := viewSampler{remaining: 2048, truncated: &truncated.Text}
+			failure.Message = sample.text(failure.Message)
+			payload["details"], _ = json.Marshal(call.details)
+		}
+		payload["error"], _ = json.Marshal(failure)
 		if detail := executionconflict.Details(err); detail != nil {
+			if call.compactOutput() {
+				copy := *detail
+				sample := viewSampler{remaining: 2048, truncated: &truncated.Text}
+				copy.Worktree, copy.Target = sample.identity(copy.Worktree), sample.identity(copy.Target)
+				detail = &copy
+			}
 			payload["resourceConflict"], _ = json.Marshal(detail)
+		}
+		if call.compactOutput() {
+			payload["truncated"], _ = json.Marshal(truncated)
 		}
 		if call.jsonStream {
 			if writeErr := writeJSONLine(call.Stdout, payload); writeErr != nil {

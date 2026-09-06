@@ -129,7 +129,15 @@ func (s *Server) prepareRun(ctx context.Context, projectName, target string, mod
 	return context.WithValue(observed, runOperationKey{}, operation), operation, nil
 }
 
-func (s *Server) completeRun(runID string, result *api.RunResult, runErr error) error {
+func (s *Server) completeRun(runID string, result *api.RunResult, runErr error) (completionErr error) {
+	defer func() {
+		// Observers must see evidence failures even when reading the record or
+		// its final atomic save fails before completion can be published.
+		if completionErr != nil && result != nil {
+			result.Success = false
+			result.Error = clierror.Describe(errors.Join(runErr, completionErr), "evidence_write_failed", "execution")
+		}
+	}()
 	record, err := instance.LoadRun(s.worktree, s.instanceID, runID)
 	if err != nil {
 		return err
@@ -145,10 +153,10 @@ func (s *Server) completeRun(runID string, result *api.RunResult, runErr error) 
 	}
 	_, pruneErr := instance.PruneRuns(s.worktree, s.instanceID, instance.DefaultRunRetention)
 	pruneErr = clierror.Wrap(pruneErr, "retention_failed", "execution")
-	runErr = errors.Join(runErr, pruneErr)
-	if runErr != nil {
+	resultErr := errors.Join(runErr, pruneErr)
+	if resultErr != nil {
 		result.Success = false
-		result.Error = clierror.Describe(runErr, "task_failed", "execution")
+		result.Error = clierror.Describe(resultErr, "task_failed", "execution")
 	}
 	record.Result = result
 	record.FinishedAt = time.Now().UTC()

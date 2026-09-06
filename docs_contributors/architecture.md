@@ -20,7 +20,7 @@
 - `pkg/watch`: Devflow-owned polling file scanner and debounced change batching
 - `pkg/validation`: finite sandbox execution for input/output contract checks and exhaustive dependency-valid task-order checks
 - `internal/clierror`: source classification preserving error causes and the shared `api.CommandError` transport contract
-- `internal/logstream`: bounded CLI line reading/following with a consumed-byte cursor and rewrite detection
+- `internal/logstream`: bounded CLI line reading/following and UTF-8 page retrieval with attempt-bound byte cursors and observed rewrite detection
 - `internal/taskexec`: shared `BeforeRun` and optional `Run` callbacks for engine and validation execution
 - `internal/adaptersource`: filename classification shared by adapter discovery and changed-file planning
 
@@ -158,13 +158,32 @@ The instance status snapshot remains the current development view. Retained reco
 
 Engine sessions serialize attempt/status evidence updates across parallel tasks. Final records are written atomically after execution cleanup. Enclosing operations use `Request.DeferCompletion` so daemon environment restoration and direct CI repository finalization can contribute to the same terminal result. The per-instance run-store file lock serializes record changes, cancellation, prompt responses and pruning; it is never held across task execution or prompt waiting.
 
+Only the new attempt may publish its starting state; manual service restart must
+not briefly rewrite the completed predecessor before allocating that identity.
+Engine and daemon completion normalize the caller-visible success/error after
+the final persistence attempt, including failed reads or writes. Direct CLI text
+and JSON both wait until enclosing completion has contributed its outcome.
+
+Compact `api.ExecutionView` values are presentation-only copies made by
+`internal/cli`; engine/daemon/store records stay full. The CLI validates details
+and progress flags before bootstrap and derives exact counts before sampling.
+Diagnostic text is bounded; operational identifiers are exact or omitted with
+truncation metadata, never shortened into another task or path. Final error
+presentation applies the same bound even before a result exists. Quiet progress
+uses only the progress writer/subscription boundary: replacing the CLI's stderr
+would hide final diagnostics from a Windows bootstrap child.
+
 The execution owner emits `run_finished` after terminal evidence is durable; a deferred engine leaves that publication to its owner. Daemon completion includes cleanup failures and uses the same success/error as the retained result. A request-scoped event stream detaches and drains its queued events before sending the terminal response, which ends the client's read loop. Live daemon subscribers remain best-effort and do not block task execution.
 
 Retention targets 100 completed runs, seven days and 64 MiB of completed record/log data. Completed-run pruning runs before the current terminal result is committed, so retention failures are included in that immutable result (`retention_failed`). The newly completed result can put evidence over the count/age/byte thresholds until the next pruning pass.
 
 Pruning first renames a completed run into a hidden retirement directory; a blocked rename preserves its published record, and failed physical deletion leaves hidden data retried by later pruning. Retired IDs return `run_expired`; following a retired attempt stops with that error. Active/interrupted records and pending physical cleanup can exceed the retention budget. The issued-ID watermark distinguishes expired from unknown IDs without per-run tombstones. No old state or log-path reader is retained.
 
-CLI log selection resolves a current or retained attempt once. `--follow` remains on that selected append-only file; it does not jump to another attempt after a restart. Cross-attempt traversal and resumable cursors remain item 7 work. The TUI can select the latest path from refreshed node status independently.
+CLI log selection resolves a current or retained attempt once. Current selection takes the pathname and run/attempt identity from one status snapshot, preventing a concurrent restart from labeling old bytes with a newer identity. `--follow` remains on that selected append-only file; it does not jump to another attempt after a restart. The TUI can select the latest path from refreshed node status independently.
+
+Finite JSON pages in `internal/logstream` bind an opaque cursor to instance, run, task, attempt, native file identity, observed size, byte offset, and a digest of up to 4 KiB preceding that offset. The CLI resolves retained records from that identity and never treats a cursor as an authorized filesystem path. Page reads and their verification reread are bounded by the requested source-byte limit, with a 1 MiB maximum; JSON escaping may expand the serialized text. Cursor tokens are bounded to 8 KiB on input and output. Windows file identity uses volume/file indices; Unix uses device/inode identity. Replacement, observed shrinkage, changed anchor bytes, or an observed in-page rewrite requires an explicit reset, while retirement reports expired evidence. The reader closes each page's handle and rechecks run retention before returning it.
+
+Page text preserves partial lines and complete UTF-8 characters. An unfinished character at a running attempt's end stays unconsumed until a later read; malformed terminal evidence fails instead of polling forever. Retrying one cursor rereads the same offset and may include newer appends after an earlier short page; advancing to the returned cursor continues without a gap. No cursor switches to a newer attempt. These guarantees rely on append-only attempt ownership and immutable completed logs. Bounded observations cannot identify every external rewrite, including an unseen truncate-and-regrow that preserves the checked bytes. See [CLI log contracts](cli.md) for flags, page fields, and structured reset/expiry errors.
 
 `runs cancel` writes only the named run's marker. Direct and daemon owners observe that marker through their execution contexts; a completed ID returns `run_not_active` and never targets the newer instance owner. Acceptance confirms a cancellation request, not completed cleanup. Explicit operation deadlines reach queued/running/waiting execution, while cancellation of a status, flush or log observer only ends its wait. Cleanup retains its bounded independent context and existing execution-recovery rules; an uncooperative callback cannot be killed safely in-process.
 
@@ -332,7 +351,7 @@ Tasks declare expected prompt patterns and typed confirm/text questions through 
 
 Headless execution defaults to `fail`: a detected question ends with `interaction_required`, closes the diagnostic prompt and cleans up. Explicit `--headless wait` permits typed responses until the earlier of the operation deadline and the five-minute prompt wait limit; it never chooses an answer automatically. The TUI explicitly opts into waiting. Known action inputs remain the preferred unattended path.
 
-`prompts respond` and the TUI submit the complete run/task/attempt/prompt identity plus exactly one typed answer. The shared run-store lock rejects mismatched, duplicate, expired, canceled or completed responses, including a cancellation that arrived before the execution owner observed its marker. Answers exist only in transient owner-only files, are consumed once and are deleted during prompt closure. Secret answers never enter ordinary prompt metadata, result documents or interaction events; adapters must still avoid echoing them in subprocess output. Accepted answers are written to subprocess stdin and produce an `interaction_answered` event without the answer value.
+`prompts respond` and the TUI submit the complete run/task/attempt/prompt identity plus exactly one typed answer. The shared run-store lock rejects mismatched, duplicate, expired, canceled or completed responses, including a cancellation that arrived before the execution owner observed its marker. Admission also requires a live recorded owner; missing/exited owners cannot create, receive or consume answers. Listing derives non-answerable prompt state without finalizing interrupted execution. Answers exist only in transient owner-only files, are consumed once and are deleted during prompt closure. Cancellation erases undelivered answer files under the same lock, including already-answered metadata and retried cancellation requests. This proves input closure, not cleanup of external resources. Secret answers never enter ordinary prompt metadata, result documents or interaction events; adapters must still avoid echoing them in subprocess output. Accepted answers are written to subprocess stdin and produce an `interaction_answered` event without the answer value.
 
 Current limitation:
 - this is prompt-pattern and stdin based, not full TTY emulation

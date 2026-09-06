@@ -114,12 +114,16 @@ The [CLI reliability evidence](cli-reliability-verification.md) records the obse
 
 Tail/follow tests cover empty/blank/partial lines, UTF-8 split across writes, appends during initial reading, truncation and replacement, cursor-prefix rewrites, bounded large files/lines, cancellation and output writer errors. A 128 MiB sparse-file suffix and a million-line finite stream verify that the reader does not accumulate the requested tail in memory.
 
+Page regressions cover four-byte boundaries through multibyte UTF-8 and partial lines, exact byte offsets, retrying the same cursor, advancing without replay, empty EOF pages, and appends after EOF. Incomplete UTF-8 must resume when bytes arrive and fail explicitly for terminal evidence. A counting/mutating `ReaderAt` proves bounded page I/O at a large offset and rejects an observed rewrite during the read; malformed, oversized, mismatched, truncated, and replaced cursors must fail, and generated cursors must themselves be resumable. Native Windows tests are needed for file identity/replacement semantics; cross-compilation alone is insufficient.
+
+CLI page tests must parse exactly one JSON document, assert error code/phase for argument failures, cursor mismatches, resets, expiry, and invalid UTF-8, and retrieve the original attempt after current status changes and the adapter no longer compiles. A concurrent status writer regression checks that every current log record's bytes match its advertised attempt ID. Retention and attempt pinning remain observable CLI guarantees; tests must not claim that bounded anchors can detect arbitrary unobserved external rewrites.
+
 Cancellation tests pause an adapter build, localbuild lock, owned task or Git child, then cancel and assert cleanup, preserved previous binary/key and no repair commit/push after a canceled DAG. Subprocess fixtures use Go helpers with portable cache isolation and native executable suffixes; Windows child ownership tests run natively in Windows CI, while the actual Unix signal test is platform-scoped. Windows bootstrap gives the child a bounded console-interruption window; forceful fallback cannot prove arbitrary resource cleanup.
 
 Bootstrap build keys include repository Go source. Freeze source edits before full CLI verification: editing source during the timestamp-only/cache-key test legitimately invalidates its key. Cross-compilation checks buildability only; native Windows remains necessary for socket, console signal and file replacement behavior.
 
 ```bash
-go test ./internal/cli -run 'TestBootstrapJSON|TestCompiled.*JSON|TestLogs|TestBootstrapInterrupt|TestLocalProjectBuild.*Cancellation|TestRunCancellation' -count=1
+go test ./internal/cli -run 'TestBootstrapJSON|TestCompiled.*JSON|TestLogs|TestLogPages|TestCurrentLogIdentity|TestBootstrapInterrupt|TestLocalProjectBuild.*Cancellation|TestRunCancellation' -count=1
 go test -race ./internal/logstream ./internal/clierror ./internal/reporepair ./pkg/process -count=1
 ```
 
@@ -173,6 +177,20 @@ All three real-DB paths use `pkg/database` Engine APIs for container service log
 
 
 ## Retained execution and unattended control
+
+The combined item 7 / item 5 review correction is recorded in
+[compact evidence verification](compact-evidence-verification.md). Test large
+healthy and failing snapshots with exact counts, bounded samples/text, intact
+prompt/task identities and unmodified retained results. Cover full defaults,
+summary/issues text and JSON, early errors, CI quiet/states/logs, real bootstrap
+failure diagnostics and daemon flush freshness fields. Freeze source before
+compiled-bootstrap and full suites.
+
+Permanent review regressions exercise expired queued invalidation/restart/retarget
+preserving the watcher, immutable predecessor attempts on manual restart, missing
+and exited prompt owners, cancellation of unconsumed answers, and final engine or
+daemon evidence failures invalidating returned success. Fixture runs that can
+answer prompts must record a real live owner PID.
 
 See [run-control verification](run-control-verification.md) for item 5's observed failures and focused commands. Test run/attempt identity across finite execution, cache reuse, watch retries and daemon restarts. Retained terminal results must be immutable; old logs must survive a later task attempt. Retention must exclude all nonterminal records and distinguish malformed, never-issued and expired IDs.
 

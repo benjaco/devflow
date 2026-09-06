@@ -31,7 +31,7 @@ Available command-specific evidence stays at the top level: a failed run retains
 
 Codes are assigned from error types and source boundaries, never inferred from prose. The outer entrypoint discovers the selected command's actual flag definitions before bootstrap. `--json`/`--json=true` are recognized around malformed flags and on either side of positional arguments; a value such as `--project --json`, or a token after `--`, does not enable JSON. `--json=false` opts out. Ordinary text errors are reported once on stderr. JSON errors already presented by the local binary are not printed again by bootstrap entrypoints.
 
-Logs and attached watch use JSONL: each record occupies one line, including watch start metadata, events and a terminal error when the stream fails. Watch emits no plain banner in JSON mode. A failed output writer returns an error without attempting another document on that writer. Progress remains independent stderr text for finite runs and validation; progress verbosity controls are a later item.
+Line-mode logs and attached watch use JSONL: each record occupies one line, including watch start metadata, events and a terminal error when the stream fails. Watch emits no plain banner in JSON mode. Log pages return one finite JSON result. A failed output writer returns an error without attempting another document on that writer. CI progress remains independent stderr text, controlled by `run --progress`; validation keeps its existing stderr progress.
 
 `App.Context`, Ctrl+C and termination signals propagate to direct CI, validation, bootstrap compilation and local lock waits, repository repair, CLI installers and client waits. A canceled adapter build does not publish its temporary binary/key. Finite subprocess and Git cancellation stops their process trees. Unix bootstrap transfers into the local binary; Windows owns a child process and preserves its exit/result ownership. Cancelling a log reader, watch subscription or flush wait leaves the daemon's development execution running. Execution deadlines and `runs cancel <run-id>` address the operation itself; cancellation of a client wait alone does not cancel server work. A cancel response acknowledges the request; `runs show` supplies the eventual cleanup and terminal result.
 
@@ -149,9 +149,63 @@ The final `RunResult` includes `runId`, structured `error`, failed-node name and
 
 Engine configuration failures, including cached tasks without output declarations, also produce one failed `RunResult` for `run --ci --json`. They return before instance configuration or task execution; `nodes` is empty, and `repositoryChanges` is present only when repository repair was requested.
 
+### Compact results and progress
+
+`run`, `status` and `flush` accept `--details summary|issues|full`. The default is
+`full`; compact views are explicit, and validation retains its separate defaults.
+Compact views apply to finite run results; use status/flush to inspect detached or
+watch execution. `run --watch` retains its event stream and rejects compact views
+and nondefault progress controls.
+
+```bash
+devflow run verify --ci --details issues --progress quiet --json
+devflow status --details summary --json
+devflow flush --details summary --progress quiet --json
+```
+
+Both compact views preserve available run/instance/request identity, outcome,
+timings, structured errors, ownership conflicts and flush `synced`/`timedOut`
+state. Status does not invent a success/health verdict: `counts.nodeStates`
+describes its observed snapshot. Exact counts cover all nodes, problem nodes,
+cache hits/misses, flush services/unready services, issues, pending prompts and
+failure excerpt windows. Problem nodes include failures, blocked/canceled work,
+migration-needed, degraded or dirty states and nodes with errors. Healthy nodes
+are omitted from compact samples, with primary failures ordered before blocked
+or canceled dependents.
+
+`summary` lists at most five nodes/issues/prompts per category with an 8 KiB
+shared sample-text budget. `issues` raises those limits to 50 and 64 KiB and adds
+up to five failure excerpts of up to 30 lines each. Individual sampled strings
+are limited to 2 KiB. Counts remain exact; `truncated` reports omitted samples
+and shortened text. Task/path identities are kept exact or omitted rather than
+clipped into unusable selectors. Error messages remain bounded even before a
+result exists, including resolution/bootstrap failures. JSON escaping and field
+overhead are additional to the text budgets.
+
+`evidence.run`, `evidence.status` and `evidence.prompts` are argument vectors for
+read-only retrieval, when identity is available. `runs show` retrieves the full
+historical record; `status --details full` is a new current snapshot, not a saved
+flush acknowledgment. Compact presentation never changes stored results,
+attempts or logs. Repository repair keeps outcome/commit/push/count fields while
+omitting its path lists. Full output retains all existing result fields.
+
+`--progress quiet|states|logs` controls existing stderr progress independently of
+details. For CI JSON, `quiet` suppresses run and repository-repair progress,
+`states` includes run/task/cache transitions, and `logs` also includes task log
+lines (the default). Final errors/results remain visible in every mode, including
+Windows bootstrap children. Status, flush and attached daemon runs do not start
+new progress subscriptions; their final results use the same details choices.
+
 ### Retained runs, prompts and scoped cancellation
 
 Every admitted operation has one `runId`, including direct CI, daemon runs, watch sessions and foreground actions. Every task attempt has a new `attemptId`; task state and log events carry both identities. Watch reruns keep the watch run ID and allocate new attempts. `runId` identifies evidence, while the worktree execution lease still determines whether execution may overlap.
+
+Manual service restart allocates the new attempt before publishing `starting`;
+completed predecessor attempts remain unchanged. Queued invalidate/restart/retarget
+requests honor admission deadlines before replacing development work. Engine and
+daemon final evidence failures set the returned result to `success: false`, even
+if task execution itself succeeded; no durable-finish event is emitted for a
+failed daemon completion commit.
 
 ```bash
 devflow runs list --json
@@ -181,6 +235,12 @@ devflow prompts respond <prompt-id> --run <run-id> --task <task> --attempt <atte
 Use another CLI while the first command waits. Prompt metadata contains `id`, `runId`, `task`, `attemptId`, `kind`, `message`, optional `secret`, `state`, `createdAt` and `deadline`. States are `pending`, `answered`, `cancelled` and `expired`. Inspection reconstructs deadline/cancellation state without changing retained prompt metadata. Responses require exactly one boolean `--confirm true|false`, text `--text`, or text `--stdin`; false and empty text are valid answers. Stdin reads UTF-8 through EOF, removes one trailing LF or CRLF, and is limited to 64 KiB. Kind mismatches return `invalid_prompt_answer`; identity mismatches return `prompt_mismatch`; duplicate, cancelled, expired or finished requests return `prompt_not_pending`. Prompt identity is unique across parallel tasks and retries. Only the latest active attempt of a task may create, answer or consume a prompt; a stopped or replaced service attempt is closed even while its old process reader is still unwinding. An answer accepted just before that transition is removed without delivery. Response admission shares a cross-process lock with run cancellation, finalization and pruning.
 
 Response JSON acknowledges identities and `accepted`; it never echoes the value. Values travel through temporary owner-only answer files that are removed on consumption or cleanup, separate from retained prompt metadata, events and results. Marking an adapter prompt `Secret` also masks TUI input. Once that response is sent, Devflow hides subsequent subprocess output and emits `[output hidden after secret response]`, while continuing to recognize later prompts. This prevents child echoes from entering task logs/events; adapters must still avoid printing secrets themselves or including them in returned errors.
+
+Prompt input requires a live recorded owner as well as the current attempt. A
+missing/exited owner makes pending metadata non-answerable; this does not finalize
+the interrupted run or prove resource cleanup. Explicit cancellation removes
+undelivered answer files, including already-answered prompts and retrying a
+previously recorded cancellation request, under the same store lock as delivery.
 
 ### Atomic repository repair
 
@@ -399,9 +459,32 @@ Task states now distinguish:
 
 `logs --tail N` selects the last N lines (default 50); zero streams the whole file and negative values are argument errors. Empty files produce no log records, and blank lines are preserved. Tail selection scans backward in fixed-size chunks, then the same consumed-byte cursor continues through `--follow`, so initial output is not replayed and appends during tail delivery are retained. Memory stays bounded independently of file size and requested line count. A line above 4 MiB fails explicitly with `log_read_failed`; CLI logs do not use the TUI's line truncation policy. Output-writer failures and command cancellation terminate reading.
 
-Finite reads include a final unterminated line. Follow mode buffers it until a newline arrives, preserving characters split across writes. When polling detects replacement, shrinkage, or changed bytes at the cursor, it emits any remaining old partial line and reads the new file from its beginning. Follow closes file handles between 250 ms polls and tolerates a briefly absent replacement path; an initially missing log remains an error. A rewrite detected during a read fails with `log_read_failed` so mixed or incomplete evidence cannot appear as a successful finite read. This observes current files rather than retaining history: content overwritten between polls cannot be recovered, and a truncate-and-regrow with identical bytes in the bounded cursor check can be indistinguishable from an append. Immutable task attempts preserve older task output. Resumable cursors and following across attempts remain separate work.
+Finite line reads include a final unterminated line. Follow mode buffers it until a newline arrives, preserving characters split across writes. When polling detects replacement, shrinkage, or changed bytes at the cursor, it emits any remaining old partial line and reads the new file from its beginning. Follow closes file handles between 250 ms polls and tolerates a briefly absent replacement path; an initially missing log remains an error. A rewrite detected during a read fails with `log_read_failed` so mixed or incomplete evidence cannot appear as a successful finite read. This observes current files rather than retaining history: content overwritten between polls cannot be recovered, and a truncate-and-regrow with identical bytes in the bounded cursor check can be indistinguishable from an append. Immutable task attempts preserve older task output.
 
-Task logs are created once at `runs/<run-id>/attempts/<attempt-id>.log` beneath the instance state directory, then appended only within that attempt. A new attempt never truncates an older log. `logs <task>` selects the current status attempt; `--run` selects the latest retained attempt of that task within the chosen run, and `--attempt` selects one exact attempt and requires `--run`. The task and attempt must match. JSON task log records include `task`, `runId`, `attemptId` and `line`. Selection is pinned when the command starts: `--follow` follows that one attempt, including when selected from current status. Reissue the command after a watch rerun or restart to select its new attempt. Task, daemon, TUI, and event-stream logs are owner-only (`0600`) on Unix-like systems.
+Task logs are created once at `runs/<run-id>/attempts/<attempt-id>.log` beneath the instance state directory, then appended only within that attempt. A new attempt never truncates an older log. `logs <task>` selects the current status attempt, taking its pathname and run/attempt identity from the same status snapshot; `--run` selects the latest retained attempt of that task within the chosen run, and `--attempt` selects one exact attempt and requires `--run`. The task and attempt must match. JSON task log records include `task`, `runId`, `attemptId` and `line`. Selection is pinned when the command starts: `--follow` follows that one attempt, including when selected from current status. Reissue the command after a watch rerun or restart to select its new attempt. Task, daemon, TUI, and event-stream logs are owner-only (`0600`) on Unix-like systems.
+
+For bounded, resumable task evidence, request a finite JSON page:
+
+```bash
+devflow logs build --run RUN_ID --max-bytes 65536 --json
+devflow logs build --cursor NEXT_CURSOR --json
+```
+
+Use the same worktree or `--instance` on both calls. `--max-bytes` starts at byte zero; `--cursor` resumes the original run/task/attempt even when current status has advanced. Pages require `--json` and cannot combine with `--follow` or an explicit `--tail`. They apply only to retained task attempts; `daemon` and `tui` use line reads. The page contains `instanceId`, `runId`, `task`, `attemptId`, `text`, `startOffset`, `endOffset`, `nextCursor`, `atEnd`, and `pendingBytes`. The limit is 4–1,048,576 source bytes; cursor-only requests default to 65,536 bytes. JSON escaping can make the serialized response larger. Cursor tokens are opaque and bounded to 8,192 bytes.
+
+Concatenating `text` while advancing through `nextCursor` preserves blank lines, line endings, and partial lines exactly. Offsets count UTF-8 bytes, and pages never split a complete character. Repeating a cursor rereads the same starting offset for retries: existing bytes repeat, and newer appends may extend a formerly short page. Save the next cursor after consuming the response. `atEnd` describes the read's snapshot boundary; reuse its `nextCursor` to read later appends. A running attempt's final incomplete UTF-8 character leaves 1–3 `pendingBytes` unconsumed at the cursor until more bytes arrive. An incomplete character in terminal evidence, or any invalid UTF-8 sequence, fails explicitly instead of returning replacement characters or waiting forever.
+
+| Error code / phase | Meaning |
+| --- | --- |
+| `invalid_arguments` / `parsing` | Invalid byte limit or incompatible page flags. |
+| `invalid_cursor` / `parsing` | Malformed/oversized cursor or mismatched instance, task, run, or attempt selection; also an identity too large to encode a resumable cursor. |
+| `unknown_attempt` / `resolution` | No matching retained task attempt, including diagnostic sources requested as pages. |
+| `run_expired` / `resolution` | Retention removed the selected run. |
+| `log_reset_required` / `execution` | The reader observed replacement, truncation, or changed evidence; start a new read without the cursor. |
+| `log_invalid_utf8` / `execution` | Evidence cannot be represented losslessly as UTF-8 text; inspect its log file directly. |
+| `log_read_failed` / `execution` | Another log read error. |
+
+Page cursors bind native file identity, observed size, and a digest of up to 4 KiB preceding the consumed offset. Each bounded page is reread to detect an observed rewrite during retrieval. A cursor never silently resets or switches attempts. These checks do not recover arbitrary external rewrites: an unobserved truncate-and-regrow preserving the checked bytes can evade detection. Devflow's append-only per-attempt logs provide the normal no-gap/no-replay guarantee; they become immutable when the attempt finishes.
 
 `tui` now opens a live operator console connected to the per-worktree daemon. Without `--instance`, `devflow tui` follows the same default launch path as bare `devflow`: resolve the default target, ensure the per-worktree daemon is running it in watch mode, wait for a matching non-empty status snapshot, then render. With `--instance`, `tui` is attach-only and does not start or retarget work.
 

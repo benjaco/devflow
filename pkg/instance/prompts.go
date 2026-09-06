@@ -250,6 +250,11 @@ func promptAttemptActive(run *api.RunRecord, prompt api.Prompt) bool {
 	if run.State.Terminal() {
 		return false
 	}
+	// Input needs a live owner to consume transient answers. This only closes input;
+	// it does not prove the run's external resources have been cleaned up.
+	if !ProcessAlive(run.OwnerPID) {
+		return false
+	}
 	// Only the newest attempt for this task may request or consume input.
 	// An old service reader can outlive Stop while its prompt is unwinding.
 	for i := len(run.Attempts) - 1; i >= 0; i-- {

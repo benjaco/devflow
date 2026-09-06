@@ -27,7 +27,7 @@ func retainedCLIRun(t *testing.T, state api.RunState) (string, *api.RunRecord) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := &api.RunRecord{InstanceID: id, Project: "record-fixture", Target: "verify", Mode: api.ModeCI}
+	record := &api.RunRecord{InstanceID: id, Project: "record-fixture", Target: "verify", Mode: api.ModeCI, OwnerPID: os.Getpid()}
 	if err := instance.CreateRun(wt, id, record); err != nil {
 		t.Fatal(err)
 	}

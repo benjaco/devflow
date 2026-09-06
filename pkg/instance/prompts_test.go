@@ -192,6 +192,132 @@ func TestPromptRejectsResponseAsSoonAsRunCancellationIsRequested(t *testing.T) {
 	assertPromptError(t, err, "prompt_not_pending")
 }
 
+func TestPromptRejectsResponseAfterOwnerExited(t *testing.T) {
+	assertPromptRejectsInactiveOwner(t, exitedPromptOwnerPID(t))
+}
+
+func TestPromptRejectsResponseWithoutOwner(t *testing.T) {
+	assertPromptRejectsInactiveOwner(t, 0)
+}
+
+func assertPromptRejectsInactiveOwner(t *testing.T, ownerPID int) {
+	t.Helper()
+	ctx := context.Background()
+	root := t.TempDir()
+	prompt := createTestPrompt(t, root, "instance", "login", "text")
+	record, err := LoadRun(root, "instance", prompt.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.OwnerPID = ownerPID
+	record.State = api.RunWaiting
+	if err := SaveRun(root, "instance", record); err != nil {
+		t.Fatal(err)
+	}
+	items, err := ListPrompts(ctx, root, "instance", prompt.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].State != api.PromptCancelled {
+		t.Errorf("inactive owner still exposes an answerable prompt: %+v", items)
+	}
+	secret := "orphaned-secret"
+	err = RespondPrompt(ctx, root, "instance", api.PromptAnswer{RunID: prompt.RunID, Task: prompt.Task, AttemptID: prompt.AttemptID, PromptID: prompt.ID, Text: &secret})
+	assertPromptError(t, err, "prompt_not_pending")
+	path, err := promptPath(root, "instance", prompt.RunID, prompt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(promptAnswerPath(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("response without an active owner left transient answer data: %v", err)
+	}
+	_, err = CreatePrompt(ctx, root, "instance", api.Prompt{RunID: prompt.RunID, Task: prompt.Task, AttemptID: prompt.AttemptID, Kind: "text", Message: "Late prompt"})
+	assertPromptError(t, err, "prompt_not_pending")
+	retained, err := LoadRun(root, "instance", prompt.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained.State != api.RunWaiting || !retained.UpdatedAt.Equal(record.UpdatedAt) {
+		t.Errorf("prompt inspection/admission changed interrupted run evidence: %+v", retained)
+	}
+}
+
+func TestRunCancellationRemovesUndeliveredPromptAnswers(t *testing.T) {
+	for _, name := range []string{"live_owner", "exited_owner", "already_requested"} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			prompt, err := CreatePrompt(ctx, root, "instance", api.Prompt{RunID: testPromptRunID(t, root, "instance"), Task: "login", AttemptID: testPromptAttemptID(t, root, "instance", "login"), Kind: "text", Message: "Password", Secret: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			secret := "unconsumed-secret"
+			if err := RespondPrompt(ctx, root, "instance", api.PromptAnswer{RunID: prompt.RunID, Task: prompt.Task, AttemptID: prompt.AttemptID, PromptID: prompt.ID, Text: &secret}); err != nil {
+				t.Fatal(err)
+			}
+			record, err := LoadRun(root, "instance", prompt.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record.OwnerPID = os.Getpid()
+			if name == "exited_owner" {
+				record.OwnerPID = exitedPromptOwnerPID(t)
+			}
+			record.State = api.RunWaiting
+			if err := SaveRun(root, "instance", record); err != nil {
+				t.Fatal(err)
+			}
+			if name == "already_requested" {
+				marker, err := cancellationPath(root, "instance", prompt.RunID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// A previous requester may have stopped after writing its marker.
+				if err := os.WriteFile(marker, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for range 2 {
+				if err := RequestRunCancellation(ctx, root, "instance", prompt.RunID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path, err := promptPath(root, "instance", prompt.RunID, prompt.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(promptAnswerPath(path)); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("explicit cancellation retained an undelivered answer: %v", err)
+			}
+			retained, err := LoadRun(root, "instance", prompt.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if retained.State != api.RunWaiting || !retained.UpdatedAt.Equal(record.UpdatedAt) || !retained.FinishedAt.IsZero() {
+				t.Errorf("answer cleanup changed run/resource completion evidence: %+v", retained)
+			}
+			if err := CheckRunCancellation(ctx, root, "instance", prompt.RunID); !errors.Is(err, context.Canceled) {
+				t.Fatalf("answer cleanup lost cancellation marker: %v", err)
+			}
+		})
+	}
+}
+
+func exitedPromptOwnerPID(t *testing.T) int {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	owner := exec.CommandContext(ctx, os.Args[0], "-test.run=^$")
+	if output, err := owner.CombinedOutput(); err != nil {
+		t.Fatalf("prompt owner fixture: %v\n%s", err, output)
+	}
+	pid := owner.Process.Pid
+	if ProcessAlive(pid) {
+		t.Fatal("completed prompt owner fixture still reports alive")
+	}
+	return pid
+}
+
 func TestPromptUnknownRunErrorsAndPathValidation(t *testing.T) {
 	root := t.TempDir()
 	prompt := createTestPrompt(t, root, "instance", "task", "confirm")
@@ -373,7 +499,7 @@ func testPromptRunID(t *testing.T, root, instanceID string) string {
 	if len(runs) > 0 {
 		return runs[0].RunID
 	}
-	record := &api.RunRecord{Project: "prompt-test", Target: "verify", Mode: api.ModeCI, State: api.RunRunning}
+	record := &api.RunRecord{Project: "prompt-test", Target: "verify", Mode: api.ModeCI, State: api.RunRunning, OwnerPID: os.Getpid()}
 	if err := CreateRun(root, instanceID, record); err != nil {
 		t.Fatal(err)
 	}

@@ -159,6 +159,11 @@ func (s *runSession) finish(result *api.RunResult, runErr error, deferCompletion
 		s.record.FinishedAt = time.Now().UTC()
 	}
 	s.saveLocked()
+	// The returned result must include failures from the final evidence commit.
+	if s.err != nil {
+		result.Success = false
+		result.Error = clierror.Describe(errors.Join(runErr, s.err), "evidence_write_failed", "execution")
+	}
 	return s.err
 }
 

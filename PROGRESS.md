@@ -5,14 +5,23 @@ Last updated: 2026-09-06
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: item 6's Windows rooted-path correction is ready for review and native CI after failure at `54a5ec5`. Item 5's five review findings remain outstanding; item 7 is queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: planner and CLI planning tests, compiled-bootstrap planning, all examples, focused race checks, vet, Staticcheck v0.8.1, formatting/diff checks and Windows amd64 planner/CLI test compilation pass. Native Windows runtime confirmation awaits CI; all other jobs passed on `54a5ec5`.
+- State: item 7 compact results/resumable logs and all five item 5 review corrections are implemented and verified together; ready for review. Item 6 and its Windows correction are accepted at `e04dee3`. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: full default/race suites and examples, compiled CLI boundaries, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), format/module/diff/version checks and 14 Linux/Windows amd64 affected test/CLI compilation checks pass. Native Windows behavior awaits CI.
 
 ## In Progress
 
-- Await review and native Windows CI for the rooted-path correction. Retain item 5 findings as known gaps; item 7 has not started.
+- Await user review and native Windows CI. Admitted service-local execution deadlines and cross-attempt following remain separate from this change (see compact evidence verification).
 
 ## Completed
+
+- Agent-verification item 7 and all five item 5 review corrections:
+  - added opt-in summary/issues/full views for finite run/status/flush with full defaults, exact counts, bounded actionable samples/excerpts and read-only evidence argv; presentation leaves full retained records intact and keeps task/path identities exact or omits them explicitly
+  - added quiet/states/logs control for existing CI JSON progress and quiet repository-repair progress; preserved final errors, including early compact JSON errors and Windows bootstrap child diagnostics; human CI summaries now wait for final evidence completion
+  - added finite JSON log pages with instance/run/task/attempt-bound cursors, bounded UTF-8 byte reads, explicit reset/expiry/malformed-text errors, retry/append behavior and attempt pinning; current log paths and labels now share one status snapshot
+  - fixed queued lifecycle deadline admission preserving the watcher, manual restart rewriting completed attempts, missing/exited-owner prompt admission and undelivered-answer cancellation cleanup, and final engine/daemon evidence failures leaving returned success true
+  - recorded observed failures and permanent regressions in `docs_contributors/compact-evidence-verification.md`, including additional review findings for oversized compact fields, prompt-identity truncation and early-error bounds; updated public/subsystem docs and memory
+  - passed final `go test -count=1 ./...` (CLI 124.958s) and `go test -race -count=1 ./...` (CLI 106.987s), compiled compact/bootstrap/flush/evidence retrieval smoke tests, examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0, format/module/diff checks and version JSON
+  - passed Linux/Windows amd64 test compilation for CLI/logstream/instance/engine/daemon/TUI plus CLI builds (14 checks); native Windows runtime still requires CI. Local changes only; no commits, pushes, installs, existing-service operations or external-project edits
 
 - Windows planner path correction:
   - [run `34057692957`, job `101552479071`](https://github.com/benjaco/devflow/actions/runs/34057692957/job/101552479071) failed `TestScopeDigestDeterminismAndInvalidFiles`: the planner accepted `/absolute` because Windows `filepath.IsAbs` requires a volume
@@ -1013,7 +1022,7 @@ Last updated: 2026-09-06
 
 ## Next Steps
 
-- Review item 6 metadata/planning before item 7 compact retrieval; the five item 5 review findings remain outstanding and need their own fixes/regressions.
+- Review the combined item 7 compact/progress/cursor change and all five item 5 review corrections after final verification.
 - Confirm the reliability changes on the native Linux/macOS/Windows CI matrix; retest the historical readiness symptom through the real daemon/TUI only if it recurs (the engine early-exit restart regression passes).
 - Confirm the Delve v1.27.1 pin on the next native Linux/macOS/Windows GitHub Actions run
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
@@ -1025,7 +1034,8 @@ Last updated: 2026-09-06
 ## Deferred / Known Gaps
 
 - Flush proves a processed observation boundary for declared, metadata-visible inputs and selected-target health; it cannot cover transient/metadata-preserving edits, undeclared dependencies, writes made inside a producer-owned output scope during its execution, or edits after the final scan. Restart/warmup policy blocks require explicit rerun/restart.
-- Execution admission is conservative and cooperative: same-worktree overlap is rejected; finer resource scheduling remains deferred; planner and compact/cursor retrieval are the remaining approved items. Active/interrupted run records and logs are protected from completed-only retention and may exceed its bounds. Unresolved orphan/PID-less resources require explicit reconciliation. Current recovery still uses recorded PIDs rather than OS process-birth identities; do not interpret process-exit/lease release as proof that arbitrary external resources stopped.
+- Execution admission is conservative and cooperative: same-worktree overlap is rejected; finer resource scheduling remains deferred. Active/interrupted run records and logs are protected from completed-only retention and may exceed its bounds. Unresolved orphan/PID-less resources require explicit reconciliation. Current recovery still uses recorded PIDs rather than OS process-birth identities; do not interpret process-exit/lease release as proof that arbitrary external resources stopped.
+- Cursors stay within an immutable attempt and bounded observations cannot detect arbitrary external rewrites preserving the checked bytes. Cross-attempt following remains separate. Queued lifecycle admission honors deadlines, but admitted service-local commands retain their engine's execution context; CLI restart has no independent timeout option.
 - Successful upgrade clears the global task artifact cache without coordinating active cache operations; run upgrades between executions. It does not clear worktree state, outputs or database volumes.
 - Interrupted snapshots can record different PIDs for one task in instance/status maps; current name-based cleanup may retain only one reference. This pre-existing reconciliation gap remains separate follow-up work.
 - Cache restore rollback covers reported operation failures, not abrupt process/machine crashes; staging and output roots must share a filesystem. Failed rollback retains a recovery directory and reports its path.

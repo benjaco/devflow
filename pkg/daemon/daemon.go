@@ -2239,13 +2239,18 @@ func (s *Server) waitForFlushAck(ctx context.Context, active *activeRun, request
 }
 
 func (s *Server) invalidateAndRelaunch(ctx context.Context, task string) (*api.LifecycleResult, error) {
-	s.transitionMu.Lock()
+	if err := s.lockRunAdmission(ctx); err != nil {
+		return nil, err
+	}
 	unlock := sync.OnceFunc(s.transitionMu.Unlock)
 	defer unlock()
 	return s.invalidateAndRelaunchLocked(ctx, task, unlock)
 }
 
 func (s *Server) invalidateAndRelaunchLocked(ctx context.Context, task string, unlock func()) (*api.LifecycleResult, error) {
+	if err := s.checkRunAdmission(ctx); err != nil {
+		return nil, err
+	}
 	task = strings.TrimSpace(task)
 	if task == "" {
 		return nil, fmt.Errorf("no task selected")
@@ -2303,6 +2308,12 @@ func (s *Server) invalidateAndRelaunchLocked(ctx context.Context, task string, u
 		Processes: []api.LifecycleProcessChange{},
 		Success:   false,
 	}
+	// Adapter graph resolution can take time; expiry must be checked before
+	// invalidation stops the existing watcher or changes any cache state.
+	if err := s.checkRunAdmission(ctx); err != nil {
+		lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
+		return lifecycle, err
+	}
 	if !s.stopActiveLocked(5 * time.Second) {
 		err := s.activeStopConflict()
 		lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
@@ -2349,13 +2360,18 @@ func (s *Server) invalidateAndRelaunchLocked(ctx context.Context, task string, u
 }
 
 func (s *Server) restart(ctx context.Context, projectName, task string, upstream, downstream bool, maxParallel int) (*api.RunResult, *api.LifecycleResult, error) {
-	s.transitionMu.Lock()
+	if err := s.lockRunAdmission(ctx); err != nil {
+		return nil, nil, err
+	}
 	unlock := sync.OnceFunc(s.transitionMu.Unlock)
 	defer unlock()
 	return s.restartLocked(ctx, projectName, task, upstream, downstream, maxParallel, unlock)
 }
 
 func (s *Server) restartLocked(ctx context.Context, projectName, task string, upstream, downstream bool, maxParallel int, unlock func()) (*api.RunResult, *api.LifecycleResult, error) {
+	if err := s.checkRunAdmission(ctx); err != nil {
+		return nil, nil, err
+	}
 	task = strings.TrimSpace(task)
 	if task == "" {
 		return nil, nil, fmt.Errorf("usage: devflow restart <task>")
@@ -2564,12 +2580,17 @@ func restartLifecyclePlan(g *graph.Graph, inst *api.Instance, status *instance.S
 }
 
 func (s *Server) retarget(ctx context.Context, target string) (*api.LifecycleResult, error) {
-	s.transitionMu.Lock()
+	if err := s.lockRunAdmission(ctx); err != nil {
+		return nil, err
+	}
 	defer s.transitionMu.Unlock()
 	return s.retargetLocked(ctx, target)
 }
 
 func (s *Server) retargetLocked(ctx context.Context, target string) (*api.LifecycleResult, error) {
+	if err := s.checkRunAdmission(ctx); err != nil {
+		return nil, err
+	}
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return nil, fmt.Errorf("no target selected")
