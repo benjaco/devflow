@@ -614,8 +614,8 @@ func TestRenderHeaderIncludesStateSummary(t *testing.T) {
 			{Name: "done", State: api.StateDone},
 			{Name: "db_prepare", State: api.StateMigrationNeeded},
 		},
-		supervisor: &api.SupervisorStatus{PID: 55, Alive: true},
-		urls:       map[string]string{"backend": "http://localhost:8080"},
+		daemon: &api.DaemonStatus{PID: 55, Alive: true},
+		urls:   map[string]string{"backend": "http://localhost:8080"},
 	}
 	lines := renderHeader(snap)
 	joined := strings.Join(lines, "\n")
@@ -1860,8 +1860,8 @@ func TestHandleKeysUsesLetterShortcutsWhenNoInputActive(t *testing.T) {
 	if got := d.handleKeys(tcell.NewEventKey(tcell.KeyRune, 'l', tcell.ModNone)); got != nil {
 		t.Fatalf("expected log shortcut to be handled, got %#v", got)
 	}
-	if !d.showSupervisorLog || d.showDatabasePanel {
-		t.Fatalf("expected l to toggle supervisor log and hide database panel, got supervisor=%v database=%v", d.showSupervisorLog, d.showDatabasePanel)
+	if !d.showDaemonLog || d.showDatabasePanel {
+		t.Fatalf("expected l to toggle daemon log and hide database panel, got daemon=%v database=%v", d.showDaemonLog, d.showDatabasePanel)
 	}
 }
 
@@ -1946,6 +1946,60 @@ func TestLoadSnapshotAllowsMissingInitialStatus(t *testing.T) {
 	}
 	if len(snap.nodes) != 0 {
 		t.Fatalf("expected no nodes before initial status, got %d", len(snap.nodes))
+	}
+}
+
+func TestLoadSnapshotPreservesRecordedResourcesAfterDaemonExit(t *testing.T) {
+	cacheRoot := t.TempDir()
+	t.Setenv("HOME", cacheRoot)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv("LOCALAPPDATA", cacheRoot)
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.Env["RECOVERY_VALUE"] = "preserve"
+	inst.LastRun = api.RunConfig{Target: "development", Mode: api.ModeWatch}
+	if err := instance.Save(inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.RecordDaemon(inst, 1<<30, "daemon.log"); err != nil {
+		t.Fatal(err)
+	}
+	nodes := map[string]api.NodeStatus{
+		"process": {Name: "process", Kind: "service", State: api.StateRunning, PID: os.Getpid()},
+		"handle":  {Name: "handle", Kind: "service", State: api.StateReady},
+	}
+	if err := instance.SaveStatus(worktree, inst.ID, "development", api.ModeWatch, nodes); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(worktree, ".devflow", "state", "instances", inst.ID)
+	before := map[string][]byte{}
+	for _, name := range []string{"instance.json", "runtime.env", "status.json", "daemon.json"} {
+		before[name], err = os.ReadFile(filepath.Join(stateDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	snap, err := loadSnapshot(worktree, inst.ID, false, false, "process")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.daemon == nil || snap.daemon.Alive || snap.daemon.PID != 1<<30 {
+		t.Errorf("snapshot hid the recorded daemon exit: %+v", snap.daemon)
+	}
+	for name, want := range nodes {
+		if got := snap.state.Nodes[name]; got.State != want.State || got.PID != want.PID {
+			t.Errorf("snapshot claimed resource %q was cleaned up: %+v", name, got)
+		}
+	}
+	for name, want := range before {
+		got, err := os.ReadFile(filepath.Join(stateDir, name))
+		if err != nil || !bytes.Equal(got, want) {
+			t.Errorf("read-only snapshot changed %s: %v", name, err)
+		}
 	}
 }
 

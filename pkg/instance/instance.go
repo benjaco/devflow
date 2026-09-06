@@ -18,9 +18,8 @@ import (
 	"github.com/benjaco/devflow/pkg/api"
 )
 
-var ErrSupervisorNotRecorded = errors.New("detached supervisor is not recorded yet")
-
 type State struct {
+	RunID     string                    `json:"runId,omitempty"`
 	Target    string                    `json:"target"`
 	Mode      api.RunMode               `json:"mode"`
 	Nodes     map[string]api.NodeStatus `json:"nodes"`
@@ -49,10 +48,15 @@ func Resolve(worktree, label string) (*api.Instance, error) {
 
 	var inst api.Instance
 	if err := jsonutil.ReadFile(filepath.Join(path, "instance.json"), &inst); err == nil {
+		if err := overlayDaemonControl(&inst); err != nil {
+			return nil, err
+		}
 		if err := registerIndex(inst.ID, real); err != nil {
 			return nil, err
 		}
 		return &inst, nil
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read instance state %s: %w", filepath.Join(path, "instance.json"), err)
 	}
 
 	inst = api.Instance{
@@ -63,6 +67,9 @@ func Resolve(worktree, label string) (*api.Instance, error) {
 		Ports:     map[string]int{},
 		Env:       map[string]string{},
 		Processes: map[string]api.ProcessRef{},
+	}
+	if err := overlayDaemonControl(&inst); err != nil {
+		return nil, err
 	}
 	if err := Save(&inst); err != nil {
 		return nil, err
@@ -97,6 +104,10 @@ func SaveStatus(worktree, instanceID, target string, mode api.RunMode, nodes map
 		Mode:      mode,
 		Nodes:     nodes,
 		UpdatedAt: time.Now().UTC(),
+	}
+	for _, node := range nodes {
+		state.RunID = node.RunID
+		break
 	}
 	return jsonutil.WriteFileAtomic(filepath.Join(instancePath(worktree, instanceID), "status.json"), state)
 }
@@ -161,7 +172,33 @@ func Load(worktree, instanceID string) (*api.Instance, error) {
 	if err := jsonutil.ReadFile(filepath.Join(instancePath(worktree, instanceID), "instance.json"), &inst); err != nil {
 		return nil, err
 	}
+	if err := overlayDaemonControl(&inst); err != nil {
+		return nil, err
+	}
 	return &inst, nil
+}
+
+// LoadDaemon reads the daemon's own record so execution snapshot writes cannot
+// change daemon identity or make daemon control depend on runtime.env.
+func LoadDaemon(worktree, instanceID string) (api.DaemonRef, error) {
+	var ref api.DaemonRef
+	path := filepath.Join(instancePath(worktree, instanceID), "daemon.json")
+	if err := jsonutil.ReadFile(path, &ref); err != nil {
+		if os.IsNotExist(err) {
+			return api.DaemonRef{}, nil
+		}
+		return api.DaemonRef{}, fmt.Errorf("read daemon control %s: %w", path, err)
+	}
+	return ref, nil
+}
+
+func overlayDaemonControl(inst *api.Instance) error {
+	ref, err := LoadDaemon(inst.Worktree, inst.ID)
+	if err != nil {
+		return err
+	}
+	inst.Daemon = ref
+	return nil
 }
 
 func List() ([]api.InstanceSummary, error) {
@@ -290,33 +327,6 @@ func RemoveFlushRequest(worktree, instanceID, requestID string) error {
 	return nil
 }
 
-func InteractionAnswerPath(worktree, instanceID, promptID string) string {
-	return filepath.Join(instancePath(worktree, instanceID), "interactions", promptID+".json")
-}
-
-func WriteInteractionAnswer(worktree, instanceID, promptID, value string) error {
-	path := InteractionAnswerPath(worktree, instanceID, promptID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return jsonutil.WriteFileAtomic(path, map[string]string{"value": value})
-}
-
-func ConsumeInteractionAnswer(worktree, instanceID, promptID string) (string, bool, error) {
-	path := InteractionAnswerPath(worktree, instanceID, promptID)
-	var payload map[string]string
-	if err := jsonutil.ReadFile(path, &payload); err != nil {
-		if os.IsNotExist(err) {
-			return "", false, nil
-		}
-		return "", false, err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return "", false, err
-	}
-	return payload["value"], true, nil
-}
-
 func CacheRoot() string {
 	base, err := os.UserCacheDir()
 	if err != nil || base == "" {
@@ -409,95 +419,43 @@ func StopProcesses(inst *api.Instance, task string) ([]string, error) {
 	return stopped, Save(inst)
 }
 
-func StopAll(inst *api.Instance, extra map[string]int) ([]string, error) {
-	refs := map[string]int{}
-	addStopRef(refs, "supervisor", inst.Supervisor.PID)
-	addStopRef(refs, "executor", inst.Supervisor.ExecPID)
-	for name, ref := range inst.Processes {
-		addStopRef(refs, name, ref.PID)
-	}
-	for name, pid := range extra {
-		addStopRef(refs, name, pid)
-	}
-	stopped, err := stopNamedProcessGroups(refs, 3*time.Second)
-	if err != nil {
-		return stopped, err
-	}
-	inst.Supervisor = api.SupervisorRef{}
-	inst.Processes = map[string]api.ProcessRef{}
-	return stopped, Save(inst)
-}
-
-func RecordDetachedRun(inst *api.Instance, cfg api.RunConfig, supervisorPID int, logPath string) error {
-	execPID := inst.Supervisor.ExecPID
-	if loaded, err := Load(inst.Worktree, inst.ID); err == nil && loaded.Supervisor.ExecPID > 0 {
-		execPID = loaded.Supervisor.ExecPID
-	}
-	inst.LastRun = cfg
-	inst.Supervisor = api.SupervisorRef{
-		PID:       supervisorPID,
-		ExecPID:   execPID,
-		StartedAt: time.Now().UTC(),
-		LogPath:   logPath,
-	}
-	return Save(inst)
-}
-
+// RecordDaemon owns only daemon control metadata. Daemon startup can run while
+// a direct executor owns instance.json, runtime.env, and service snapshots.
 func RecordDaemon(inst *api.Instance, pid int, logPath string) error {
-	if loaded, err := Load(inst.Worktree, inst.ID); err == nil {
-		inst = loaded
+	if _, err := LoadDaemon(inst.Worktree, inst.ID); err != nil {
+		return err
 	}
-	inst.Supervisor = api.SupervisorRef{
+	ref := api.DaemonRef{
 		PID:       pid,
 		StartedAt: time.Now().UTC(),
 		LogPath:   logPath,
 	}
-	return Save(inst)
+	return jsonutil.WriteFileAtomic(filepath.Join(instancePath(inst.Worktree, inst.ID), "daemon.json"), ref)
 }
 
-func RecordSupervisorExec(worktree string, pid int) error {
-	if pid <= 0 {
-		return nil
-	}
-	id, real, err := IDForWorktree(worktree)
-	if err != nil {
+func ClearDaemon(inst *api.Instance) error {
+	path := filepath.Join(instancePath(inst.Worktree, inst.ID), "daemon.json")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	inst, err := Load(real, id)
-	if err != nil {
-		return err
-	}
-	if inst.Supervisor.PID <= 0 {
-		return ErrSupervisorNotRecorded
-	}
-	inst.Supervisor.ExecPID = pid
-	return Save(inst)
-}
-
-func ClearSupervisor(inst *api.Instance) error {
-	inst.Supervisor = api.SupervisorRef{}
-	if inst.Processes == nil {
-		inst.Processes = map[string]api.ProcessRef{}
-	}
-	return Save(inst)
-}
-
-func StopSupervisor(inst *api.Instance) error {
-	_, err := StopAll(inst, nil)
-	return err
+	inst.Daemon = api.DaemonRef{}
+	return nil
 }
 
 func StopDaemonWork(inst *api.Instance, extra map[string]int, daemonPID int) ([]string, error) {
 	refs := map[string]int{}
-	if inst.Supervisor.PID > 0 && inst.Supervisor.PID != daemonPID {
-		addStopRef(refs, "supervisor", inst.Supervisor.PID)
-	}
-	addStopRef(refs, "executor", inst.Supervisor.ExecPID)
 	for name, ref := range inst.Processes {
 		addStopRef(refs, name, ref.PID)
 	}
 	for name, pid := range extra {
 		addStopRef(refs, name, pid)
+	}
+	// Process and status snapshots can name the same PID. The daemon must stay
+	// alive until it has completed cleanup and delivered the stop response.
+	for name, pid := range refs {
+		if pid == daemonPID {
+			delete(refs, name)
+		}
 	}
 	stopped, stopErr := stopNamedProcessGroups(refs, 3*time.Second)
 	stoppedPIDs := map[int]bool{}
@@ -506,26 +464,12 @@ func StopDaemonWork(inst *api.Instance, extra map[string]int, daemonPID int) ([]
 			stoppedPIDs[pid] = true
 		}
 	}
-	if inst.Supervisor.PID != daemonPID && inst.Supervisor.PID > 0 && (stoppedPIDs[inst.Supervisor.PID] || !ProcessAlive(inst.Supervisor.PID)) {
-		inst.Supervisor = api.SupervisorRef{}
-	} else if inst.Supervisor.ExecPID > 0 && (stoppedPIDs[inst.Supervisor.ExecPID] || !ProcessAlive(inst.Supervisor.ExecPID)) {
-		// The current daemon reference is retained until its caller has written
-		// the stop response, but an absent legacy executor can be cleared now.
-		inst.Supervisor.ExecPID = 0
-	}
 	for name, ref := range inst.Processes {
 		if stoppedPIDs[ref.PID] || !ProcessAlive(ref.PID) {
 			delete(inst.Processes, name)
 		}
 	}
-	saveErr := Save(inst)
-	if stopErr != nil && saveErr != nil {
-		return stopped, errors.Join(stopErr, saveErr)
-	}
-	if stopErr != nil {
-		return stopped, stopErr
-	}
-	return stopped, saveErr
+	return stopped, errors.Join(stopErr, Save(inst))
 }
 
 func ProcessAlive(pid int) bool {
@@ -558,7 +502,7 @@ func stopNamedProcessGroups(refs map[string]int, grace time.Duration) ([]string,
 		if pid <= 0 || !ProcessAlive(pid) {
 			continue
 		}
-		// Multiple compatibility references can point at the same process.
+		// Process and status snapshots can point at the same process.
 		// Keep one deterministic resource name in the actual-result set.
 		if _, exists := pidNames[pid]; exists {
 			continue

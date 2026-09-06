@@ -256,6 +256,16 @@ func (g *GoDebugServiceBuilder) Tags(tags ...string) *GoDebugServiceBuilder {
 	return g
 }
 
+func (g *GoDebugServiceBuilder) Purposes(purposes ...Purpose) *GoDebugServiceBuilder {
+	g.task.Purposes(purposes...)
+	return g
+}
+
+func (g *GoDebugServiceBuilder) Effects(effects Effects) *GoDebugServiceBuilder {
+	g.task.Effects(effects)
+	return g
+}
+
 func (g *GoDebugServiceBuilder) Ready(fn ReadyFunc) *GoDebugServiceBuilder {
 	g.appReady = fn
 	return g.refresh()

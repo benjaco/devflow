@@ -147,10 +147,66 @@ Important details:
 - `sqlc` uses a glob, so generated Go files do not become inputs unless you declare them.
 - `backend_build` depends on `sqlc`, Prisma client generation, and database migration state.
 - `Outputs("bin/coach")` and `Outputs("dist")` make those finite tasks cacheable.
+- Cached tasks must declare at least one output. `OutputFiles` requires regular files and `OutputDirs` requires real directories; paths must remain inside the worktree without symlink parents. Duplicate declarations and children of an already declared output directory are supported. Restores stage all artifacts before replacing outputs and roll back failed publication; an unrecoverable rollback error identifies the retained backups.
 - Install/setup tasks such as `npm_install` should use `Stamp()` with local outputs like `node_modules` when they must run once per lockfile key without copying dependency folders into Devflow's global cache.
 - `unit.NoCache()` keeps tests as a live check even though they have declared inputs.
 - `database.Postgres("prisma")` defaults the snapshot directory; set `SnapshotRoot(...)` only when the default is wrong.
 - `CloneFromEnvContainerized(...)` uses the clients bundled in the managed Postgres image, so this example needs a reachable Docker Engine but not host `pg_dump`/`psql` binaries.
+
+## Verification Purposes and Effects
+
+Declare verification intent separately from task names, tags, and cache outputs. `devflow plan --files <paths> --intent verify --json` uses `PurposeTest`, `PurposeLint`, `PurposeTypecheck`, and `PurposeBuild` to select checks. `PurposeGenerate` identifies generators that can be required dependencies; `PurposeFormat` identifies formatting work. A task can declare multiple purposes.
+
+```go
+generated := b.Task("generate").
+    Command("go", "generate", "./schema").
+    Inputs("schema").
+    Outputs("internal/generated").
+    Purposes(project.PurposeGenerate).
+    Effects(project.Effects{
+        Writes: []string{"internal/generated/**"},
+        Touches: []string{"go-tool-cache"},
+    })
+
+unit := b.Task("unit").
+    Command("go", "test", "./internal/...").
+    DependsOn(generated).
+    Inputs("go.mod", "go.sum", "internal").
+    Purposes(project.PurposeTest).
+    Effects(project.Effects{Touches: []string{"go-tool-cache"}}).
+    NoCache()
+
+lint := b.Task("lint").
+    Command("go", "vet", "./internal/...").
+    DependsOn(generated).
+    Inputs("go.mod", "go.sum", "internal").
+    Purposes(project.PurposeLint).
+    Effects(project.Effects{Touches: []string{"go-tool-cache"}}).
+    NoCache()
+
+b.VerificationTarget("verify", unit, lint)
+```
+
+The example declares shared Go cache writes, so unordered checks can produce a conservative resource-conflict notice even when the Go toolchain coordinates those writes itself. Add any project-specific effects of the tests or generators as well.
+
+Use `VerificationTarget` for the adapter's complete finite verification suite. Changes to the root `devflow.project.go` or a root `devflow_*.go` companion, including added, deleted, and renamed sources, select all declared verification targets and recommend finite artifact validation. Runtime bootstrap excludes `devflow_*_test.go` and nested files, so they keep ordinary input-matching behavior. Ordinary source changes prefer checks with declared purposes; verification targets also provide fallback coverage where task purposes are missing. If the declarations cannot establish coverage, the plan remains unresolved.
+
+`Effects` records declarations for inspection and planning:
+
+| Field | Declaration |
+| --- | --- |
+| `Writes []string` | Worktree paths or globs the task may write, including generated source. |
+| `Touches []string` | Logical resources the task may change; treated as write access. |
+| `Invalidates []string` | Task names whose results the action or task invalidates. |
+| `Resources []project.ResourceUse` | Named logical resources with `Access: project.ResourceRead` or `Access: project.ResourceWrite`. |
+
+Use the same resource name for tasks that share a database, external service, or other mutable resource. For example, `Effects(project.Effects{Resources: []project.ResourceUse{{Name: "database:test", Access: project.ResourceWrite}}})` declares a test database writer. The planner reports potentially overlapping unordered access when a writer is involved. It also compares declared file reads with output/effect writes. Dependency edges express required ordering; these declarations do not add scheduling, isolate external resources, or authorize execution.
+
+Omitting `Effects` leaves task effects unknown (`null` in graph metadata). `Effects(project.Effects{})` explicitly declares an empty effects set (`{}`). Declare actual writes and resource use before choosing the empty form: artifact `Outputs` describe cacheable results and are not a complete side-effect declaration. Custom fingerprints and cache-key callbacks remain opaque during planning and produce an uncertainty issue.
+
+Low-level adapters set `Task.Purposes`, `Task.Effects` (a `*project.Effects`), and `Target.Verification` directly. Actions use the same `project.Effects` value type. `GoDebugServiceBuilder` also accepts `Purposes` and `Effects`, but a verification closure containing a service, registered action, formatter, or invalidation is not recommended for automatic checking. Keep such work outside finite verification targets.
+
+`graph show <target> --json` exposes these declarations, input paths/filter signatures/environment names, and hook-presence flags. Inspection and planning do not execute task hooks, fingerprints, readiness checks, or instance provisioning. They omit command signatures, environment values, and debug configuration. Loading a Go adapter remains executable configuration; planning output is advisory and does not prove that any check ran or passed.
 
 ## Commands That Must Produce Files
 
@@ -350,6 +406,14 @@ Recommended precedence:
 
 Use dotenv values for normal app configuration, but let CI/shell values override defaults. Devflow selects only keys referenced by project env, task `InputEnv`/`RequiredEnv`, or project-wide `RequiredEnv` rather than persisting the caller's entire environment. Leased ports, instance IDs, and per-instance DB URLs remain under devflow control and win last.
 
+## Execution identity and evidence
+
+Inside normal engine task callbacks, `Runtime.RunID` identifies the operation and `Runtime.AttemptID` identifies the current task attempt. `BeforeRun` and `Run` share that attempt; a watch rerun or service restart receives a fresh attempt. `Runtime.LogPath` points to its append-only retained log. Use `RunCmdSpec`, `StartServiceSpec`, `EmitLogLine` and registered service handles so output and cleanup remain attached to the owning attempt; do not construct or truncate a shared per-task log path.
+
+Cache/stamp skips also have attempt records and report that callbacks were not executed. Group nodes are resolved by the scheduler without an attempt record. Run results, node states, events and prompt metadata carry their execution identities. `runs show <run-id> --json` retrieves the retained provenance, outcomes and log references after a later run. Retention applies only to completed evidence; run IDs do not permit simultaneous conflicting execution in one worktree.
+
+Observe the supplied callback context in external calls and loops. `run`, `watch` and actions accept an operation `--timeout`, and `runs cancel <run-id>` cancels only the addressed execution. A disconnected observer or an expired `flush` wait does not cancel daemon-owned development work. Service cleanup must finish within the engine's bounded cleanup phase and preserve failures when a resource remains alive. Validation remains a separate finite sandbox workflow and does not create normal retained run/attempt identities.
+
 ## Explicit Interactive Actions
 
 Prompting commands should be explicit authoring or operator actions, not hidden in normal `up`/watch paths. For custom tools, use interactive command specs:
@@ -522,6 +586,8 @@ return nil
 
 The handle has no host PID because Docker owns the container process. Devflow still follows its logs, detects exit, checks it during `flush`, and stops it during watch restarts, CI cleanup, and normal shutdown. Do not add a `docker info` prerequisite or launch `docker logs -f` as a wrapper service; the database package connects to the Docker Engine directly and supports Unix sockets, Windows named pipes, and configured TCP/TLS or SSH contexts.
 
+A custom `ServiceHandle.Stop()` must join cleanup and return an error if it cannot stop the resource; after successful stop, `Alive()` must return false. Devflow preserves failed handles and blocks replacement until cleanup is confirmed. This applies to handles registered by finite tasks as well as services. `Runtime.RegisterServiceHandle` uses the same `OnServiceHandle` callback for OS processes and PID-less managed resources. Keep `ConfigureInstance` declarative: resources that need cleanup belong in task execution and must register a handle. The worktree execution lease protects cooperating Devflow operations; adapters still need explicit isolation for external resources shared by different worktrees.
+
 Custom low-level migration tasks can read a SQL file and call `database.New().ExecSQL(ctx, rt.Instance.DB, sql)`. This runs `psql` inside the managed container through the Engine exec API and returns its output even on failure, so adapters can forward it with `Runtime.EmitLogLine` without depending on `docker exec` or host path syntax.
 
 `EnsureRuntime` preserves the data volume, but recreates a stale container when its published host/container port mapping or resolved Postgres image does not match the current Devflow instance. Avoid unconditional container removal in normal startup paths. The default `postgres:16.14` runtime and `alpine:3.24.1` snapshot sidecar are official multi-architecture images, so Docker selects `linux/arm64` natively on Apple Silicon. Custom images must publish the architecture they are expected to run on; adapters should not force `linux/amd64` unless emulation is an intentional project requirement. The high-level component exposes `Image(...)`, `SidecarImage(...)`, and `ContainerPort(...)` for compatible custom runtimes.
@@ -566,7 +632,7 @@ When a daemon-owned run is active, `devflow tui` has a `d` database/Prisma panel
 
 If `schema.prisma` declares models but no migrations exist, or if `schema.prisma` changes but no new migration appears, the Prisma migration task returns an explicit migration-needed error instead of pretending the database is current. Devflow records that task as `migration_needed` so the TUI can show an authoring action instead of a generic failure.
 
-Custom migration guards can get the same task state by returning an error that implements `MigrationNeeded() bool`. Devflow also recognizes the built-in Prisma "generate one with GeneratePrismaMigration" guard text for compatibility.
+Custom migration guards get the same task state by returning an error that implements `MigrationNeeded() bool` and returns true. Wrapped errors retain that signal. Ordinary error messages remain failures regardless of their wording, so diagnostic text cannot accidentally offer migration actions for an unrelated problem.
 
 For a plain SQL migration folder, use the generic migration workflow and an apply function:
 
@@ -607,7 +673,7 @@ Adapters should prefer non-interactive subprocesses.
 Rules:
 - for package installs and similar setup commands, prefer explicit confirmation flags such as `-y`, `--yes`, `--force`, or `CI=1` when the adapter has already decided the action is correct
 - do not rely on hidden stdin prompts during normal `run` or `watch` targets
-- if a task needs a real user choice, model it as an explicit command, target, or future TUI action instead of letting the process stall
+- if a task needs a real user choice, model it as an explicit command, target, or registered TUI action instead of letting the process stall
 
 This is especially important for detached runs and watch mode, where a blocked prompt is easy to miss and hard to recover from.
 
@@ -627,9 +693,16 @@ return rt.RunCmdSpec(ctx, process.CommandSpec{
 
 Semantics:
 - Devflow watches subprocess output for the declared prompt patterns
-- matching prompts become `interaction_requested` events
-- detached runs can then be answered from the TUI
-- the answer is written back to subprocess stdin and recorded as `interaction_answered`
+- normal CLI and engine execution defaults to headless `fail`; a prompt returns `interaction_required`, stops the owned subprocess, and leaves a closed diagnostic
+- intentional `--headless wait` and TUI execution publish `interaction_requested` events and persist pending metadata for inspection/reconnection
+- `--timeout` bounds the operation; each prompt also has a five-minute maximum or the earlier operation deadline
+- `prompts list --run <run-id>` discovers requests; `prompts respond` requires the exact run, task, attempt and prompt identities and a typed boolean or text answer
+- a boolean response becomes `y` or `n` on subprocess stdin; text is written as the provided value plus a newline
+- `interaction_answered` records identity only; cancellation, expiry, task completion and attempt replacement close requests so duplicate or stale answers cannot reach a retry
+
+Use `Secret: true` on a `process.PromptSpec` for sensitive text input. `process.PromptRequest` carries the prompt text, kind and secret flag; the engine allocates the durable prompt ID when it binds the request to its run/task/attempt. Do not create process-local IDs or answer files. The TUI masks secret input, and `prompts respond --stdin` supplies text without putting it in command arguments. The prompt store never places answer values in retained metadata, events or result JSON; temporary owner-only delivery files are removed when consumed or cancelled.
+
+After the first secret response, Devflow emits `[output hidden after secret response]` and hides subsequent subprocess output from logs/events while still matching later prompt patterns. A child may echo or transform its input, so suppression begins before the value is written to its stdin. Adapters remain responsible for avoiding secret values in their own log calls and returned errors.
 
 This path should still be the exception, not the default adapter style.
 
@@ -687,6 +760,8 @@ devflow graph affected --files internal/storage/sqlc/users.sql.go --explain --js
 
 This gives you a standard way to compile helper binaries once, cache them by input hash, and run the restored artifact later from downstream tasks.
 
+Declared outputs also identify task-owned writes during watch execution. Devflow records their metadata when the producer finishes, before finite-task cache persistence, so later edits to an input/output file remain eligible for rebuilding while downstream work runs. Keep output scopes narrow: declaring a whole source tree as output assigns that tree to the producer during its execution. Flush observes declared inputs; `watch_restart_required` means restart/warmup policy prevented required work from refreshing.
+
 ### Validation Mode
 
 Use the finite validation runner while tuning an adapter:
@@ -700,13 +775,17 @@ JSON validation defaults to `issues`, which preserves exact counts and returns b
 
 Artifact mode projects the filesystem separately for every task. Explicit `Inputs(...)`, file/dir/glob/filtered inputs, and normal ignore rules select source files. Declared outputs from every transitive dependency are also materialized, so a consumer does not need to duplicate its producer's output path as a file input merely to receive the dependency artifact. Only declared outputs are archived for downstream tasks.
 
-After the task returns, validation compares filesystem snapshots. A final changed file outside `Outputs(...)`, `OutputFiles(...)`, or `OutputDirs(...)` is an `undeclared_output`; a missing or wrong-kind declaration is a `missing_output`. If the task cannot run in the projected worktree, it is reported as `task_failed_with_projected_inputs`. That failure can still be an ordinary command failure, so inspect its captured log before assuming the absent declaration is the only cause.
+Both validation modes use the same `BeforeRun` then optional `Run` sequence as normal execution. A finite task can do all its work in `BeforeRun`. A hook failure prevents `Run`; hook logs and errors appear in the task's failure evidence. Declare the files a hook reads and writes just as you would for `Run`. Hook-provided values in `rt.Env` reach that task's `Run`, while siblings retain their original environment. This clones the task runtime value and its environment map only: keep task-scoped changes in `rt.Env`, and avoid mutating shared `rt.Instance.Env` or adapter globals.
+
+After both callbacks return, or a hook fails, artifact validation compares filesystem snapshots. A final changed file outside `Outputs(...)`, `OutputFiles(...)`, or `OutputDirs(...)` is an `undeclared_output`; a missing or wrong-kind declaration is a `missing_output`. If the task cannot run in the projected worktree, it is reported as `task_failed_with_projected_inputs`. That failure can still be an ordinary command or hook failure, so inspect its captured log before assuming the absent declaration is the only cause.
 
 Order mode starts each permutation with all ordinary worktree source files, but removes `.git`, `.devflow`, and declared generated outputs. It runs each topological order sequentially with caches and stamps bypassed. Producer outputs that are also that producer's inputs are restored for in-place transformations. All permutations must produce the same final declared-output snapshot.
 
 Adapter rules exposed by validation:
 
 - a target closure must be finite; services and debug services are not permutation-testable
+- validation does not run service readiness or `AfterReady`; prompts from hooks or `Run` fail immediately
+- a finite task that registers supervised handles fails validation; Devflow attempts to stop every handle, including after hook failure, and reports stop failures alongside the original task error
 - different tasks must not own overlapping output paths
 - input/output declarations must be worktree-relative and cannot point into `.git` or `.devflow`
 - the worktree root cannot be an output

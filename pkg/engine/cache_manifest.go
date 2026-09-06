@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -67,11 +68,24 @@ func WriteCacheKeyManifest(path string, manifest *api.CacheKeyManifest) error {
 	return jsonutil.WriteFileAtomic(path, manifest)
 }
 
-func (e *Engine) CacheKeyWithManifest(ctx context.Context, req Request) (*api.CacheKeyResult, *api.CacheKeyManifest, error) {
-	inst, _, baseRT, err := e.prepareExecution(ctx, req)
+func (e *Engine) CacheKeyWithManifest(ctx context.Context, req Request) (result *api.CacheKeyResult, manifest *api.CacheKeyManifest, resultErr error) {
+	lease, release, err := acquireExecution(ctx, req)
 	if err != nil {
 		return nil, nil, err
 	}
+	defer release()
+	inst, state, baseRT, err := e.prepareExecution(ctx, req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if cleanupErr := state.stopServices(req, sortedHandles(state.snapshotServices())); cleanupErr != nil {
+			lease.RequireRecovery()
+			resultErr = errors.Join(resultErr, cleanupErr)
+			result, manifest = nil, nil
+		}
+	}()
+
 	order, err := e.graph.TargetClosure(req.Target)
 	if err != nil {
 		return nil, nil, err
@@ -114,7 +128,7 @@ func (e *Engine) CacheKeyWithManifest(ctx context.Context, req Request) (*api.Ca
 		manifestTasks = append(manifestTasks, manifestTask)
 	}
 	aggregateKey := aggregateTargetCacheKey(project.CacheNamespace(e.project), req.Target, taskKeys)
-	result := &api.CacheKeyResult{
+	result = &api.CacheKeyResult{
 		Project:    e.project.Name(),
 		Target:     req.Target,
 		InstanceID: inst.ID,
@@ -123,7 +137,7 @@ func (e *Engine) CacheKeyWithManifest(ctx context.Context, req Request) (*api.Ca
 		TaskKeys:   taskKeys,
 	}
 	createdAt := time.Now().UTC()
-	manifest := &api.CacheKeyManifest{
+	manifest = &api.CacheKeyManifest{
 		SchemaVersion:       CacheKeyManifestSchemaVersion,
 		Compatibility:       cacheManifestCompatibility(),
 		Project:             e.project.Name(),

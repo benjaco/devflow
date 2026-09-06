@@ -1,18 +1,141 @@
 # Progress
 
-Last updated: 2026-09-04
+Last updated: 2026-09-06
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: Go 1.27.1 baseline, Delve 1.27.1 alignment, and Windows daemon-response delivery hardening are implemented; the Windows fix is CI-confirmed and the Delve patch alignment is locally verified
-- Confidence: repeated focused coverage, full default/race suites, real Delve lifecycle coverage, quality/security gates, Windows amd64/arm64 compilation, and successful native Windows CI for the response fix; the Delve v1.27.1 pin awaits the next CI run
+- State: item 7 compact results/resumable logs and all five item 5 review corrections are implemented and verified together; ready for review. Item 6 and its Windows correction are accepted at `e04dee3`. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: full default/race suites and examples, compiled CLI boundaries, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), format/module/diff/version checks and 14 Linux/Windows amd64 affected test/CLI compilation checks pass. Native Windows behavior awaits CI.
 
 ## In Progress
 
-- None.
+- Await user review and native Windows CI. Admitted service-local execution deadlines and cross-attempt following remain separate from this change (see compact evidence verification).
 
 ## Completed
+
+- Agent-verification item 7 and all five item 5 review corrections:
+  - added opt-in summary/issues/full views for finite run/status/flush with full defaults, exact counts, bounded actionable samples/excerpts and read-only evidence argv; presentation leaves full retained records intact and keeps task/path identities exact or omits them explicitly
+  - added quiet/states/logs control for existing CI JSON progress and quiet repository-repair progress; preserved final errors, including early compact JSON errors and Windows bootstrap child diagnostics; human CI summaries now wait for final evidence completion
+  - added finite JSON log pages with instance/run/task/attempt-bound cursors, bounded UTF-8 byte reads, explicit reset/expiry/malformed-text errors, retry/append behavior and attempt pinning; current log paths and labels now share one status snapshot
+  - fixed queued lifecycle deadline admission preserving the watcher, manual restart rewriting completed attempts, missing/exited-owner prompt admission and undelivered-answer cancellation cleanup, and final engine/daemon evidence failures leaving returned success true
+  - recorded observed failures and permanent regressions in `docs_contributors/compact-evidence-verification.md`, including additional review findings for oversized compact fields, prompt-identity truncation and early-error bounds; updated public/subsystem docs and memory
+  - passed final `go test -count=1 ./...` (CLI 124.958s) and `go test -race -count=1 ./...` (CLI 106.987s), compiled compact/bootstrap/flush/evidence retrieval smoke tests, examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0, format/module/diff checks and version JSON
+  - passed Linux/Windows amd64 test compilation for CLI/logstream/instance/engine/daemon/TUI plus CLI builds (14 checks); native Windows runtime still requires CI. Local changes only; no commits, pushes, installs, existing-service operations or external-project edits
+
+- Windows planner path correction:
+  - [run `34057692957`, job `101552479071`](https://github.com/benjaco/devflow/actions/runs/34057692957/job/101552479071) failed `TestScopeDigestDeterminismAndInvalidFiles`: the planner accepted `/absolute` because Windows `filepath.IsAbs` requires a volume
+  - reject leading slashes after native separator normalization; extend rooted/UNC/drive/traversal rejection and valid native-relative deduplication coverage, plus exact `invalid_arguments/parsing` CLI JSON checks
+  - passed `go test ./pkg/planner ./examples/... -count=1`, CLI `TestPlan|TestBootstrapPlan`, full planner and focused CLI planning race checks, affected vet/Staticcheck v0.8.1, format/diff checks and Windows amd64 planner/CLI test compilation; independent diff review found no issues
+  - recorded the native CI failure and local verification limits in planning evidence, testing guidance and shared memory. Local changes only; no commits, pushes or workflow reruns. Native Windows execution awaits CI
+
+- Agent-verification item 6 — metadata and advisory planning:
+  - added explicit task purposes, generic shared task/action effects, resource read/write declarations and verification-target builders; safe copied graph metadata preserves target/closure inspection without exposing callbacks, command signatures or env values
+  - added pure changed-file planning with narrow checks, per-branch fallback coverage, shared dependency closure, prerequisites, declared effects/conflicts and explicit unmatched/ignored/opaque/configuration uncertainty
+  - shared bootstrap adapter filename classification for added/deleted/renamed source names; bound advice to safe graph, inspected configuration-source and changed-path digests without introducing saved-plan execution
+  - added JSON/text `plan`, worktree-bound command/validation argv, read-only ownership snapshots and structured partial errors; actual compiled adapter tests reject runtime callback/state changes and keep unavailable prerequisites unchecked
+  - annotated the existing embedded-web-app finite build graph and verified real frontend/backend/shared/config selection; recorded initial API/CLI/example failures and review regressions for missing file reads, uncovered shared-input branches, mixed-target reasons and CLI enrichment/text gaps in `docs_contributors/planning-verification.md`
+  - passed final `go test -count=1 ./...`, `go test -race -count=1 ./...`, examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0, format/module/diff checks, version JSON and Linux/Windows amd64 affected test-binary/CLI compilation; native Windows execution awaits CI
+  - kept the five item 5 review findings outstanding under the user's instruction to proceed. Local changes only; no commits, pushes, installs, existing development-service operations or external-project edits
+
+- Item 5 review — source review and focused temporary overlays, no implementation edits:
+  - reproduced expired queued daemon invalidation stopping the current watcher before reporting its deadline (`TestReviewExpiredInvalidationPreservesWatcher`); deadline admission does not cover invalidation's earlier mutation path
+  - reproduced current log bytes labeled with another attempt after two separate status reads (`TestReviewCurrentLogIdentity`); resolve path and identity from one snapshot
+  - reproduced manual service restart rewriting the completed previous attempt to `starting` (`TestReviewRetainedAttemptAfterLifecycleRestart`); allocate the new identity before publishing its starting state
+  - reproduced accepted secret responses for an exited execution owner and undelivered answers surviving cancellation (`TestReviewRejectResponseAfterOwnerExited`, `TestReviewCancelInterruptedRunRemovesUndeliveredAnswer`); reject dead-owner delivery and clean transient answers without finalizing resource ownership
+  - reproduced standalone engine `Result.Success=true` alongside a final evidence-write failure (`TestReviewFinalEvidenceWriteFailureChangesSuccessResult`); normalize the returned result after that failure
+  - recommended sharing terminal-record construction across engine/daemon/direct CLI and removing redundant reads/result writes; retain caller-owned cleanup boundaries. Existing focused CLI/prompt tests pass; no full-suite rerun for this review. Only this ledger changed in the repository
+
+- Agent-verification item 5 — run evidence and unattended control:
+  - added unique run/task-attempt identities, owner-only atomic records, immutable terminal results and separate append-only attempt logs; retained target/graph/executable identity, computed keys, timestamps, outcomes and executed/cache-reused evidence
+  - added projectless `runs list/show/cancel`, `prompts list/respond` and historical `logs --run --attempt`; expired IDs are explicit, cancellation remains scoped, and current development status is preserved by existing worktree admission
+  - defaulted unattended prompts to `fail`/`interaction_required`; explicit `wait` persists run/task/attempt-bound typed prompts for at most five minutes or an earlier deadline; rejected duplicate, expired, stopped/replaced-attempt and mismatched responses; transient answers are removed, secret input is masked and subsequent subprocess output suppressed
+  - propagated operation deadlines through daemon admission/execution and direct CLI/Git finalization; cancellation while queued preserves existing development, detached observers do not own execution, and final events follow durable cleanup results
+  - applied completed-only retention targets of 100 runs, seven days and 64 MiB with constant-size issuance tracking; atomically retire before deletion and prune before terminal publication so maintenance failures are recorded; active/interrupted records are protected, with read-only owner-liveness diagnostics and no automatic cleanup claims
+  - kept selected-attempt log following explicit; cross-attempt/cursor retrieval and compact/progress controls remain item 7, planner remains item 6; removed the retired answer API and updated CLI/TUI/example/validation callers
+  - recorded actual log/prompt/deadline/readiness/secret/stale-attempt/event failures and additional regression coverage in `docs_contributors/run-control-verification.md`; updated subsystem docs, shared memory, roadmap and plan
+  - passed final `go test -count=1 ./...`, `go test -race -count=1 ./...` and examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0, module/format/diff checks, version JSON and Linux/Windows amd64 affected test/CLI compilation. Local changes only; no commits, pushes, installs, existing-service operations or external-project changes
+
+- Agent-verification item 4 — CLI logs, errors and cancellation:
+  - replaced whole-file tails and the independent zero-offset follower with bounded `internal/logstream` reading; preserved blank/partial UTF-8 lines, one consumed-byte cursor, append/truncate/replacement handling, cancellation and writer failures; oversized lines or detected mid-read rewrites fail explicitly
+  - established one finite JSON presentation boundary with current `error: {code, phase, message}`, typed source classification and retained task/validation/flush/lifecycle/repository evidence; removed string-error/root-code contracts from affected result types and eliminated duplicate parent/child diagnostics
+  - discovered actual command flag definitions before bootstrap; preserved flag-value/`--` semantics, accepted interspersed flags, rejected extra arguments and normalized action positionals; watch now emits compact JSONL start/events/terminal errors without a plain banner
+  - propagated invocation cancellation through direct CI, validation, bootstrap locks/builds, finite subprocess trees, Git repair and client waits; canceled builds retain prior binary/key, canceled DAGs clean registered handles and skip repair commit/push
+  - isolated Windows daemon console groups, preserved local-child result/exit ownership and bounded graceful interruption; forced cancellation stops finite owned trees or only the observing CLI so daemon descendants survive
+  - recorded observed pre-fix failures and focused commands in `docs_contributors/cli-reliability-verification.md`; updated CLI/architecture/agent/testing docs, shared memory, plan and roadmap
+  - passed final `go test -count=1 ./...`, `go test -race -count=1 ./...` and examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0, module/format/diff checks, version JSON and Linux/Windows amd64 affected test/CLI compilation; final Windows CLI/daemon binaries also compile after ownership review fixes
+  - local changes only; no commits, pushes, installs, existing-service operations or external-project changes. Stop for review before item 5
+
+- Agent-verification item 3 — validation lifecycle parity:
+  - shared `BeforeRun` then optional `Run` through `internal/taskexec.Run`, removed the engine-local implementation, and kept the effective runtime available to service readiness
+  - validation now executes hook-only tasks, passes hook-local environment to `Run`, prevents `Run` after hook failure and includes hook writes/logs in existing artifact/order evidence
+  - retained validation sandbox/budget/prompt/service restrictions and engine cache/stamp/status/readiness boundaries; cleanup attempts every registered handle and preserves callback, Stop and still-alive diagnostics
+  - recorded observed pre-fix failures for both validation modes and nine CLI cases, plus additional cleanup/cancellation/engine guards, in `docs_contributors/validation-lifecycle-verification.md`; updated subsystem docs, shared memory and roadmap
+  - passed `go test -count=1 ./...`, `go test -race -count=1 ./...` and examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), module/format/diff checks, version JSON and Linux/Windows amd64 engine/validation/CLI test-binary and CLI compilation
+  - local changes only; no commits, pushes, installs, existing-service operations or external-project changes. Stop for review before item 4
+
+- Windows scanner test CI correction:
+  - [run `33995892365`, job `101386261330`](https://github.com/benjaco/devflow/actions/runs/33995892365/job/101386261330) at `58fe3f6` failed only the walk/info `not_directory` cases in `TestScanEntryHandlesConcurrentDisappearance`; other Windows packages and all other jobs passed
+  - replaced the synthetic `syscall.ENOTDIR` fixture with portable `os.ErrInvalid`: Windows maps `ENOTDIR` to a not-found error, so the old assertion misclassified it; retained disappearance/permission checks and the real non-directory-ancestor fixture
+  - updated testing guidance, shared memory and freshness evidence; no runtime or JSON changes and no test skips
+  - passed `go test ./pkg/watch -count=1 -v`, `go test -race ./pkg/watch -count=1`, `go vet ./pkg/watch`, Staticcheck v0.8.1 for the watcher, formatting/diff checks and Windows amd64 watcher-test compilation
+  - local changes only; no commits, pushes or workflow reruns. The corrected test still needs native Windows CI; item 3 remains queued
+
+- Agent-verification item 2 — startup and flush freshness:
+  - established the scoped polling baseline before the initial DAG and added `Runner.Sync` to drain queued, pending and newly scanned changes without blocking on full queues
+  - reconciled startup, rebuilds and health-probe edits before flush acknowledgment; bound daemon flush to one captured watch/project/target and removed timestamp waiting and sentinel retouching
+  - retained `RestartNever` and excluded-warmup policies while reporting persistent `watch_restart_required`; `synced=true` records acknowledgment, while `success=true` additionally requires freshness and health
+  - replaced timed output masking with producer-completion metadata captured before finite-task cache persistence; preserved later input/output edits and neighboring source files, restricted ancestor handling and kept incomplete/symlink evidence conservative
+  - kept disappearing directory entries observable without treating normal replacement as scanner failure; preserved permission/non-directory errors and cross-platform failure cleanup, and retained restart errors containing cancellation even when final cleanup succeeds
+  - recorded observed red-to-green regressions and focused commands in `docs_contributors/watch-freshness-verification.md`; updated subsystem docs, adapter guidance, roadmap and shared memory
+  - passed `go test -count=1 ./...`, `go test -race -count=1 ./...`, vet, Staticcheck v0.8.1, govulncheck v1.6.0, module/format/diff checks, version JSON and Linux/Windows amd64 watcher/engine/daemon test-binary and CLI compilation; removed the unused generated-output fixture identified by Staticcheck
+  - main work was committed externally as `207f146` during this turn; final review fixes and evidence remain local. No agent commits, pushes, installs, existing-service operations or external-project changes; item 3 remains queued for review
+
+- Windows cache assertion CI fix:
+  - [Actions run `33991168112`](https://github.com/benjaco/devflow/actions/runs/33991168112/job/101373548031) failed `TestSnapshotClassifiesOutputPaths`: expected `bin/tool`, received `bin\tool`; the preceding run had the same failure
+  - changed the expected manifest path to `filepath.Join("bin", "tool")`, retaining slash-form adapter input and restore/content assertions; added a brief rationale comment and testing guidance
+  - passed `go test ./pkg/cache -count=1 -v`, `go vet ./pkg/cache`, formatting/diff checks and Windows amd64 cache-test compilation; native Windows execution awaits the next CI run
+  - no production code changes, commits, pushes or workflow reruns; item 2 has not started
+
+- Item 1 review revision — current-only code and upgrades:
+  - removed supervisor/executor migration, launcher-log/process-table discovery, old project/service providers, retired CLI/JSON aliases and unused launch-state inference; current control uses only `daemon.json`, `daemon`/`daemonStarted` and `logs daemon`
+  - made daemon lookup/log diagnostics independent of execution snapshots; TUI reads preserve crash/resource evidence for explicit cleanup
+  - successful `upgrade` clears the shared task artifact cache and reports `cacheCleared`; failed installs preserve it, unrelated state/outputs/database volumes stay outside cleanup, and cache-clear failures are reported
+  - retained typed migration-needed classification only and aligned omitted validation API details with JSON's bounded `issues` default; exhaustive callers now request `full`
+  - documented the current-only policy and brief rationale-comment expectations in `AGENTS.md`, subsystem docs and shared memory; older adapters may require source fixes instead of compatibility shims
+  - recorded eight observed red-to-green regressions in `docs_contributors/execution-ownership-verification.md`; upgrade uses fake Go plus fully isolated OS cache paths
+  - passed full default/race suites and examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), formatting/module/diff checks, version JSON smoke, and affected Linux/Windows amd64 test/CLI compilation; removed two unused test helpers flagged by Staticcheck
+  - local changes only; no actual upgrade, install, commit or operations on existing development services. Item 2 remains queued for separate review.
+
+- Agent-verification item 1 — worktree execution ownership:
+  - added nonblocking canonical-worktree leases shared by direct CI, daemon engines and mutating cache operations; admit before configuration/state/env changes and retain through cleanup, temporary-env restoration and repository finalization
+  - serialized daemon transitions, retained ownership after stop timeout, released failed-initialization slots, and prevented old action completion from relaunching over newer intent
+  - separated daemon control from execution snapshots and blocked recorded live/unknown current resources before admission; review removed old supervisor/executor recovery
+  - made cleanup require successful Stop plus confirmed non-aliveness; preserve failed handles/recovery markers, clean every watcher exit, protect finalization with the lease and report cleanup failures in terminal results/events
+  - added structured resource_conflict JSON including owner metadata, safe explicit recovery, task-cache/stamp preservation and protection against the daemon appearing in its own stop aliases
+  - recorded observed red failures and focused rerun commands in `docs_contributors/execution-ownership-verification.md`; updated architecture, CLI, adapter, operator, agent, testing, roadmap and shared-memory contracts
+  - verified final `go test ./...`, `go test -race ./...`, `go vet ./...`, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), clean module metadata/format/diff checks, examples, `go run ./cmd/devflow version --json`, and Linux/Windows amd64 affected test-binary/CLI compilation
+  - local changes only; no commits, installs, existing development-service operations or external-project changes; native Linux/Windows execution and opt-in Docker/PTY smoke remain separate checks
+
+- Agent-verification feedback assessment and implementation plan:
+  - assessed the supplied `b46220f` review against current `a7fe4f8`; saved dispositions, existing alternatives, staged scope/reasons and acceptance tests in `docs_contributors/agent-verification-plan.md`, and linked the proposal from the roadmap
+  - reproduced stale startup artifacts after a successful flush, validation hook mismatches, empty unknown-target JSON, and log replay/truncation failures using isolated temporary Go-overlay tests
+  - source-confirmed competing execution ownership, daemon transition/stop-timeout gaps, and run/task prompt-ID collision risks; concurrency reproductions are specified for implementation
+  - prioritize ownership, startup freshness and validation parity; reuse current graph impact/prerequisite/action facilities, and defer broad concurrency/MCP/storage redesign
+  - planning only: no runtime source changes, installs, existing-service operations or external-project edits; full product tests were not rerun for documentation-only changes
+
+- Core reliability review:
+  - cache restore validates manifests/paths/artifact kinds, stages complete copies before output replacement, and retains backups for rollback; corruption, cancellation, and failed publication have output-preservation regressions
+  - preserved redundant output declarations, internal relative symlinks, read-only modes, legacy manifest indexes, and Unix colon names; operational restore errors now fail execution explicitly
+  - reject outputless cached tasks before execution while retaining local stamp semantics, graph inspection, and the validator's structured `missing_output_declaration` issue
+  - failed runs and failed service startups clean up registered handles, including PID-less resources; readiness rejects already-dead services and flush enforces timeout/exit detection
+  - daemon cancellation interrupts blocked socket I/O without a deadline, canceled request handlers close, and idle disconnected subscribers unregister
+  - unreadable/malformed instance state reports an error without overwriting persisted state or runtime env
+  - root-level input globs and explicit root watches now observe edits while retaining default ignores; full watcher queues no longer prevent cancellation
+  - project detection snapshots the registry under its mutex, and direct task execution preserves the project's cache namespace
+  - CI engine-preflight errors emit one failed JSON result without requiring repository repair or mutating the worktree
+  - updated architecture, CLI, adapter, testing, and durable memory docs; added regressions and kept the executing daemon cache fixture isolated with a real declared artifact and joined cleanup
+  - verified `go test ./...`, `go test -race ./...`, vet, Staticcheck v0.8.1, govulncheck v1.6.0, clean module metadata/format/diff checks, examples, native build/version JSON smoke, and Windows/Linux amd64 affected-package test compilation and CLI builds
 
 - Preview URL display hostname normalization:
   - changed daemon status URLs and TUI preview/header URLs to render `http://localhost:<port>` instead of `http://127.0.0.1:<port>` while preserving the underlying loopback bind/listen addresses and non-preview host metadata
@@ -899,6 +1022,8 @@ Last updated: 2026-09-04
 
 ## Next Steps
 
+- Review the combined item 7 compact/progress/cursor change and all five item 5 review corrections after final verification.
+- Confirm the reliability changes on the native Linux/macOS/Windows CI matrix; retest the historical readiness symptom through the real daemon/TUI only if it recurs (the engine early-exit restart regression passes).
 - Confirm the Delve v1.27.1 pin on the next native Linux/macOS/Windows GitHub Actions run
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
 - Convert bundled example adapters to the builder/component API so source examples match the new user-facing shape
@@ -908,8 +1033,14 @@ Last updated: 2026-09-04
 
 ## Deferred / Known Gaps
 
+- Flush proves a processed observation boundary for declared, metadata-visible inputs and selected-target health; it cannot cover transient/metadata-preserving edits, undeclared dependencies, writes made inside a producer-owned output scope during its execution, or edits after the final scan. Restart/warmup policy blocks require explicit rerun/restart.
+- Execution admission is conservative and cooperative: same-worktree overlap is rejected; finer resource scheduling remains deferred. Active/interrupted run records and logs are protected from completed-only retention and may exceed its bounds. Unresolved orphan/PID-less resources require explicit reconciliation. Current recovery still uses recorded PIDs rather than OS process-birth identities; do not interpret process-exit/lease release as proof that arbitrary external resources stopped.
+- Cursors stay within an immutable attempt and bounded observations cannot detect arbitrary external rewrites preserving the checked bytes. Cross-attempt following remains separate. Queued lifecycle admission honors deadlines, but admitted service-local commands retain their engine's execution context; CLI restart has no independent timeout option.
+- Successful upgrade clears the global task artifact cache without coordinating active cache operations; run upgrades between executions. It does not clear worktree state, outputs or database volumes.
+- Interrupted snapshots can record different PIDs for one task in instance/status maps; current name-based cleanup may retain only one reference. This pre-existing reconciliation gap remains separate follow-up work.
+- Cache restore rollback covers reported operation failures, not abrupt process/machine crashes; staging and output roots must share a filesystem. Failed rollback retains a recovery directory and reports its path.
 - Publishing maintained multi-architecture PostGIS images remains deferred until the project defines a registry, image provenance/signing, PostgreSQL/PostGIS patch cadence, and release ownership; native arm64 local builds remain the supported fallback
 - Round-1 release flow deliberately has no binary artifacts, npm package, Homebrew tap, Scoop installer, GitHub API updater, or self-replacing executable
-- A real PTY rerun of a service whose process exits immediately while its custom readiness callback waits only on context remained at `rerun running` for more than eight seconds, despite status already exposing the failed process and bounded excerpt. This was discovered during R2-07 and is deliberately deferred to a focused lifecycle follow-up; restart readiness should race process exit and return the existing bounded failure promptly.
+- The historical R2-07 PTY rerun remained at `rerun running` after an immediate service exit. The new engine-level regression confirms prompt restart failure, readiness cancellation, terminal excerpts, and preservation of independent services, including before this review's fixes. No new PTY session was run; the original daemon/TUI symptom remains a separate follow-up if it recurs.
 - The example adapter still uses a deterministic fake-DB path in normal tests; the full real Docker-backed module suite remains opt-in, while the focused PostGIS case is required in CI on native Linux amd64/arm64
 - The `embedded-web-app` adapter is manually validated against a local repo for build, DB prep, detached runtime, health, and shutdown flows. Its shared production container supervision now has real Docker-backed package coverage; a full adapter-level Docker smoke remains manual, as does richer control UX.

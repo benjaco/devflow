@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/benjaco/devflow/pkg/api"
@@ -30,9 +29,7 @@ func TestBootstrapValidateDetectsProjectContractFailures(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected validation to exit non-zero, stdout:\n%s", stdout)
 		}
-		if !strings.Contains(stderr, "validation failed") {
-			t.Fatalf("expected validation failure on stderr, got %q", stderr)
-		}
+		assertJSONContractFailure(t, stdout, stderr, err, "validation_failed", "execution")
 
 		var result api.ValidationResult
 		if decodeErr := json.Unmarshal([]byte(stdout), &result); decodeErr != nil {
@@ -92,9 +89,7 @@ func TestBootstrapValidateDetectsProjectContractFailures(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected validation to exit non-zero, stdout:\n%s", stdout)
 		}
-		if !strings.Contains(stderr, "validation failed") {
-			t.Fatalf("expected validation failure on stderr, got %q", stderr)
-		}
+		assertJSONContractFailure(t, stdout, stderr, err, "validation_failed", "execution")
 
 		var result api.ValidationResult
 		if decodeErr := json.Unmarshal([]byte(stdout), &result); decodeErr != nil {

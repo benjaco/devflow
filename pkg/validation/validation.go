@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/benjaco/devflow/internal/fsutil"
+	"github.com/benjaco/devflow/internal/taskexec"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/graph"
 	"github.com/benjaco/devflow/pkg/process"
@@ -111,10 +112,9 @@ func (v *Validator) Run(ctx context.Context, req Request) (*api.ValidationResult
 		req.MaxOrders = DefaultMaxOrders
 	}
 	if req.Details == "" {
-		// Library callers historically received exhaustive path lists. The CLI
-		// explicitly selects its bounded default; preserving this zero-value
-		// behavior avoids silently changing embedded validator integrations.
-		req.Details = api.ValidationDetailsFull
+		// Embedded callers and JSON commands share a bounded default; exhaustive
+		// successful-path evidence requires an explicit full-details request.
+		req.Details = api.ValidationDetailsIssues
 	}
 	if req.Details != api.ValidationDetailsSummary && req.Details != api.ValidationDetailsIssues && req.Details != api.ValidationDetailsFull {
 		return nil, fmt.Errorf("unknown validation details %q (want summary, issues, or full)", req.Details)
@@ -340,7 +340,7 @@ func (t runtimeTemplate) runtime(sandbox, validationMode string) (*executionRunt
 }
 
 func (r *executionRuntime) runTask(ctx context.Context, task project.Task, logPath string, depKeys []string) (string, error) {
-	if task.Kind == project.KindGroup || task.Run == nil {
+	if task.Kind == project.KindGroup {
 		return "", nil
 	}
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
@@ -352,13 +352,21 @@ func (r *executionRuntime) runTask(ctx context.Context, task project.Task, logPa
 	rt := r.base.WithTask(task.Name, logPath)
 	rt.DepKeys = append([]string(nil), depKeys...)
 	beforeHandles := r.handles.len()
-	runErr := task.Run(ctx, rt)
+	_, runErr := taskexec.Run(ctx, task, rt)
 	startedHandles := r.handles.takeFrom(beforeHandles)
-	for _, handle := range startedHandles {
-		_ = handle.Stop()
+	if len(startedHandles) > 0 {
+		runErr = errors.Join(runErr, fmt.Errorf("finite task %q started %d supervised service(s)", task.Name, len(startedHandles)))
 	}
-	if len(startedHandles) > 0 && runErr == nil {
-		runErr = fmt.Errorf("finite task %q started %d supervised service(s)", task.Name, len(startedHandles))
+	for _, handle := range startedHandles {
+		stopErr := handle.Stop()
+		if stopErr == nil && handle.Alive() {
+			stopErr = errors.New("service remains alive after stop")
+		}
+		// A failed hook can still own resources; retain both errors so cleanup
+		// failure never disappears behind the original callback diagnostic.
+		if stopErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("stop service started by finite task %q: %w", task.Name, stopErr))
+		}
 	}
 	return readCapturedLog(logPath), runErr
 }

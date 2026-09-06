@@ -6,18 +6,25 @@
 
 - `pkg/project`: task, target, runtime, adapter interfaces, and generic tasklets such as output-converging finite commands
 - `pkg/graph`: validation, topo ordering, closures, and affected-task calculation
+- `pkg/planner`: pure advisory verification selection, declared coverage/effects and resource conflicts
 - `pkg/fingerprint`: deterministic file, directory, env, and task-key hashing
 - `pkg/cache`: manifest, snapshot, restore, and cache lookup
 - `pkg/process`: one-shot execution, supervised services, line-buffered logs
 - `pkg/project`: also defines readiness hooks for service tasks
 - `pkg/database`: Docker-backed dedicated Postgres runtime and snapshot helpers
-- `pkg/instance`: worktree-scoped instance identity and persisted state
+- `pkg/instance`: worktree-scoped instance identity, retained run/attempt evidence, prompt responses and cancellation requests
 - `pkg/ports`: shared port registry with lock-safe allocation
 - `pkg/engine`: bounded parallel ready-queue execution engine and status persistence
 - `pkg/daemon`: per-worktree daemon, JSON-line socket protocol, action queue, and event fanout for mutable dev/watch/operator work
 - `pkg/event`: typed event bus used by the engine for run, task-state, cache, process, instance, and log events
 - `pkg/watch`: Devflow-owned polling file scanner and debounced change batching
 - `pkg/validation`: finite sandbox execution for input/output contract checks and exhaustive dependency-valid task-order checks
+- `internal/clierror`: source classification preserving error causes and the shared `api.CommandError` transport contract
+- `internal/logstream`: bounded CLI line reading/following and UTF-8 page retrieval with attempt-bound byte cursors and observed rewrite detection
+- `internal/taskexec`: shared `BeforeRun` and optional `Run` callbacks for engine and validation execution
+- `internal/adaptersource`: filename classification shared by adapter discovery and changed-file planning
+
+CLI invocations discover their command's flag definitions before bootstrap so early JSON detection shares the parser's value semantics. Finite handlers hold their result as a value until the shared presentation boundary knows the outcome; failures retain that evidence alongside one typed error. Streaming handlers write JSONL directly and propagate writer failures. Installed and generated main functions use the same error/exit presentation helpers, including Windows child-result ownership.
 
 ## Local Project Bootstrap
 
@@ -29,14 +36,16 @@ Flow:
 - if the file is missing, the command fails
 - if the file exists, the bootstrap CLI discovers it first plus lexically sorted, regular root-level `devflow_*.go` companions; `devflow_*_test.go`, unrelated Go files, nested files, and non-regular matches are excluded or rejected as appropriate
 - the bootstrap CLI compiles that ordered source set into a worktree-local full CLI binary
-- stale checks and rebuilds are guarded by a per-worktree lock at `<worktree>/.devflow/localbuild.lock`; commands that waited for another builder re-check the build key before compiling
+- stale checks and rebuilds are guarded by a per-worktree lock at `<worktree>/.devflow/localbuild.lock`; cancellable lock waiters re-check the build key before compiling
 - execution is then transferred into that compiled local binary for all normal commands
 
 `localProjectSourceFiles` owns the adapter discovery contract. Every adapter filename/source label and its contents participate in the content key along with the existing Devflow version/bootstrap inputs. Discovery happens again after acquiring the localbuild lock, and that exact post-lock ordered adapter set is copied into the reconstructed generated module. This preserves add/remove/rename invalidation, stable timestamp-only reuse, serialized builds, and removal of stale companions.
 
 The worktree does not have to live under the Devflow source checkout. Source-local bootstrap hashes repo sources relative to the checkout when possible, and hashes external project files with stable external labels so Windows temp worktrees on another drive still build.
 
-On Unix platforms, transfer into the worktree-local binary uses process replacement. Windows does not support `syscall.Exec`, so the bootstrap process runs the worktree-local binary as a child and exits with the child's status.
+Bootstrap builds use the invocation context, stop their process trees on cancellation, and publish only a completed non-canceled temporary binary. Direct CI passes that same context into the engine and repository repair. `pkg/process.CommandContext` is the finite-command constructor for owned process-tree cancellation; supervised services retain their handle lifecycle. Client-wait cancellation does not imply cancellation of a daemon-owned run.
+
+On Unix platforms, transfer into the worktree-local binary uses process replacement. Windows does not support `syscall.Exec`, so bootstrap owns a child process group and propagates its status without duplicating its result. On cancellation it sends a scoped console break, allows up to two seconds for cleanup/result publication, then falls back to tree termination for direct finite work. Observer cancellation terminates only its local CLI, preserving daemon descendants; daemons use independent console groups. A missing console or unresponsive child can require forced cleanup; the existing execution ownership record remains the recovery authority.
 
 Current local binary location:
 - `<worktree>/.devflow/bin/devflow-local`
@@ -67,6 +76,20 @@ This model intentionally avoids:
 - runtime JSON adapter protocols
 - dynamic plugin loading tricks
 
+## Metadata and verification planning
+
+The project API carries explicit `Task.Purposes`, optional `Task.Effects` and `Target.Verification`. `Effects` is shared by tasks and actions, with file writes, named touches/invalidations and resource read/write declarations. A nil task effects pointer means unknown; an explicit empty object declares no effects. This metadata neither grants concurrency permission nor changes execution/caching behavior. Tags remain descriptive, and purpose is never inferred from a task name.
+
+`graph.Metadata` projects declaration values and callback-presence flags, without invoking callbacks or serializing function values, command signatures, env values or debug config. It clones mutable declarations and supplies a metadata-only digest. CLI graph inspection retains the ordered closure alongside that projection.
+
+`planner.Build` uses graph input matching, upstream/downstream traversal and existing prerequisite selection. It prefers eligible purpose tasks, adds explicit verification targets for uncovered finite branches and uses the declared verification targets for configuration changes. Authoring/action tasks, formatters, invalidations and service closures cannot become automatic verification goals; required generators remain visible. Unknown inputs/effects and uncovered paths remain issues. A combined closure and shared-dependency references are an inspection plan, not a new executor.
+
+The planner compares declared resource/file access only between tasks without dependency ordering; input reads, outputs and effect writes participate. Named read/read use is compatible; possible read/write or write/write overlap is reported. Glob footprints use literal directory prefixes, deliberately overestimating access without filesystem scans. Instance ownership remains an independent execution admission boundary.
+
+Planning itself has no filesystem or process operations. The CLI separately reads a diagnostic owner snapshot and hashes the exact validated adapter-source set. Source classification is filename-based, so deleted/renamed adapter files remain configuration changes without needing to exist. Normal adapter bootstrap still compiles and executes Go configuration; pure planning does not turn that loader into a sandbox.
+
+Planner identity records safe graph/action/prerequisite declarations, current adapter source names/bytes and the supplied normalized changed-path list. A path-list digest is not a source-content snapshot. Plans remain advisory, and subsequent commands perform their normal current-input/admission checks. A saved-plan executor would require new graph and complete change-scope revalidation; it is deliberately absent.
+
 ## State Layout
 
 Per-worktree state lives under `.devflow/`:
@@ -74,15 +97,27 @@ Per-worktree state lives under `.devflow/`:
 - `.devflow/logs/<instance-id>/tui.log` for interactive-client session, error, and crash diagnostics
 - `.devflow/state/instances/<instance-id>/`
 - `.devflow/state/instances/<instance-id>/flush/`
+- `.devflow/state/instances/<instance-id>/runs/<run-id>/record.json` for execution identity, provenance, attempts and the final result
+- `.devflow/state/instances/<instance-id>/runs/<run-id>/attempts/<attempt-id>.log` for append-only task-attempt output
+- `.devflow/state/instances/<instance-id>/runs/<run-id>/prompts/` for pending/completed prompt metadata and transient answers
+- `.devflow/state/instances/<instance-id>/runs/<run-id>/cancel.request` for scoped cancellation
 - `.devflow/state/instances/<instance-id>/payload-schema/` for password-free Payload schema-push fingerprints
+- `.devflow/execution.lock` for cross-process execution admission; never unlink this lock file during operation
+- `.devflow/execution-owner.json` for owner identity and retained recovery evidence
+- `.devflow/state/instances/<instance-id>/daemon.json` for daemon transport metadata, independent of execution snapshots
 
-Daemon/supervisor state is also per worktree. The instance snapshot records:
-- the per-worktree daemon PID as the supervisor PID
-- legacy child executor PIDs when old supervisor state is being reconciled
+Daemon state is also per worktree. Instance loading combines the execution snapshot with `daemon.json`, the sole daemon control record. These records expose:
+- the per-worktree daemon PID and start time from `daemon.json`, exposed by status under `daemon`
 - service task PIDs when the supervised service is an operating-system process; managed resources such as database containers have no host PID entry
 - the daemon log path
 
 The engine, not the CLI or persisted PID registry, owns live service handles. Each daemon active run therefore carries an `engine.LifecycleController`. Task-scoped stop/restart commands are serialized through the engine loop, which verifies a monotonic service generation and readiness before returning. Late `Wait` results from a replaced handle are ignored by generation. Watch mode monitors every current generation after readiness, so an unexpected Delve/service exit becomes terminal status without tearing down independent services. Direct OS process termination remains only the recovery path when no live owning engine exists; `stop --all` remains the complete cleanup boundary.
+
+Execution admission is deliberately conservative: one executor owns a canonical worktree at a time, regardless of project or target. `internal/execution` uses nonblocking OS file locking plus an owner-only marker. Direct CI, daemon execution, cache-key preparation and local cache/stamp invalidation participate. The lease spans configuration, environment/port/state changes, task execution, cleanup, temporary-env restoration and CI repository finalization. Engine callers borrow only a valid enclosing lease for the same worktree; otherwise the engine acquires its own. Existing parallel DAG scheduling remains inside that ownership boundary.
+
+Daemon admission and stop/replace/retarget/invalidate transitions have a separate transition mutex. Foreground execution and lifecycle readiness waits release it; status, cancellation and prompt responses remain available. Run/action admission uses cancellable lock waiting and rechecks a queued run's cancellation marker before stopping the current owner. A monotonically increasing selection generation prevents a completed action from relaunching over newer operator intent. Stop timeout preserves the active owner. The active completion signal is closed only after environment restoration, lease finalization and retained-result publication. Starting or refreshing daemon control metadata never rewrites `instance.json` or `runtime.env`.
+
+`ServiceHandle.Stop` must both succeed and leave `Alive()==false`. Failed cleanup retains the handle/process identity, reports degraded state, and marks ownership as requiring recovery. The OS lock remains held through final persistence; releasing it retains the marker on incomplete cleanup. Owner process exit alone does not authorize replacement: explicit stop-all recovery must reconcile known resources, and unresolved resources remain conflicts. This is cooperative Devflow ownership, not a sandbox for arbitrary external commands or a scheduler for shared external databases across worktrees.
 
 Task cache storage is global for the user:
 - `<os.UserCacheDir()>/devflow/cache`
@@ -90,7 +125,7 @@ Task cache storage is global for the user:
 Entries are namespaced inside that physical cache root:
 - `entries/<project-cache-namespace>/<task>/<fingerprint-key>/`
 
-Projects can implement `CacheNamespace() string`; otherwise the project name is used. This keeps one cache folder on the system while avoiding accidental collisions between project adapters.
+Projects can implement `CacheNamespace() string`; otherwise the project name is used. This keeps one cache folder on the system while avoiding accidental collisions between project adapters. Resolving an individual task as a synthetic target preserves the project's cache namespace, so direct task commands and declared targets share the same cache entries.
 
 Repo-shared coordination state for sibling git worktrees still lives under the Git common dir from:
 - `git rev-parse --git-common-dir`
@@ -101,19 +136,64 @@ Current shared paths:
 Global coordination state that is not repo-specific still lives under the user cache directory:
 - `devflow/state/instance-index.json`
 
-The daemon Unix socket lives in a short per-user temp directory such as `/tmp/devflow-daemon-<uid>/<instance-id>.sock`. It is intentionally not stored under deeply nested worktree paths because Unix socket path length limits are easy to hit on macOS. Request/response clients acknowledge each terminal response after decoding it, and the daemon waits for that acknowledgment with a short bound before closing the connection. The acknowledgment is best-effort in both directions so upgraded clients and daemons remain compatible with older peers. This delivery handshake prevents Windows Unix-domain sockets from dropping an immediate final response when the server closes directly after writing it.
+The daemon Unix socket lives in a short per-user temp directory such as `/tmp/devflow-daemon-<uid>/<instance-id>.sock`. It is intentionally not stored under deeply nested worktree paths because Unix socket path length limits are easy to hit on macOS. Request/response clients acknowledge each terminal response after decoding it, and the daemon waits for that acknowledgment with a short bound before closing the connection. The bound prevents an unresponsive caller from holding a connection indefinitely. This delivery handshake prevents Windows Unix-domain sockets from dropping an immediate final response when the server closes directly after writing it.
+
+Client cancellation closes blocked socket I/O even when the context has no deadline. Server shutdown also closes connections waiting for requests, and an idle observer disconnect unregisters its subscription without waiting for another event. Disconnecting a caller does not change daemon ownership of active workflows.
 
 This split keeps runtime logs and instance state local to the worktree, keeps task cache globally reusable, keeps port allocation coordinated for sibling git worktrees, and keeps socket paths short enough for real terminals and test worktrees.
 
 Structured state files and `runtime.env` are replaced through unique temporary files in the same directory so a failed or concurrent write cannot expose a partially truncated destination. Same-destination replacements are serialized within a process. On Windows, the final `MoveFileEx(..., REPLACE_EXISTING)` operation and JSON readers both retry bounded transient access, sharing, and lock violations because concurrent daemon/engine operations and file scanners can briefly hold the destination. The existing destination is never removed first, so readers still see either the old complete file or the new complete file. On Unix-like systems these persisted files are owner-readable/writable only (`0600`), because instance JSON and runtime env can contain local database credentials or other sensitive development values. This is local hardening, not encryption.
 
+Instance resolution creates state only when `instance.json` is absent. Unreadable or malformed existing state returns a contextual error and preserves both that file and `runtime.env`, so a recovery attempt cannot silently discard persisted configuration or service references.
+
 Task, daemon, TUI, and event-stream log files are also created and repaired to owner-only `0600` permissions on Unix-like systems. They can contain command output, errors, or panic data derived from runtime configuration and must not default to group/world-readable files.
+
+### Run identity and retained evidence
+
+`instance.CreateRun` allocates an instance-bound, monotonically increasing run ID before execution; `ClaimRun` permits exactly one executor to claim a queued record. Every task attempt receives a separate random identity, including finite work and cache lookups. Run and attempt IDs propagate through runtime callbacks, node status, events, log selection, prompts and results. The action result uses its task execution's run ID. A successful action's development relaunch receives a new run ID and does not inherit the completed action's deadline or cancellation.
+
+Attached daemon runs and actions publish a queued record before waiting for admission, so they can be inspected and canceled while another transition is in progress. Detached admission allocates a record only when it starts a new execution; an idempotent ensure request returns the existing run ID. Its admission wait honors cancellation/deadlines, but has no separately cancelable run ID before acceptance. Detached readiness compares both run ID and target, preventing an earlier successful run of the same target from satisfying the new launch.
+
+The instance status snapshot remains the current development view. Retained records identify target, mode, timestamps, owner PID, graph digest, compiled executable digest, task input/cache keys already computed for execution, whether each attempt executed callbacks, cache reuse, outcomes and bounded failure excerpts. These describe the observed execution and do not establish freshness after later edits. Adapter callbacks and environment values are not serialized as provenance. Task logs are created once per attempt and appended; starting a later attempt selects another path instead of truncating historical output.
+
+Engine sessions serialize attempt/status evidence updates across parallel tasks. Final records are written atomically after execution cleanup. Enclosing operations use `Request.DeferCompletion` so daemon environment restoration and direct CI repository finalization can contribute to the same terminal result. The per-instance run-store file lock serializes record changes, cancellation, prompt responses and pruning; it is never held across task execution or prompt waiting.
+
+Only the new attempt may publish its starting state; manual service restart must
+not briefly rewrite the completed predecessor before allocating that identity.
+Engine and daemon completion normalize the caller-visible success/error after
+the final persistence attempt, including failed reads or writes. Direct CLI text
+and JSON both wait until enclosing completion has contributed its outcome.
+
+Compact `api.ExecutionView` values are presentation-only copies made by
+`internal/cli`; engine/daemon/store records stay full. The CLI validates details
+and progress flags before bootstrap and derives exact counts before sampling.
+Diagnostic text is bounded; operational identifiers are exact or omitted with
+truncation metadata, never shortened into another task or path. Final error
+presentation applies the same bound even before a result exists. Quiet progress
+uses only the progress writer/subscription boundary: replacing the CLI's stderr
+would hide final diagnostics from a Windows bootstrap child.
+
+The execution owner emits `run_finished` after terminal evidence is durable; a deferred engine leaves that publication to its owner. Daemon completion includes cleanup failures and uses the same success/error as the retained result. A request-scoped event stream detaches and drains its queued events before sending the terminal response, which ends the client's read loop. Live daemon subscribers remain best-effort and do not block task execution.
+
+Retention targets 100 completed runs, seven days and 64 MiB of completed record/log data. Completed-run pruning runs before the current terminal result is committed, so retention failures are included in that immutable result (`retention_failed`). The newly completed result can put evidence over the count/age/byte thresholds until the next pruning pass.
+
+Pruning first renames a completed run into a hidden retirement directory; a blocked rename preserves its published record, and failed physical deletion leaves hidden data retried by later pruning. Retired IDs return `run_expired`; following a retired attempt stops with that error. Active/interrupted records and pending physical cleanup can exceed the retention budget. The issued-ID watermark distinguishes expired from unknown IDs without per-run tombstones. No old state or log-path reader is retained.
+
+CLI log selection resolves a current or retained attempt once. Current selection takes the pathname and run/attempt identity from one status snapshot, preventing a concurrent restart from labeling old bytes with a newer identity. `--follow` remains on that selected append-only file; it does not jump to another attempt after a restart. The TUI can select the latest path from refreshed node status independently.
+
+Finite JSON pages in `internal/logstream` bind an opaque cursor to instance, run, task, attempt, native file identity, observed size, byte offset, and a digest of up to 4 KiB preceding that offset. The CLI resolves retained records from that identity and never treats a cursor as an authorized filesystem path. Page reads and their verification reread are bounded by the requested source-byte limit, with a 1 MiB maximum; JSON escaping may expand the serialized text. Cursor tokens are bounded to 8 KiB on input and output. Windows file identity uses volume/file indices; Unix uses device/inode identity. Replacement, observed shrinkage, changed anchor bytes, or an observed in-page rewrite requires an explicit reset, while retirement reports expired evidence. The reader closes each page's handle and rechecks run retention before returning it.
+
+Page text preserves partial lines and complete UTF-8 characters. An unfinished character at a running attempt's end stays unconsumed until a later read; malformed terminal evidence fails instead of polling forever. Retrying one cursor rereads the same offset and may include newer appends after an earlier short page; advancing to the returned cursor continues without a gap. No cursor switches to a newer attempt. These guarantees rely on append-only attempt ownership and immutable completed logs. Bounded observations cannot identify every external rewrite, including an unseen truncate-and-regrow that preserves the checked bytes. See [CLI log contracts](cli.md) for flags, page fields, and structured reset/expiry errors.
+
+`runs cancel` writes only the named run's marker. Direct and daemon owners observe that marker through their execution contexts; a completed ID returns `run_not_active` and never targets the newer instance owner. Acceptance confirms a cancellation request, not completed cleanup. Explicit operation deadlines reach queued/running/waiting execution, while cancellation of a status, flush or log observer only ends its wait. Cleanup retains its bounded independent context and existing execution-recovery rules; an uncooperative callback cannot be killed safely in-process.
 
 Flush coordination is per instance:
 - `flush/requests/<request-id>.json` records the requested sync point
 - `flush/sync/<request-id>.sync` is the file-watcher sentinel
 - `flush/acks/<request-id>.json` stores the final `FlushResult`
-- `flush/watch.ready` is an internal readiness marker written after detached watch startup has reached the file-watching phase
+- `flush/watch.ready` records completion of initial watch execution and reconciliation, and is removed when that watch exits
+
+Daemon readiness uses the active execution's in-memory channel, closed immediately after the observer captures its baseline. The marker is useful for direct engine consumers and diagnostics; it does not identify a daemon watch generation.
 
 ## Runtime Env
 
@@ -130,11 +210,11 @@ The important rule is precedence:
 
 Devflow deliberately selects only project-relevant process variables instead of persisting the entire caller environment. That allows projects to keep normal local app settings in `.env`, lets CI override those defaults, and still ensures launched processes point at the correct per-instance Postgres runtime and leased ports.
 
-Instance env is persisted under `.devflow/state` so detached supervisors, status, and relaunches can recover the same runtime configuration. Do not treat it as encrypted secret storage. Adapters should avoid storing long-lived production secrets there, avoid logging full env maps, and override runtime values such as `PORT` for unit-test tasks when those tests should not inherit the service runtime port.
+Instance env is persisted under `.devflow/state` so daemon execution, status, and relaunches can recover the same runtime configuration. Do not treat it as encrypted secret storage. Adapters should avoid storing long-lived production secrets there, avoid logging full env maps, and override runtime values such as `PORT` for unit-test tasks when those tests should not inherit the service runtime port.
 
 ## Service Supervision Boundary
 
-The engine supervises `project.ServiceHandle`, not only child processes. A handle reports liveness, waits for termination, stops idempotently, and may expose a host PID. `process.Handle` implements that contract for command-backed services. Concurrent calls to its `Stop` method join the same bounded terminate/kill operation; a context watcher cannot make engine cleanup return before the child has been reaped. Engine-managed resources can return PID `0`; the engine retains their in-memory handle for readiness, flush health, watch restarts, CI cleanup, and attached-run shutdown without persisting a false OS-process reference.
+The engine supervises `project.ServiceHandle`, not only child processes. A handle reports liveness, waits for termination, stops idempotently, and may expose a host PID. `Runtime.OnServiceHandle` is the single registration callback for both command processes and PID-less resources. `process.Handle` implements that contract for command-backed services. Concurrent calls to its `Stop` method join the same bounded terminate/kill operation; a context watcher cannot make engine cleanup return before the child has been reaped. Engine-managed resources can return PID `0`; the engine retains their in-memory handle for readiness, flush health, watch restarts, CI cleanup, and attached-run shutdown without persisting a false OS-process reference.
 
 Database adapters use `database.Manager.StartRuntimeService` for this path. It ensures the container, follows stdout/stderr through the Docker Engine log API, waits for container termination through the Engine API, and stops the container through the Engine API. Adapters register the returned handle with `Runtime.RegisterServiceHandle` and route its log callback through `Runtime.LineEmitter`. A wrapper process running `docker logs -f` is neither required nor permitted by the managed-database portability contract.
 
@@ -158,7 +238,7 @@ When a file batch arrives, the engine:
 
 The dependency-barrier rule is important: if an intermediate candidate is blocked from the watch cycle, its downstream candidates are blocked too. Downstream tasks must not run in advance against stale intermediate outputs just because they are also reachable from the changed task.
 
-Normal ready-queue scheduling still applies to the final rerun set, so included downstream tasks become runnable only after included upstream dependencies finish or restore from cache.
+Normal ready-queue scheduling still applies to the final rerun set, so included downstream tasks become runnable only after included upstream dependencies finish or restore from cache. A changed task excluded by watch policy, or a downstream task blocked behind it, remains unresolved for flush. Its previous `done` or `running` state does not establish freshness. Flush reports `watch_restart_required` until that task executes successfully or the target is explicitly restarted; repeated flushes do not clear the condition.
 
 Ignore semantics are shared by watch matching and fingerprinting:
 - paths are slash-normalized before matching
@@ -169,7 +249,7 @@ Ignore semantics are shared by watch matching and fingerprinting:
 
 This lets adapters use either `internal/storage/sqlc` or `sqlc` to ignore generated files under `Inputs.Dirs: []string{"internal/storage"}`. `devflow graph affected --files <path> --explain --json` exposes which input matched or which ignore pattern suppressed a file.
 
-New user-facing adapters should normally use the builder API, where `Inputs("path")` populates `Inputs.Paths` and `project.Glob("internal/storage/**/*.sql")` populates `Inputs.Globs`. The older `Files`/`Dirs` fields remain the lower-level internal representation for existing engine tests and helpers.
+New user-facing adapters should normally use the builder API, where `Inputs("path")` populates `Inputs.Paths` and `project.Glob("internal/storage/**/*.sql")` populates `Inputs.Globs`. The `Files`/`Dirs` fields provide explicit file and directory declarations in the lower-level task representation.
 
 Current service restart policy meanings in watch mode:
 - `RestartNever`: never restart from file-change cascades
@@ -178,41 +258,52 @@ Current service restart policy meanings in watch mode:
 
 ## Flush Readiness Gate
 
-`devflow flush [target]` coordinates with detached watch mode through the per-instance flush files. The command writes a request file and then writes the sync sentinel under `.devflow/state/instances/<instance-id>/flush/sync/`. While waiting for the ack, the CLI periodically rewrites the sync sentinel. This makes the first flush after `watch --detach` resilient to watcher startup races where the file watcher has written `watch.ready` but has not completed its first polling scan yet.
+`devflow flush [target]` captures the daemon's active watch, verifies its project and target, and waits for that execution's observer baseline before publishing a request and sync sentinel. This applies both when flush starts watch and when a watch is already starting. Request publication is serialized with daemon transitions. Readiness and acknowledgement waits honor the request context and timeout, and a stopped or replaced watch fails with `watch_stopped`, including replacement by the same project and target. There is no fixed readiness sleep or sentinel-retouch loop.
 
-The watch runner normally ignores `.devflow`, but the engine explicitly includes the flush sync directory in its watcher inputs. When a batch arrives, the engine splits flush sync files out of normal changed files:
-- normal user file changes run through the existing watch cascade logic first
-- sync files are not treated as task inputs
-- after the cycle completes, the engine loads each matching request and writes an ack
-- sync-only batches still produce an ack after health evaluation
+Cancellation classification follows the typed cause across admission, observer establishment and acknowledgement. A deadline that expires before watch starts still reports issue `timeout` and `timedOut=true`; a canceled caller reports `canceled`. The phase that notices cancellation does not turn it into a generic watch-start failure.
 
-This proves that edits completed before the `flush` command wrote the sentinel have crossed the watcher's file-change boundary before the command returns success.
+The watcher normally ignores `.devflow`, but explicitly observes the flush sync directory. The engine separates sync files from task inputs and retains their request IDs while reconciling changes:
 
-Flush health is scoped to the selected target closure:
-- once, group, and warmup tasks must be `done` or `cached`
-- service tasks must be `running`
-- the registered service handle must still be alive; process-backed handles additionally require a live host PID
-- service readiness hooks must pass when defined
-- services outside the selected target closure are not part of flush success
+1. Take a fresh watcher snapshot and consume queued, debounced, and newly discovered changes.
+2. Run the eligible affected task slice, then repeat the fresh scan so edits during execution are processed.
+3. Evaluate target health when no rerun remains, then scan again to catch edits during readiness probes.
+4. Write acknowledgements only when that final scan reports no outstanding changes. Sync-only requests still receive health evaluation.
 
-Version 1 reports unhealthy in-chain services as `service_unhealthy` issues. It does not auto-restart unhealthy services during `flush`.
+Observation starts before the initial DAG, and startup passes through the same reconciliation loop. Successful flush therefore accounts for observable declared-input edits during initial execution and subsequent rebuilds; an old successful node snapshot alone cannot satisfy the gate.
+
+`FlushResult.synced=true` means the observer processed the synchronization request and produced an acknowledgement. Only `success=true` establishes the selected target's freshness and health under its declared watch inputs and policies. Health requires:
+
+- no unresolved task excluded by watch policy
+- once, group, and warmup tasks in `done` or `cached` state
+- services in `running` state with a live registered handle; process-backed handles also require a live host PID
+- passing service readiness hooks when defined
+
+Services outside the selected target closure do not participate. Unhealthy in-chain services produce `service_unhealthy`; flush does not automatically restart them. Policy-blocked work produces `watch_restart_required` even if its old node state and service probes still look healthy.
+
+An enumerated child disappearing during a scan is ordinary input deletion. Permission errors and non-directory ancestors remain scanner failures and trigger watch cancellation and cleanup.
+
+The boundary is the polling observer's final scan of declared inputs, not an atomic filesystem snapshot. Metadata-preserving edits, transient changes entirely between scans, and undeclared inputs are outside this guarantee. Flush also does not execute tests omitted from the selected target.
 
 ## Pipeline Validation
 
 `devflow validate <target>` is a direct, finite verification surface. It does not use the worktree daemon, task cache, or task stamps, and tasks receive `Runtime.Mode == api.ModeValidation` together with `DEVFLOW_VALIDATION=1` and the selected `DEVFLOW_VALIDATION_MODE`.
+
+The engine and validator call `internal/taskexec.Run` for the same callback sequence: `BeforeRun`, then `Run` when defined. A hook failure stops that sequence; a finite task implemented entirely through `BeforeRun` still executes. When a hook exists, the helper clones the runtime value and its `Env` map, and both callbacks receive that task-local runtime. The instance pointer and adapter globals are not cloned. The helper returns the effective runtime so engine service readiness can observe hook-provided values. Cache/stamp admission, scheduling and readiness remain engine concerns; sandbox projection, output checks, prompt rejection and finite-task resource cleanup remain validation concerns.
 
 Artifact validation uses one disposable worktree and a deterministic dependency order. Before each finite task, Devflow resets that sandbox and materializes only:
 
 - the task's declared worktree file/path/dir/glob/filtered inputs, with normal ignore rules
 - declared outputs archived from the task's transitive dependencies
 
-The task then runs normally. Devflow compares filesystem snapshots around the task, reports final file changes outside its declared output paths, verifies every declared output exists with the requested file/directory type, and archives only declared outputs for downstream tasks. This proves that the explicit worktree inputs plus dependency outputs are sufficient for the observed run. It cannot prove that every declared input is necessary, observe a temporary file created and removed entirely during the task, or trace resources outside the sandbox.
+Devflow compares filesystem snapshots around both callbacks, including final hook writes when a hook fails, reports final file changes outside the task's declared output paths, verifies every declared output exists with the requested file/directory type, and archives only declared outputs for downstream tasks. Captured task logs include hook diagnostics. This proves that the explicit worktree inputs plus dependency outputs are sufficient for the observed run. It cannot prove that every declared input is necessary, observe a temporary file created and removed entirely during the task, or trace resources outside the sandbox.
 
 Order validation enumerates every topological ordering of the selected target closure. Each ordering starts from the same reset copy of the source worktree with `.git`, `.devflow`, and non-in-place declared outputs removed. Tasks execute one at a time with cache/stamp bypass. Every order must finish successfully, produce all declared outputs, and yield the same final declared-output content/type/mode snapshot as the first successful order. This catches undeclared dependency edges as well as order-dependent artifact generation.
 
 Exhaustiveness is a contract, not a best-effort label. The command enumerates up to `--max-orders` (default 1000) before running permutations. If the graph has more valid orders, it runs none of them, returns `complete=false`, and asks the caller to raise the bound. It never reports a sampled prefix as successful exhaustive validation.
 
 Validation only accepts target closures without service or debug-service tasks because those tasks do not finish one by one. `.git` and `.devflow` are reserved sandbox paths, absolute/escaping declarations and worktree-root outputs are rejected, and overlapping outputs from different tasks are rejected as ambiguous ownership. The shared projection copier preserves relative symlinks whose fully resolved targets remain inside the selected source projection and rejects absolute, escaping, or externally resolving symlinks; it never expands a pnpm-style internal link graph by dereferencing it. Directories remain writable while children are copied and receive their source permissions only after the subtree is complete. Copy operations honor cancellation, report progress, and cleanup first repairs restrictive copied permissions without following symlinks.
+
+Validation does not invoke service readiness or `AfterReady`. An interactive prompt from either task callback fails immediately. If a finite task registers supervised handles, validation rejects the task and attempts to stop every registered handle, including handles registered before a hook fails or returns cancellation. Stop errors and a handle remaining alive after a successful `Stop` are included alongside the original callback error; validation does not claim to have cleaned a resource that failed to stop.
 
 Artifact validation formerly copied each dependency's declared outputs from the active sandbox into a separate archive tree. That made the projection and archive two simultaneously expanded copies. The artifact lifecycle now transfers those outputs into validation-owned holding directories with same-filesystem renames, checks them back out before consumers run, and transfers the next outputs back after execution. This preserves isolation without writable hardlinks, avoids a second full materialization on filesystems with or without reflinks, and bypasses the normal persistent task cache. A single validation-wide budget counts every projection, snapshot, and output-transfer phase instead of resetting per copier call. It records cumulative files/logical bytes, current and peak validation-specific logical bytes, measured current/peak allocated filesystem bytes on Linux/macOS, phase timing, and remaining limits; Windows reports the physical-measurement flag as false while retaining exact logical metrics. Before materialization it checks available space against a safety reserve; limit failures return structured phase/resource/observed/limit data and cleanup makes restrictive partial trees removable. Task-defined effects outside `Runtime.Worktree`—databases, networks, absolute paths, global tool caches, and processes not registered as services—are not isolated, so users should validate finite, side-effect-safe targets.
 
@@ -225,7 +316,7 @@ Policy:
 - adapters should prefer explicit non-interactive flags such as `-y`, `--yes`, `--force`, or `CI=1` where that is safe
 - if a task would require a destructive or ambiguous choice, the adapter should model that as an explicit action or separate target instead of letting the process block on stdin
 
-This keeps DAG execution deterministic and prevents background runs, detached supervisors, and watch mode from hanging on hidden prompts.
+This keeps DAG execution deterministic and prevents background runs, detached daemon execution, and watch mode from hanging on hidden prompts.
 
 ### Prisma-Specific Rules
 
@@ -256,19 +347,11 @@ Design implication:
 
 Devflow now supports prompt-driven interactive one-shot commands without blocking invisibly in detached mode.
 
-Current behavior:
-- tasks can mark a subprocess command as interactive through `process.CommandSpec`
-- the command declares expected prompt patterns and prompt kinds
-- prompt specs can provide alternate `Patterns` and `Repeat` for tools that emit different or repeated confirmations, such as destructive migration warnings
-- when a prompt pattern is detected in subprocess output, the engine emits an `interaction_requested` event
-- the engine waits for an answer file under the instance state directory
-- when an answer arrives, the engine writes it back to the subprocess stdin and emits `interaction_answered`
+Tasks declare expected prompt patterns and typed confirm/text questions through `process.CommandSpec`. Alternate `Patterns` and `Repeat` handle repeated questions. The engine allocates prompt identity bound to run, task and attempt; subprocess-local counters do not identify public prompts. Pending metadata is persisted and exposed through events, status, `runs show` and `prompts list`, so reconnecting clients can recover a waiting question.
 
-The current transport is file-backed:
-- request metadata is carried on the event stream
-- answers are written to `.devflow/state/instances/<instance-id>/interactions/<prompt-id>.json`
+Headless execution defaults to `fail`: a detected question ends with `interaction_required`, closes the diagnostic prompt and cleans up. Explicit `--headless wait` permits typed responses until the earlier of the operation deadline and the five-minute prompt wait limit; it never chooses an answer automatically. The TUI explicitly opts into waiting. Known action inputs remain the preferred unattended path.
 
-This is enough for detached runs and the TUI to cooperate without shared in-memory state.
+`prompts respond` and the TUI submit the complete run/task/attempt/prompt identity plus exactly one typed answer. The shared run-store lock rejects mismatched, duplicate, expired, canceled or completed responses, including a cancellation that arrived before the execution owner observed its marker. Admission also requires a live recorded owner; missing/exited owners cannot create, receive or consume answers. Listing derives non-answerable prompt state without finalizing interrupted execution. Answers exist only in transient owner-only files, are consumed once and are deleted during prompt closure. Cancellation erases undelivered answer files under the same lock, including already-answered metadata and retried cancellation requests. This proves input closure, not cleanup of external resources. Secret answers never enter ordinary prompt metadata, result documents or interaction events; adapters must still avoid echoing them in subprocess output. Accepted answers are written to subprocess stdin and produce an `interaction_answered` event without the answer value.
 
 Current limitation:
 - this is prompt-pattern and stdin based, not full TTY emulation
@@ -278,7 +361,7 @@ Current limitation:
 
 Adapters define required command-line tools together with platform-specific install scripts.
 
-`RequiredCLIs()` is the project-level catalog at the engine boundary. New adapters normally populate it through `project.Builder.RequiredCLIs` or `RequiredCLI`. Builder command tasks automatically select a matching catalog entry when the command name matches it. Tasks and targets select from that catalog with `RequiredCLIs`, allowing target-scoped commands to avoid over-reporting tools that belong only to unrelated flows. The older `Dependencies()` provider remains as a compatibility shim for early adapters.
+`RequiredCLIs()` is the project-level catalog at the engine boundary. Adapters normally populate it through `project.Builder.RequiredCLIs` or `RequiredCLI`. Builder command tasks automatically select a matching catalog entry when the command name matches it. Tasks and targets select from that catalog with `RequiredCLIs`, allowing target-scoped commands to avoid over-reporting tools that belong only to unrelated flows. Direct task execution uses the same catalog through its synthetic target.
 
 Current shape:
 
@@ -304,7 +387,7 @@ type Target struct {
 
 Semantics:
 - required CLI status is determined by checking whether the command is available on `PATH`
-- `devflow doctor` checks the full project required CLI catalog for backward compatibility
+- `devflow doctor` checks the full project required CLI catalog when no target is selected
 - `devflow doctor --target <target>` checks only CLIs required by the target and its task closure
 - `devflow clis status/install --target <target>` use the same scoped selection
 - `RequiredCLIs` entries may reference either required CLI `Name` or `Command`
@@ -342,7 +425,7 @@ Long-lived database service supervision uses the same client. `StartRuntimeServi
 
 PostGIS volume identity includes `-pg<major>` so changing the parameter cannot attach an older physical cluster to a newer PostgreSQL server. Versions 16 and 17 mount their named volume at `/var/lib/postgresql/data`; version 18 mounts at `/var/lib/postgresql`, following the official image's breaking `PGDATA`/`VOLUME` layout change. Existing containers are reconciled when the named volume or destination differs. This is isolation, not a major-version migration facility; use logical dumps or an explicit `pg_upgrade` flow to carry data forward.
 
-Volume snapshots are physical Postgres cluster archives. Snapshot and restore stream tar data through the Engine container archive API and gzip locally; they do not expose host paths to a sidecar bind mount. This removes host-path syntax and sharing differences between Unix, Docker Desktop, and Windows. Snapshot keys must be one directory name rather than an absolute, nested, or parent-relative path; validate them before any Docker call or filesystem removal. Snapshot manifest version 3 records the resolved Docker image, its OS/architecture, and the PostgreSQL major when configured. Managed Prisma/migration restore treats legacy manifests without required platform/version metadata, manifests whose platform or PostgreSQL major differs, and manifests produced by another resolved image as cache misses before any container or volume is destroyed. This protects Intel-to-ARM moves, Postgres-to-PostGIS flavor changes, and custom-image aliases reused across PostgreSQL majors. Direct `RestoreSnapshot` returns `ErrSnapshotIncompatible` for the same conditions. Do not turn `.devflow/db-snapshots` into a cross-machine data transfer format; use logical dumps for that purpose.
+Volume snapshots are physical Postgres cluster archives. Snapshot and restore stream tar data through the Engine container archive API and gzip locally; they do not expose host paths to a sidecar bind mount. This removes host-path syntax and sharing differences between Unix, Docker Desktop, and Windows. Snapshot keys must be one directory name rather than an absolute, nested, or parent-relative path; validate them before any Docker call or filesystem removal. Snapshot manifest version 3 records the resolved Docker image, its OS/architecture, and the PostgreSQL major when configured. Managed Prisma/migration restore treats manifests without required platform/version metadata, manifests whose platform or PostgreSQL major differs, and manifests produced by another resolved image as cache misses before any container or volume is destroyed. This protects Intel-to-ARM moves, Postgres-to-PostGIS flavor changes, and custom-image aliases reused across PostgreSQL majors. Direct `RestoreSnapshot` returns `ErrSnapshotIncompatible` for the same conditions. Do not turn `.devflow/db-snapshots` into a cross-machine data transfer format; use logical dumps for that purpose.
 
 Engine control-plane calls such as inspect, create/start, stop, and remove are bounded by short context deadlines. Cold image acquisition is resolved explicitly with image inspection plus a separately bounded long Engine pull; do not let a first-machine image download happen implicitly inside the short container-start deadline. Image builds and streaming snapshot/restore work use the longer data deadline. Context cancellation closes attached exec streams, so an unavailable or stuck Engine surfaces as a database task error instead of leaving a task in `running` forever.
 
@@ -432,6 +515,14 @@ Managed Postgres target pattern:
 - stop the final DB container through `devflow stop --all`; this preserves the Docker volume
 
 Do not unconditionally remove the DB container in normal startup. Docker port mappings are immutable, so `EnsureRuntime` removes and recreates only stale containers with a wrong published port while preserving the volume.
+
+## Cache Restore Safety
+
+Cacheable tasks must declare at least one output; engine construction rejects outputless cached tasks before execution or instance provisioning. Graph inspection remains available, and `validate --json` retains its structured `missing_output_declaration` issue. Local install stamps may still omit outputs. Snapshotting checks output path containment and file/directory kinds before publication. Cache manifests must match the supported version, task, key, and nonempty output declarations. Paths cannot escape the worktree, traverse symlink parents, or replace the worktree root, `.git`, or `.devflow` itself; existing `.devflow` child outputs remain supported.
+
+Restore validates cached artifacts and stages complete copies under a unique `.devflow/cache-restore-*` directory before replacing any output. Duplicate and descendant declarations normalize to the containing output, including entries written by older versions. Publication retains existing outputs as backups and rolls back completed replacements if a later replacement fails. If rollback itself fails, the returned error identifies the retained recovery directory. Cancellation and damaged entries leave existing outputs intact before publication; ordinary cache corruption is a miss, while filesystem or cancellation errors propagate to the engine instead of silently executing the task.
+
+Staging and output paths must be on the same filesystem; outputs on a separate mounted filesystem fail with their originals retained. This provides rollback for failures observed during the operation, not a crash-atomic transaction across multiple paths. A hard process or machine crash during publication can leave the staging directory and backups for recovery.
 
 ## Cache Keys
 
@@ -610,6 +701,10 @@ Semantics:
 - `AfterReady`, when defined, runs after readiness and before the task is marked running; it requires an explicit readiness function
 - if readiness fails, times out, or the process exits first, the task becomes `failed`
 - a failed readiness or `AfterReady` attempt stops the service process before returning
+- a readiness probe that succeeds after the handle is already dead must fail before `AfterReady` can commit per-start state
+- a service task that registers a handle and then fails startup still has that handle stopped; failed finite runs also stop previously ready services before returning, including PID-less resources
+
+Flush health checks enforce the readiness deadline independently of the adapter callback and stop waiting promptly when the service dies. They recheck liveness after a successful probe and do not invoke `AfterReady`. Repeated flushes poll registered-handle liveness instead of accumulating `Wait` goroutines for the same service. Adapter callbacks should honor their context so canceled probes release their own resources.
 
 The current helper surface includes:
 - `ReadyAll(...)`
@@ -631,8 +726,8 @@ Service tasks have different command semantics depending on the run mode:
 - `run --ci` is deliberately direct and finite, not daemon-backed. Services are allowed as readiness probes: Devflow starts them, waits for readiness, stops them, clears persisted service PIDs, and records the service nodes as `stopped` before returning success.
 - `run --detach` asks the per-worktree daemon to start the target in the background and returns after launch. It does not prove the target closure is healthy.
 - `watch --detach` asks the daemon to start the development loop. It is the expected long-running mode for humans and agents that want automatic reruns after file edits.
-- `flush` is the daemon-backed watch readiness gate. It proves the watcher observed the post-edit sync sentinel, waits for the selected target closure to settle, and checks service health.
-- `stop --all` asks the daemon to stop active work. It reconciles legacy supervisors, child executors and their process trees, tracked services, stale status PIDs, and the instance-managed database container. Stopping the database container preserves its Docker volume. After sending the response, the daemon shuts itself down so stopped state is not reported as a live daemon.
+- `flush` is the daemon-backed watch readiness gate. It reconciles observable declared-input changes through a fresh scan after execution and health probes, rejects unresolved policy-blocked work, and binds its result to the captured active watch.
+- `stop --all` asks the daemon to stop active work through its owning engine handles. When no live engine owns a resource, recovery uses explicitly recorded process refs, PID-bearing status nodes, and the instance-managed database container. Stopping the database container preserves its Docker volume. After sending the response, the daemon shuts itself down so stopped state is not reported as a live daemon.
 
 The current automation recommendation is intentionally explicit: use detached watch plus `flush` for "background environment is ready" workflows. Do not reinterpret attached `run` as a start-and-return command without adding a separate CLI contract.
 
@@ -658,6 +753,14 @@ The additive `RunResult.repositoryChanges` object is the audit surface. It carri
 ## Watch Mode
 
 Watch mode uses a polling watcher with debounced batches. The engine scopes the watcher to the selected target closure's declared file inputs plus the flush sync directory. It does not intentionally poll the whole worktree when the closure has concrete `Inputs(...)`, `Files`, `Dirs`, or `Globs`; common heavyweight folders such as `node_modules` are ignored by default unless explicitly watched by an input path.
+
+An explicit `.` input or a glob without a literal directory prefix requires a root scan, including when the watcher is restricted to declared inputs. That root scan retains the default ignores; separately declared paths under ignored directories remain explicit scan roots.
+
+`Runner.Start` captures the baseline synchronously before task execution. `Runner.Sync` takes a fresh scan and consumes changes already queued for delivery, pending debounce, or not yet polled. Its caller must be the sole batch consumer and must not receive batches concurrently with `Sync`. The watcher can service synchronization and cancellation with a full batch queue. Failed scans do not consume outstanding changes; a background scanner failure cancels engine execution and follows normal resource cleanup before ownership is released.
+
+File polling compares modification time, size, mode, and type. Metadata-only changes to existing directories do not create parent events because children are observed individually; directory creation, deletion, type, and mode changes remain observable.
+
+Each executed or restored producer records its declared outputs' metadata when it finishes writing, before finite-task cache persistence. The next reconciliation excludes an output change only when the current state still matches that completion record. Files are matched exactly; directory trees and `Outputs.Paths` use the same per-path evidence. An edit after the producer finishes remains observable even while downstream tasks are running, including edits to a file declared as both input and output. Ancestor directory events are eligible for suppression only when the directory was missing before the attempt and exists afterward; existing ancestors and sibling source paths are never excluded wholesale. The evidence is consumed by that reconciliation, with no timed suppression window. Output declarations establish producer ownership during its own execution; completion metadata cannot attribute external writes made inside that interval. As with polling itself, metadata-preserving edits cannot be distinguished.
 
 On each batch:
 - changed files are mapped to task inputs
@@ -698,30 +801,29 @@ TUI daemon ownership is explicit. If bare `devflow` or `devflow tui` creates the
 
 The TUI process owns a separate per-instance diagnostic boundary at `.devflow/logs/<instance-id>/tui.log`. It records session boundaries and returned application errors. Panics on the application goroutine and Devflow-owned background workers are recovered, persisted with a stack, and converted to an error after stopping the screen. A Go runtime crash-output duplicate covers fatal failures and dependency-owned goroutines that cannot be recovered locally. The crash-output file descriptor is installed only for the TUI session and disabled during normal teardown. This surface is intentionally separate from the daemon log because the daemon may remain healthy when only the interactive client fails.
 
-The older hidden `__internal_exec` and `__internal_supervise` launcher paths are no longer user-facing execution routes. Their persisted supervisor/executor state and process-tree descendants can still be reconciled during `stop --all` so existing stale processes are not orphaned.
+Devflow maintains one current API, daemon protocol, and state model. It has no old-state migration, retired launcher discovery, process-command scanning, or supervisor-log parsing. Recovery reconciles current explicitly recorded resources; it does not infer ownership from a process name or log message.
 
 The daemon persists:
-- daemon PID as the supervisor PID
+- daemon PID and start time in `daemon.json`
 - daemon log path
 - last run config
-- legacy supervisor/executor PIDs as process refs when replacing old state
 
 This is enough for:
 - `run --detach`
 - `watch --detach`
-- `stop --all` against daemon-owned work; it snapshots live resources before engine cancellation clears references, terminates legacy supervisor/executor process groups and descendants, tracked service process groups and PID-bearing status nodes, stops the managed database only when its container is running, and reports only confirmed actual stops before shutting the daemon down
-- service `restart` by asking the daemon to relaunch the last active target
+- `stop --all` against daemon-owned work; it snapshots live resources before engine cancellation clears references, stops owned handles or explicitly recorded processes and their process trees, stops the managed database only when its container is running, and reports only confirmed actual stops before shutting the daemon down
+- service `restart` through the owning engine's lifecycle controller
 
 The operator surface now also reconciles detached state when queried:
 - `status` uses the daemon when one is already running, otherwise reads persisted state without starting a new daemon; it includes daemon PID/liveness plus sanitized instance metadata such as ports, URLs, and DB identity when present
-- `logs supervisor` reads the daemon/supervisor log directly
+- `logs daemon` reads the daemon log directly
 
 The first usable TUI slice is now implemented as a local terminal console connected to the per-worktree daemon, with persisted state as fallback. It currently provides:
 - live daemon event subscription plus fallback persisted-event refresh
 - task selection
 - selected-task details
 - task log tail
-- daemon/supervisor log toggle
+- daemon log toggle
 - database/Prisma panel showing managed Postgres identity and recent Prisma migration-prefix snapshots
 - explicit migration generation from inside the TUI by asking for a migration name, sending a daemon migration-create action through the daemon-owned engine, surfacing declared prompts, and relaunching the previously detached target after success
 - instance/worktree/runtime header

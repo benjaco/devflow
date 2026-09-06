@@ -23,6 +23,17 @@ const (
 	KindWarmup       Kind = "warmup"
 )
 
+type Purpose string
+
+const (
+	PurposeTest      Purpose = "test"
+	PurposeLint      Purpose = "lint"
+	PurposeTypecheck Purpose = "typecheck"
+	PurposeBuild     Purpose = "build"
+	PurposeFormat    Purpose = "format"
+	PurposeGenerate  Purpose = "generate"
+)
+
 type RestartPolicy string
 
 const (
@@ -92,9 +103,12 @@ type Task struct {
 	AllowInWatch              bool
 	Tags                      []string
 	Description               string
-	Signature                 string
-	CacheKeyOverride          CacheKeyFunc
-	Debug                     *DebugConfig
+	Purposes                  []Purpose
+	// Nil means effects are unknown; an explicit empty declaration is distinct.
+	Effects          *Effects
+	Signature        string
+	CacheKeyOverride CacheKeyFunc
+	Debug            *DebugConfig
 }
 
 type DebugConfig struct {
@@ -117,6 +131,8 @@ type Target struct {
 	RequiredCLIs []string
 	RequiredEnv  []string
 	Description  string
+	// Verification marks a full fallback for adapter or configuration changes.
+	Verification bool
 }
 
 type InstanceConfig struct {
@@ -166,17 +182,17 @@ func CacheNamespace(p Project) string {
 }
 
 type Runtime struct {
-	Worktree string
-	Instance *api.Instance
-	Mode     api.RunMode
-	Env      map[string]string
-	TaskName string
-	LogPath  string
-	EventFn  func(api.Event)
-	// OnService is the legacy process-only registration hook. New engine
-	// integrations use OnServiceHandle so managed resources need no wrapper
-	// process.
-	OnService       func(task string, handle *process.Handle)
+	Worktree  string
+	Instance  *api.Instance
+	Mode      api.RunMode
+	Env       map[string]string
+	TaskName  string
+	RunID     string
+	AttemptID string
+	LogPath   string
+	EventFn   func(api.Event)
+	// Processes and PID-less resources share one registration path so lifecycle
+	// ownership never depends on the resource's concrete implementation.
 	OnServiceHandle func(task string, handle ServiceHandle)
 	DepKeys         []string
 	OnPrompt        func(task string, req process.PromptRequest) (process.PromptResponse, error)
@@ -245,6 +261,8 @@ func (rt *Runtime) EmitLogLine(stream, line string) {
 		TS:         process.NowRFC3339Nano(),
 		Type:       api.EventLogLine,
 		InstanceID: rt.Instance.ID,
+		RunID:      rt.RunID,
+		AttemptID:  rt.AttemptID,
 		Worktree:   rt.Worktree,
 		Task:       rt.TaskName,
 		Mode:       rt.Mode,
@@ -335,10 +353,6 @@ func (rt *Runtime) RegisterServiceHandle(handle ServiceHandle) {
 	}
 	if rt.OnServiceHandle != nil {
 		rt.OnServiceHandle(rt.TaskName, handle)
-		return
-	}
-	if processHandle, ok := handle.(*process.Handle); ok && rt.OnService != nil {
-		rt.OnService(rt.TaskName, processHandle)
 	}
 }
 
@@ -350,6 +364,8 @@ func (rt *Runtime) emitProcessLine(stream, line string) {
 		TS:         process.NowRFC3339Nano(),
 		Type:       api.EventLogLine,
 		InstanceID: rt.Instance.ID,
+		RunID:      rt.RunID,
+		AttemptID:  rt.AttemptID,
 		Worktree:   rt.Worktree,
 		Task:       rt.TaskName,
 		Mode:       rt.Mode,

@@ -1,20 +1,24 @@
 package cli
 
 import (
+	"context"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 
+	"github.com/benjaco/devflow/internal/adaptersource"
+	"github.com/benjaco/devflow/internal/clierror"
 	"github.com/benjaco/devflow/internal/lock"
 	"github.com/benjaco/devflow/internal/version"
+	"github.com/benjaco/devflow/pkg/process"
 )
 
 const (
@@ -25,7 +29,7 @@ const (
 	localProjectFile          = "devflow.project.go"
 )
 
-func shouldExecLocalProject(args []string) bool {
+func shouldExecLocalProject(args []string, worktree string) bool {
 	if os.Getenv(envLocalExec) == "1" {
 		return false
 	}
@@ -38,29 +42,21 @@ func shouldExecLocalProject(args []string) bool {
 	if os.Getenv(envBootstrapEntry) == "1" {
 		return true
 	}
-	worktree, err := worktreeFromArgs(args)
-	if err != nil {
-		return false
-	}
 	// Any filesystem object at the marker path enters bootstrap validation so a
 	// directory, symlink, or special file produces the precise source error.
-	_, err = os.Lstat(filepath.Join(worktree, localProjectFile))
+	_, err := os.Lstat(filepath.Join(worktree, localProjectFile))
 	return err == nil
 }
 
-func (a *App) execLocalProject(args []string) error {
+func (a *App) execLocalProject(args []string, worktree string) error {
 	bootstrapRoot := bootstrapRoot()
-	worktree, err := worktreeFromArgs(args)
-	if err != nil {
-		return err
-	}
-	localBinary, err := ensureLocalProjectBinary(bootstrapRoot, worktree)
+	localBinary, err := ensureLocalProjectBinary(a.context(), bootstrapRoot, worktree)
 	if err != nil {
 		return err
 	}
 	env := withEnv(os.Environ(), envLocalExec, "1")
 	env = withEnv(env, envBootstrapRoot, bootstrapRoot)
-	return execLocalBinary(localBinary, append([]string{localBinary}, args...), env)
+	return clierror.Wrap(execLocalBinary(a.context(), localBinary, append([]string{localBinary}, args...), env, a.Stdout, a.Stderr, a.localChildOwnsExecution), "bootstrap_failed", "bootstrap")
 }
 
 func bootstrapRoot() string {
@@ -75,23 +71,11 @@ func bootstrapRoot() string {
 	return abs
 }
 
-func worktreeFromArgs(args []string) (string, error) {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "--worktree":
-			if i+1 >= len(args) {
-				return "", fmt.Errorf("missing value for --worktree")
-			}
-			return resolveWorktree(args[i+1])
-		case strings.HasPrefix(arg, "--worktree="):
-			return resolveWorktree(strings.TrimPrefix(arg, "--worktree="))
-		}
+func ensureLocalProjectBinary(ctx context.Context, bootstrapRoot, worktree string) (binary string, err error) {
+	defer func() { err = clierror.Wrap(err, "bootstrap_failed", "bootstrap") }()
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-	return resolveWorktree("")
-}
-
-func ensureLocalProjectBinary(bootstrapRoot, worktree string) (string, error) {
 	projectPath := filepath.Join(worktree, localProjectFile)
 	target := filepath.Join(worktree, ".devflow", "bin", "devflow-local"+localProjectBinarySuffix())
 	buildKey, err := localBuildKey(bootstrapRoot, projectPath)
@@ -105,7 +89,7 @@ func ensureLocalProjectBinary(bootstrapRoot, worktree string) (string, error) {
 	if !needsBuild {
 		return target, nil
 	}
-	lockFile, err := lock.Acquire(localBuildLockPath(worktree))
+	lockFile, err := lock.AcquireContext(ctx, localBuildLockPath(worktree))
 	if err != nil {
 		return "", err
 	}
@@ -121,7 +105,7 @@ func ensureLocalProjectBinary(bootstrapRoot, worktree string) (string, error) {
 	if !needsBuild {
 		return target, nil
 	}
-	if err := buildLocalProjectBinary(bootstrapRoot, worktree, projectSources, target, buildKey); err != nil {
+	if err := buildLocalProjectBinary(ctx, bootstrapRoot, worktree, projectSources, target, buildKey); err != nil {
 		return "", err
 	}
 	return target, nil
@@ -152,15 +136,16 @@ func localBinaryNeedsBuild(target, buildKey string) (bool, error) {
 	return false, nil
 }
 
-func localProjectSourceFiles(projectPath string) ([]string, error) {
+func localProjectSourceFiles(projectPath string) (sources []string, err error) {
+	defer func() { err = clierror.Wrap(err, "adapter_source_invalid", "bootstrap") }()
 	// Keep project detection anchored to the explicit marker. This is intentionally
 	// narrower than loading a Go package: unrelated root Go files and adapter tests
 	// must not become part of the runtime CLI by accident.
 	projectPath = filepath.Clean(projectPath)
 	projectDir := filepath.Dir(projectPath)
 	if err := validateLocalProjectSource(projectPath); err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("%s not found in %s", localProjectFile, projectDir)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, clierror.Wrap(fmt.Errorf("%s not found in %s", localProjectFile, projectDir), "adapter_not_found", "bootstrap")
 		}
 		return nil, err
 	}
@@ -173,7 +158,7 @@ func localProjectSourceFiles(projectPath string) ([]string, error) {
 	seen := map[string]struct{}{projectPath: {}}
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasPrefix(name, "devflow_") || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+		if !adaptersource.IsSource(name) {
 			continue
 		}
 		path := filepath.Join(projectDir, name)
@@ -190,7 +175,8 @@ func localProjectSourceFiles(projectPath string) ([]string, error) {
 	return append([]string{projectPath}, companions...), nil
 }
 
-func validateLocalProjectSource(path string) error {
+func validateLocalProjectSource(path string) (err error) {
+	defer func() { err = clierror.Wrap(err, "adapter_source_invalid", "bootstrap") }()
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
@@ -317,7 +303,10 @@ func localBuildSourceLabel(bootstrapRoot, path string) string {
 	return "external/" + filepath.ToSlash(path)
 }
 
-func buildLocalProjectBinary(bootstrapRoot, worktree string, projectSources []string, target, buildKey string) error {
+func buildLocalProjectBinary(ctx context.Context, bootstrapRoot, worktree string, projectSources []string, target, buildKey string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(projectSources) == 0 {
 		return fmt.Errorf("cannot build local devflow binary without %s", localProjectFile)
 	}
@@ -369,16 +358,21 @@ func buildLocalProjectBinary(bootstrapRoot, worktree string, projectSources []st
 			return err
 		}
 	}
-	cmd := exec.Command("go", "build", "-mod=mod", "-o", tmpTarget, ".")
+	cmd := process.CommandContext(ctx, "go", "build", "-mod=mod", "-o", tmpTarget, ".")
 	cmd.Dir = buildDir
 	output, err := cmd.CombinedOutput()
+	// A canceled build must never publish an artifact, even if the child exits zero.
+	if ctx.Err() != nil {
+		_ = os.Remove(tmpTarget)
+		return ctx.Err()
+	}
 	if err != nil {
 		_ = os.Remove(tmpTarget)
 		trimmed := strings.TrimSpace(string(output))
 		if trimmed == "" {
-			return fmt.Errorf("failed to build local devflow binary from %s: %w", projectPath, err)
+			return clierror.Wrap(fmt.Errorf("failed to build local devflow binary from %s: %w", projectPath, err), "adapter_compile_failed", "bootstrap")
 		}
-		return fmt.Errorf("failed to build local devflow binary from %s: %w\n%s", projectPath, err, trimmed)
+		return clierror.Wrap(fmt.Errorf("failed to build local devflow binary from %s: %w\n%s", projectPath, err, trimmed), "adapter_compile_failed", "bootstrap")
 	}
 	if err := os.Rename(tmpTarget, target); err != nil {
 		_ = os.Remove(tmpTarget)
@@ -400,7 +394,6 @@ func localBuildMainSource() string {
 	return `package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/benjaco/devflow/internal/cli"
@@ -409,8 +402,8 @@ import (
 func main() {
 	app := cli.New()
 	if err := app.Run(os.Args[1:]); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		cli.ReportError(os.Stderr, err)
+		os.Exit(cli.ExitCode(err))
 	}
 }
 `
@@ -485,7 +478,7 @@ func isProjectlessCommand(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "version", "upgrade", "docs", "instances":
+	case "logs", "runs", "prompts", "version", "upgrade", "docs", "instances":
 		return true
 	default:
 		return false

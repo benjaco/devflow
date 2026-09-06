@@ -2,10 +2,13 @@ package watch
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -45,6 +48,24 @@ type Runner struct {
 	ignorePaths   []string
 	includePaths  []string
 	explicitPaths []string
+	mu            sync.Mutex
+	session       *session
+}
+
+type session struct {
+	ctx      context.Context
+	requests chan syncRequest
+	done     chan struct{}
+}
+
+type syncRequest struct {
+	ctx    context.Context
+	result chan syncResult
+}
+
+type syncResult struct {
+	batch Batch
+	err   error
 }
 
 type fileState struct {
@@ -71,7 +92,16 @@ func New(opts Options) (*Runner, error) {
 	ignorePaths = append(ignorePaths, opts.IgnorePaths...)
 	watchPaths := normalizeIncludePaths(root, opts.WatchPaths)
 	includePaths := normalizeIncludePaths(root, opts.IncludePaths)
-	explicitPaths := append(append([]string{}, includePaths...), watchPaths...)
+	explicitPaths := make([]string, 0, len(includePaths)+len(watchPaths))
+	for _, paths := range [][]string{includePaths, watchPaths} {
+		for _, path := range paths {
+			// Root-level inputs and globs require a root scan, but do not
+			// opt every ignored subtree into watching.
+			if path != "." {
+				explicitPaths = append(explicitPaths, path)
+			}
+		}
+	}
 	return &Runner{
 		root:          root,
 		debounce:      debounce,
@@ -90,86 +120,94 @@ func (r *Runner) Start(ctx context.Context) (<-chan Batch, <-chan error, error) 
 			return nil, nil, err
 		}
 	}
-	previous, err := r.snapshot()
+	previous, err := r.snapshot(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
+	s := &session{ctx: ctx, requests: make(chan syncRequest), done: make(chan struct{})}
+	r.mu.Lock()
+	if r.session != nil {
+		r.mu.Unlock()
+		return nil, nil, errors.New("watcher already started")
+	}
+	r.session = s
+	r.mu.Unlock()
 
 	batches := make(chan Batch, 16)
 	errs := make(chan error, 16)
-
 	go func() {
+		defer close(s.done)
 		defer close(batches)
 		defer close(errs)
-
-		var (
-			pending   = map[string]bool{}
-			startedAt time.Time
-			timer     *time.Timer
-			timerCh   <-chan time.Time
-		)
+		pending := map[string]bool{}
+		var startedAt time.Time
+		var timer *time.Timer
+		var timerCh <-chan time.Time
+		publish := false
 		ticker := time.NewTicker(r.pollInterval)
 		defer ticker.Stop()
-
-		flush := func() {
-			if len(pending) == 0 {
-				return
-			}
-			files := make([]string, 0, len(pending))
-			for file := range pending {
-				files = append(files, file)
-			}
-			sort.Strings(files)
-			batches <- Batch{
-				Files:      files,
-				StartedAt:  startedAt,
-				FinishedAt: time.Now().UTC(),
-			}
-			pending = map[string]bool{}
-			startedAt = time.Time{}
+		stopTimer := func() {
 			if timer != nil {
 				timer.Stop()
 			}
 			timer = nil
 			timerCh = nil
 		}
-
+		defer stopTimer()
+		clearPending := func() {
+			pending = map[string]bool{}
+			startedAt = time.Time{}
+			publish = false
+			stopTimer()
+		}
+		collect := func(current map[string]fileState) {
+			changes := changedFiles(previous, current)
+			previous = current
+			if len(changes) == 0 {
+				return
+			}
+			if len(pending) == 0 {
+				startedAt = time.Now().UTC()
+			}
+			added := false
+			for _, file := range changes {
+				if !pending[file] {
+					added = true
+				}
+				pending[file] = true
+			}
+			if !publish && (timer == nil || added) {
+				stopTimer()
+				timer = time.NewTimer(r.debounce)
+				timerCh = timer.C
+			}
+		}
+		pendingBatch := func() Batch {
+			if len(pending) == 0 {
+				return Batch{}
+			}
+			files := make([]string, 0, len(pending))
+			for file := range pending {
+				files = append(files, file)
+			}
+			sort.Strings(files)
+			return Batch{Files: files, StartedAt: startedAt, FinishedAt: time.Now().UTC()}
+		}
 		for {
+			var output chan Batch
+			var batch Batch
+			if publish {
+				output, batch = batches, pendingBatch()
+			}
 			select {
 			case <-ctx.Done():
 				return
+			case output <- batch:
+				clearPending()
 			case <-ticker.C:
-				current, err := r.snapshot()
+				current, err := r.snapshot(ctx)
 				if err == nil {
-					changes := changedFiles(previous, current)
-					previous = current
-					if len(changes) == 0 {
-						continue
-					}
-					if len(pending) == 0 {
-						startedAt = time.Now().UTC()
-					}
-					addedNewFile := false
-					for _, rel := range changes {
-						if rel != "." && rel != "" {
-							if !pending[rel] {
-								addedNewFile = true
-							}
-							pending[rel] = true
-						}
-					}
-					if timer == nil {
-						timer = time.NewTimer(r.debounce)
-						timerCh = timer.C
-					} else if addedNewFile {
-						if !timer.Stop() {
-							select {
-							case <-timer.C:
-							default:
-							}
-						}
-						timer.Reset(r.debounce)
-					}
+					collect(current)
 				} else {
 					select {
 					case errs <- err:
@@ -177,21 +215,78 @@ func (r *Runner) Start(ctx context.Context) (<-chan Batch, <-chan error, error) 
 					}
 				}
 			case <-timerCh:
-				flush()
+				// Keep polling and accepting barriers while a slow consumer fills the queue.
+				publish = true
+				timerCh = nil
+			case request := <-s.requests:
+				current, err := r.snapshot(request.ctx)
+				if err != nil {
+					request.result <- syncResult{err: err}
+					continue
+				}
+				collect(current)
+				// The caller is the sole batch consumer and has paused receiving.
+				for len(batches) > 0 {
+					queued := <-batches
+					for _, file := range queued.Files {
+						pending[file] = true
+					}
+					if startedAt.IsZero() || queued.StartedAt.Before(startedAt) {
+						startedAt = queued.StartedAt
+					}
+				}
+				request.result <- syncResult{batch: pendingBatch()}
+				clearPending()
 			}
 		}
 	}()
-
 	return batches, errs, nil
 }
 
-func (r *Runner) snapshot() (map[string]fileState, error) {
+// Sync takes a fresh snapshot and consumes all queued and pending changes.
+// Call it only after Start returns, while the sole batch consumer is not receiving.
+func (r *Runner) Sync(ctx context.Context) (Batch, error) {
+	r.mu.Lock()
+	s := r.session
+	r.mu.Unlock()
+	if s == nil {
+		return Batch{}, errors.New("watcher not started")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.ctx, cancel)
+	defer stop()
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return Batch{}, err
+	}
+	request := syncRequest{ctx: ctx, result: make(chan syncResult, 1)}
+	select {
+	case s.requests <- request:
+	case <-ctx.Done():
+		return Batch{}, ctx.Err()
+	case <-s.done:
+		return Batch{}, s.ctx.Err()
+	}
+	// Once accepted, the context-aware scan owns completion so cancellation
+	// cannot discard a successfully consumed batch in the caller's select.
+	select {
+	case result := <-request.result:
+		return result.batch, result.err
+	case <-s.done:
+		return Batch{}, s.ctx.Err()
+	}
+}
+
+func (r *Runner) snapshot(ctx context.Context) (map[string]fileState, error) {
 	roots := r.scanRoots()
 	out := make(map[string]fileState)
 	for _, rel := range roots {
-		if err := r.scanPath(rel, out); err != nil {
+		if err := r.scanPath(ctx, rel, out); err != nil {
 			return nil, err
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -207,13 +302,16 @@ func (r *Runner) scanRoots() []string {
 	return compactScanRoots(roots)
 }
 
-func (r *Runner) scanPath(rel string, out map[string]fileState) error {
+func (r *Runner) scanPath(ctx context.Context, rel string, out map[string]fileState) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	rel = filepath.ToSlash(filepath.Clean(rel))
 	full := filepath.Join(r.root, filepath.FromSlash(rel))
 	info, err := os.Stat(full)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return checkMissingScanRoot(ctx, full)
 		}
 		return err
 	}
@@ -222,30 +320,68 @@ func (r *Runner) scanPath(rel string, out map[string]fileState) error {
 		return nil
 	}
 	return filepath.WalkDir(full, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
+		return r.scanEntry(ctx, path, entry, err, out)
+	})
+}
+
+func checkMissingScanRoot(ctx context.Context, path string) error {
+	// A missing input may be created later, but a regular-file ancestor makes
+	// it unobservable. Some filesystems report both cases as "not found".
+	for ancestor := filepath.Dir(path); ; ancestor = filepath.Dir(ancestor) {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		itemRel, err := filepath.Rel(r.root, path)
-		if err != nil {
-			return err
-		}
-		itemRel = filepath.ToSlash(filepath.Clean(itemRel))
-		if itemRel == "." {
-			return nil
-		}
-		if r.ignored(itemRel) {
-			if entry.IsDir() {
-				return filepath.SkipDir
+		info, err := os.Stat(ancestor)
+		if err == nil {
+			if !info.IsDir() {
+				return fmt.Errorf("watch input %q has non-directory ancestor %q", path, ancestor)
 			}
 			return nil
 		}
-		r.addState(itemRel, info, out)
+		if !os.IsNotExist(err) {
+			return err
+		}
+		if filepath.Dir(ancestor) == ancestor {
+			return err
+		}
+	}
+}
+
+func (r *Runner) scanEntry(ctx context.Context, path string, entry os.DirEntry, err error, out map[string]fileState) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	info, err := entry.Info()
+	if err != nil {
+		// Atomic saves and generated-tree replacement can remove an enumerated
+		// entry before its metadata is read; its absence is an input change.
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	itemRel, err := filepath.Rel(r.root, path)
+	if err != nil {
+		return err
+	}
+	itemRel = filepath.ToSlash(filepath.Clean(itemRel))
+	if itemRel == "." {
 		return nil
-	})
+	}
+	if r.ignored(itemRel) {
+		if entry.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	}
+	r.addState(itemRel, info, out)
+	return nil
 }
 
 func (r *Runner) addState(rel string, info os.FileInfo, out map[string]fileState) {
@@ -281,7 +417,10 @@ func changedFiles(previous, current map[string]fileState) []string {
 			changed[rel] = true
 			continue
 		}
-		if before.modTime != after.modTime || before.mode != after.mode || before.size != after.size || before.isDir != after.isDir {
+		// Child paths already describe directory content changes; reporting their
+		// unchanged parent would also invalidate unrelated sibling inputs.
+		metadataChanged := !(before.isDir && after.isDir) && (before.modTime != after.modTime || before.size != after.size)
+		if metadataChanged || before.mode != after.mode || before.isDir != after.isDir {
 			changed[rel] = true
 		}
 	}
@@ -313,7 +452,7 @@ func normalizeIncludePaths(root string, paths []string) []string {
 			path = rel
 		}
 		path = filepath.ToSlash(filepath.Clean(path))
-		if path == "." || path == "" || strings.HasPrefix(path, "../") || path == ".." {
+		if path == "" || strings.HasPrefix(path, "../") || path == ".." {
 			continue
 		}
 		if seen[path] {
@@ -325,7 +464,9 @@ func normalizeIncludePaths(root string, paths []string) []string {
 	sort.Strings(out)
 	compacted := make([]string, 0, len(out))
 	for _, path := range out {
-		if pathIncluded(path, compacted) {
+		// Preserve explicit subtrees beside a root scan, since the root
+		// scan skips ignored directories that these paths can opt into.
+		if scanRootCovered(path, compacted) {
 			continue
 		}
 		compacted = append(compacted, path)

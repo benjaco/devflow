@@ -389,7 +389,7 @@ func (p *taskLogAttemptProject) Targets() []project.Target {
 	return []project.Target{{Name: "build", RootTasks: []string{"prepare"}}}
 }
 
-func TestTaskLogTruncatedBeforeCustomRunAttempt(t *testing.T) {
+func TestEachTaskAttemptStartsWithAnEmptyLog(t *testing.T) {
 	worktree := t.TempDir()
 	p := &taskLogAttemptProject{}
 	eng, err := New(p, worktree)
@@ -400,7 +400,7 @@ func TestTaskLogTruncatedBeforeCustomRunAttempt(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected first run to fail")
 	}
-	logPath := instance.LogPath(worktree, first.Instance.ID, "prepare")
+	logPath := first.Result.Nodes[0].LogPath
 	firstLog, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
@@ -409,10 +409,11 @@ func TestTaskLogTruncatedBeforeCustomRunAttempt(t *testing.T) {
 		t.Fatalf("expected first attempt log, got %q", firstLog)
 	}
 
-	if _, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI}); err != nil {
+	second, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
 		t.Fatal(err)
 	}
-	secondLog, err := os.ReadFile(logPath)
+	secondLog, err := os.ReadFile(second.Result.Nodes[0].LogPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -735,10 +736,23 @@ func TestMigrationNeededErrorUsesMigrationNeededState(t *testing.T) {
 	}
 }
 
-func TestMigrationNeededMessageUsesMigrationNeededState(t *testing.T) {
-	err := fmt.Errorf("prisma schema changed without a new migration; generate one with GeneratePrismaMigration before preparing the database")
+func TestTaskErrorClassificationRequiresTypedMigrationSignal(t *testing.T) {
+	for _, message := range []string{
+		"generate one with GeneratePrismaMigration",
+		"generate a migration failed: disk full",
+		"needs new migration task: command not found",
+		"could not read migration_needed fixture",
+	} {
+		t.Run(message, func(t *testing.T) {
+			if got := classifyTaskError(context.Background(), errors.New(message)); got != api.StateFailed {
+				t.Fatalf("ordinary task error was reclassified from its wording: got %q, want %q", got, api.StateFailed)
+			}
+		})
+	}
+
+	err := fmt.Errorf("prepare database: %w", testMigrationNeededError{message: "schema changed"})
 	if got := classifyTaskError(context.Background(), err); got != api.StateMigrationNeeded {
-		t.Fatalf("expected migration-needed state from Prisma guard message, got %q", got)
+		t.Fatalf("wrapped typed migration error = %q, want %q", got, api.StateMigrationNeeded)
 	}
 }
 
@@ -793,17 +807,20 @@ func TestRunInteractiveTaskAnswersViaInstanceFiles(t *testing.T) {
 			if evt.Type != api.EventInteractionReq {
 				continue
 			}
-			answer := "y"
+			yes := true
+			answer := api.PromptAnswer{RunID: evt.RunID, Task: evt.Task, AttemptID: evt.AttemptID, PromptID: evt.PromptID, Confirm: &yes}
 			if evt.PromptKind == string(process.PromptText) {
-				answer = "Ada"
+				text := "Ada"
+				answer.Confirm = nil
+				answer.Text = &text
 			}
-			if err := instance.WriteInteractionAnswer(worktree, evt.InstanceID, evt.PromptID, answer); err != nil {
+			if err := instance.RespondPrompt(context.Background(), worktree, evt.InstanceID, answer); err != nil {
 				t.Errorf("write interaction answer: %v", err)
 				return
 			}
 		}
 	}()
-	outcome, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI})
+	outcome, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI, Headless: api.HeadlessWait})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -811,7 +828,7 @@ func TestRunInteractiveTaskAnswersViaInstanceFiles(t *testing.T) {
 		t.Fatalf("expected success, got %+v", outcome.Result)
 	}
 	waitFor(t, 3*time.Second, func() bool {
-		lines, err := os.ReadFile(instance.LogPath(worktree, outcome.Instance.ID, "prompt"))
+		lines, err := os.ReadFile(outcome.Result.Nodes[0].LogPath)
 		return err == nil && string(lines) != "" && strings.Contains(string(lines), "Hello, Ada")
 	})
 }
@@ -1585,11 +1602,6 @@ type watchServiceChainProject struct {
 	uiRuns    atomic.Int32
 }
 
-type watchGeneratedOutputProject struct {
-	bundleRuns  atomic.Int32
-	serviceRuns atomic.Int32
-}
-
 func (p *watchServiceChainProject) Name() string { return "watch-service-chain-project" }
 
 func (p *watchServiceChainProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
@@ -2083,69 +2095,17 @@ func TestWatchRunRestartsRestartAlwaysServiceOnAnyTargetChange(t *testing.T) {
 	}
 }
 
-func (p *watchGeneratedOutputProject) Name() string { return "watch-generated-output-project" }
-
-func (p *watchGeneratedOutputProject) ConfigureInstance(ctx context.Context, worktree string) (project.InstanceConfig, error) {
-	_ = ctx
-	_ = worktree
-	return project.InstanceConfig{Label: "watch-generated"}, nil
-}
-
-func (p *watchGeneratedOutputProject) Targets() []project.Target {
-	return []project.Target{{Name: "dev", RootTasks: []string{"svc"}}}
-}
-
-func (p *watchGeneratedOutputProject) Tasks() []project.Task {
-	return []project.Task{
-		{
-			Name:      "bundle",
-			Kind:      project.KindOnce,
-			Cache:     true,
-			Inputs:    project.Inputs{Files: []string{"src.txt"}},
-			Outputs:   project.Outputs{Files: []string{"generated/out.txt"}},
-			Signature: "watch-generated-bundle-v1",
-			Run: func(ctx context.Context, rt *project.Runtime) error {
-				_ = ctx
-				p.bundleRuns.Add(1)
-				data, err := os.ReadFile(filepath.Join(rt.Worktree, "src.txt"))
-				if err != nil {
-					return err
-				}
-				if err := os.MkdirAll(filepath.Join(rt.Worktree, "generated"), 0o755); err != nil {
-					return err
-				}
-				return os.WriteFile(filepath.Join(rt.Worktree, "generated", "out.txt"), data, 0o644)
-			},
-		},
-		{
-			Name:      "svc",
-			Kind:      project.KindService,
-			Deps:      []string{"bundle"},
-			Inputs:    project.Inputs{Dirs: []string{"generated"}},
-			Restart:   project.RestartOnInputChange,
-			Signature: "watch-generated-svc-v1",
-			Run: func(ctx context.Context, rt *project.Runtime) error {
-				p.serviceRuns.Add(1)
-				_, err := rt.StartServiceSpec(ctx, testServiceSpec(rt))
-				return err
-			},
-		},
-	}
-}
-
-func TestWatchOutputSuppressorFiltersOutputFilesAndDirs(t *testing.T) {
-	g, err := graph.New((&watchGeneratedOutputProject{}).Tasks(), []project.Target{{Name: "dev", RootTasks: []string{"svc"}}})
-	if err != nil {
+func TestWatchOutputsFilterKeepsSiblingSourceChanges(t *testing.T) {
+	root := t.TempDir()
+	finish := beginWatchOutputs(context.Background(), root, project.Outputs{Files: []string{"generated/out.txt"}})
+	if err := os.MkdirAll(filepath.Join(root, "generated"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	suppressor := watchOutputSuppressor{
-		files: map[string]time.Time{},
-		dirs:  map[string]time.Time{},
+	if err := os.WriteFile(filepath.Join(root, "generated", "out.txt"), []byte("generated"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	suppressor.Record(g, []string{"bundle"}, time.Minute)
-
-	filtered := suppressor.Filter([]string{"generated/out.txt", "generated", "src.txt"})
-	if got := strings.Join(filtered, ","); got != "src.txt" {
+	filtered := filterProducedWatchOutputs(root, []string{"generated/out.txt", "generated", "generated/source.txt", "src.txt"}, []watchOutputEvidence{finish()})
+	if got := strings.Join(filtered, ","); got != "generated/source.txt,src.txt" {
 		t.Fatalf("unexpected filtered files %q", got)
 	}
 }
@@ -3052,7 +3012,7 @@ func main() {
 	if err != nil {
 		logPath := ""
 		if out != nil {
-			logPath = instance.LogPath(worktree, out.Instance.ID, "api_debug")
+			logPath = out.Result.Nodes[0].LogPath
 		}
 		t.Fatalf("real dlv debug run failed: %v\nlog:\n%s", err, readFileForFailure(logPath))
 	}
@@ -3147,7 +3107,11 @@ func TestGoDebugServiceWatchRestartsRealDelveAfterSourceEdit(t *testing.T) {
 	if apiPort == 0 {
 		t.Fatalf("expected api port to be allocated: %+v", inst.Ports)
 	}
-	logPath := instance.LogPath(worktree, instanceID, "api_debug")
+	initialStatus, err := instance.LoadStatus(worktree, instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := initialStatus.Nodes["api_debug"].LogPath
 	failIfWatchExited(t, watchDone, watchError, worktree, instanceID)
 
 	var firstPID int

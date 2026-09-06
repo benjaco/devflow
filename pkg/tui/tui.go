@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -36,8 +37,9 @@ type Options struct {
 type snapshot struct {
 	instance     *api.Instance
 	state        *instance.State
+	prompts      []api.Prompt
 	nodes        []api.NodeStatus
-	supervisor   *api.SupervisorStatus
+	daemon       *api.DaemonStatus
 	urls         map[string]string
 	logTitle     string
 	logPath      string
@@ -56,9 +58,9 @@ type snapshot struct {
 type logSourceKind string
 
 const (
-	logSourceTask       logSourceKind = "task"
-	logSourceSupervisor logSourceKind = "supervisor"
-	logSourceDatabase   logSourceKind = "database"
+	logSourceTask     logSourceKind = "task"
+	logSourceDaemon   logSourceKind = "daemon"
+	logSourceDatabase logSourceKind = "database"
 )
 
 // logSource contains only durable identity. Paths and snapshot metadata are
@@ -106,7 +108,7 @@ type dashboard struct {
 	content           *tview.Flex
 	layout            *tview.Flex
 	tooSmall          *tview.TextView
-	showSupervisorLog bool
+	showDaemonLog     bool
 	showDatabasePanel bool
 	selectedName      string
 	allNodes          []api.NodeStatus
@@ -155,7 +157,7 @@ const (
 const (
 	fallbackRefreshInterval = 2 * time.Second
 	databasePanelTitle      = "database / prisma"
-	supervisorLogTitle      = "supervisor log"
+	daemonLogTitle          = "daemon log"
 )
 
 var callDaemonForTUI = func(ctx context.Context, root string, req daemon.Request, onEvent func(api.Event)) (daemon.Response, error) {
@@ -583,7 +585,7 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 		d.toggleDatabasePanel()
 		return nil
 	case tcell.KeyF3:
-		d.toggleSupervisorLog()
+		d.toggleDaemonLog()
 		return nil
 	case tcell.KeyF4:
 		d.openPrismaMigrationPrompt()
@@ -646,7 +648,7 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 			_ = d.refresh()
 			return nil
 		case 'l':
-			d.toggleSupervisorLog()
+			d.toggleDaemonLog()
 			return nil
 		case 'd':
 			d.toggleDatabasePanel()
@@ -730,7 +732,7 @@ func (d *dashboard) openHelp() {
 			"[yellow]Navigation[-]  Tab changes pane; j/k or arrows move in the focused pane.",
 			"[yellow]Logs[-]        running logs open at the tail; Page Up/up pauses; End/f resumes; o loads older retained lines.",
 			"[yellow]Actions[-]     i reruns the selected scope immediately; t previews retarget scope; m creates a migration.",
-			"[yellow]Views[-]       l switches task/supervisor log; d opens database details.",
+			"[yellow]Views[-]       l switches task/daemon log; d opens database details.",
 			"[yellow]Quit[-]        q or Escape closes the UI; a pre-existing detached run remains active.",
 			"",
 			"Press Escape, ? or q to close help.",
@@ -750,9 +752,9 @@ func (d *dashboard) closeHelp() {
 	d.renderFooter()
 }
 
-func (d *dashboard) toggleSupervisorLog() {
-	d.showSupervisorLog = !d.showSupervisorLog
-	if d.showSupervisorLog {
+func (d *dashboard) toggleDaemonLog() {
+	d.showDaemonLog = !d.showDaemonLog
+	if d.showDaemonLog {
 		d.showDatabasePanel = false
 	}
 	d.updateLogs()
@@ -761,7 +763,7 @@ func (d *dashboard) toggleSupervisorLog() {
 func (d *dashboard) toggleDatabasePanel() {
 	d.showDatabasePanel = !d.showDatabasePanel
 	if d.showDatabasePanel {
-		d.showSupervisorLog = false
+		d.showDaemonLog = false
 	}
 	d.updateLogs()
 }
@@ -798,7 +800,7 @@ func (d *dashboard) selectTaskSource(name string) bool {
 
 func (d *dashboard) refresh() error {
 	requestedSelection := d.selectedName
-	snap, err := loadSnapshotWithLogLimit(d.root, d.instanceID, d.showSupervisorLog, d.showDatabasePanel, d.selectedName, d.logLineLimit)
+	snap, err := loadSnapshotWithLogLimit(d.root, d.instanceID, d.showDaemonLog, d.showDatabasePanel, d.selectedName, d.logLineLimit)
 	if err != nil {
 		d.header.SetText(fmt.Sprintf("[red]failed to load instance state: %v", err))
 		return err
@@ -809,7 +811,7 @@ func (d *dashboard) refresh() error {
 	d.header.SetText(strings.Join(renderHeader(snap), "\n"))
 	d.renderTasks(snap.nodes)
 	d.reconcileSelection()
-	if !d.showSupervisorLog && !d.showDatabasePanel && d.selectedName != requestedSelection {
+	if !d.showDaemonLog && !d.showDatabasePanel && d.selectedName != requestedSelection {
 		selectedSnap, reloadErr := loadSnapshotWithLogLimit(d.root, d.instanceID, false, false, d.selectedName, d.logLineLimit)
 		if reloadErr == nil {
 			selectedSnap.nodes = d.currentNodes
@@ -817,6 +819,7 @@ func (d *dashboard) refresh() error {
 		}
 	}
 	d.updateLogsFromSnapshot(snap)
+	d.reconcilePrompts(snap)
 	d.renderFooter()
 	return nil
 }
@@ -904,7 +907,7 @@ func (d *dashboard) reconcileSelection() {
 }
 
 func (d *dashboard) updateLogs() {
-	snap, err := loadSnapshotWithLogLimit(d.root, d.instanceID, d.showSupervisorLog, d.showDatabasePanel, d.selectedName, d.logLineLimit)
+	snap, err := loadSnapshotWithLogLimit(d.root, d.instanceID, d.showDaemonLog, d.showDatabasePanel, d.selectedName, d.logLineLimit)
 	if err != nil {
 		d.logs.SetTitle(" Logs ")
 		d.logs.SetText(fmt.Sprintf("failed to load logs: %v", err))
@@ -954,8 +957,8 @@ func (d *dashboard) logSourceForSnapshot(snap snapshot) logSource {
 	case d.showDatabasePanel || snap.logTitle == databasePanelTitle:
 		source.kind = logSourceDatabase
 		source.task = ""
-	case d.showSupervisorLog || snap.logTitle == supervisorLogTitle:
-		source.kind = logSourceSupervisor
+	case d.showDaemonLog || snap.logTitle == daemonLogTitle:
+		source.kind = logSourceDaemon
 		source.task = ""
 	case source.task == "":
 		if selected := findSelectedNode(snap.nodes, ""); selected != nil {
@@ -1013,7 +1016,7 @@ func (d *dashboard) preserveTransientLogSnapshot(snap snapshot, source logSource
 }
 
 func transientEmptyLogAllowed(snap snapshot, source logSource) bool {
-	if source.kind == logSourceSupervisor {
+	if source.kind == logSourceDaemon {
 		return true
 	}
 	if source.kind != logSourceTask {
@@ -1114,7 +1117,7 @@ func (d *dashboard) loadOlderLogContent() {
 		return
 	}
 	d.setStatus(fmt.Sprintf("[yellow]loading up to %d retained log lines...", nextLimit))
-	snap, err := loadSnapshotWithLogLimit(d.root, d.instanceID, d.showSupervisorLog, d.showDatabasePanel, d.selectedName, nextLimit)
+	snap, err := loadSnapshotWithLogLimit(d.root, d.instanceID, d.showDaemonLog, d.showDatabasePanel, d.selectedName, nextLimit)
 	if err != nil {
 		d.setStatus(fmt.Sprintf("[red]failed to load older log content: %v", err))
 		return
@@ -1209,7 +1212,7 @@ func (d *dashboard) renderFooter() {
 		return
 	}
 	d.footer.SetText("? help  Tab focus  q quit  j/k/arrows move  Home/End contextual  f follow  o older\n" +
-		"l task/supervisor log  d db  a attention  m migration  i rerun  t retarget\n" + timestamp + status)
+		"l task/daemon log  d db  a attention  m migration  i rerun  t retarget\n" + timestamp + status)
 }
 
 func (d *dashboard) openPrismaMigrationPrompt() {
@@ -1300,7 +1303,7 @@ func (d *dashboard) triggerGeneratePrismaMigration(name string) {
 		d.app.QueueUpdateDraw(func() {
 			d.busy = false
 			d.showDatabasePanel = true
-			d.showSupervisorLog = false
+			d.showDaemonLog = false
 			if err != nil {
 				d.setStatus(fmt.Sprintf("[red]migration failed: %v", err))
 				_ = d.refresh()
@@ -1584,11 +1587,11 @@ func lifecycleList(values []string) string {
 	return strings.Join(values, ", ")
 }
 
-func loadSnapshot(root, instanceID string, showSupervisor bool, showDatabase bool, selectedName string) (snapshot, error) {
-	return loadSnapshotWithLogLimit(root, instanceID, showSupervisor, showDatabase, selectedName, 200)
+func loadSnapshot(root, instanceID string, showDaemon bool, showDatabase bool, selectedName string) (snapshot, error) {
+	return loadSnapshotWithLogLimit(root, instanceID, showDaemon, showDatabase, selectedName, 200)
 }
 
-func loadSnapshotWithLogLimit(root, instanceID string, showSupervisor bool, showDatabase bool, selectedName string, logLineLimit int) (snapshot, error) {
+func loadSnapshotWithLogLimit(root, instanceID string, showDaemon bool, showDatabase bool, selectedName string, logLineLimit int) (snapshot, error) {
 	inst, err := instance.Load(root, instanceID)
 	if err != nil {
 		return snapshot{}, err
@@ -1610,15 +1613,9 @@ func loadSnapshotWithLogLimit(root, instanceID string, showSupervisor bool, show
 	if state.Mode == "" && inst.LastRun.Mode != "" {
 		state.Mode = inst.LastRun.Mode
 	}
-	supervisor := supervisorStatus(inst)
-	if supervisor != nil && !supervisor.Alive {
-		if err := instance.ClearSupervisor(inst); err == nil {
-			_ = markAllStoppedNodes(root, instanceID)
-			inst, _ = instance.Load(root, instanceID)
-			state, _ = instance.LoadStatus(root, instanceID)
-			supervisor = supervisorStatus(inst)
-		}
-	}
+	// A daemon exit does not prove its resources stopped. Rendering preserves
+	// recovery evidence; only an explicit operation may reconcile ownership.
+	daemon := daemonStatus(inst)
 
 	var prisma []prismaSnapshotSummary
 	var prismaErr string
@@ -1656,12 +1653,12 @@ func loadSnapshotWithLogLimit(root, instanceID string, showSupervisor bool, show
 		logTitle = databasePanelTitle
 		logSource.kind = logSourceDatabase
 		logSource.task = ""
-	} else if showSupervisor {
-		logTitle = supervisorLogTitle
-		logSource.kind = logSourceSupervisor
+	} else if showDaemon {
+		logTitle = daemonLogTitle
+		logSource.kind = logSourceDaemon
 		logSource.task = ""
-		if supervisor != nil {
-			logPath = supervisor.LogPath
+		if daemon != nil {
+			logPath = daemon.LogPath
 		}
 	} else if selected != nil {
 		logTitle = selected.Name + " log"
@@ -1676,12 +1673,22 @@ func loadSnapshotWithLogLimit(root, instanceID string, showSupervisor bool, show
 		logLineLimit = 200
 	}
 	logInfo, _ := readLastLinesInfo(logPath, logLineLimit)
+	var prompts []api.Prompt
+	if state.RunID != "" {
+		promptCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		prompts, err = instance.ListPrompts(promptCtx, root, instanceID, state.RunID)
+		cancel()
+		if err != nil && !errors.Is(err, instance.ErrRunExpired) {
+			return snapshot{}, err
+		}
+	}
 
 	return snapshot{
 		instance:     inst,
 		state:        state,
+		prompts:      prompts,
 		nodes:        nodes,
-		supervisor:   supervisor,
+		daemon:       daemon,
 		urls:         instanceURLs(inst),
 		logTitle:     logTitle,
 		logPath:      logPath,
@@ -1761,13 +1768,13 @@ func renderHeader(snap snapshot) []string {
 		urlParts = append(urlParts, "no urls")
 	}
 
-	supervisorText := "supervisor: stopped"
-	if snap.supervisor != nil {
+	daemonText := "daemon: stopped"
+	if snap.daemon != nil {
 		state := "stopped"
-		if snap.supervisor.Alive {
+		if snap.daemon.Alive {
 			state = "running"
 		}
-		supervisorText = fmt.Sprintf("supervisor: %s pid=%d", state, snap.supervisor.PID)
+		daemonText = fmt.Sprintf("daemon: %s pid=%d", state, snap.daemon.PID)
 	}
 
 	counts := map[api.NodeState]int{}
@@ -1781,7 +1788,7 @@ func renderHeader(snap snapshot) []string {
 		fmt.Sprintf("[yellow]db[-]: %s host=%s port=%d container=%s", snap.instance.DB.Name, snap.instance.DB.Host, snap.instance.DB.Port, snap.instance.DB.ContainerName),
 		fmt.Sprintf("[yellow]urls[-]: %s", strings.Join(urlParts, "    ")),
 		fmt.Sprintf("[yellow]%s[-]    [yellow]states[-]: WAIT=%d START=%d RUN=%d READY=%d RSTR=%d CACHE=%d DONE=%d MIGR=%d FAIL=%d BLOCK=%d DEGR=%d CANC=%d STOP=%d",
-			supervisorText,
+			daemonText,
 			counts[api.StatePending]+counts[api.StateDirty],
 			counts[api.StateStarting],
 			counts[api.StateRunning],
@@ -1872,7 +1879,7 @@ func (d *dashboard) applyEvents(events []api.Event) {
 }
 
 func (d *dashboard) openPrompt(evt api.Event) {
-	if evt.PromptID == "" || evt.PromptID == d.activePromptID {
+	if evt.PromptID == "" || d.activePromptID != "" {
 		return
 	}
 	d.activePromptID = evt.PromptID
@@ -1884,15 +1891,14 @@ func (d *dashboard) openPrompt(evt api.Event) {
 			SetText(evt.Prompt).
 			AddButtons([]string{"Yes", "No"}).
 			SetDoneFunc(func(_ int, label string) {
-				answer := "n"
-				if label == "Yes" {
-					answer = "y"
-				}
-				if err := instance.WriteInteractionAnswer(d.root, d.instanceID, evt.PromptID, answer); err != nil {
+				answer := label == "Yes"
+				if err := instance.RespondPrompt(context.Background(), d.root, d.instanceID, api.PromptAnswer{
+					RunID: evt.RunID, Task: evt.Task, AttemptID: evt.AttemptID, PromptID: evt.PromptID, Confirm: &answer,
+				}); err != nil {
 					d.setStatus(fmt.Sprintf("[red]failed to answer prompt: %v", err))
 					return
 				}
-				d.setStatus(fmt.Sprintf("[yellow]answered %s with %s", evt.Task, answer))
+				d.setStatus(fmt.Sprintf("[yellow]answered %s prompt", evt.Task))
 				d.closePrompt()
 			})
 		d.pages.AddPage("prompt", modal, true, true)
@@ -1906,19 +1912,55 @@ func (d *dashboard) openPrompt(evt api.Event) {
 					return
 				}
 				value := input.GetText()
-				if err := instance.WriteInteractionAnswer(d.root, d.instanceID, evt.PromptID, value); err != nil {
+				if err := instance.RespondPrompt(context.Background(), d.root, d.instanceID, api.PromptAnswer{
+					RunID: evt.RunID, Task: evt.Task, AttemptID: evt.AttemptID, PromptID: evt.PromptID, Text: &value,
+				}); err != nil {
 					d.setStatus(fmt.Sprintf("[red]failed to answer prompt: %v", err))
 					return
 				}
 				d.setStatus(fmt.Sprintf("[yellow]answered %s prompt", evt.Task))
 				d.closePrompt()
 			})
+		if evt.PromptSecret {
+			input.SetMaskCharacter('•')
+		}
 		frame := tview.NewFrame(input).
 			SetBorders(1, 1, 1, 1, 1, 1).
 			AddText("Interactive Prompt", true, tview.AlignCenter, tcell.ColorWhite)
 		d.pages.AddPage("prompt", centered(frame, 80, 7), true, true)
 		d.app.SetFocus(input)
 	}
+}
+
+func (d *dashboard) reconcilePrompts(snap snapshot) {
+	if snap.state == nil || snap.state.RunID == "" {
+		return
+	}
+	var first *api.Prompt
+	for i := range snap.prompts {
+		prompt := &snap.prompts[i]
+		if prompt.State != api.PromptPending {
+			continue
+		}
+		if prompt.ID == d.activePromptID {
+			return
+		}
+		if first == nil {
+			first = prompt
+		}
+	}
+	if d.activePromptID != "" {
+		d.closePrompt()
+	}
+	if first == nil || d.activeInput {
+		return
+	}
+	// Events are advisory. Persisted pending metadata restores prompts after
+	// reconnect and queues parallel requests without replacing an open dialog.
+	d.openPrompt(api.Event{
+		RunID: first.RunID, Task: first.Task, AttemptID: first.AttemptID,
+		PromptID: first.ID, PromptKind: first.Kind, Prompt: first.Message, PromptSecret: first.Secret,
+	})
 }
 
 func (d *dashboard) closePrompt() {
@@ -1957,8 +1999,8 @@ func renderLogPanel(snap snapshot, selectedName string) []string {
 		return renderDatabasePanel(snap)
 	}
 	lines := []string{}
-	if snap.logTitle == supervisorLogTitle {
-		lines = append(lines, "selected: supervisor")
+	if snap.logTitle == daemonLogTitle {
+		lines = append(lines, "selected: daemon")
 	} else if node := findSelectedNode(snap.nodes, selectedName); node != nil {
 		lines = append(lines, fmt.Sprintf("selected: %s    kind=%s    state=%s", node.Name, node.Kind, node.State))
 		if node.PID > 0 {
@@ -2194,6 +2236,8 @@ func generatePrismaMigrationFromTUI(root, instanceID, name string, progressFns .
 	defer cancel()
 	_, err := callDaemonForTUI(ctx, root, daemon.Request{
 		Action:       daemon.ActionRunAction,
+		Headless:     api.HeadlessWait,
+		TimeoutMs:    (10 * time.Minute).Milliseconds(),
 		ActionKind:   database.ActionMigrationCreate,
 		StreamEvents: true,
 		Inputs: map[string]string{
@@ -2425,16 +2469,15 @@ func truncateTUILogLine(value string, maxBytes int) string {
 	return value
 }
 
-func supervisorStatus(inst *api.Instance) *api.SupervisorStatus {
-	if inst == nil || inst.Supervisor.PID <= 0 {
+func daemonStatus(inst *api.Instance) *api.DaemonStatus {
+	if inst == nil || inst.Daemon.PID <= 0 {
 		return nil
 	}
-	return &api.SupervisorStatus{
-		PID:       inst.Supervisor.PID,
-		ExecPID:   inst.Supervisor.ExecPID,
-		Alive:     instance.ProcessAlive(inst.Supervisor.PID),
-		StartedAt: inst.Supervisor.StartedAt,
-		LogPath:   inst.Supervisor.LogPath,
+	return &api.DaemonStatus{
+		PID:       inst.Daemon.PID,
+		Alive:     instance.ProcessAlive(inst.Daemon.PID),
+		StartedAt: inst.Daemon.StartedAt,
+		LogPath:   inst.Daemon.LogPath,
 	}
 }
 
@@ -2461,28 +2504,12 @@ func stringSliceContains(items []string, want string) bool {
 	return false
 }
 
-func markAllStoppedNodes(worktree, instanceID string) error {
-	state, err := instance.LoadStatus(worktree, instanceID)
-	if err != nil {
-		return nil
-	}
-	for name, node := range state.Nodes {
-		switch node.State {
-		case api.StatePending, api.StateReady, api.StateRunning, api.StateDirty:
-			node.State = api.StateStopped
-			node.PID = 0
-			state.Nodes[name] = node
-		}
-	}
-	return instance.SaveStatus(worktree, instanceID, state.Target, state.Mode, state.Nodes)
-}
-
 func invalidateAndRerunDownstream(root, instanceID, task string, onTransition func()) error {
 	_ = instanceID
 	if onTransition != nil {
 		onTransition()
 	}
-	_, err := callDaemonForTUI(context.Background(), root, daemon.Request{Action: daemon.ActionInvalidate, Task: task}, nil)
+	_, err := callDaemonForTUI(context.Background(), root, daemon.Request{Action: daemon.ActionInvalidate, Task: task, Headless: api.HeadlessWait}, nil)
 	return err
 }
 
@@ -2500,7 +2527,7 @@ func previewLifecycleForTUI(root string, req daemon.Request) (api.LifecyclePlan,
 
 func retargetAndRelaunch(root, instanceID, task string) error {
 	_ = instanceID
-	_, err := callDaemonForTUI(context.Background(), root, daemon.Request{Action: daemon.ActionRetarget, Target: task}, nil)
+	_, err := callDaemonForTUI(context.Background(), root, daemon.Request{Action: daemon.ActionRetarget, Target: task, Headless: api.HeadlessWait}, nil)
 	return err
 }
 

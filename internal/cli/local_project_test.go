@@ -19,7 +19,15 @@ func TestLocalProjectSourceFilesDiscoversOnlyAdapterSources(t *testing.T) {
 	writeTestFile(t, filepath.Join(worktree, "devflow_z.go"), "package main\n")
 	writeTestFile(t, filepath.Join(worktree, "devflow_a.go"), "package main\n")
 	writeTestFile(t, filepath.Join(worktree, "devflow_watch_test.go"), "not valid Go on purpose\n")
+	writeTestFile(t, filepath.Join(worktree, "devflow.project_test.go"), "not valid Go on purpose\n")
 	writeTestFile(t, filepath.Join(worktree, "backend.go"), "not valid Go on purpose\n")
+	for _, name := range []string{"nested", "devflow_nested"} {
+		if err := os.Mkdir(filepath.Join(worktree, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTestFile(t, filepath.Join(worktree, "nested", "devflow.project.go"), "not valid Go on purpose\n")
+	writeTestFile(t, filepath.Join(worktree, "devflow_nested", "tasks.go"), "not valid Go on purpose\n")
 
 	got, err := localProjectSourceFiles(projectPath)
 	if err != nil {
@@ -51,13 +59,13 @@ func TestLocalProjectDetectionRequiresEntrypointMarker(t *testing.T) {
 	worktree := t.TempDir()
 	t.Chdir(worktree)
 	writeTestFile(t, filepath.Join(worktree, "devflow_shared.go"), "package main\n")
-	if shouldExecLocalProject([]string{"graph", "list"}) {
+	if shouldExecLocalProject([]string{"graph", "list"}, worktree) {
 		t.Fatal("companion file alone activated local project bootstrap")
 	}
 	if err := os.Mkdir(filepath.Join(worktree, localProjectFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if !shouldExecLocalProject([]string{"graph", "list"}) {
+	if !shouldExecLocalProject([]string{"graph", "list"}, worktree) {
 		t.Fatal("non-regular entrypoint marker bypassed source validation")
 	}
 }

@@ -452,7 +452,7 @@ func TestPostgresDumpSourcePolicyFailsWhenPgDumpFails(t *testing.T) {
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	ciJSON, marshalErr := json.Marshal(api.RunResult{Error: err.Error()})
+	ciJSON, marshalErr := json.Marshal(api.RunResult{Error: &api.CommandError{Code: "task_failed", Phase: "execution", Message: err.Error()}})
 	if marshalErr != nil {
 		t.Fatal(marshalErr)
 	}

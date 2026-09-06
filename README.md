@@ -6,7 +6,7 @@ It gives a project a small Go-defined task graph with:
 - cached one-shot tasks
 - supervised long-running services
 - service readiness checks
-- detached watch/dev supervisors
+- daemon-owned detached watch/dev execution
 - file-change cascades through the task graph
 - sandboxed input/output and exhaustive valid-order pipeline validation
 - `devflow flush --json` as an AI readiness gate
@@ -48,6 +48,8 @@ go install github.com/benjaco/devflow/cmd/devflow@latest
 ```
 
 There are no release binaries, npm package, Homebrew tap, or installer scripts yet.
+
+After a successful installation, `devflow upgrade` clears the global task artifact cache so subsequent runs rebuild with the installed code. Failed installation leaves the cache intact. Devflow maintains the current API and worktree state model without migration code for older versions.
 
 ## Getting Started
 

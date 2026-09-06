@@ -8,6 +8,8 @@ import (
 	"sort"
 
 	"github.com/benjaco/devflow/pkg/process"
+
+	"github.com/benjaco/devflow/internal/clierror"
 )
 
 type RequiredCLIProvider interface {
@@ -20,15 +22,6 @@ type RequiredCLI struct {
 	Description string
 	Install     map[string]InstallScript
 }
-
-// DependencyProvider is kept for compatibility with early adapters.
-// New adapters should implement RequiredCLIProvider instead.
-type DependencyProvider interface {
-	Dependencies() []Dependency
-}
-
-// Dependency is a compatibility alias for RequiredCLI.
-type Dependency = RequiredCLI
 
 type InstallScript struct {
 	Shell  string
@@ -44,15 +37,11 @@ type RequiredCLIStatus struct {
 	Platform    string `json:"platform,omitempty"`
 }
 
-type DependencyStatus = RequiredCLIStatus
-
 type RequiredCLIInstallResult struct {
 	Installed      []string `json:"installed"`
 	AlreadyPresent []string `json:"alreadyPresent"`
 	MissingInstall []string `json:"missingInstall"`
 }
-
-type DependencyInstallResult = RequiredCLIInstallResult
 
 func RequiredCLIsFor(p Project) []RequiredCLI {
 	if provider, ok := p.(RequiredCLIProvider); ok {
@@ -60,22 +49,13 @@ func RequiredCLIsFor(p Project) []RequiredCLI {
 		sort.Slice(clis, func(i, j int) bool { return clis[i].Name < clis[j].Name })
 		return clis
 	}
-	if provider, ok := p.(DependencyProvider); ok {
-		clis := append([]RequiredCLI(nil), provider.Dependencies()...)
-		sort.Slice(clis, func(i, j int) bool { return clis[i].Name < clis[j].Name })
-		return clis
-	}
 	return nil
-}
-
-func DependenciesFor(p Project) []Dependency {
-	return RequiredCLIsFor(p)
 }
 
 func RequiredCLIsForTarget(p Project, target string) ([]RequiredCLI, error) {
 	targetDef, ok := targetByName(p.Targets(), target)
 	if !ok {
-		return nil, fmt.Errorf("unknown target %q", target)
+		return nil, clierror.Wrap(fmt.Errorf("unknown target %q", target), "unknown_target", "resolution")
 	}
 	catalog := RequiredCLIsFor(p)
 	index := requiredCLIIndex(catalog)
@@ -133,20 +113,12 @@ func RequiredCLIsForTarget(p Project, target string) ([]RequiredCLI, error) {
 	return sortedRequiredCLIs(selected), nil
 }
 
-func DependenciesForTarget(p Project, target string) ([]Dependency, error) {
-	return RequiredCLIsForTarget(p, target)
-}
-
 func CheckRequiredCLIs(clis []RequiredCLI) []RequiredCLIStatus {
 	statuses := make([]RequiredCLIStatus, 0, len(clis))
 	for _, cli := range clis {
 		statuses = append(statuses, CheckRequiredCLI(cli))
 	}
 	return statuses
-}
-
-func CheckDependencies(deps []Dependency) []DependencyStatus {
-	return CheckRequiredCLIs(deps)
 }
 
 func CheckRequiredCLI(cli RequiredCLI) RequiredCLIStatus {
@@ -160,10 +132,6 @@ func CheckRequiredCLI(cli RequiredCLI) RequiredCLIStatus {
 		Installable: ok && script.Script != "",
 		Platform:    runtime.GOOS,
 	}
-}
-
-func CheckDependency(dep Dependency) DependencyStatus {
-	return CheckRequiredCLI(dep)
 }
 
 func InstallMissingRequiredCLIs(ctx context.Context, workdir string, clis []RequiredCLI, onLine func(string, string)) (RequiredCLIInstallResult, error) {
@@ -202,10 +170,6 @@ func InstallMissingRequiredCLIs(ctx context.Context, workdir string, clis []Requ
 	return result, nil
 }
 
-func InstallMissingDependencies(ctx context.Context, workdir string, deps []Dependency, onLine func(string, string)) (DependencyInstallResult, error) {
-	return InstallMissingRequiredCLIs(ctx, workdir, deps, onLine)
-}
-
 func EnsureRequiredCLIExists(cli RequiredCLI) error {
 	if _, err := exec.LookPath(cli.Command); err != nil {
 		status := CheckRequiredCLI(cli)
@@ -215,10 +179,6 @@ func EnsureRequiredCLIExists(cli RequiredCLI) error {
 		return fmt.Errorf("required CLI %q not found: %w", cli.Command, err)
 	}
 	return nil
-}
-
-func EnsureDependencyExists(dep Dependency) error {
-	return EnsureRequiredCLIExists(dep)
 }
 
 func EnsureRequiredCLIs(clis []RequiredCLI, names ...string) error {
@@ -233,10 +193,6 @@ func EnsureRequiredCLIs(clis []RequiredCLI, names ...string) error {
 		}
 	}
 	return nil
-}
-
-func EnsureDependencies(deps []Dependency, names ...string) error {
-	return EnsureRequiredCLIs(deps, names...)
 }
 
 func targetByName(targets []Target, name string) (Target, bool) {

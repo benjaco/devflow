@@ -4,20 +4,25 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/benjaco/devflow/internal/clierror"
+	"github.com/benjaco/devflow/internal/execution"
+	"github.com/benjaco/devflow/internal/executionconflict"
+	"github.com/benjaco/devflow/internal/executionstate"
+	"github.com/benjaco/devflow/internal/fsutil"
+	"github.com/benjaco/devflow/internal/logstream"
 	"github.com/benjaco/devflow/internal/reporepair"
 	"github.com/benjaco/devflow/internal/version"
 	"github.com/benjaco/devflow/pkg/api"
@@ -27,24 +32,33 @@ import (
 	"github.com/benjaco/devflow/pkg/engine"
 	"github.com/benjaco/devflow/pkg/graph"
 	"github.com/benjaco/devflow/pkg/instance"
+	"github.com/benjaco/devflow/pkg/process"
 	"github.com/benjaco/devflow/pkg/project"
 	"github.com/benjaco/devflow/pkg/tui"
 	"github.com/benjaco/devflow/pkg/validation"
 )
 
 type App struct {
-	Stdout io.Writer
-	Stderr io.Writer
+	localChildOwnsExecution bool
+	Stdin                   io.Reader
+	Stdout                  io.Writer
+	Stderr                  io.Writer
+	Context                 context.Context
+	discoverFlags           bool
+	flagSet                 *flag.FlagSet
+	jsonOutput              bool
+	jsonStream              bool
+	outputFailed            bool
+	result                  any
+	details                 string
+	progress                string
 }
 
 func New() *App {
-	return &App{Stdout: os.Stdout, Stderr: os.Stderr}
+	return &App{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
 }
 
-func (a *App) Run(args []string) error {
-	if shouldExecLocalProject(args) {
-		return a.execLocalProject(args)
-	}
+func (a *App) dispatch(args []string) error {
 	if len(args) == 0 {
 		return a.defaultEntry()
 	}
@@ -63,6 +77,10 @@ func (a *App) Run(args []string) error {
 		return a.actionCmd(args[1:])
 	case "migration":
 		return a.migrationCmd(args[1:])
+	case "runs":
+		return a.runsCmd(args[1:])
+	case "prompts":
+		return a.promptsCmd(args[1:])
 	case "status":
 		return a.statusCmd(args[1:])
 	case "logs":
@@ -71,10 +89,12 @@ func (a *App) Run(args []string) error {
 		return a.instancesCmd(args[1:])
 	case "doctor":
 		return a.doctorCmd(args[1:])
-	case "deps", "clis", "required-clis":
-		return a.depsCmd(args[1:])
+	case "clis":
+		return a.clisCmd(args[1:])
 	case "graph":
 		return a.graphCmd(args[1:])
+	case "plan":
+		return a.planCmd(args[1:])
 	case "validate":
 		return a.validateCmd(args[1:])
 	case "watch":
@@ -107,15 +127,16 @@ func (a *App) launchDefaultTUI(root string) error {
 	if err != nil {
 		return err
 	}
-	client, daemonStarted, err := daemon.Ensure(context.Background(), root, plan.projectName)
+	client, daemonStarted, err := daemon.Ensure(a.context(), root, plan.projectName)
 	if err != nil {
 		return err
 	}
-	if _, err := client.Call(context.Background(), daemon.Request{
-		Action:  daemon.ActionWatch,
-		Project: plan.projectName,
-		Target:  plan.target,
-		Detach:  true,
+	if _, err := client.Call(a.context(), daemon.Request{
+		Action:   daemon.ActionWatch,
+		Headless: api.HeadlessWait,
+		Project:  plan.projectName,
+		Target:   plan.target,
+		Detach:   true,
 	}); err != nil {
 		return err
 	}
@@ -124,10 +145,9 @@ func (a *App) launchDefaultTUI(root string) error {
 }
 
 type launchPlan struct {
-	projectName   string
-	target        string
-	instanceID    string
-	startDetached bool
+	projectName string
+	target      string
+	instanceID  string
 }
 
 func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
@@ -143,28 +163,18 @@ func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
 	if err != nil {
 		return launchPlan{}, err
 	}
-	plan := launchPlan{
+	// The daemon decides whether existing work can be reused when it admits
+	// ActionWatch; persisted status is not evidence of a live engine.
+	return launchPlan{
 		projectName: p.Name(),
 		target:      target,
 		instanceID:  instanceID,
-	}
-	inst, err := instance.Load(root, instanceID)
-	if err != nil {
-		if os.IsNotExist(err) {
-			plan.startDetached = true
-			return plan, nil
-		}
-		return launchPlan{}, err
-	}
-	if !instance.ProcessAlive(inst.Supervisor.PID) || inst.LastRun.Mode != api.ModeWatch || inst.LastRun.Target != target {
-		plan.startDetached = true
-	}
-	return plan, nil
+	}, nil
 }
 
 func (a *App) usage() error {
-	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|action|migration|cache|status|logs|instances|doctor|clis|graph|validate|tui|version|upgrade|docs>")
-	return flag.ErrHelp
+	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|action|migration|cache|status|logs|instances|doctor|clis|graph|plan|validate|tui|version|upgrade|docs>")
+	return clierror.Wrap(flag.ErrHelp, "invalid_arguments", "parsing")
 }
 
 func (a *App) validateCmd(args []string) error {
@@ -183,36 +193,38 @@ func (a *App) validateCmd(args []string) error {
 	maxListedPaths := fs.Int("max-listed-paths", validation.DefaultMaxListedPaths, "maximum paths listed per validation issue category")
 	maxOrders := validation.DefaultMaxOrders
 	fs.IntVar(&maxOrders, "max-orders", validation.DefaultMaxOrders, "maximum valid task orders to enumerate exhaustively")
-	fs.IntVar(&maxOrders, "max-permutations", validation.DefaultMaxOrders, "alias for --max-orders")
 	maxFiles := fs.Int64("max-files", validation.DefaultValidationMaxFiles, "validation-wide maximum files processed")
 	maxBytes := fs.Int64("max-bytes", validation.DefaultValidationMaxBytes, "validation-wide maximum logical bytes processed")
 	maxTemporaryBytes := fs.Int64("max-temporary-bytes", validation.DefaultValidationMaxTemp, "maximum validation-specific temporary logical bytes")
 	diskReserveBytes := fs.Int64("disk-reserve-bytes", validation.DefaultValidationDiskReserve, "free-space safety reserve retained during validation")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	if target == "" {
 		if fs.NArg() != 1 {
-			return fmt.Errorf("usage: devflow validate <target> [--mode artifacts|orders|all]")
+			return clierror.Wrap(fmt.Errorf("usage: devflow validate <target> [--mode artifacts|orders|all]"), "invalid_arguments", "parsing")
 		}
 		target = fs.Arg(0)
 	} else if fs.NArg() != 0 {
-		return fmt.Errorf("usage: devflow validate <target> [--mode artifacts|orders|all]")
+		return clierror.Wrap(fmt.Errorf("usage: devflow validate <target> [--mode artifacts|orders|all]"), "invalid_arguments", "parsing")
 	}
 	if maxOrders <= 0 {
-		return fmt.Errorf("--max-orders must be positive")
+		return clierror.Wrap(fmt.Errorf("--max-orders must be positive"), "invalid_arguments", "parsing")
 	}
 	if *maxListedPaths <= 0 {
-		return fmt.Errorf("--max-listed-paths must be positive")
+		return clierror.Wrap(fmt.Errorf("--max-listed-paths must be positive"), "invalid_arguments", "parsing")
 	}
 	if *maxFiles <= 0 || *maxBytes <= 0 || *maxTemporaryBytes <= 0 || *diskReserveBytes < 0 {
-		return fmt.Errorf("validation resource limits must be positive and --disk-reserve-bytes must not be negative")
+		return clierror.Wrap(fmt.Errorf("validation resource limits must be positive and --disk-reserve-bytes must not be negative"), "invalid_arguments", "parsing")
 	}
 	modeValue := api.ValidationMode(strings.ToLower(strings.TrimSpace(*mode)))
-	if modeValue == "permutations" {
-		modeValue = api.ValidationModeOrders
-	}
 	detailsValue := api.ValidationDetails(strings.ToLower(strings.TrimSpace(*details)))
+	if modeValue != api.ValidationModeAll && modeValue != api.ValidationModeArtifacts && modeValue != api.ValidationModeOrders {
+		return clierror.Wrap(fmt.Errorf("invalid validation mode %q", *mode), "invalid_arguments", "parsing")
+	}
+	if detailsValue != "" && detailsValue != api.ValidationDetailsSummary && detailsValue != api.ValidationDetailsIssues && detailsValue != api.ValidationDetailsFull {
+		return clierror.Wrap(fmt.Errorf("invalid validation details %q", *details), "invalid_arguments", "parsing")
+	}
 	if detailsValue == "" {
 		if *jsonOut {
 			detailsValue = api.ValidationDetailsIssues
@@ -236,8 +248,7 @@ func (a *App) validateCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	ctx := a.context()
 	result, err := validator.Run(ctx, validation.Request{
 		Target:                 resolvedTarget,
 		Worktree:               root,
@@ -257,7 +268,7 @@ func (a *App) validateCmd(args []string) error {
 		return err
 	}
 	if *jsonOut {
-		if err := writeJSON(a.Stdout, result); err != nil {
+		if err := a.writeResult(result); err != nil {
 			return err
 		}
 	} else {
@@ -275,7 +286,7 @@ func (a *App) validateCmd(args []string) error {
 		}
 	}
 	if !result.Success {
-		return validation.ErrValidationFailed
+		return clierror.Wrap(validation.ErrValidationFailed, "validation_failed", "execution")
 	}
 	return nil
 }
@@ -336,11 +347,12 @@ func (a *App) runCmd(args []string) error {
 	}
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
+	addResultFlags(fs)
 	jsonOut := fs.Bool("json", false, "(--json) emit stable JSON output")
 	worktree := fs.String("worktree", "", "project worktree path; defaults to the current directory")
 	modeWatch := fs.Bool("watch", false, "(--watch) run in watch mode; for detached automation prefer devflow watch <target> --detach plus devflow flush")
 	ciMode := fs.Bool("ci", false, "(--ci) run as a finite CI/readiness probe; service tasks start, pass readiness, then stop before returning")
-	detach := fs.Bool("detach", false, "(--detach) launch a detached supervisor and return after it starts; this is not a readiness gate")
+	detach := fs.Bool("detach", false, "(--detach) launch a detached daemon and return after it starts; this is not a readiness gate")
 	maxParallel := fs.Int("max-parallel", 0, "maximum parallel tasks; 0 uses the engine default")
 	cacheKeyManifest := fs.String("cache-key-manifest", "", "owner-only cache-key manifest created by devflow cache key --manifest-out")
 	commitChanges := fs.Bool("commit-changes", false, "after a successful finite CI run, atomically commit changes allowed by --commit-path")
@@ -351,43 +363,51 @@ func (a *App) runCmd(args []string) error {
 	failAfterCommit := fs.Bool("fail-after-commit", false, "(--fail-after-commit) return nonzero after a repository repair commit (and requested push) succeeds")
 	pedantic := fs.Bool("pedantic", false, "(--pedantic) treat CRLF/LF-only repository changes as commit-worthy in --commit-changes mode")
 	projectName := fs.String("project", defaultProject(), "registered project adapter name")
-	if err := fs.Parse(args); err != nil {
+	executionFlags := addExecutionFlags(fs)
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
+	}
+	opts, err := executionFlags.options()
+	if err != nil {
+		return err
+	}
+	if target != "" && fs.NArg() != 0 {
+		return clierror.Wrap(fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " ")), "invalid_arguments", "parsing")
 	}
 	if target == "" {
 		if fs.NArg() != 1 {
-			return fmt.Errorf("usage: devflow run <target>")
+			return clierror.Wrap(fmt.Errorf("usage: devflow run <target>"), "invalid_arguments", "parsing")
 		}
 		target = fs.Arg(0)
 	}
 	if target == "" {
-		return fmt.Errorf("usage: devflow run <target>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow run <target>"), "invalid_arguments", "parsing")
 	}
 	repairFlagsUsed := len(commitPaths) > 0 || *commitMessage != "" || *pushChanges || *failAfterCommit || *pedantic
 	if !*commitChanges && repairFlagsUsed {
-		return fmt.Errorf("--commit-path, --commit-message, --push, --fail-after-commit, and --pedantic require --commit-changes")
+		return clierror.Wrap(fmt.Errorf("--commit-path, --commit-message, --push, --fail-after-commit, and --pedantic require --commit-changes"), "invalid_arguments", "parsing")
 	}
 	var repairOptions *reporepair.Options
 	if *commitChanges {
 		if !*ciMode {
-			return fmt.Errorf("--commit-changes is supported only with run --ci")
+			return clierror.Wrap(fmt.Errorf("--commit-changes is supported only with run --ci"), "invalid_arguments", "parsing")
 		}
 		if len(commitPaths) == 0 {
-			return fmt.Errorf("--commit-changes requires at least one --commit-path")
+			return clierror.Wrap(fmt.Errorf("--commit-changes requires at least one --commit-path"), "invalid_arguments", "parsing")
 		}
 		for _, pathspec := range commitPaths {
 			if pathspec == "" {
-				return fmt.Errorf("--commit-path must not be empty")
+				return clierror.Wrap(fmt.Errorf("--commit-path must not be empty"), "invalid_arguments", "parsing")
 			}
 			if strings.IndexByte(pathspec, 0) >= 0 {
-				return fmt.Errorf("--commit-path must not contain NUL")
+				return clierror.Wrap(fmt.Errorf("--commit-path must not contain NUL"), "invalid_arguments", "parsing")
 			}
 		}
 		if strings.TrimSpace(*commitMessage) == "" {
-			return fmt.Errorf("--commit-changes requires a non-empty --commit-message")
+			return clierror.Wrap(fmt.Errorf("--commit-changes requires a non-empty --commit-message"), "invalid_arguments", "parsing")
 		}
 		if strings.IndexByte(*commitMessage, 0) >= 0 {
-			return fmt.Errorf("--commit-message must not contain NUL")
+			return clierror.Wrap(fmt.Errorf("--commit-message must not contain NUL"), "invalid_arguments", "parsing")
 		}
 		repairOptions = &reporepair.Options{
 			Pathspecs:       append([]string(nil), commitPaths...),
@@ -399,23 +419,23 @@ func (a *App) runCmd(args []string) error {
 	}
 	if *ciMode {
 		if *detach {
-			return fmt.Errorf("run --ci is finite and does not support --detach")
+			return clierror.Wrap(fmt.Errorf("run --ci is finite and does not support --detach"), "invalid_arguments", "parsing")
 		}
 		if *modeWatch {
-			return fmt.Errorf("run --ci is finite and does not support --watch")
+			return clierror.Wrap(fmt.Errorf("run --ci is finite and does not support --watch"), "invalid_arguments", "parsing")
 		}
-		return a.runDirect(target, *jsonOut, *worktree, *projectName, api.ModeCI, *maxParallel, *cacheKeyManifest, repairOptions)
+		return a.runDirect(target, *jsonOut, *worktree, *projectName, api.ModeCI, *maxParallel, *cacheKeyManifest, repairOptions, opts)
 	}
 	if *cacheKeyManifest != "" {
-		return fmt.Errorf("--cache-key-manifest is supported only with run --ci")
+		return clierror.Wrap(fmt.Errorf("--cache-key-manifest is supported only with run --ci"), "invalid_arguments", "parsing")
 	}
 	if *modeWatch {
-		return a.watchViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel)
+		return a.watchViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel, opts)
 	}
-	return a.runViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel)
+	return a.runViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel, opts)
 }
 
-func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName string, mode api.RunMode, maxParallel int, cacheKeyManifest string, repairOptions *reporepair.Options) error {
+func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName string, mode api.RunMode, maxParallel int, cacheKeyManifest string, repairOptions *reporepair.Options, opts executionOptions) (returnErr error) {
 	commandStarted := time.Now().UTC()
 	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
@@ -431,37 +451,104 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	}
 	var repairRunner *reporepair.Runner
 	if repairOptions != nil {
-		repairRunner = reporepair.New(root, *repairOptions, a.Stderr)
-		repositoryResult, preflightErr := repairRunner.Preflight(context.Background())
+		repairRunner = reporepair.New(root, *repairOptions, a.progressWriter())
+	}
+
+	eng, err := engine.New(execProject, root)
+	if err != nil {
+		err = clierror.Wrap(err, "invalid_graph", "resolution")
+		result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, err)
+		if repairRunner != nil {
+			repositoryResult := repairRunner.SkippedDAGFailure()
+			result.RepositoryChanges = &repositoryResult
+		}
+		if jsonOut {
+			if writeErr := a.writeResult(result); writeErr != nil {
+				return writeErr
+			}
+		}
+		return err
+	}
+	// The CLI owns the whole operation, including Git finalization after the DAG.
+	operationCtx := a.context()
+	if opts.Timeout > 0 {
+		var cancel context.CancelFunc
+		operationCtx, cancel = context.WithTimeout(operationCtx, opts.Timeout)
+		defer cancel()
+	}
+	id, _, err := instance.IDForWorktree(root)
+	if err != nil {
+		return err
+	}
+	record := &api.RunRecord{Project: execProject.Name(), Target: resolvedTarget, Mode: mode, OwnerPID: os.Getpid()}
+	record.Deadline, _ = operationCtx.Deadline()
+	if err := instance.CreateRun(root, id, record); err != nil {
+		return err
+	}
+	var retainedResult *api.RunResult
+	stopObservation := func() {}
+	defer func() {
+		defer stopObservation()
+		if retainedResult == nil {
+			result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, returnErr)
+			retainedResult = &result
+		}
+		retainedResult.RunID = record.RunID
+		if operationCtx.Err() != nil && returnErr == nil {
+			returnErr = operationCtx.Err()
+			retainedResult.Success = false
+			retainedResult.Error = clierror.Describe(returnErr, "task_failed", "execution")
+		}
+		if evidenceErr := completeDirectRun(root, retainedResult, returnErr); evidenceErr != nil {
+			returnErr = errors.Join(returnErr, evidenceErr)
+			retainedResult.Success = false
+			retainedResult.Error = clierror.Describe(returnErr, "evidence_write_failed", "execution")
+		}
+		if mode == api.ModeCI && jsonOut && a.progress != "quiet" {
+			_, _ = fmt.Fprintf(a.Stderr, "[devflow] run %s finished success=%t\n", retainedResult.Target, retainedResult.Success)
+		}
+		if jsonOut && !a.outputFailed {
+			returnErr = errors.Join(returnErr, a.writeResult(retainedResult))
+		} else if a.compactOutput() && !a.outputFailed {
+			returnErr = errors.Join(returnErr, writeExecutionView(a.Stdout, a.resultView(retainedResult).(*api.ExecutionView)))
+		} else if !jsonOut && !a.outputFailed {
+			// Human output must wait for the same evidence commit as JSON.
+			returnErr = errors.Join(returnErr, writeRunText(a.Stdout, retainedResult))
+		}
+	}()
+	observedCtx, observeCancel, err := instance.ObserveRunCancellation(operationCtx, root, id, record.RunID)
+	if err != nil {
+		return err
+	}
+	operationCtx, stopObservation = observedCtx, observeCancel
+	lease, err := executionstate.Acquire(root, execution.Owner{Target: resolvedTarget, Mode: string(mode), Kind: "ci"})
+	if err != nil {
+		if jsonOut {
+			if writeErr := a.writeResult(newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, err)); writeErr != nil {
+				return writeErr
+			}
+		}
+		return err
+	}
+	defer lease.Release()
+	runCtx := execution.ContextWithLease(operationCtx, lease)
+	if repairRunner != nil {
+		repositoryResult, preflightErr := repairRunner.Preflight(runCtx)
 		if preflightErr != nil {
 			result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, preflightErr)
 			result.RepositoryChanges = &repositoryResult
+			retainedResult = &result
 			if jsonOut {
-				if writeErr := writeJSON(a.Stdout, result); writeErr != nil {
+				if writeErr := a.writeResult(result); writeErr != nil {
 					return writeErr
 				}
 			}
 			return preflightErr
 		}
 	}
-	eng, err := engine.New(execProject, root)
-	if err != nil {
-		if repairRunner != nil {
-			repositoryResult := repairRunner.SkippedDAGFailure()
-			result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, err)
-			result.RepositoryChanges = &repositoryResult
-			if jsonOut {
-				if writeErr := writeJSON(a.Stdout, result); writeErr != nil {
-					return writeErr
-				}
-			}
-		}
-		return err
-	}
-	runCtx := context.Background()
 	progressCtx, stopProgress := context.WithCancel(context.Background())
 	var progressWG sync.WaitGroup
-	if mode == api.ModeCI && jsonOut {
+	if mode == api.ModeCI && jsonOut && a.progress != "quiet" {
 		// Subscribe synchronously so a fast run cannot publish run_started
 		// before the progress goroutine has been scheduled. Direct CI output is
 		// lossless because stderr is the only live execution record.
@@ -469,26 +556,32 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 		progressWG.Add(1)
 		go func() {
 			defer progressWG.Done()
-			streamCIProgress(progressCtx, a.Stderr, progressEvents)
+			streamCIProgress(progressCtx, a.Stderr, progressEvents, a.progress)
 		}()
 	}
 	outcome, runErr := eng.Run(runCtx, engine.Request{
+		RunID: record.RunID, Headless: opts.Headless, DeferCompletion: true,
 		Target:               resolvedTarget,
 		Worktree:             root,
 		Mode:                 mode,
 		MaxParallel:          maxParallel,
 		CacheKeyManifestPath: cacheKeyManifest,
 	})
+	if outcome != nil {
+		retainedResult = &outcome.Result
+	}
 	stopProgress()
 	progressWG.Wait()
+	runErr = clierror.Wrap(runErr, "task_failed", "execution")
 	if repairRunner != nil {
 		if outcome == nil {
 			if runErr != nil {
 				repositoryResult := repairRunner.SkippedDAGFailure()
 				result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, runErr)
 				result.RepositoryChanges = &repositoryResult
+				retainedResult = &result
 				if jsonOut {
-					if writeErr := writeJSON(a.Stdout, result); writeErr != nil {
+					if writeErr := a.writeResult(result); writeErr != nil {
 						return writeErr
 					}
 				}
@@ -506,23 +599,18 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 			outcome.Result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 			if repairErr != nil {
 				outcome.Result.Success = false
-				outcome.Result.Error = repairErr.Error()
-				runErr = repairErr
+				outcome.Result.Error = clierror.Describe(repairErr, "repository_failed", "execution")
+				runErr = clierror.Wrap(repairErr, "repository_failed", "execution")
 			}
 		}
 	}
 	if outcome != nil {
 		if jsonOut {
-			if err := writeJSON(a.Stdout, outcome.Result); err != nil {
+			if err := a.writeResult(&outcome.Result); err != nil {
 				return err
 			}
 			return runErr
 		}
-		_, _ = fmt.Fprintf(a.Stdout, "target=%s instance=%s success=%v cache_hits=%d", outcome.Result.Target, outcome.Result.InstanceID, outcome.Result.Success, len(outcome.Result.CacheHits))
-		if outcome.Result.RepositoryChanges != nil {
-			_, _ = fmt.Fprintf(a.Stdout, " repository_status=%s commit=%s push_attempted=%t push_succeeded=%t", outcome.Result.RepositoryChanges.Status, outcome.Result.RepositoryChanges.CommitSHA, outcome.Result.RepositoryChanges.PushAttempted, outcome.Result.RepositoryChanges.PushSucceeded)
-		}
-		_, _ = fmt.Fprintln(a.Stdout)
 	}
 	return runErr
 }
@@ -534,13 +622,13 @@ func newDirectRunFailureResult(worktree, target string, mode api.RunMode, starte
 	if durationMs == 0 && !finished.Before(started) {
 		durationMs = 1
 	}
-	return api.RunResult{
+	result := api.RunResult{
 		Target:          target,
 		Mode:            mode,
 		InstanceID:      instanceID,
 		Success:         false,
 		DurationMs:      durationMs,
-		Error:           runErr.Error(),
+		Error:           clierror.Describe(runErr, "operation_failed", "execution"),
 		FailureExcerpts: []api.FailureExcerpt{},
 		Nodes:           []api.NodeStatus{},
 		CacheHits:       []string{},
@@ -548,9 +636,31 @@ func newDirectRunFailureResult(worktree, target string, mode api.RunMode, starte
 		StartedAt:       started.Format(time.RFC3339),
 		FinishedAt:      finished.Format(time.RFC3339),
 	}
+	result.ResourceConflict = executionconflict.Details(runErr)
+	return result
 }
 
-func streamCIProgress(ctx context.Context, out io.Writer, events <-chan api.Event) {
+// Admission can fail before a command result exists. Keep ownership details
+// available on stdout so callers can distinguish contention from task failure.
+func (a *App) reportResourceConflict(err error, jsonOut bool, extraFields ...map[string]any) error {
+	detail := executionconflict.Details(err)
+	if jsonOut && detail != nil {
+		payload := map[string]any{"success": false, "error": clierror.Describe(err, "resource_conflict", "admission"), "resourceConflict": detail}
+		for _, fields := range extraFields {
+			for key, value := range fields {
+				if value != nil {
+					payload[key] = value
+				}
+			}
+		}
+		if writeErr := a.writeResult(payload); writeErr != nil {
+			return writeErr
+		}
+	}
+	return err
+}
+
+func streamCIProgress(ctx context.Context, out io.Writer, events <-chan api.Event, progress string) {
 	write := func(evt api.Event) {
 		switch evt.Type {
 		case api.EventRunStarted:
@@ -566,7 +676,9 @@ func streamCIProgress(ctx context.Context, out io.Writer, events <-chan api.Even
 		case api.EventCacheMiss:
 			_, _ = fmt.Fprintf(out, "[devflow] cache %s: miss\n", evt.Task)
 		case api.EventLogLine:
-			_, _ = fmt.Fprintf(out, "[devflow] %s %s: %s\n", evt.Task, evt.Stream, evt.Line)
+			if progress != "states" {
+				_, _ = fmt.Fprintf(out, "[devflow] %s %s: %s\n", evt.Task, evt.Stream, evt.Line)
+			}
 		case api.EventRunFinished:
 			_, _ = fmt.Fprintf(out, "[devflow] run %s finished success=%t\n", evt.Target, evt.Success != nil && *evt.Success)
 		}
@@ -594,16 +706,17 @@ func streamCIProgress(ctx context.Context, out io.Writer, events <-chan api.Even
 	}
 }
 
-func (a *App) runViaDaemon(target string, jsonOut bool, worktreeFlag, projectName string, detach bool, maxParallel int) error {
+func (a *App) runViaDaemon(target string, jsonOut bool, worktreeFlag, projectName string, detach bool, maxParallel int, opts executionOptions) error {
 	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
-	client, _, err := daemon.Ensure(context.Background(), root, projectName)
+	client, _, err := daemon.Ensure(a.context(), root, projectName)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
-	resp, err := client.Call(context.Background(), daemon.Request{
+	resp, err := client.Call(a.context(), daemon.Request{
+		Headless: opts.Headless, TimeoutMs: opts.Timeout.Milliseconds(),
 		Action:      daemon.ActionRun,
 		Project:     projectName,
 		Target:      target,
@@ -611,14 +724,14 @@ func (a *App) runViaDaemon(target string, jsonOut bool, worktreeFlag, projectNam
 		MaxParallel: maxParallel,
 		Detach:      detach,
 	})
-	if err != nil {
-		return err
+	if err != nil && resp.Run == nil {
+		return a.reportResourceConflict(err, jsonOut)
 	}
 	if detach {
 		if resp.Started != nil {
-			payload := newDetachedStartResult(resp.Started)
+			payload := resp.Started
 			if jsonOut {
-				return writeJSON(a.Stdout, payload)
+				return a.writeResult(payload)
 			}
 			_, _ = fmt.Fprintf(a.Stdout, "daemon instance=%s pid=%d target=%s\n", resp.Started.InstanceID, resp.Started.DaemonPID, resp.Started.Target)
 		}
@@ -626,10 +739,13 @@ func (a *App) runViaDaemon(target string, jsonOut bool, worktreeFlag, projectNam
 	}
 	if resp.Run != nil {
 		if jsonOut {
-			if writeErr := writeJSON(a.Stdout, resp.Run); writeErr != nil {
+			if writeErr := a.writeResult(resp.Run); writeErr != nil {
 				return writeErr
 			}
 			return err
+		}
+		if a.compactOutput() {
+			return errors.Join(err, writeExecutionView(a.Stdout, a.resultView(resp.Run).(*api.ExecutionView)))
 		}
 		_, _ = fmt.Fprintf(a.Stdout, "target=%s instance=%s success=%v cache_hits=%d\n", resp.Run.Target, resp.Run.InstanceID, resp.Run.Success, len(resp.Run.CacheHits))
 	}
@@ -649,80 +765,89 @@ func (a *App) watchCmd(args []string) error {
 	projectName := fs.String("project", defaultProject(), "")
 	detach := fs.Bool("detach", false, "")
 	maxParallel := fs.Int("max-parallel", 0, "")
-	if err := fs.Parse(args); err != nil {
+	executionFlags := addExecutionFlags(fs)
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
+	}
+	opts, err := executionFlags.options()
+	if err != nil {
+		return err
+	}
+	if target != "" && fs.NArg() != 0 {
+		return clierror.Wrap(fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " ")), "invalid_arguments", "parsing")
 	}
 	if target == "" {
 		if fs.NArg() != 1 {
-			return fmt.Errorf("usage: devflow watch <target>")
+			return clierror.Wrap(fmt.Errorf("usage: devflow watch <target>"), "invalid_arguments", "parsing")
 		}
 		target = fs.Arg(0)
 	}
 	if target == "" {
-		return fmt.Errorf("usage: devflow watch <target>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow watch <target>"), "invalid_arguments", "parsing")
 	}
-	return a.watchViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel)
+	return a.watchViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel, opts)
 }
 
-func (a *App) watchViaDaemon(target string, jsonOut bool, worktreeFlag, projectName string, detach bool, maxParallel int) error {
+func (a *App) watchViaDaemon(target string, jsonOut bool, worktreeFlag, projectName string, detach bool, maxParallel int, opts executionOptions) error {
 	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
-	client, _, err := daemon.Ensure(context.Background(), root, projectName)
+	client, _, err := daemon.Ensure(a.context(), root, projectName)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
-	resp, err := client.Call(context.Background(), daemon.Request{
+	resp, err := client.Call(a.context(), daemon.Request{
+		Headless: opts.Headless, TimeoutMs: opts.Timeout.Milliseconds(),
 		Action:      daemon.ActionWatch,
 		Project:     projectName,
 		Target:      target,
 		MaxParallel: maxParallel,
 	})
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
 	if resp.Started == nil {
 		return fmt.Errorf("daemon did not return watch start metadata")
 	}
-	payload := newDetachedStartResult(resp.Started)
+	payload := resp.Started
 	if detach {
 		if jsonOut {
-			return writeJSON(a.Stdout, payload)
+			return a.writeResult(payload)
 		}
 		_, _ = fmt.Fprintf(a.Stdout, "daemon instance=%s pid=%d target=%s\n", resp.Started.InstanceID, resp.Started.DaemonPID, resp.Started.Target)
 		return nil
 	}
 	if jsonOut {
-		if err := writeJSON(a.Stdout, payload); err != nil {
+		a.jsonStream = true
+		if err := writeJSONLine(a.Stdout, payload); err != nil {
+			a.outputFailed = true
 			return err
 		}
+	} else {
+		_, _ = fmt.Fprintf(a.Stdout, "watching target=%s instance=%s through daemon pid=%d\n", resp.Started.Target, resp.Started.InstanceID, resp.Started.DaemonPID)
 	}
-	_, _ = fmt.Fprintf(a.Stdout, "watching target=%s instance=%s through daemon pid=%d\n", resp.Started.Target, resp.Started.InstanceID, resp.Started.DaemonPID)
-	subCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	subCtx, stop := context.WithCancel(a.context())
 	defer stop()
-	return client.Subscribe(subCtx, func(evt api.Event) {
+	var writeErr error
+	err = client.Subscribe(subCtx, func(evt api.Event) {
 		if jsonOut {
-			_ = writeJSONLine(a.Stdout, evt)
+			if writeErr == nil {
+				writeErr = writeJSONLine(a.Stdout, evt)
+				if writeErr != nil {
+					a.outputFailed = true
+					stop()
+				}
+			}
 		}
 	})
-}
-
-// detachedStartResult embeds the daemon's authoritative launch result while
-// retaining the historical CLI-only detached and pid fields. This avoids the
-// two JSON surfaces drifting when launch-state fields are added to the daemon.
-type detachedStartResult struct {
-	daemon.StartResult
-	Detached bool `json:"detached"`
-	PID      int  `json:"pid"`
-}
-
-func newDetachedStartResult(started *daemon.StartResult) detachedStartResult {
-	return detachedStartResult{
-		StartResult: *started,
-		Detached:    true,
-		PID:         started.DaemonPID,
+	if writeErr != nil {
+		return writeErr
 	}
+	if err == nil {
+		err = subCtx.Err()
+	}
+	return clierror.Wrap(err, "daemon_unavailable", "transport")
 }
 
 func (a *App) flushCmd(args []string) error {
@@ -733,34 +858,35 @@ func (a *App) flushCmd(args []string) error {
 	}
 	fs := flag.NewFlagSet("flush", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
+	addResultFlags(fs)
 	jsonOut := fs.Bool("json", false, "")
 	worktree := fs.String("worktree", "", "")
 	instanceID := fs.String("instance", "", "")
 	projectName := fs.String("project", "", "")
 	timeout := fs.Duration("timeout", 60*time.Second, "")
 	maxParallel := fs.Int("max-parallel", 0, "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {
 		if target != "" || fs.NArg() != 1 {
-			return fmt.Errorf("usage: devflow flush [target]")
+			return clierror.Wrap(fmt.Errorf("usage: devflow flush [target]"), "invalid_arguments", "parsing")
 		}
 		target = fs.Arg(0)
 	}
 	if *timeout <= 0 {
-		return fmt.Errorf("--timeout must be positive")
+		return clierror.Wrap(fmt.Errorf("--timeout must be positive"), "invalid_arguments", "parsing")
 	}
 
 	root, id, err := resolveInstance(*worktree, *instanceID)
 	if err != nil {
 		return err
 	}
-	client, _, err := daemon.Ensure(context.Background(), root, *projectName)
+	client, _, err := daemon.Ensure(a.context(), root, *projectName)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, *jsonOut)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout+5*time.Second)
+	ctx, cancel := context.WithTimeout(a.context(), *timeout+5*time.Second)
 	defer cancel()
 	callStarted := time.Now()
 	resp, callErr := client.Call(ctx, daemon.Request{
@@ -782,12 +908,18 @@ func (a *App) flushCmd(args []string) error {
 }
 
 func preserveFlushCallError(result api.FlushResult, callErr error, worktree, instanceID, projectName, target string, elapsed time.Duration) api.FlushResult {
+	if callErr != nil {
+		result.Error = clierror.Describe(callErr, "daemon_unavailable", "transport")
+	}
+	if detail := executionconflict.Details(callErr); detail != nil {
+		result.Error = clierror.Describe(callErr, "resource_conflict", "admission")
+		result.ResourceConflict = detail
+	}
 	if callErr == nil || result.Success || len(result.Issues) > 0 {
 		return result
 	}
-	// A newly upgraded CLI can still be connected to an older daemon. Older
-	// daemons returned an empty FlushResult for some low-level failures, so retain
-	// the transport error and invocation context until that daemon is restarted.
+	// A transport failure may arrive before any result. Preserve invocation
+	// context so callers can identify the failed operation without stderr.
 	if result.Worktree == "" {
 		result.Worktree = worktree
 	}
@@ -822,15 +954,14 @@ func (a *App) internalDaemonCmd(args []string) error {
 	projectName := fs.String("project", "", "")
 	worktree := fs.String("worktree", "", "")
 	logPath := fs.String("log-path", "", "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	root, err := resolveWorktree(*worktree)
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	ctx := a.context()
 	return daemon.Serve(ctx, daemon.Options{
 		Worktree: root,
 		Project:  *projectName,
@@ -854,12 +985,15 @@ func (a *App) restartCmd(args []string) error {
 	upstream := fs.Bool("upstream", false, "")
 	downstream := fs.Bool("downstream", false, "")
 	preview := fs.Bool("preview", false, "preview lifecycle scope without changing processes")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
+	}
+	if task != "" && fs.NArg() != 0 {
+		return clierror.Wrap(fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " ")), "invalid_arguments", "parsing")
 	}
 	if task == "" {
 		if fs.NArg() != 1 {
-			return fmt.Errorf("usage: devflow restart <task>")
+			return clierror.Wrap(fmt.Errorf("usage: devflow restart <task>"), "invalid_arguments", "parsing")
 		}
 		task = fs.Arg(0)
 	}
@@ -868,11 +1002,11 @@ func (a *App) restartCmd(args []string) error {
 		return err
 	}
 	_ = id
-	client, _, err := daemon.Ensure(context.Background(), root, *projectName)
+	client, _, err := daemon.Ensure(a.context(), root, *projectName)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, *jsonOut)
 	}
-	resp, runErr := client.Call(context.Background(), daemon.Request{
+	resp, runErr := client.Call(a.context(), daemon.Request{
 		Action:      daemon.ActionRestart,
 		Project:     *projectName,
 		Task:        task,
@@ -881,6 +1015,15 @@ func (a *App) restartCmd(args []string) error {
 		MaxParallel: *maxParallel,
 		Preview:     *preview,
 	})
+	if detail := executionconflict.Details(runErr); detail != nil {
+		if *jsonOut {
+			if err := a.writeResult(map[string]any{"success": false, "error": clierror.Describe(runErr, "resource_conflict", "admission"), "resourceConflict": detail, "lifecycle": resp.Lifecycle}); err != nil {
+				return err
+			}
+		}
+		return runErr
+	}
+
 	if *preview {
 		if resp.Lifecycle == nil {
 			if runErr != nil {
@@ -889,7 +1032,7 @@ func (a *App) restartCmd(args []string) error {
 			return fmt.Errorf("daemon returned no lifecycle plan")
 		}
 		if *jsonOut {
-			if err := writeJSON(a.Stdout, resp.Lifecycle); err != nil {
+			if err := a.writeResult(resp.Lifecycle); err != nil {
 				return err
 			}
 		} else {
@@ -900,14 +1043,14 @@ func (a *App) restartCmd(args []string) error {
 	if resp.Run != nil {
 		resp.Run.Lifecycle = resp.Lifecycle
 		if *jsonOut {
-			if err := writeJSON(a.Stdout, resp.Run); err != nil {
+			if err := a.writeResult(resp.Run); err != nil {
 				return err
 			}
 			return runErr
 		}
 		_, _ = fmt.Fprintf(a.Stdout, "restarted=%s success=%v cache_hits=%d\n", task, resp.Run.Success, len(resp.Run.CacheHits))
 	} else if *jsonOut && resp.Lifecycle != nil {
-		if err := writeJSON(a.Stdout, resp.Lifecycle); err != nil {
+		if err := a.writeResult(resp.Lifecycle); err != nil {
 			return err
 		}
 		return runErr
@@ -919,7 +1062,7 @@ func (a *App) restartCmd(args []string) error {
 				payload["plan"] = resp.Lifecycle.Plan
 				payload["processes"] = resp.Lifecycle.Processes
 			}
-			return writeJSON(a.Stdout, payload)
+			return a.writeResult(payload)
 		}
 		affected := []string{task}
 		if resp.Lifecycle != nil {
@@ -939,22 +1082,29 @@ func (a *App) stopCmd(args []string) error {
 	task := fs.String("task", "", "")
 	all := fs.Bool("all", false, "")
 	preview := fs.Bool("preview", false, "preview lifecycle scope without changing processes")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	if !*all && *task == "" {
-		return fmt.Errorf("usage: devflow stop --task <name> | --all")
+		return clierror.Wrap(fmt.Errorf("usage: devflow stop --task <name> | --all"), "invalid_arguments", "parsing")
 	}
 	root, id, err := resolveInstance(*worktree, *instanceID)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, *jsonOut)
 	}
 	_ = id
-	client, _, err := daemon.Ensure(context.Background(), root, "")
+	client, _, err := daemon.Ensure(a.context(), root, "")
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, *jsonOut)
 	}
-	resp, err := client.Call(context.Background(), daemon.Request{Action: daemon.ActionStop, All: *all, Task: *task, Preview: *preview})
+	resp, err := client.Call(a.context(), daemon.Request{Action: daemon.ActionStop, All: *all, Task: *task, Preview: *preview})
+	if executionconflict.Details(err) != nil {
+		fields := map[string]any{"instanceId": id, "lifecycle": resp.Lifecycle}
+		if resp.Stop != nil {
+			fields["stopped"] = resp.Stop.Stopped
+		}
+		return a.reportResourceConflict(err, *jsonOut, fields)
+	}
 	if err != nil && resp.Stop == nil && resp.Lifecycle == nil {
 		return err
 	}
@@ -974,7 +1124,7 @@ func (a *App) stopCmd(args []string) error {
 		payload["plan"] = resp.Lifecycle.Plan
 	}
 	if *jsonOut {
-		if writeErr := writeJSON(a.Stdout, payload); writeErr != nil {
+		if writeErr := a.writeResult(payload); writeErr != nil {
 			return writeErr
 		}
 		return err
@@ -1003,7 +1153,7 @@ func writeLifecyclePlanText(output io.Writer, plan api.LifecyclePlan) {
 
 func (a *App) actionCmd(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: devflow action <list|run>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow action <list|run>"), "invalid_arguments", "parsing")
 	}
 	switch args[0] {
 	case "list":
@@ -1011,7 +1161,7 @@ func (a *App) actionCmd(args []string) error {
 	case "run":
 		return a.actionRunCmd(args[1:])
 	default:
-		return fmt.Errorf("usage: devflow action <list|run>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow action <list|run>"), "invalid_arguments", "parsing")
 	}
 }
 
@@ -1021,18 +1171,18 @@ func (a *App) actionListCmd(args []string) error {
 	jsonOut := fs.Bool("json", false, "emit stable JSON output")
 	worktree := fs.String("worktree", "", "project worktree path")
 	projectName := fs.String("project", defaultProject(), "registered project adapter name")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	root, err := resolveWorktree(*worktree)
 	if err != nil {
 		return err
 	}
-	client, _, err := daemon.Ensure(context.Background(), root, *projectName)
+	client, _, err := daemon.Ensure(a.context(), root, *projectName)
 	if err != nil {
 		return err
 	}
-	resp, err := client.Call(context.Background(), daemon.Request{
+	resp, err := client.Call(a.context(), daemon.Request{
 		Action:  daemon.ActionListActions,
 		Project: *projectName,
 	})
@@ -1043,7 +1193,7 @@ func (a *App) actionListCmd(args []string) error {
 		return fmt.Errorf("daemon did not return action list")
 	}
 	if *jsonOut {
-		return writeJSON(a.Stdout, resp.Actions)
+		return a.writeResult(resp.Actions)
 	}
 	for _, action := range resp.Actions.Actions {
 		label := action.Label
@@ -1057,10 +1207,6 @@ func (a *App) actionListCmd(args []string) error {
 
 func (a *App) actionRunCmd(args []string) error {
 	actionID := ""
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		actionID = args[0]
-		args = args[1:]
-	}
 	inputs := map[string]string{}
 	inputFlags := kvFlags{}
 	fs := flag.NewFlagSet("action run", flag.ContinueOnError)
@@ -1072,7 +1218,12 @@ func (a *App) actionRunCmd(args []string) error {
 	component := fs.String("component", "", "component ID used to disambiguate action kind")
 	name := fs.String("name", "", "common input value named \"name\"")
 	fs.Var(&inputFlags, "input", "action input as key=value; may be repeated")
-	if err := fs.Parse(args); err != nil {
+	executionFlags := addExecutionFlags(fs)
+	if err := a.parseFlags(fs, args); err != nil {
+		return err
+	}
+	opts, err := executionFlags.options()
+	if err != nil {
 		return err
 	}
 	if actionID == "" && fs.NArg() > 0 {
@@ -1088,14 +1239,14 @@ func (a *App) actionRunCmd(args []string) error {
 		inputs["name"] = fs.Arg(1)
 	}
 	if actionID == "" && *kind == "" {
-		return fmt.Errorf("usage: devflow action run <action-id> [--input key=value]")
+		return clierror.Wrap(fmt.Errorf("usage: devflow action run <action-id> [--input key=value]"), "invalid_arguments", "parsing")
 	}
-	return a.runAction(actionID, *kind, *component, inputs, *jsonOut, *worktree, *projectName)
+	return a.runAction(actionID, *kind, *component, inputs, *jsonOut, *worktree, *projectName, opts)
 }
 
 func (a *App) migrationCmd(args []string) error {
 	if len(args) == 0 || args[0] != "create" {
-		return fmt.Errorf("usage: devflow migration create <name>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow migration create <name>"), "invalid_arguments", "parsing")
 	}
 	return a.migrationCreateCmd(args[1:])
 }
@@ -1113,12 +1264,20 @@ func (a *App) migrationCreateCmd(args []string) error {
 	projectName := fs.String("project", defaultProject(), "registered project adapter name")
 	component := fs.String("component", "", "component ID used when several migration systems exist")
 	force := fs.Bool("force", false, "allow component-specific force/accept-warning behavior when declared")
-	if err := fs.Parse(args); err != nil {
+	executionFlags := addExecutionFlags(fs)
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
+	}
+	opts, err := executionFlags.options()
+	if err != nil {
+		return err
+	}
+	if name != "" && fs.NArg() != 0 {
+		return clierror.Wrap(fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " ")), "invalid_arguments", "parsing")
 	}
 	if name == "" {
 		if fs.NArg() != 1 {
-			return fmt.Errorf("usage: devflow migration create <name>")
+			return clierror.Wrap(fmt.Errorf("usage: devflow migration create <name>"), "invalid_arguments", "parsing")
 		}
 		name = fs.Arg(0)
 	}
@@ -1126,19 +1285,20 @@ func (a *App) migrationCreateCmd(args []string) error {
 	if *force {
 		inputs["force"] = "true"
 	}
-	return a.runAction("", database.ActionMigrationCreate, *component, inputs, *jsonOut, *worktree, *projectName)
+	return a.runAction("", database.ActionMigrationCreate, *component, inputs, *jsonOut, *worktree, *projectName, opts)
 }
 
-func (a *App) runAction(actionID, kind, component string, inputs map[string]string, jsonOut bool, worktreeFlag, projectName string) error {
+func (a *App) runAction(actionID, kind, component string, inputs map[string]string, jsonOut bool, worktreeFlag, projectName string, opts executionOptions) error {
 	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
-	client, _, err := daemon.Ensure(context.Background(), root, projectName)
+	client, _, err := daemon.Ensure(a.context(), root, projectName)
 	if err != nil {
-		return err
+		return a.reportResourceConflict(err, jsonOut)
 	}
-	resp, callErr := client.Call(context.Background(), daemon.Request{
+	resp, callErr := client.Call(a.context(), daemon.Request{
+		Headless: opts.Headless, TimeoutMs: opts.Timeout.Milliseconds(),
 		Action:       daemon.ActionRunAction,
 		Project:      projectName,
 		ActionID:     actionID,
@@ -1153,9 +1313,12 @@ func (a *App) runAction(actionID, kind, component string, inputs map[string]stri
 			}
 		}
 	})
+	if executionconflict.Details(callErr) != nil {
+		return a.reportResourceConflict(callErr, jsonOut, map[string]any{"actionResult": resp.ActionResult})
+	}
 	if resp.ActionResult != nil {
 		if jsonOut {
-			if err := writeJSON(a.Stdout, resp.ActionResult); err != nil {
+			if err := a.writeResult(resp.ActionResult); err != nil {
 				return err
 			}
 			return callErr
@@ -1168,7 +1331,7 @@ func (a *App) runAction(actionID, kind, component string, inputs map[string]stri
 
 func (a *App) cacheCmd(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: devflow cache <status|key|path|invalidate|gc>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow cache <status|key|path|invalidate|gc>"), "invalid_arguments", "parsing")
 	}
 	switch args[0] {
 	case "status":
@@ -1182,7 +1345,7 @@ func (a *App) cacheCmd(args []string) error {
 	case "gc":
 		return a.cacheGCCmd(args[1:])
 	default:
-		return fmt.Errorf("usage: devflow cache <status|key|path|invalidate|gc>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow cache <status|key|path|invalidate|gc>"), "invalid_arguments", "parsing")
 	}
 }
 
@@ -1194,11 +1357,11 @@ func (a *App) cacheKeyCmd(args []string) error {
 	projectName := fs.String("project", "", "project adapter name")
 	target := fs.String("target", "", "target or task whose cache key should be computed")
 	manifestOut := fs.String("manifest-out", "", "write an owner-only cache-key manifest for immediate run reuse")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	if strings.TrimSpace(*target) == "" {
-		return fmt.Errorf("cache key requires --target")
+		return clierror.Wrap(fmt.Errorf("cache key requires --target"), "invalid_arguments", "parsing")
 	}
 	root, err := resolveWorktree(*worktree)
 	if err != nil {
@@ -1212,11 +1375,16 @@ func (a *App) cacheKeyCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	lease, err := executionstate.Acquire(root, execution.Owner{Target: resolvedTarget, Kind: "cache_key"})
+	if err != nil {
+		return a.reportResourceConflict(err, *jsonOut)
+	}
+	defer lease.Release()
 	eng, err := engine.New(executionProject, root)
 	if err != nil {
 		return err
 	}
-	result, manifest, err := eng.CacheKeyWithManifest(context.Background(), engine.Request{Target: resolvedTarget, Worktree: root, Mode: api.ModeCI})
+	result, manifest, err := eng.CacheKeyWithManifest(execution.ContextWithLease(a.context(), lease), engine.Request{Target: resolvedTarget, Worktree: root, Mode: api.ModeCI})
 	if err != nil {
 		return err
 	}
@@ -1231,7 +1399,7 @@ func (a *App) cacheKeyCmd(args []string) error {
 		result.ManifestPath = manifestPath
 	}
 	if *jsonOut {
-		return writeJSON(a.Stdout, result)
+		return a.writeResult(result)
 	}
 	_, _ = fmt.Fprintln(a.Stdout, result.Key)
 	return nil
@@ -1243,7 +1411,7 @@ func (a *App) cachePathCmd(args []string) error {
 	jsonOut := fs.Bool("json", false, "emit stable JSON output")
 	worktree := fs.String("worktree", "", "project worktree path")
 	projectName := fs.String("project", "", "project adapter name")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	root, err := resolveWorktree(*worktree)
@@ -1262,7 +1430,7 @@ func (a *App) cachePathCmd(args []string) error {
 		NamespacePath: store.EntriesRoot(),
 	}
 	if *jsonOut {
-		return writeJSON(a.Stdout, result)
+		return a.writeResult(result)
 	}
 	_, _ = fmt.Fprintln(a.Stdout, result.NamespacePath)
 	return nil
@@ -1274,7 +1442,7 @@ func (a *App) cacheStatusCmd(args []string) error {
 	jsonOut := fs.Bool("json", false, "")
 	worktree := fs.String("worktree", "", "")
 	projectName := fs.String("project", "", "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	root, err := resolveWorktree(*worktree)
@@ -1298,7 +1466,7 @@ func (a *App) cacheStatusCmd(args []string) error {
 		"count":     len(entries),
 	}
 	if *jsonOut {
-		return writeJSON(a.Stdout, payload)
+		return a.writeResult(payload)
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "entries=%d\n", len(entries))
 	for _, entry := range entries {
@@ -1314,7 +1482,7 @@ func (a *App) cacheInvalidateCmd(args []string) error {
 	worktree := fs.String("worktree", "", "")
 	projectName := fs.String("project", "", "")
 	task := fs.String("task", "", "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	root, err := resolveWorktree(*worktree)
@@ -1325,6 +1493,11 @@ func (a *App) cacheInvalidateCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	lease, err := executionstate.Acquire(root, execution.Owner{Target: *task, Kind: "cache_invalidate"})
+	if err != nil {
+		return a.reportResourceConflict(err, *jsonOut)
+	}
+	defer lease.Release()
 	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p))
 	if err := store.Invalidate(*task); err != nil {
 		return err
@@ -1342,7 +1515,7 @@ func (a *App) cacheInvalidateCmd(args []string) error {
 	}
 	payload := map[string]any{"cacheRoot": instance.CacheRoot(), "namespace": store.Namespace, "project": p.Name(), "task": *task, "invalidated": true}
 	if *jsonOut {
-		return writeJSON(a.Stdout, payload)
+		return a.writeResult(payload)
 	}
 	if *task == "" {
 		_, _ = fmt.Fprintln(a.Stdout, "invalidated all cache entries")
@@ -1359,7 +1532,7 @@ func (a *App) cacheGCCmd(args []string) error {
 	worktree := fs.String("worktree", "", "")
 	projectName := fs.String("project", "", "")
 	keepPerTask := fs.Int("keep-per-task", 1, "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	root, err := resolveWorktree(*worktree)
@@ -1377,7 +1550,7 @@ func (a *App) cacheGCCmd(args []string) error {
 	}
 	payload := map[string]any{"cacheRoot": instance.CacheRoot(), "namespace": store.Namespace, "project": p.Name(), "removed": removed, "keepPerTask": *keepPerTask}
 	if *jsonOut {
-		return writeJSON(a.Stdout, payload)
+		return a.writeResult(payload)
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "removed=%d keep_per_task=%d\n", removed, *keepPerTask)
 	return nil
@@ -1386,22 +1559,26 @@ func (a *App) cacheGCCmd(args []string) error {
 func (a *App) statusCmd(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
+	addResultFlags(fs)
 	jsonOut := fs.Bool("json", false, "")
 	worktree := fs.String("worktree", "", "")
 	instanceID := fs.String("instance", "", "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	root, id, err := resolveInstance(*worktree, *instanceID)
 	if err != nil {
 		return err
 	}
-	out, err := statusResult(root, id)
+	out, err := statusResult(a.context(), root, id)
 	if err != nil {
 		return err
 	}
 	if *jsonOut {
-		return writeJSON(a.Stdout, out)
+		return a.writeResult(out)
+	}
+	if a.compactOutput() {
+		return writeExecutionView(a.Stdout, a.resultView(out).(*api.ExecutionView))
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "instance: %s  target: %s  mode: %s\n", out.InstanceID, out.Target, out.Mode)
 	_, _ = fmt.Fprintf(a.Stdout, "worktree: %s\n", out.Worktree)
@@ -1420,12 +1597,12 @@ func (a *App) statusCmd(args []string) error {
 	if out.DB.Name != "" {
 		_, _ = fmt.Fprintf(a.Stdout, "db: %s host=%s port=%d container=%s\n", out.DB.Name, out.DB.Host, out.DB.Port, out.DB.ContainerName)
 	}
-	if out.Supervisor != nil {
+	if out.Daemon != nil {
 		state := "stopped"
-		if out.Supervisor.Alive {
+		if out.Daemon.Alive {
 			state = "running"
 		}
-		_, _ = fmt.Fprintf(a.Stdout, "supervisor: %s pid=%d log=%s\n", state, out.Supervisor.PID, out.Supervisor.LogPath)
+		_, _ = fmt.Fprintf(a.Stdout, "daemon: %s pid=%d log=%s\n", state, out.Daemon.PID, out.Daemon.LogPath)
 	}
 	_, _ = fmt.Fprintln(a.Stdout)
 	for _, node := range out.Nodes {
@@ -1434,9 +1611,9 @@ func (a *App) statusCmd(args []string) error {
 	return nil
 }
 
-func statusResult(root, instanceID string) (api.StatusResult, error) {
+func statusResult(ctx context.Context, root, instanceID string) (api.StatusResult, error) {
 	if client, err := daemon.Dial(root); err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
 		resp, callErr := client.Call(ctx, daemon.Request{Action: daemon.ActionStatus})
 		if callErr == nil && resp.Status != nil {
@@ -1465,7 +1642,20 @@ func statusResult(root, instanceID string) (api.StatusResult, error) {
 		nodes = append(nodes, node)
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+	var pending []api.Prompt
+	if state.RunID != "" {
+		prompts, promptErr := instance.ListPrompts(ctx, root, instanceID, state.RunID)
+		if promptErr != nil && !errors.Is(promptErr, instance.ErrRunExpired) {
+			return api.StatusResult{}, promptErr
+		}
+		for _, prompt := range prompts {
+			if prompt.State == api.PromptPending {
+				pending = append(pending, prompt)
+			}
+		}
+	}
 	return api.StatusResult{
+		RunID: state.RunID, PendingPrompts: pending,
 		InstanceID: instanceID,
 		Worktree:   root,
 		Target:     state.Target,
@@ -1474,7 +1664,7 @@ func statusResult(root, instanceID string) (api.StatusResult, error) {
 		Ports:      inst.Ports,
 		DB:         instance.DisplayDB(inst.DB),
 		URLs:       daemon.InstanceURLs(inst),
-		Supervisor: daemon.SupervisorStatus(inst),
+		Daemon:     daemon.DaemonStatus(inst),
 		Nodes:      nodes,
 	}, nil
 }
@@ -1490,54 +1680,87 @@ func (a *App) logsCmd(args []string) error {
 	jsonOut := fs.Bool("json", false, "")
 	worktree := fs.String("worktree", "", "")
 	instanceID := fs.String("instance", "", "")
+	runID := fs.String("run", "", "retained run ID; defaults to the current task attempt")
+	attemptID := fs.String("attempt", "", "specific task attempt in --run; defaults to its latest attempt")
 	tail := fs.Int("tail", 50, "")
 	follow := fs.Bool("follow", false, "")
-	if err := fs.Parse(args); err != nil {
+	cursor := fs.String("cursor", "", "resume a retained log page")
+	maxBytes := fs.Int("max-bytes", logstream.DefaultPageBytes, "return one bounded JSON page (4 to 1048576 bytes)")
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
+	if task != "" && fs.NArg() != 0 {
+		return clierror.Wrap(fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " ")), "invalid_arguments", "parsing")
+	}
+	if *tail < 0 {
+		return clierror.Wrap(logstream.ErrInvalidTail, "invalid_arguments", "parsing")
+	}
+	pageMode, explicitTail := *cursor != "", false
+	fs.Visit(func(f *flag.Flag) {
+		pageMode = pageMode || f.Name == "max-bytes" || f.Name == "cursor"
+		explicitTail = explicitTail || f.Name == "tail"
+	})
+	if pageMode && (!*jsonOut || *follow || explicitTail) {
+		return clierror.Wrap(errors.New("log pages require --json and cannot combine with --follow or --tail"), "invalid_arguments", "parsing")
+	}
+	if pageMode && (*maxBytes < 4 || *maxBytes > logstream.MaxPageBytes) {
+		return clierror.Wrap(logstream.ErrInvalidPageSize, "invalid_arguments", "parsing")
+	}
+	a.jsonStream = *jsonOut && !pageMode
 	if task == "" {
 		if fs.NArg() != 1 {
-			return fmt.Errorf("usage: devflow logs <task>")
+			return clierror.Wrap(fmt.Errorf("usage: devflow logs <task>"), "invalid_arguments", "parsing")
 		}
 		task = fs.Arg(0)
 	}
 	if task == "" {
-		return fmt.Errorf("usage: devflow logs <task>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow logs <task>"), "invalid_arguments", "parsing")
 	}
 	root, id, err := resolveInstance(*worktree, *instanceID)
 	if err != nil {
 		return err
 	}
-	logPath, err := resolveLogPath(root, id, task)
+	if *attemptID != "" && *runID == "" {
+		return clierror.Wrap(errors.New("--attempt requires --run"), "invalid_arguments", "parsing")
+	}
+	selection, err := resolveLogSelection(root, id, task, *runID, *attemptID, *cursor)
 	if err != nil {
 		return err
 	}
-	lines, err := readLastLines(logPath, *tail)
-	if err != nil {
-		return err
+	if pageMode {
+		return a.logPage(root, selection, *cursor, *maxBytes)
 	}
-	if *jsonOut {
-		for _, line := range lines {
-			if err := writeJSONLine(a.Stdout, map[string]string{"task": task, "line": line}); err != nil {
-				return err
-			}
+	logPath, selectedRun, selectedAttempt := selection.path, selection.RunID, selection.AttemptID
+	logCtx := a.context()
+	if *follow && selectedRun != "" {
+		observed, stop, observeErr := observeLogEvidence(logCtx, root, id, selectedRun)
+		if observeErr != nil {
+			return runEvidenceError(observeErr)
 		}
-	} else {
-		for _, line := range lines {
-			_, _ = fmt.Fprintln(a.Stdout, line)
+		logCtx = observed
+		defer stop()
+	}
+	err = logstream.Stream(logCtx, logPath, *tail, *follow, func(line string) error {
+		var writeErr error
+		if *jsonOut {
+			writeErr = writeJSONLine(a.Stdout, map[string]string{"task": task, "runId": selectedRun, "attemptId": selectedAttempt, "line": line})
+		} else {
+			_, writeErr = fmt.Fprintln(a.Stdout, line)
 		}
-	}
-	if *follow {
-		return followFile(a.Stdout, logPath, *jsonOut, task)
-	}
-	return nil
+		if writeErr != nil {
+			a.outputFailed = true
+		}
+		return writeErr
+	})
+	err = retainedLogError(logCtx, root, id, selectedRun, err)
+	return clierror.Wrap(err, "log_read_failed", "execution")
 }
 
 func (a *App) instancesCmd(args []string) error {
 	fs := flag.NewFlagSet("instances", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	items, err := instance.List()
@@ -1545,7 +1768,7 @@ func (a *App) instancesCmd(args []string) error {
 		return err
 	}
 	if *jsonOut {
-		return writeJSON(a.Stdout, items)
+		return a.writeResult(items)
 	}
 	for _, item := range items {
 		_, _ = fmt.Fprintf(a.Stdout, "%s %s %s\n", item.ID, item.Label, item.Worktree)
@@ -1561,7 +1784,7 @@ func (a *App) doctorCmd(args []string) error {
 	projectName := fs.String("project", defaultProject(), "")
 	target := fs.String("target", "", "")
 	strict := fs.Bool("strict", false, "return a nonzero exit when any doctor check fails")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	root, err := resolveWorktree(*worktree)
@@ -1637,7 +1860,7 @@ func (a *App) doctorCmd(args []string) error {
 		result.Checks = append(result.Checks, "required_clis: ok (0)")
 	}
 	if len(requiredEnv) > 0 {
-		cfg, cfgErr := executionProject.ConfigureInstance(context.Background(), root)
+		cfg, cfgErr := executionProject.ConfigureInstance(a.context(), root)
 		if cfgErr != nil {
 			return cfgErr
 		}
@@ -1666,7 +1889,7 @@ func (a *App) doctorCmd(args []string) error {
 		result.Checks = append(result.Checks, "required_env: ok (0)")
 	}
 	if *jsonOut {
-		if err := writeJSON(a.Stdout, result); err != nil {
+		if err := a.writeResult(result); err != nil {
 			return err
 		}
 	} else {
@@ -1678,33 +1901,33 @@ func (a *App) doctorCmd(args []string) error {
 		}
 	}
 	if *strict && !result.ChecksPassed {
-		return fmt.Errorf("doctor checks failed")
+		return clierror.Wrap(fmt.Errorf("doctor checks failed"), "doctor_failed", "execution")
 	}
 	return nil
 }
 
-func (a *App) depsCmd(args []string) error {
+func (a *App) clisCmd(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: devflow clis <status|install>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow clis <status|install>"), "invalid_arguments", "parsing")
 	}
 	switch args[0] {
 	case "status":
-		return a.depsStatusCmd(args[1:])
+		return a.clisStatusCmd(args[1:])
 	case "install":
-		return a.depsInstallCmd(args[1:])
+		return a.clisInstallCmd(args[1:])
 	default:
-		return fmt.Errorf("usage: devflow clis <status|install>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow clis <status|install>"), "invalid_arguments", "parsing")
 	}
 }
 
-func (a *App) depsStatusCmd(args []string) error {
+func (a *App) clisStatusCmd(args []string) error {
 	fs := flag.NewFlagSet("clis status", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
 	projectName := fs.String("project", defaultProject(), "")
 	worktree := fs.String("worktree", "", "")
 	target := fs.String("target", "", "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	root, err := resolveWorktree(*worktree)
@@ -1723,7 +1946,6 @@ func (a *App) depsStatusCmd(args []string) error {
 	payload := map[string]any{
 		"worktree":     root,
 		"project":      p.Name(),
-		"dependencies": statuses,
 		"requiredCLIs": statuses,
 	}
 	if resolvedTarget != "" {
@@ -1733,7 +1955,7 @@ func (a *App) depsStatusCmd(args []string) error {
 		payload["cliScope"] = "project"
 	}
 	if *jsonOut {
-		return writeJSON(a.Stdout, payload)
+		return a.writeResult(payload)
 	}
 	for _, status := range statuses {
 		state := "missing"
@@ -1749,14 +1971,14 @@ func (a *App) depsStatusCmd(args []string) error {
 	return nil
 }
 
-func (a *App) depsInstallCmd(args []string) error {
+func (a *App) clisInstallCmd(args []string) error {
 	fs := flag.NewFlagSet("clis install", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
 	projectName := fs.String("project", defaultProject(), "")
 	worktree := fs.String("worktree", "", "")
 	target := fs.String("target", "", "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	root, err := resolveWorktree(*worktree)
@@ -1771,7 +1993,7 @@ func (a *App) depsInstallCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	result, installErr := project.InstallMissingRequiredCLIs(context.Background(), root, requiredCLIs, func(stream, line string) {
+	result, installErr := project.InstallMissingRequiredCLIs(a.context(), root, requiredCLIs, func(stream, line string) {
 		if *jsonOut {
 			return
 		}
@@ -1790,7 +2012,7 @@ func (a *App) depsInstallCmd(args []string) error {
 		payload["cliScope"] = "target"
 	}
 	if *jsonOut {
-		if err := writeJSON(a.Stdout, payload); err != nil {
+		if err := a.writeResult(payload); err != nil {
 			return err
 		}
 		return installErr
@@ -1830,7 +2052,7 @@ func requiredCLIsForTargetScope(p project.Project, target string) (project.Proje
 
 func (a *App) graphCmd(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: devflow graph <list|show|affected>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow graph <list|show|affected>"), "invalid_arguments", "parsing")
 	}
 	switch args[0] {
 	case "list":
@@ -1840,7 +2062,7 @@ func (a *App) graphCmd(args []string) error {
 	case "affected":
 		return a.graphAffectedCmd(args[1:])
 	default:
-		return fmt.Errorf("usage: devflow graph <list|show|affected>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow graph <list|show|affected>"), "invalid_arguments", "parsing")
 	}
 }
 
@@ -1849,7 +2071,7 @@ func (a *App) tuiCmd(args []string) error {
 	fs.SetOutput(a.Stderr)
 	worktree := fs.String("worktree", "", "")
 	instanceID := fs.String("instance", "", "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	if strings.TrimSpace(*instanceID) == "" {
@@ -1870,11 +2092,11 @@ func (a *App) versionCmd(args []string) error {
 	fs := flag.NewFlagSet("version", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: devflow version")
+		return clierror.Wrap(fmt.Errorf("usage: devflow version"), "invalid_arguments", "parsing")
 	}
 	info := version.Current()
 	result := api.VersionResult{
@@ -1886,7 +2108,7 @@ func (a *App) versionCmd(args []string) error {
 		Modified:    info.Modified,
 	}
 	if *jsonOut {
-		return writeJSON(a.Stdout, result)
+		return a.writeResult(result)
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "devflow %s\n", result.Version)
 	return nil
@@ -1898,11 +2120,11 @@ func (a *App) upgradeCmd(args []string) error {
 	jsonOut := fs.Bool("json", false, "")
 	versionTarget := fs.String("version", "latest", "")
 	direct := fs.Bool("direct", false, "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: devflow upgrade")
+		return clierror.Wrap(fmt.Errorf("usage: devflow upgrade"), "invalid_arguments", "parsing")
 	}
 	target := strings.TrimSpace(*versionTarget)
 	if target == "" {
@@ -1911,7 +2133,7 @@ func (a *App) upgradeCmd(args []string) error {
 	pkg := version.CommandPackage + "@" + target
 	command := []string{"go", "install", pkg}
 	started := time.Now()
-	cmd := exec.Command(command[0], command[1:]...)
+	cmd := process.CommandContext(a.context(), command[0], command[1:]...)
 	if *direct {
 		cmd.Env = upgradeGoEnv(os.Environ())
 	}
@@ -1927,7 +2149,16 @@ func (a *App) upgradeCmd(args []string) error {
 		cmd.Stdout = a.Stdout
 		cmd.Stderr = a.Stderr
 	}
-	err := cmd.Run()
+	err := errors.Join(cmd.Run(), a.context().Err())
+	cacheCleared := false
+	if err == nil {
+		// Upgrades invalidate artifacts so cache changes need no migration path.
+		if clearErr := fsutil.RemoveAllWritable(instance.CacheRoot()); clearErr != nil {
+			err = fmt.Errorf("installed Devflow, but clearing task cache: %w", clearErr)
+		} else {
+			cacheCleared = true
+		}
+	}
 	duration := time.Since(started)
 	_, _ = fmt.Fprintf(a.Stderr, "[devflow] upgrade finished success=%t duration_ms=%d\n", err == nil, duration.Milliseconds())
 	result := api.UpgradeResult{
@@ -1935,18 +2166,19 @@ func (a *App) upgradeCmd(args []string) error {
 		Package:       version.CommandPackage,
 		VersionTarget: target,
 		Success:       err == nil,
+		CacheCleared:  cacheCleared,
 		DurationMs:    duration.Milliseconds(),
 		Output:        strings.TrimSpace(output.String()),
 	}
 	if err != nil {
-		result.Error = err.Error()
+		result.Error = clierror.Describe(err, "upgrade_failed", "execution")
 	}
 	if *jsonOut {
-		if writeErr := writeJSON(a.Stdout, result); writeErr != nil {
+		if writeErr := a.writeResult(result); writeErr != nil {
 			return writeErr
 		}
 		if err != nil {
-			return fmt.Errorf("upgrade failed")
+			return clierror.Wrap(err, "upgrade_failed", "execution")
 		}
 		return nil
 	}
@@ -2051,7 +2283,7 @@ func sameExecutablePath(a, b string) bool {
 
 func (a *App) docsCmd(args []string) error {
 	if len(args) != 1 {
-		return fmt.Errorf("usage: devflow docs <setup|development>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow docs <setup|development>"), "invalid_arguments", "parsing")
 	}
 	switch args[0] {
 	case "setup", "pipeline":
@@ -2059,7 +2291,7 @@ func (a *App) docsCmd(args []string) error {
 	case "development", "dev", "daily":
 		return writeUserDocs(a.Stdout, docsBundleDevelopment)
 	default:
-		return fmt.Errorf("usage: devflow docs <setup|development>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow docs <setup|development>"), "invalid_arguments", "parsing")
 	}
 }
 
@@ -2068,7 +2300,7 @@ func (a *App) graphListCmd(args []string) error {
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
 	projectName := fs.String("project", defaultProject(), "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	g, err := loadGraph(*projectName)
@@ -2080,7 +2312,7 @@ func (a *App) graphListCmd(args []string) error {
 		"targets": sortedTargetNames(g),
 	}
 	if *jsonOut {
-		return writeJSON(a.Stdout, payload)
+		return a.writeResult(payload)
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "tasks: %s\n", strings.Join(payload["tasks"].([]string), ", "))
 	_, _ = fmt.Fprintf(a.Stdout, "targets: %s\n", strings.Join(payload["targets"].([]string), ", "))
@@ -2097,17 +2329,20 @@ func (a *App) graphShowCmd(args []string) error {
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
 	projectName := fs.String("project", defaultProject(), "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
+	}
+	if target != "" && fs.NArg() != 0 {
+		return clierror.Wrap(fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " ")), "invalid_arguments", "parsing")
 	}
 	if target == "" {
 		if fs.NArg() != 1 {
-			return fmt.Errorf("usage: devflow graph show <target>")
+			return clierror.Wrap(fmt.Errorf("usage: devflow graph show <target>"), "invalid_arguments", "parsing")
 		}
 		target = fs.Arg(0)
 	}
 	if target == "" {
-		return fmt.Errorf("usage: devflow graph show <target>")
+		return clierror.Wrap(fmt.Errorf("usage: devflow graph show <target>"), "invalid_arguments", "parsing")
 	}
 	g, err := loadGraph(*projectName)
 	if err != nil {
@@ -2117,9 +2352,13 @@ func (a *App) graphShowCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	payload := map[string]any{"target": target, "closure": closure}
+	metadata, err := g.MetadataForTarget(target)
+	if err != nil {
+		return err
+	}
+	payload := map[string]any{"target": target, "closure": closure, "metadata": metadata}
 	if *jsonOut {
-		return writeJSON(a.Stdout, payload)
+		return a.writeResult(payload)
 	}
 	for _, name := range closure {
 		_, _ = fmt.Fprintln(a.Stdout, name)
@@ -2134,11 +2373,11 @@ func (a *App) graphAffectedCmd(args []string) error {
 	projectName := fs.String("project", defaultProject(), "")
 	files := fs.String("files", "", "")
 	explain := fs.Bool("explain", false, "")
-	if err := fs.Parse(args); err != nil {
+	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
 	if *files == "" {
-		return fmt.Errorf("usage: devflow graph affected --files a,b")
+		return clierror.Wrap(fmt.Errorf("usage: devflow graph affected --files a,b"), "invalid_arguments", "parsing")
 	}
 	g, err := loadGraph(*projectName)
 	if err != nil {
@@ -2157,7 +2396,7 @@ func (a *App) graphAffectedCmd(args []string) error {
 		payload.UnmatchedFiles = graphUnmatchedFiles(changed, impacts)
 	}
 	if *jsonOut {
-		return writeJSON(a.Stdout, payload)
+		return a.writeResult(payload)
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "affected: %s\n", strings.Join(direct, ", "))
 	if *explain {
@@ -2237,9 +2476,9 @@ func resolvedProject(name, worktree string) (project.Project, error) {
 		return project.Detect(worktree)
 	}
 	if len(names) == 0 {
-		return nil, fmt.Errorf("no project is registered")
+		return nil, clierror.Wrap(fmt.Errorf("no project is registered"), "unknown_project", "resolution")
 	}
-	return nil, fmt.Errorf("multiple projects are registered; pass --project explicitly")
+	return nil, clierror.Wrap(fmt.Errorf("multiple projects are registered; pass --project explicitly"), "ambiguous_project", "resolution")
 }
 
 type kvFlags struct {
@@ -2307,7 +2546,7 @@ func resolveInstance(worktreeFlag, instanceID string) (string, string, error) {
 				return item.Worktree, item.ID, nil
 			}
 		}
-		return "", "", fmt.Errorf("unknown instance %q", instanceID)
+		return "", "", clierror.Wrap(fmt.Errorf("unknown instance %q", instanceID), "unknown_instance", "resolution")
 	}
 	worktree, err := resolveWorktree(worktreeFlag)
 	if err != nil {
@@ -2320,18 +2559,18 @@ func resolveInstance(worktreeFlag, instanceID string) (string, string, error) {
 	return real, id, nil
 }
 
-func resolveLogPath(worktree, instanceID, task string) (string, error) {
-	if task != "supervisor" {
+func resolveDiagnosticLogPath(worktree, instanceID, task string) (string, error) {
+	if task == "tui" {
 		return instance.LogPath(worktree, instanceID, task), nil
 	}
-	inst, err := instance.Load(worktree, instanceID)
+	ref, err := instance.LoadDaemon(worktree, instanceID)
 	if err != nil {
 		return "", err
 	}
-	if inst.Supervisor.LogPath != "" {
-		return inst.Supervisor.LogPath, nil
+	if ref.LogPath != "" {
+		return ref.LogPath, nil
 	}
-	return filepath.Join(worktree, ".devflow", "logs", instanceID, "supervisor.log"), nil
+	return filepath.Join(worktree, ".devflow", "logs", instanceID, "daemon.log"), nil
 }
 
 func writeJSON(w io.Writer, v any) error {
@@ -2391,14 +2630,24 @@ func (a *App) finishFlush(result api.FlushResult, jsonOut bool) error {
 		return err
 	}
 	if !result.Success {
-		return fmt.Errorf("flush failed")
+		if result.Error != nil {
+			return result.Error
+		}
+		code := "flush_failed"
+		if result.TimedOut {
+			code = "deadline_exceeded"
+		}
+		return clierror.Wrap(fmt.Errorf("flush failed"), code, "execution")
 	}
 	return nil
 }
 
 func (a *App) writeFlushResult(result api.FlushResult, jsonOut bool) error {
 	if jsonOut {
-		return writeJSON(a.Stdout, result)
+		return a.writeResult(result)
+	}
+	if a.compactOutput() {
+		return writeExecutionView(a.Stdout, a.resultView(result).(*api.ExecutionView))
 	}
 	if result.Success {
 		_, _ = fmt.Fprintf(a.Stdout, "flush ok target=%s instance=%s synced=%v duration_ms=%d\n", result.Target, result.InstanceID, result.Synced, result.DurationMs)
@@ -2469,56 +2718,4 @@ func splitCSV(value string) []string {
 		}
 	}
 	return out
-}
-
-func readLastLines(path string, limit int) ([]string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	if limit > 0 && len(lines) > limit {
-		lines = lines[len(lines)-limit:]
-	}
-	return lines, nil
-}
-
-func followFile(w io.Writer, path string, jsonOut bool, task string) error {
-	offset := int64(0)
-	for {
-		info, err := os.Stat(path)
-		if err != nil {
-			return err
-		}
-		if info.Size() > offset {
-			file, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			if _, err := file.Seek(offset, io.SeekStart); err != nil {
-				_ = file.Close()
-				return err
-			}
-			data, err := io.ReadAll(file)
-			_ = file.Close()
-			if err != nil {
-				return err
-			}
-			offset = info.Size()
-			lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-			for _, line := range lines {
-				if line == "" {
-					continue
-				}
-				if jsonOut {
-					if err := writeJSONLine(w, map[string]string{"task": task, "line": line}); err != nil {
-						return err
-					}
-				} else {
-					_, _ = fmt.Fprintln(w, line)
-				}
-			}
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
 }

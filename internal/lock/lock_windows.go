@@ -3,6 +3,7 @@
 package lock
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -15,6 +16,15 @@ type FileLock struct {
 }
 
 func Acquire(path string) (*FileLock, error) {
+	return acquire(path, false)
+}
+
+// TryAcquire acquires an exclusive lock without waiting for another holder.
+func TryAcquire(path string) (*FileLock, error) {
+	return acquire(path, true)
+}
+
+func acquire(path string, nonblocking bool) (*FileLock, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
@@ -23,15 +33,22 @@ func Acquire(path string) (*FileLock, error) {
 		return nil, err
 	}
 	lock := &FileLock{file: file}
+	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK)
+	if nonblocking {
+		flags |= windows.LOCKFILE_FAIL_IMMEDIATELY
+	}
 	if err := windows.LockFileEx(
 		windows.Handle(file.Fd()),
-		windows.LOCKFILE_EXCLUSIVE_LOCK,
+		flags,
 		0,
 		1,
 		0,
 		&lock.overlapped,
 	); err != nil {
 		file.Close()
+		if nonblocking && errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			return nil, ErrLocked
+		}
 		return nil, err
 	}
 	return lock, nil

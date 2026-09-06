@@ -78,45 +78,42 @@ func TestPublishPersistsAndFansOutEvents(t *testing.T) {
 	}
 }
 
-func TestWaitForFlushAckRetouchesSyncSentinel(t *testing.T) {
-	worktree := t.TempDir()
-	instanceID := "abc123"
-	requestID := "flush-retouch"
-	syncPath := instance.FlushSyncPath(worktree, instanceID, requestID)
+func TestWaitForFlushAckDoesNotRewriteSyncSentinel(t *testing.T) {
+	s, active := newFlushGenerationFixture(t)
+	close(active.watchReady)
+	requestID := "flush-observed"
+	syncPath := instance.FlushSyncPath(s.worktree, s.instanceID, requestID)
 	if err := os.MkdirAll(filepath.Dir(syncPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(syncPath, []byte(requestID+"\n"), 0o644); err != nil {
+	contents := []byte(requestID + "\n")
+	if err := os.WriteFile(syncPath, contents, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
+	written := make(chan error, 1)
+	writeDone := make(chan struct{})
+	t.Cleanup(func() { <-writeDone })
 	go func() {
-		defer close(done)
-		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) {
-			data, err := os.ReadFile(syncPath)
-			if err == nil && strings.Count(string(data), "\n") >= 2 {
-				_ = instance.WriteFlushAck(worktree, instanceID, api.FlushResult{
-					RequestID:  requestID,
-					InstanceID: instanceID,
-					Worktree:   worktree,
-					Target:     "up",
-					Synced:     true,
-					Success:    true,
-				})
-				return
-			}
-			time.Sleep(25 * time.Millisecond)
-		}
+		defer close(writeDone)
+		time.Sleep(150 * time.Millisecond)
+		written <- instance.WriteFlushAck(s.worktree, s.instanceID, api.FlushResult{
+			RequestID: requestID, InstanceID: s.instanceID, Worktree: s.worktree,
+			Target: active.target, Synced: true, Success: true,
+		})
 	}()
-	result, ok, err := waitForFlushAck(worktree, instanceID, requestID, syncPath, 2*time.Second)
-	if err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := s.waitForFlushAck(ctx, active, requestID)
+	if err != nil || !result.Success || !result.Synced {
+		t.Fatalf("expected successful ack, result=%+v err=%v", result, err)
+	}
+	if err := <-written; err != nil {
 		t.Fatal(err)
 	}
-	if !ok || !result.Success || !result.Synced {
-		t.Fatalf("expected retouched sync sentinel to produce ack, ok=%v result=%+v", ok, result)
+	data, err := os.ReadFile(syncPath)
+	if err != nil || !bytes.Equal(data, contents) {
+		t.Fatalf("ack wait rewrote the sync sentinel: contents=%q err=%v", data, err)
 	}
-	<-done
 }
 
 func TestFlushRequestWriteFailureReturnsStructuredContext(t *testing.T) {
@@ -154,8 +151,12 @@ func TestFlushRequestWriteFailureReturnsStructuredContext(t *testing.T) {
 			projectName: projectName,
 			target:      "up",
 			mode:        api.ModeWatch,
+			done:        make(chan struct{}),
+			watchReady:  make(chan struct{}),
 		},
 	}
+
+	close(s.active.watchReady)
 
 	result, err := s.flush(context.Background(), projectName, "up", time.Second, 1)
 	if err == nil || !strings.Contains(err.Error(), "flush failed") {
@@ -166,6 +167,50 @@ func TestFlushRequestWriteFailureReturnsStructuredContext(t *testing.T) {
 	}
 	if len(result.Issues) != 1 || result.Issues[0].Kind != "request_write_error" || result.Issues[0].Message == "" || result.Issues[0].LogPath != logPath {
 		t.Fatalf("flush failure lost the underlying issue: %+v", result.Issues)
+	}
+}
+
+func TestFlushStartsWatchAfterCompletedDetachedRun(t *testing.T) {
+	worktree := t.TempDir()
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const projectName = "daemon-flush-completed-detached-run"
+	var runs atomic.Int32
+	project.Register(daemonTestProject{
+		name: projectName,
+		tasks: []project.Task{{
+			Name: "check",
+			Kind: project.KindOnce,
+			Run: func(context.Context, *project.Runtime) error {
+				runs.Add(1)
+				return nil
+			},
+		}},
+		targets: []project.Target{{Name: "up", RootTasks: []string{"check"}}},
+	})
+	inst.LastRun = api.RunConfig{Project: projectName, Target: "up", Mode: api.ModeDev, Detached: true}
+	if err := instance.Save(inst); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(worktree, "daemon.log")
+	if err := instance.RecordDaemon(inst, os.Getpid(), logPath); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{
+		worktree:    worktree,
+		instanceID:  inst.ID,
+		projectName: projectName,
+		logPath:     logPath,
+		subscribers: map[chan api.Event]bool{},
+	}
+	defer s.stopActive(3 * time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := s.flush(ctx, projectName, "up", 4*time.Second, 1)
+	if err != nil || !result.Started || !result.Success || runs.Load() != 1 {
+		t.Fatalf("completed run prevented a fresh watch: result=%+v runs=%d err=%v", result, runs.Load(), err)
 	}
 }
 
@@ -364,6 +409,104 @@ func TestSubscribeReturnsWhenContextCanceled(t *testing.T) {
 	}
 }
 
+func TestClientCallReturnsWhenContextCanceledWithoutDeadline(t *testing.T) {
+	socketPath := filepath.Join(os.TempDir(), "df-call-cancel-"+time.Now().Format("150405.000000000")+".sock")
+	defer os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	connected := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		var req Request
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			_ = conn.Close()
+			return
+		}
+		connected <- conn
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := (&Client{socketPath: socketPath}).Call(ctx, Request{Action: ActionPing})
+		done <- err
+	}()
+	select {
+	case conn := <-connected:
+		defer conn.Close()
+	case <-time.After(time.Second):
+		t.Fatal("Call did not send its request to the test daemon")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Call cancellation error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Call did not return after context cancellation")
+	}
+}
+
+func TestHandleConnReturnsWhenCanceledBeforeRequest(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		(&Server{}).handleConn(ctx, serverConn)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("connection handler remained blocked on an unread request after cancellation")
+	}
+}
+
+func TestHandleConnRemovesIdleSubscriberAfterDisconnect(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Server{subscribers: map[chan api.Event]bool{}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleConn(ctx, serverConn)
+	}()
+	if err := json.NewEncoder(clientConn).Encode(Request{Action: ActionSubscribe}); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForDaemonCondition(time.Second, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return len(s.subscribers) == 1
+	}) {
+		t.Fatal("connection handler did not register the subscription")
+	}
+	_ = clientConn.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("idle subscriber remained registered after the client disconnected")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.subscribers) != 0 {
+		t.Fatalf("disconnected subscribers retained: %d", len(s.subscribers))
+	}
+}
+
 func TestClientCallAcknowledgesFinalErrorResponse(t *testing.T) {
 	socketPath := filepath.Join(os.TempDir(), "df-response-ack-"+time.Now().Format("150405.000000000")+".sock")
 	defer os.Remove(socketPath)
@@ -399,7 +542,7 @@ func TestClientCallAcknowledgesFinalErrorResponse(t *testing.T) {
 				Message: `live watch target is "gen", requested "build"`,
 			}},
 		}
-		resp := Response{ID: req.ID, OK: false, Error: "flush failed", Flush: &result}
+		resp := Response{ID: req.ID, OK: false, Error: &api.CommandError{Code: "flush_failed", Phase: "execution", Message: "flush failed"}, Flush: &result}
 		if err := enc.Encode(frame{Type: responseFrameType, ID: req.ID, Response: &resp}); err != nil {
 			serverDone <- err
 			return
@@ -493,48 +636,30 @@ func TestDaemonNeedsRestartWhenCopiedExecutableIsMissingOrStale(t *testing.T) {
 	}
 }
 
-func TestLegacyDevflowProcessRefsIncludesDescendants(t *testing.T) {
+func TestStopAllUsesRecordedTaskOwnershipOnly(t *testing.T) {
 	worktree := t.TempDir()
-	previous := listProcessesForLegacy
-	listProcessesForLegacy = func() []legacyProcess {
-		return []legacyProcess{
-			{pid: 100, ppid: 1, command: filepath.Join(worktree, ".devflow", "bin", "devflow-launcher") + " __internal_supervise"},
-			{pid: 101, ppid: 100, command: "/bin/sh -c npx tsx src/server.ts"},
-			{pid: 102, ppid: 101, command: "node src/server.ts"},
-			{pid: 200, ppid: 1, command: "/bin/sh -c npx tsx src/server.ts"},
-			{pid: 300, ppid: 1, command: filepath.Join(t.TempDir(), ".devflow", "bin", "devflow-launcher") + " __internal_supervise"},
-		}
+	inst, err := instance.Resolve(worktree, "test")
+	if err != nil {
+		t.Fatal(err)
 	}
-	defer func() { listProcessesForLegacy = previous }()
-
-	refs := legacyDevflowProcessRefs(worktree)
-	for name, pid := range map[string]int{
-		"legacy-100":       100,
-		"legacy-child-101": 101,
-		"legacy-child-102": 102,
-	} {
-		if refs[name] != pid {
-			t.Fatalf("expected %s=%d in refs, got %v", name, pid, refs)
-		}
+	trackedPID, orphanPID, logPID := os.Getpid()+1, os.Getpid()+2, os.Getpid()+3
+	inst.Processes["tracked"] = api.ProcessRef{PID: trackedPID}
+	if err := instance.SaveStatus(worktree, inst.ID, "dev", api.ModeWatch, map[string]api.NodeStatus{
+		"tracked": {Name: "tracked", PID: trackedPID},
+		"orphan":  {Name: "orphan", PID: orphanPID},
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if refs["legacy-child-200"] != 0 {
-		t.Fatalf("did not expect unrelated process in refs: %v", refs)
+	logPath := filepath.Join(worktree, ".devflow", "logs", inst.ID, "supervisor.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if refs["legacy-300"] != 0 {
-		t.Fatalf("did not expect other worktree process in refs: %v", refs)
+	if err := os.WriteFile(logPath, fmt.Appendf(nil, "child pid=%d\n", logPID), 0o600); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestParseLegacyProcesses(t *testing.T) {
-	processes := parseLegacyProcesses("  10     1 /bin/sh -c npx tsx src/server.ts\nbad\n  11 10 node src/server.ts\n")
-	if len(processes) != 2 {
-		t.Fatalf("expected 2 parsed processes, got %+v", processes)
-	}
-	if processes[0].pid != 10 || processes[0].ppid != 1 || processes[0].command != "/bin/sh -c npx tsx src/server.ts" {
-		t.Fatalf("unexpected first process: %+v", processes[0])
-	}
-	if processes[1].pid != 11 || processes[1].ppid != 10 || processes[1].command != "node src/server.ts" {
-		t.Fatalf("unexpected second process: %+v", processes[1])
+	refs := additionalRecordedProcessRefs(worktree, inst.ID, inst)
+	if len(refs) != 1 || refs["orphan"] != orphanPID {
+		t.Fatalf("stop scope must contain only additional recorded task PIDs, got %v", refs)
 	}
 }
 
@@ -738,7 +863,7 @@ func TestDaemonRestartAndScopedStopPreserveIndependentService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !started.Accepted || !started.SupervisorStarted || started.Ready || started.State != "starting" {
+	if !started.Accepted || !started.DaemonStarted || started.Ready || started.State != "starting" {
 		t.Fatalf("detached start did not distinguish acceptance from readiness: %+v", started)
 	}
 	defer s.stopActive(3 * time.Second)
@@ -920,37 +1045,49 @@ func TestDetachedTargetStateDistinguishesStartingReadyAndFailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &Server{worktree: worktree, instanceID: inst.ID}
-	if ready, state := s.detachedTargetState("dev"); ready || state != "starting" {
+	if ready, state := s.detachedTargetState("dev", "run-state"); ready || state != "starting" {
 		t.Fatalf("missing status = ready=%v state=%q", ready, state)
 	}
 	if err := instance.SaveStatus(worktree, inst.ID, "dev", api.ModeWatch, map[string]api.NodeStatus{
-		"build":   {Name: "build", State: api.StateDone},
-		"backend": {Name: "backend", State: api.StateRunning, Ready: true},
+		"build":   {Name: "build", RunID: "run-state", State: api.StateDone},
+		"backend": {Name: "backend", RunID: "run-state", State: api.StateRunning, Ready: true},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if ready, state := s.detachedTargetState("dev"); !ready || state != "ready" {
+	if ready, state := s.detachedTargetState("dev", "run-state"); !ready || state != "ready" {
 		t.Fatalf("healthy status = ready=%v state=%q", ready, state)
 	}
 	if err := instance.SaveStatus(worktree, inst.ID, "dev", api.ModeWatch, map[string]api.NodeStatus{
-		"backend": {Name: "backend", State: api.StateFailed, LastError: "exit status 17"},
+		"backend": {Name: "backend", RunID: "run-state", State: api.StateFailed, LastError: "exit status 17"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if ready, state := s.detachedTargetState("dev"); ready || state != "failed" {
+	if ready, state := s.detachedTargetState("dev", "run-state"); ready || state != "failed" {
 		t.Fatalf("failed status = ready=%v state=%q", ready, state)
 	}
-	if ready, state := s.detachedTargetState("other"); ready || state != "starting" {
+	if ready, state := s.detachedTargetState("other", "run-state"); ready || state != "starting" {
 		t.Fatalf("stale other-target status = ready=%v state=%q", ready, state)
 	}
 }
 
 func TestInvalidateAndRelaunchForcesMatchingActiveRunToRestart(t *testing.T) {
+	cacheRoot := t.TempDir()
+	t.Setenv("HOME", cacheRoot)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv("LOCALAPPDATA", cacheRoot)
 	name := "daemon-invalidate-force-restart"
 	project.Register(daemonTestProject{
 		name: name,
 		tasks: []project.Task{
-			{Name: "build", Kind: project.KindOnce, Cache: true},
+			{
+				Name:    "build",
+				Kind:    project.KindOnce,
+				Cache:   true,
+				Outputs: project.Outputs{Files: []string{"build.out"}},
+				Run: func(_ context.Context, rt *project.Runtime) error {
+					return os.WriteFile(filepath.Join(rt.Worktree, "build.out"), []byte("built"), 0o644)
+				},
+			},
 		},
 		targets: []project.Target{{Name: "main", RootTasks: []string{"build"}}},
 	})
@@ -994,6 +1131,7 @@ func TestInvalidateAndRelaunchForcesMatchingActiveRunToRestart(t *testing.T) {
 			done:        oldDone,
 		},
 	}
+	defer s.stopActive(3 * time.Second)
 
 	if _, err := s.invalidateAndRelaunch(context.Background(), "build"); err != nil {
 		t.Fatal(err)
@@ -1002,6 +1140,16 @@ func TestInvalidateAndRelaunchForcesMatchingActiveRunToRestart(t *testing.T) {
 	case <-oldDone:
 	case <-time.After(time.Second):
 		t.Fatal("expected invalidate relaunch to stop the existing matching active run")
+	}
+	s.mu.Lock()
+	relaunched := s.active
+	s.mu.Unlock()
+	if relaunched != nil {
+		select {
+		case <-relaunched.done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("relaunched build did not finish")
+		}
 	}
 	state, err := instance.LoadStatus(worktree, inst.ID)
 	if err != nil {

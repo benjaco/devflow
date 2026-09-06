@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+
+	"github.com/benjaco/devflow/internal/clierror"
 )
 
 var (
@@ -45,7 +47,7 @@ func Lookup(name string) (Project, error) {
 	defer registryMu.RUnlock()
 	p, ok := registry[name]
 	if !ok {
-		return nil, fmt.Errorf("unknown project %q", name)
+		return nil, clierror.Wrap(fmt.Errorf("unknown project %q", name), "unknown_project", "resolution")
 	}
 	return p, nil
 }
@@ -63,10 +65,17 @@ func Names() []string {
 
 func Detect(worktree string) (Project, error) {
 	worktree = filepath.Clean(worktree)
-	names := Names()
+	registryMu.RLock()
+	projects := make([]Project, 0, len(registry))
+	for _, p := range registry {
+		projects = append(projects, p)
+	}
+	registryMu.RUnlock()
+	// Adapter callbacks run outside the registry lock so they can safely
+	// perform lookups or register another project.
+	sort.Slice(projects, func(i, j int) bool { return projects[i].Name() < projects[j].Name() })
 	matches := make([]Project, 0, 1)
-	for _, name := range names {
-		p := registry[name]
+	for _, p := range projects {
 		detector, ok := p.(WorktreeDetector)
 		if !ok {
 			continue
@@ -79,14 +88,14 @@ func Detect(worktree string) (Project, error) {
 	case 1:
 		return matches[0], nil
 	case 0:
-		return nil, fmt.Errorf("unable to detect project for worktree %q", worktree)
+		return nil, clierror.Wrap(fmt.Errorf("unable to detect project for worktree %q", worktree), "unknown_project", "resolution")
 	default:
 		names := make([]string, 0, len(matches))
 		for _, p := range matches {
 			names = append(names, p.Name())
 		}
 		sort.Strings(names)
-		return nil, fmt.Errorf("ambiguous project detection for %q: %s", worktree, stringsJoin(names, ", "))
+		return nil, clierror.Wrap(fmt.Errorf("ambiguous project detection for %q: %s", worktree, stringsJoin(names, ", ")), "ambiguous_project", "resolution")
 	}
 }
 
@@ -136,24 +145,19 @@ func ResolveExecutionProject(p Project, target string) (Project, string, error) 
 			}, target, nil
 		}
 	}
-	return nil, "", fmt.Errorf("unknown target or task %q", target)
+	return nil, "", clierror.Wrap(fmt.Errorf("unknown target or task %q", target), "unknown_target", "resolution")
 }
 
 func (p syntheticTargetProject) Name() string  { return p.base.Name() }
 func (p syntheticTargetProject) Tasks() []Task { return p.base.Tasks() }
+func (p syntheticTargetProject) CacheNamespace() string {
+	return CacheNamespace(p.base)
+}
 func (p syntheticTargetProject) ConfigureInstance(ctx context.Context, worktree string) (InstanceConfig, error) {
 	return p.base.ConfigureInstance(ctx, worktree)
 }
 func (p syntheticTargetProject) RequiredCLIs() []RequiredCLI {
-	provider, ok := p.base.(RequiredCLIProvider)
-	if ok {
-		return provider.RequiredCLIs()
-	}
-	legacy, ok := p.base.(DependencyProvider)
-	if !ok {
-		return nil
-	}
-	return legacy.Dependencies()
+	return RequiredCLIsFor(p.base)
 }
 func (p syntheticTargetProject) RequiredEnvs() []string {
 	provider, ok := p.base.(RequiredEnvProvider)

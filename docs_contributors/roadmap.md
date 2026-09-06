@@ -12,6 +12,7 @@
 - typed event stream
 - polling watch mode with selective reruns
 - per-worktree daemon flow for mutable dev/watch/operator commands
+- exclusive worktree execution leases shared by CI/daemon, serialized daemon transitions, cleanup-aware recovery and structured ownership conflicts
 - first usable TUI with task/log panes and selected-task actions
 - project-scoped required CLI checks and installers
 - interactive prompt plumbing for prompt-driven subprocesses
@@ -22,7 +23,7 @@
 - global OS user task cache with project namespaces
 - explicit documentation split between project adoption and Devflow contributor workflows
 - per-worktree localbuild locking for concurrent project-local binary builds
-- reliable `stop --all` cleanup for daemon-owned work, legacy detached supervisors, child executors, service process groups, and stale status PIDs
+- reliable `stop --all` cleanup for daemon-owned work, recorded service process groups, and stale status PIDs
 - explicit service lifecycle contract for attached run, CI readiness probes, detached run/watch, flush, status, and stop
 - graph affected explanations plus aligned ignore semantics for watch matching and fingerprinting
 - target-scoped required CLI declarations plus `doctor --target <target> --json`
@@ -37,7 +38,12 @@
 
 ## Next Milestones
 
-The BikeCoach real-project integration moved the next focus from generic operator expansion to adoption hardening. The next work should make the installed CLI safe and understandable in a real repository where humans and agents call commands quickly, stale detached state can exist, and the current workflow may still be script-based.
+The CM Navigator agent-integration review has an approved engineering sequence in [Agent verification: assessment and implementation plan](agent-verification-plan.md). Item 1 (execution ownership), its current-only revision and CI correction are accepted. Item 2 (startup/flush freshness) and its Windows CI correction are accepted; see [regression evidence](watch-freshness-verification.md). Item 3 (validation lifecycle parity) is accepted; see [lifecycle evidence](validation-lifecycle-verification.md). Item 4 (log following, JSON errors and direct cancellation) is accepted; see [CLI evidence](cli-reliability-verification.md). Successful upgrades discard the shared task artifact cache; future work targets the current API/state contracts directly. Continue one item at a time after review; the original assessment baseline is `a7fe4f8`.
+
+1. Review the combined item 7 compact results/progress/cursor implementation and the five item 5 corrections, explicitly approved together after acceptance of item 6; see [compact evidence verification](compact-evidence-verification.md).
+2. Validate the changed contracts in native Windows CI and real adoption; broader same-worktree concurrency and MCP remain deferred.
+
+The earlier BikeCoach adoption work remains useful alongside that sequence:
 
 1. User adoption docs and examples
    - Add a full "converge from scripts to Devflow" user guide based on the BikeCoach integration pattern.
@@ -59,13 +65,13 @@ The BikeCoach real-project integration moved the next focus from generic operato
 ## Feedback Disposition
 
 - Completed from BikeCoach feedback: per-worktree localbuild locking for concurrent CLI commands.
-- Completed from BikeCoach feedback: reliable `stop --all` cleanup for daemon-owned work, legacy detached supervisors, child executors, tracked services, and stale status process groups.
+- Completed from BikeCoach feedback: reliable `stop --all` cleanup for daemon-owned work, tracked services, and recorded status process groups.
 - Completed from BikeCoach feedback: service lifecycle contract documentation plus CI-mode service readiness probes that stop services before returning.
 - Completed from BikeCoach feedback: watch/debug ergonomics via `graph affected --explain` and aligned root-relative/directory-relative ignore matching between watch and fingerprinting.
 - Completed from BikeCoach feedback: target-scoped required CLI declarations plus `doctor --target <target> --json`.
 - Completed from BikeCoach feedback: managed Postgres host-port readiness, stale published-port reconciliation, `run --help` flag descriptions, finite service-dependent target guidance, and secret/runtime-env documentation.
 - Completed from Prisma/Postgres adoption test: Prisma migration inspection ignores `migration_lock.toml`, fresh schemas with models fail before smoke tests when no migrations exist, remote clone failures from `pg_dump` are not masked, `stop --all` stops the managed DB container, and first task errors are preserved over sibling cancellation noise.
-- Completed from Prisma/Postgres clean retry: first `flush` after `watch --detach` now periodically rewrites the sync sentinel while waiting so watcher startup scan races do not cause false ack timeouts.
+- Completed startup/flush correction: establish the observer before the initial DAG and bind flush to the captured watch plus a fresh reconciliation boundary. This replaces the earlier sentinel-retouch workaround and also covers edits during rebuilding and health probes.
 - Completed from reworked Prisma/Postgres setup feedback: the builder/component API is the preferred adapter shape, `prisma.NewMigration(b)` now reconciles the managed database before authoring so edited latest migrations do not force a manual reset, and docs clarify component task names, consumer-owned target names, `pg_dump` major-version compatibility, and stopped database metadata.
 - Completed from real-project CI/cache feedback: cache and validation now share a bounded copier that preserves safe relative links without expanding pnpm graphs, repairs read-only cleanup, and reports copy progress; CI JSON runs stream progress to stderr and return failure text/log context plus node/cache timing; scanner errors are propagated with a 4 MiB line bound.
 - Completed from real-project security/config feedback: PostgreSQL host clients use owner-only pgpass files and password-free arguments, containerized clients are available through `CloneFromEnvContainerized`, task/daemon/event logs are private, process env overrides dotenv defaults for declared keys while managed runtime values win last, and `RequiredEnv` plus `doctor --strict` makes missing inputs actionable.

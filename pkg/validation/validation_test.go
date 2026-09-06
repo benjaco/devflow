@@ -34,6 +34,27 @@ func (p validationTestProject) ConfigureInstance(context.Context, string) (proje
 	return project.InstanceConfig{}, nil
 }
 
+func TestValidationDefaultsToIssuesDetails(t *testing.T) {
+	validator, err := New(independentOutputProject())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := validator.Run(context.Background(), Request{
+		Target:   "build",
+		Worktree: t.TempDir(),
+		Mode:     api.ValidationModeOrders,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success || result.Details != api.ValidationDetailsIssues {
+		t.Fatalf("default validation response: success=%v details=%q, want success=true details=issues", result.Success, result.Details)
+	}
+	if result.Orders.TotalOrders != 2 {
+		t.Fatalf("default response must retain exact order counts: %+v", result.Orders)
+	}
+}
+
 func TestArtifactValidationUsesOnlyDeclaredInputsAndDependencyOutputs(t *testing.T) {
 	worktree := t.TempDir()
 	writeValidationFile(t, worktree, "source.txt", "hello")
@@ -533,6 +554,7 @@ func runValidation(t *testing.T, p project.Project, worktree string, mode api.Va
 		Target:    p.Targets()[0].Name,
 		Worktree:  worktree,
 		Mode:      mode,
+		Details:   api.ValidationDetailsFull,
 		MaxOrders: maxOrders,
 	})
 	if err != nil {

@@ -32,6 +32,8 @@ If `flush` fails, inspect `issues`, `nodes`, `services`, and referenced log path
 
 ## Service Lifecycle
 
+One execution owns each worktree. A running watcher and `run --ci` cannot overlap there: the second executor returns `resource_conflict` without replacing the first one's task status, logs or outputs. For independent checks, use another worktree containing your changes, or explicitly stop development first. A stop timeout retains ownership. Abandoned execution requires confirmed resource cleanup before a new run; `stop --all --json` reports resources it cannot safely reconcile.
+
 Use the lifecycle command that matches the job:
 
 - Dev/watch/operator commands use one daemon per worktree. The daemon owns file watching, services, status, and live TUI updates. Sibling worktrees get separate daemons but still share the global task cache.
@@ -119,7 +121,7 @@ Useful TUI keys:
 - `Home` / `End`: task top/bottom or log beginning/resume-follow, depending on focus
 - `f`: resume live-log following
 - `o`: load an older bounded block of retained log lines
-- `l`: selected task log or supervisor log
+- `l`: selected task log or daemon log
 - `d`: database/Prisma panel
 - `a`: toggle the explicit active/failure attention view
 - `m`: create a migration through the project migration-create action
@@ -146,7 +148,7 @@ Use `--component` when a project has more than one migration system.
 
 ## Watch Mode
 
-Watch mode maps changed files to task inputs, then reruns the affected downstream slice.
+Watch mode observes task inputs before initial execution, then reruns the affected downstream slice when those inputs change. Edits made during startup or a rebuild are reconciled before a successful flush. If a task also rewrites an input file, an edit made after that task finishes still triggers a rerun, even while downstream work is running; generated changes are excluded only when their metadata still matches what the producer left behind.
 
 Devflow watches the declared input paths for the selected target closure, not the whole project tree. This keeps folders such as `node_modules` out of the idle watch loop. If edits are not being picked up, add the missing source path to the relevant task inputs and check it with `graph affected --explain`.
 
@@ -162,9 +164,13 @@ Then after edits:
 devflow flush up --json
 ```
 
-`flush` proves the watcher has processed a sync sentinel written after your edits. It returns success only when the selected target closure has settled and in-chain services are healthy.
+`flush` waits for declared-input changes to settle and checks in-chain services. It scans again after rebuilds and health checks before returning success. Check `success=true`; `synced=true` alone only means the watcher processed the synchronization request.
 
-Important watch rules:
+If a watch policy prevents changed work from rerunning, flush reports `watch_restart_required` until that work executes successfully or you stop and restart the target. Repeating flush does not clear the issue. A stopped or replaced watcher reports `watch_stopped`, including replacement with the same target; run a new flush against the current watch.
+
+Freshness covers the selected target's declared inputs as observed by polling. It does not cover undeclared files or guarantee detection of transient changes or edits that preserve filesystem metadata. Tests outside the target still need to run separately.
+
+Watch rules:
 - downstream jobs do not run past blocked intermediate tasks
 - services default to affected-slice restarts
 - `RestartNever` prevents watch restarts
@@ -185,11 +191,11 @@ Use JSON status for automation and plain logs for fast inspection:
 ```bash
 devflow status --json
 devflow logs app
-devflow logs supervisor
+devflow logs daemon
 devflow logs tui --tail 200
 ```
 
-A failed `run --ci --json` already includes `error`, `failedNode`, `failedNodeLogPath`, a bounded `logTail`, every selected node's final run snapshot, and cache hit/miss lists. Each node reports duration and cache timing when applicable. Use the referenced full log only when the bounded tail is insufficient. `logs supervisor` reads the daemon log, while `logs tui` reads the interactive client's session/error/crash diagnostics. Task, daemon, TUI, and event logs are owner-only on Unix-like systems.
+A failed `run --ci --json` already includes `error`, `failedNode`, `failedNodeLogPath`, a bounded `logTail`, every selected node's final run snapshot, and cache hit/miss lists. Each node reports duration and cache timing when applicable. Use the referenced full log only when the bounded tail is insufficient. `logs daemon` reads the daemon log, while `logs tui` reads the interactive client's session/error/crash diagnostics. Task, daemon, TUI, and event logs are owner-only on Unix-like systems.
 
 For flush failures, start with the JSON `issues`, then inspect the referenced task logs. Do not rerun downstream tests until the relevant flush target reports `success=true`.
 
