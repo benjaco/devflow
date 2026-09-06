@@ -232,7 +232,7 @@ func TestValidationRejectsPromptsFromBeforeRun(t *testing.T) {
 			p := lifecycleProject(project.Task{
 				Name: "check", Kind: project.KindOnce,
 				BeforeRun: func(_ context.Context, rt *project.Runtime) error {
-					_, err := rt.OnPrompt(rt.TaskName, process.PromptRequest{ID: "hook-confirm", Prompt: "Proceed?"})
+					_, err := rt.OnPrompt(rt.TaskName, process.PromptRequest{Prompt: "Proceed?"})
 					return err
 				},
 				Run: func(context.Context, *project.Runtime) error { runCalls++; return nil },

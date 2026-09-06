@@ -46,7 +46,7 @@ func TestExecutionOwnershipRejectsBeforeMutation(t *testing.T) {
 				if err := os.WriteFile(rt.Abs("artifact.txt"), []byte("owner"), 0o600); err != nil {
 					return err
 				}
-				if err := os.WriteFile(instance.LogPath(root, rt.Instance.ID, "check"), []byte("owner log\n"), 0o600); err != nil {
+				if err := os.WriteFile(rt.LogPath, []byte("owner log\n"), 0o600); err != nil {
 					return err
 				}
 				close(entered)
@@ -86,7 +86,11 @@ func TestExecutionOwnershipRejectsBeforeMutation(t *testing.T) {
 				t.Fatal("owner did not start")
 			}
 			id, _, _ := instance.IDForWorktree(root)
-			paths := []string{filepath.Join(root, ".devflow", "state", "instances", id, "instance.json"), filepath.Join(root, ".devflow", "state", "instances", id, "runtime.env"), filepath.Join(root, ".devflow", "state", "instances", id, "status.json"), instance.LogPath(root, id, "check"), filepath.Join(root, "artifact.txt")}
+			ownerStatus, err := instance.LoadStatus(root, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			paths := []string{filepath.Join(root, ".devflow", "state", "instances", id, "instance.json"), filepath.Join(root, ".devflow", "state", "instances", id, "runtime.env"), filepath.Join(root, ".devflow", "state", "instances", id, "status.json"), ownerStatus.Nodes["check"].LogPath, filepath.Join(root, "artifact.txt")}
 			before := make(map[string]string)
 			for _, path := range paths {
 				data, err := os.ReadFile(path)

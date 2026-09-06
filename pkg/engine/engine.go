@@ -34,6 +34,12 @@ import (
 )
 
 type Request struct {
+	RunID    string
+	Headless api.HeadlessPolicy
+	Timeout  time.Duration
+	// Enclosing operations finalize evidence after their own cleanup.
+	DeferCompletion      bool
+	session              *runSession
 	Target               string
 	Worktree             string
 	Mode                 api.RunMode
@@ -138,6 +144,28 @@ func (e *Engine) CacheKey(ctx context.Context, req Request) (*api.CacheKeyResult
 }
 
 func (e *Engine) Watch(ctx context.Context, req Request) (runErr error) {
+	var stopObservation func()
+	var beginErr error
+	ctx, stopObservation, beginErr = e.beginRun(ctx, &req)
+	defer stopObservation()
+	operationCtx := ctx
+	var retainedResult api.RunResult
+	defer func() {
+		if req.session != nil {
+			if retainedResult.RunID == "" {
+				retainedResult = api.RunResult{RunID: req.RunID, Target: req.Target, Mode: req.Mode, InstanceID: req.session.record.InstanceID, Success: runErr == nil, Error: clierror.Describe(runErr, "task_failed", "execution")}
+			}
+			finishErr := req.session.finish(&retainedResult, errors.Join(runErr, operationCtx.Err()), req.DeferCompletion)
+			runErr = errors.Join(runErr, finishErr)
+			if !req.DeferCompletion && finishErr == nil {
+				e.publishRunFinished(retainedResult, req.Worktree, retainedResult.Error.Error())
+			}
+		}
+	}()
+	if beginErr != nil {
+		return beginErr
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	lease, release, err := acquireExecution(ctx, req)
@@ -158,13 +186,14 @@ func (e *Engine) Watch(ctx context.Context, req Request) (runErr error) {
 			lease.RequireRecovery()
 			runErr = errors.Join(runErr, cleanupErr)
 		}
+		resultErr := errors.Join(runErr, operationCtx.Err())
 		result := api.RunResult{
 			Target: req.Target, Mode: req.Mode, InstanceID: inst.ID,
-			Success: runErr == nil, DurationMs: time.Since(started).Milliseconds(),
+			Success: resultErr == nil, DurationMs: time.Since(started).Milliseconds(),
 			StartedAt: started.Format(time.RFC3339), FinishedAt: time.Now().UTC().Format(time.RFC3339),
 		}
-		finalizeRunResult(&result, state, runErr)
-		e.publishRunFinished(result, req.Worktree, result.Error.Error())
+		finalizeRunResult(&result, state, resultErr)
+		retainedResult = result
 	}()
 	readyPath := instance.FlushWatchReadyPath(req.Worktree, inst.ID)
 	if err := os.Remove(readyPath); err != nil && !os.IsNotExist(err) {
@@ -172,7 +201,7 @@ func (e *Engine) Watch(ctx context.Context, req Request) (runErr error) {
 	}
 	defer os.Remove(readyPath)
 	e.publish(api.Event{
-		TS: process.NowRFC3339Nano(), Type: api.EventRunStarted,
+		TS: process.NowRFC3339Nano(), Type: api.EventRunStarted, RunID: req.RunID,
 		InstanceID: inst.ID, Worktree: req.Worktree, Target: req.Target, Mode: req.Mode,
 	})
 	order, err := e.graph.TargetClosure(req.Target)
@@ -228,7 +257,7 @@ func (e *Engine) Watch(ctx context.Context, req Request) (runErr error) {
 
 	initialErr := e.runReadyQueue(ctx, func() {}, baseRT, state, order)
 	e.publish(api.Event{
-		TS: process.NowRFC3339Nano(), Type: api.EventWatchCycleDone,
+		TS: process.NowRFC3339Nano(), Type: api.EventWatchCycleDone, RunID: req.RunID,
 		InstanceID: inst.ID, Worktree: req.Worktree, Target: req.Target, Mode: req.Mode,
 		Success: boolPtr(initialErr == nil),
 	})
@@ -274,13 +303,34 @@ func (e *Engine) Watch(ctx context.Context, req Request) (runErr error) {
 	}
 }
 
-func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
+func (e *Engine) Run(ctx context.Context, req Request) (outcome *Outcome, runError error) {
+	var beginErr error
+	var stopObservation func()
+	ctx, stopObservation, beginErr = e.beginRun(ctx, &req)
+	defer stopObservation()
+	defer func() {
+		if req.session == nil {
+			return
+		}
+		if outcome == nil {
+			outcome = &Outcome{Result: api.RunResult{RunID: req.RunID, Target: req.Target, Mode: req.Mode, InstanceID: req.session.record.InstanceID, Success: false, Error: clierror.Describe(runError, "task_failed", "execution")}}
+		}
+		finishErr := req.session.finish(&outcome.Result, errors.Join(runError, ctx.Err()), req.DeferCompletion)
+		runError = errors.Join(runError, finishErr)
+		if !req.DeferCompletion && finishErr == nil {
+			e.publishRunFinished(outcome.Result, req.Worktree, outcome.Result.Error.Error())
+		}
+	}()
+	if beginErr != nil {
+		return nil, beginErr
+	}
+
 	if req.LifecycleController != nil {
 		defer req.LifecycleController.closeController()
 	}
 	started := time.Now().UTC()
 	result := api.RunResult{
-		Target: req.Target, Mode: req.Mode, FailureExcerpts: []api.FailureExcerpt{},
+		RunID: req.RunID, Target: req.Target, Mode: req.Mode, FailureExcerpts: []api.FailureExcerpt{},
 		Nodes: []api.NodeStatus{}, CacheHits: []string{}, CacheMisses: []string{},
 		StartedAt: started.Format(time.RFC3339),
 	}
@@ -312,7 +362,7 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	e.publish(api.Event{TS: process.NowRFC3339Nano(), Type: api.EventRunStarted, InstanceID: inst.ID, Worktree: req.Worktree, Target: req.Target, Mode: req.Mode})
+	e.publish(api.Event{TS: process.NowRFC3339Nano(), Type: api.EventRunStarted, RunID: req.RunID, InstanceID: inst.ID, Worktree: req.Worktree, Target: req.Target, Mode: req.Mode})
 	runErr := e.runReadyQueue(runCtx, cancel, baseRT, state, order)
 	if runErr == nil && req.Mode != api.ModeCI {
 		if services := state.snapshotServices(); len(services) > 0 {
@@ -329,16 +379,16 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 		lease.RequireRecovery()
 		runErr = errors.Join(runErr, cleanupErr)
 	}
-	result.Success = runErr == nil
+	resultErr := errors.Join(runErr, ctx.Err())
+	result.Success = resultErr == nil
 	result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 	result.DurationMs = time.Since(started).Milliseconds()
-	finalizeRunResult(&result, state, runErr)
+	finalizeRunResult(&result, state, resultErr)
 	if err := instance.SaveStatus(req.Worktree, inst.ID, req.Target, req.Mode, state.statusSnapshot()); err != nil {
 		runErr = errors.Join(runErr, err)
 		result.Success = false
 		result.Error = clierror.Describe(runErr, "task_failed", "execution")
 	}
-	e.publishRunFinished(result, req.Worktree, result.Error.Error())
 	return &Outcome{Result: result, Instance: inst}, runErr
 }
 
@@ -429,11 +479,11 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 	for _, name := range order {
 		task := e.graph.Tasks[name]
 		state.status[name] = api.NodeStatus{
-			Name:    name,
-			Kind:    string(task.Kind),
-			State:   api.StatePending,
-			LogPath: instance.LogPath(req.Worktree, inst.ID, name),
-			Debug:   debugStatus(task, inst),
+			Name:  name,
+			Kind:  string(task.Kind),
+			State: api.StatePending,
+			RunID: req.RunID,
+			Debug: debugStatus(task, inst),
 		}
 	}
 	if err := instance.SaveStatus(req.Worktree, inst.ID, req.Target, req.Mode, state.status); err != nil {
@@ -442,6 +492,7 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 	e.publish(api.Event{
 		TS:         process.NowRFC3339Nano(),
 		Type:       api.EventInstanceUpdated,
+		RunID:      req.RunID,
 		InstanceID: inst.ID,
 		Worktree:   req.Worktree,
 		Target:     req.Target,
@@ -449,18 +500,17 @@ func (e *Engine) prepareExecution(ctx context.Context, req Request) (*api.Instan
 	})
 
 	baseRT := &project.Runtime{
+		RunID:    req.RunID,
 		Worktree: req.Worktree,
 		Instance: inst,
 		Mode:     req.Mode,
 		Env:      cloneMap(inst.Env),
 		EventFn: func(evt api.Event) {
+			evt.RunID = req.RunID
 			e.publish(evt)
 		},
 		OnServiceHandle: func(task string, handle project.ServiceHandle) {
 			state.registerService(task, handle)
-		},
-		OnPrompt: func(task string, prompt process.PromptRequest) (process.PromptResponse, error) {
-			return e.waitForPromptAnswer(ctx, req, inst.ID, task, prompt)
 		},
 	}
 	return inst, state, baseRT, nil
@@ -568,14 +618,8 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 				continue
 			}
 
-			if project.IsServiceKind(task.Kind) {
-				state.setNodeState(name, api.StateStarting, "", "", 0)
-			} else {
-				state.setNodeState(name, api.StateRunning, "", "", 0)
-			}
-
 			depKeys := state.depKeySnapshot(task.Deps)
-			rt := baseRT.WithTask(name, instance.LogPath(state.req.Worktree, state.inst.ID, name))
+			rt := baseRT.WithTask(name, "")
 			rt.DepKeys = append([]string(nil), depKeys...)
 			wg.Add(1)
 			running++
@@ -667,7 +711,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			state.clearWatchBlocked(task.Name)
 		}
 	}()
-	if err := truncateTaskLog(rt); err != nil {
+	if err := e.beginAttempt(ctx, state, rt, task); err != nil {
 		state.setErrorState(task.Name, ctx, "", err, 0)
 		return taskResult{name: task.Name, err: err}
 	}
@@ -696,6 +740,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			}
 		}
 		beginOutputs()
+		state.markExecuted(rt.AttemptID)
 		_, runErr := taskexec.Run(ctx, task, rt)
 		completeOutputs()
 		if runErr != nil {
@@ -775,6 +820,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			CacheKey:   key,
 		})
 		beginOutputs()
+		state.markExecuted(rt.AttemptID)
 		_, runErr := taskexec.Run(ctx, task, rt)
 		// Cache persistence can be slow; edits after the producer returns must
 		// not be attributed to it while its artifacts are being copied.
@@ -804,6 +850,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 	}
 
 	beginOutputs()
+	state.markExecuted(rt.AttemptID)
 	taskRuntime, err := taskexec.Run(ctx, task, rt)
 	if !project.IsServiceKind(task.Kind) {
 		completeOutputs()
@@ -904,24 +951,6 @@ func (e *serviceEarlyExitError) Unwrap() error {
 	return e.cause
 }
 
-func truncateTaskLog(rt *project.Runtime) error {
-	if rt == nil || rt.LogPath == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(rt.LogPath), 0o755); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(rt.LogPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return err
-	}
-	return file.Close()
-}
-
 func cacheCopyProgress(rt *project.Runtime, operation string) func(fsutil.CopyProgress) {
 	if rt == nil {
 		return nil
@@ -975,63 +1004,6 @@ func declaredOutputsExist(worktree string, outputs project.Outputs) (bool, error
 		}
 	}
 	return true, nil
-}
-
-func (e *Engine) waitForPromptAnswer(ctx context.Context, req Request, instanceID, task string, prompt process.PromptRequest) (process.PromptResponse, error) {
-	e.publish(api.Event{
-		TS:         process.NowRFC3339Nano(),
-		Type:       api.EventInteractionReq,
-		InstanceID: instanceID,
-		Worktree:   req.Worktree,
-		Target:     req.Target,
-		Task:       task,
-		Mode:       req.Mode,
-		PromptID:   prompt.ID,
-		PromptKind: string(prompt.Kind),
-		Prompt:     prompt.Prompt,
-	})
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			e.publish(api.Event{
-				TS:         process.NowRFC3339Nano(),
-				Type:       api.EventInteractionStop,
-				InstanceID: instanceID,
-				Worktree:   req.Worktree,
-				Target:     req.Target,
-				Task:       task,
-				Mode:       req.Mode,
-				PromptID:   prompt.ID,
-				PromptKind: string(prompt.Kind),
-				Prompt:     prompt.Prompt,
-				Error:      ctx.Err().Error(),
-			})
-			return process.PromptResponse{}, ctx.Err()
-		case <-ticker.C:
-			value, ok, err := instance.ConsumeInteractionAnswer(req.Worktree, instanceID, prompt.ID)
-			if err != nil {
-				return process.PromptResponse{}, err
-			}
-			if !ok {
-				continue
-			}
-			e.publish(api.Event{
-				TS:         process.NowRFC3339Nano(),
-				Type:       api.EventInteractionAck,
-				InstanceID: instanceID,
-				Worktree:   req.Worktree,
-				Target:     req.Target,
-				Task:       task,
-				Mode:       req.Mode,
-				PromptID:   prompt.ID,
-				PromptKind: string(prompt.Kind),
-				Prompt:     prompt.Prompt,
-			})
-			return process.PromptResponse{Value: value}, nil
-		}
-	}
 }
 
 func (e *Engine) waitForServices(parent context.Context, req Request, inst *api.Instance, state *runState, baseRT *project.Runtime, services map[string]project.ServiceHandle) error {
@@ -1096,8 +1068,9 @@ func (e *Engine) handleUnexpectedServiceExit(ctx context.Context, req Request, i
 	}
 	updated := state.statusSnapshot()[exited.task]
 	e.publish(api.Event{
-		TS:            process.NowRFC3339Nano(),
-		Type:          api.EventProcessExited,
+		TS:    process.NowRFC3339Nano(),
+		Type:  api.EventProcessExited,
+		RunID: req.RunID, AttemptID: node.AttemptID,
 		InstanceID:    inst.ID,
 		Worktree:      req.Worktree,
 		Target:        req.Target,
@@ -1160,7 +1133,7 @@ func (e *Engine) applyServiceLifecycleCommand(ctx context.Context, req Request, 
 func (e *Engine) startStoppedService(ctx context.Context, state *runState, baseRT *project.Runtime, task project.Task, result ServiceLifecycleResult) (ServiceLifecycleResult, error) {
 	node := state.statusSnapshot()[task.Name]
 	state.setNodeState(task.Name, api.StateStarting, node.LastRunKey, "", 0)
-	runtime := baseRT.WithTask(task.Name, instance.LogPath(state.req.Worktree, state.inst.ID, task.Name))
+	runtime := baseRT.WithTask(task.Name, "")
 	depKeys := state.depKeySnapshot(task.Deps)
 	runtime.DepKeys = append([]string(nil), depKeys...)
 	execution := e.executeTask(ctx, state, runtime, task, depKeys)
@@ -1218,8 +1191,9 @@ func (s *runState) setNodeState(name string, state api.NodeState, lastRunKey, la
 	s.saveLocked()
 	if s.publish != nil && (prev != node.State || prevPID != node.PID || prevError != node.LastError) {
 		s.publish(api.Event{
-			TS:            process.NowRFC3339Nano(),
-			Type:          api.EventTaskState,
+			TS:    process.NowRFC3339Nano(),
+			Type:  api.EventTaskState,
+			RunID: s.req.RunID, AttemptID: node.AttemptID,
 			InstanceID:    s.inst.ID,
 			Worktree:      s.req.Worktree,
 			Target:        s.req.Target,
@@ -1414,6 +1388,12 @@ func uniqueSortedStrings(values []string) []string {
 }
 
 func (s *runState) publishEvent(evt api.Event) {
+	evt.RunID = s.req.RunID
+	if evt.Task != "" && evt.AttemptID == "" {
+		s.mu.Lock()
+		evt.AttemptID = s.status[evt.Task].AttemptID
+		s.mu.Unlock()
+	}
 	if s.publish == nil {
 		return
 	}
@@ -1434,7 +1414,6 @@ func (s *runState) registerService(task string, handle project.ServiceHandle) {
 	node := s.status[task]
 	node.PID = handle.PID()
 	node.Generation = generation
-	node.Attempt = int(generation)
 	node.Ready = false
 	s.status[task] = node
 	_ = instance.Save(s.inst)
@@ -1566,6 +1545,7 @@ func (s *runState) failedNode() string {
 }
 
 func (s *runState) saveLocked() {
+	s.saveAttemptsLocked()
 	_ = instance.SaveStatus(s.req.Worktree, s.inst.ID, s.req.Target, s.req.Mode, s.status)
 }
 
@@ -1897,6 +1877,7 @@ func (e *Engine) evaluateFlush(ctx context.Context, req Request, baseRT *project
 	closure, err := e.graph.TargetClosure(req.Target)
 	now := time.Now().UTC()
 	result := api.FlushResult{
+		RunID:      req.RunID,
 		RequestID:  flushReq.ID,
 		InstanceID: state.inst.ID,
 		Worktree:   req.Worktree,
@@ -1993,7 +1974,9 @@ func (e *Engine) evaluateFlushService(ctx context.Context, req Request, baseRT *
 	}
 	readyCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	rt := baseRT.WithTask(task.Name, instance.LogPath(req.Worktree, state.inst.ID, task.Name))
+	rt := baseRT.WithTask(task.Name, node.LogPath)
+	rt.RunID = req.RunID
+	rt.AttemptID = node.AttemptID
 	ready := make(chan error, 1)
 	go func() { ready <- task.Ready(readyCtx, rt) }()
 	// Flush can probe the same generation repeatedly. Poll Alive rather than
@@ -2055,6 +2038,7 @@ func finalizeRunResult(result *api.RunResult, state *runState, runErr error) {
 	if result == nil || state == nil {
 		return
 	}
+	result.RunID = state.req.RunID
 	result.CacheHits = state.snapshotCacheHits()
 	result.CacheMisses = state.snapshotCacheMisses()
 	result.CacheKeyManifest = state.manifestUsageSnapshot()
@@ -2147,6 +2131,7 @@ func (e *Engine) publishRunFinished(result api.RunResult, worktree, errText stri
 	e.publish(api.Event{
 		TS:         process.NowRFC3339Nano(),
 		Type:       api.EventRunFinished,
+		RunID:      result.RunID,
 		InstanceID: result.InstanceID,
 		Worktree:   worktree,
 		Target:     result.Target,

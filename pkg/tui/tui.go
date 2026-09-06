@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -36,6 +37,7 @@ type Options struct {
 type snapshot struct {
 	instance     *api.Instance
 	state        *instance.State
+	prompts      []api.Prompt
 	nodes        []api.NodeStatus
 	daemon       *api.DaemonStatus
 	urls         map[string]string
@@ -817,6 +819,7 @@ func (d *dashboard) refresh() error {
 		}
 	}
 	d.updateLogsFromSnapshot(snap)
+	d.reconcilePrompts(snap)
 	d.renderFooter()
 	return nil
 }
@@ -1670,10 +1673,20 @@ func loadSnapshotWithLogLimit(root, instanceID string, showDaemon bool, showData
 		logLineLimit = 200
 	}
 	logInfo, _ := readLastLinesInfo(logPath, logLineLimit)
+	var prompts []api.Prompt
+	if state.RunID != "" {
+		promptCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		prompts, err = instance.ListPrompts(promptCtx, root, instanceID, state.RunID)
+		cancel()
+		if err != nil && !errors.Is(err, instance.ErrRunExpired) {
+			return snapshot{}, err
+		}
+	}
 
 	return snapshot{
 		instance:     inst,
 		state:        state,
+		prompts:      prompts,
 		nodes:        nodes,
 		daemon:       daemon,
 		urls:         instanceURLs(inst),
@@ -1866,7 +1879,7 @@ func (d *dashboard) applyEvents(events []api.Event) {
 }
 
 func (d *dashboard) openPrompt(evt api.Event) {
-	if evt.PromptID == "" || evt.PromptID == d.activePromptID {
+	if evt.PromptID == "" || d.activePromptID != "" {
 		return
 	}
 	d.activePromptID = evt.PromptID
@@ -1878,15 +1891,14 @@ func (d *dashboard) openPrompt(evt api.Event) {
 			SetText(evt.Prompt).
 			AddButtons([]string{"Yes", "No"}).
 			SetDoneFunc(func(_ int, label string) {
-				answer := "n"
-				if label == "Yes" {
-					answer = "y"
-				}
-				if err := instance.WriteInteractionAnswer(d.root, d.instanceID, evt.PromptID, answer); err != nil {
+				answer := label == "Yes"
+				if err := instance.RespondPrompt(context.Background(), d.root, d.instanceID, api.PromptAnswer{
+					RunID: evt.RunID, Task: evt.Task, AttemptID: evt.AttemptID, PromptID: evt.PromptID, Confirm: &answer,
+				}); err != nil {
 					d.setStatus(fmt.Sprintf("[red]failed to answer prompt: %v", err))
 					return
 				}
-				d.setStatus(fmt.Sprintf("[yellow]answered %s with %s", evt.Task, answer))
+				d.setStatus(fmt.Sprintf("[yellow]answered %s prompt", evt.Task))
 				d.closePrompt()
 			})
 		d.pages.AddPage("prompt", modal, true, true)
@@ -1900,19 +1912,55 @@ func (d *dashboard) openPrompt(evt api.Event) {
 					return
 				}
 				value := input.GetText()
-				if err := instance.WriteInteractionAnswer(d.root, d.instanceID, evt.PromptID, value); err != nil {
+				if err := instance.RespondPrompt(context.Background(), d.root, d.instanceID, api.PromptAnswer{
+					RunID: evt.RunID, Task: evt.Task, AttemptID: evt.AttemptID, PromptID: evt.PromptID, Text: &value,
+				}); err != nil {
 					d.setStatus(fmt.Sprintf("[red]failed to answer prompt: %v", err))
 					return
 				}
 				d.setStatus(fmt.Sprintf("[yellow]answered %s prompt", evt.Task))
 				d.closePrompt()
 			})
+		if evt.PromptSecret {
+			input.SetMaskCharacter('•')
+		}
 		frame := tview.NewFrame(input).
 			SetBorders(1, 1, 1, 1, 1, 1).
 			AddText("Interactive Prompt", true, tview.AlignCenter, tcell.ColorWhite)
 		d.pages.AddPage("prompt", centered(frame, 80, 7), true, true)
 		d.app.SetFocus(input)
 	}
+}
+
+func (d *dashboard) reconcilePrompts(snap snapshot) {
+	if snap.state == nil || snap.state.RunID == "" {
+		return
+	}
+	var first *api.Prompt
+	for i := range snap.prompts {
+		prompt := &snap.prompts[i]
+		if prompt.State != api.PromptPending {
+			continue
+		}
+		if prompt.ID == d.activePromptID {
+			return
+		}
+		if first == nil {
+			first = prompt
+		}
+	}
+	if d.activePromptID != "" {
+		d.closePrompt()
+	}
+	if first == nil || d.activeInput {
+		return
+	}
+	// Events are advisory. Persisted pending metadata restores prompts after
+	// reconnect and queues parallel requests without replacing an open dialog.
+	d.openPrompt(api.Event{
+		RunID: first.RunID, Task: first.Task, AttemptID: first.AttemptID,
+		PromptID: first.ID, PromptKind: first.Kind, Prompt: first.Message, PromptSecret: first.Secret,
+	})
 }
 
 func (d *dashboard) closePrompt() {
@@ -2188,6 +2236,8 @@ func generatePrismaMigrationFromTUI(root, instanceID, name string, progressFns .
 	defer cancel()
 	_, err := callDaemonForTUI(ctx, root, daemon.Request{
 		Action:       daemon.ActionRunAction,
+		Headless:     api.HeadlessWait,
+		TimeoutMs:    (10 * time.Minute).Milliseconds(),
 		ActionKind:   database.ActionMigrationCreate,
 		StreamEvents: true,
 		Inputs: map[string]string{
@@ -2459,7 +2509,7 @@ func invalidateAndRerunDownstream(root, instanceID, task string, onTransition fu
 	if onTransition != nil {
 		onTransition()
 	}
-	_, err := callDaemonForTUI(context.Background(), root, daemon.Request{Action: daemon.ActionInvalidate, Task: task}, nil)
+	_, err := callDaemonForTUI(context.Background(), root, daemon.Request{Action: daemon.ActionInvalidate, Task: task, Headless: api.HeadlessWait}, nil)
 	return err
 }
 
@@ -2477,7 +2527,7 @@ func previewLifecycleForTUI(root string, req daemon.Request) (api.LifecyclePlan,
 
 func retargetAndRelaunch(root, instanceID, task string) error {
 	_ = instanceID
-	_, err := callDaemonForTUI(context.Background(), root, daemon.Request{Action: daemon.ActionRetarget, Target: task}, nil)
+	_, err := callDaemonForTUI(context.Background(), root, daemon.Request{Action: daemon.ActionRetarget, Target: task, Headless: api.HeadlessWait}, nil)
 	return err
 }
 

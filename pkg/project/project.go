@@ -166,13 +166,15 @@ func CacheNamespace(p Project) string {
 }
 
 type Runtime struct {
-	Worktree string
-	Instance *api.Instance
-	Mode     api.RunMode
-	Env      map[string]string
-	TaskName string
-	LogPath  string
-	EventFn  func(api.Event)
+	Worktree  string
+	Instance  *api.Instance
+	Mode      api.RunMode
+	Env       map[string]string
+	TaskName  string
+	RunID     string
+	AttemptID string
+	LogPath   string
+	EventFn   func(api.Event)
 	// Processes and PID-less resources share one registration path so lifecycle
 	// ownership never depends on the resource's concrete implementation.
 	OnServiceHandle func(task string, handle ServiceHandle)
@@ -243,6 +245,8 @@ func (rt *Runtime) EmitLogLine(stream, line string) {
 		TS:         process.NowRFC3339Nano(),
 		Type:       api.EventLogLine,
 		InstanceID: rt.Instance.ID,
+		RunID:      rt.RunID,
+		AttemptID:  rt.AttemptID,
 		Worktree:   rt.Worktree,
 		Task:       rt.TaskName,
 		Mode:       rt.Mode,
@@ -344,6 +348,8 @@ func (rt *Runtime) emitProcessLine(stream, line string) {
 		TS:         process.NowRFC3339Nano(),
 		Type:       api.EventLogLine,
 		InstanceID: rt.Instance.ID,
+		RunID:      rt.RunID,
+		AttemptID:  rt.AttemptID,
 		Worktree:   rt.Worktree,
 		Task:       rt.TaskName,
 		Mode:       rt.Mode,

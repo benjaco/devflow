@@ -26,6 +26,35 @@ func TestFlushWaitsForCapturedWatchObserver(t *testing.T) {
 	}
 }
 
+func TestFlushClassifiesCancellationBeforeWatchAdmission(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(map[bool]string{false: "canceled", true: "deadline"}[deadline], func(t *testing.T) {
+			s, previous := newFlushGenerationFixture(t)
+			s.active = nil
+			ctx, cancel := context.WithCancel(context.Background())
+			wantErr, wantKind, wantCode := context.Canceled, "canceled", "operation_cancelled"
+			if deadline {
+				cancel()
+				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				wantErr, wantKind, wantCode = context.DeadlineExceeded, "timeout", "deadline_exceeded"
+			} else {
+				cancel()
+			}
+			defer cancel()
+			result, err := s.flush(ctx, previous.projectName, previous.target, time.Second, 1)
+			if !errors.Is(err, wantErr) || result.TimedOut != deadline || result.Started || result.Success || len(result.Issues) != 1 || result.Issues[0].Kind != wantKind {
+				t.Fatalf("early cancellation lost its classification: result=%+v err=%v", result, err)
+			}
+			if result.Error == nil || result.Error.Code != wantCode {
+				t.Fatalf("early cancellation error = %+v", result.Error)
+			}
+			if _, err := os.Stat(instance.FlushRoot(s.worktree, s.instanceID)); !os.IsNotExist(err) {
+				t.Errorf("canceled admission wrote flush coordination files: %v", err)
+			}
+		})
+	}
+}
+
 func TestFlushRejectsReplacementWatchAcknowledgement(t *testing.T) {
 	s, active := newFlushGenerationFixture(t)
 	close(active.watchReady)

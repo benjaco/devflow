@@ -5,14 +5,32 @@ Last updated: 2026-09-06
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: items 1–3 accepted; item 4 (log following, structured CLI errors and direct cancellation) implemented and locally verified; awaiting user review. Items 5–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: item 4 final default/race suites and examples pass, along with vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), module/format/diff checks, version JSON and Linux/Windows compilation. Native Windows console/socket/process tests still require CI. One upgrade-streaming timeout during concurrent verification passed unchanged in focused and final full reruns.
+- State: items 1–4 accepted; item 5 (run identity, retained evidence and unattended control) is implemented but review identified five defects to fix before acceptance. Items 6–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: the existing item 5 full default/race suites, examples and quality/build checks pass. Review then reproduced five additional defects with six isolated overlay regressions; those findings remain unfixed. Native Windows behavior still requires CI. See the review entry below.
 
 ## In Progress
 
-- Await user review of item 4 and its recorded red-to-green evidence. Changes remain local and uncommitted; item 5 has not started.
+- Await review of the item 5 findings; fix them before acceptance. Item 6 metadata/planning has not started.
 
 ## Completed
+
+- Item 5 review — source review and focused temporary overlays, no implementation edits:
+  - reproduced expired queued daemon invalidation stopping the current watcher before reporting its deadline (`TestReviewExpiredInvalidationPreservesWatcher`); deadline admission does not cover invalidation's earlier mutation path
+  - reproduced current log bytes labeled with another attempt after two separate status reads (`TestReviewCurrentLogIdentity`); resolve path and identity from one snapshot
+  - reproduced manual service restart rewriting the completed previous attempt to `starting` (`TestReviewRetainedAttemptAfterLifecycleRestart`); allocate the new identity before publishing its starting state
+  - reproduced accepted secret responses for an exited execution owner and undelivered answers surviving cancellation (`TestReviewRejectResponseAfterOwnerExited`, `TestReviewCancelInterruptedRunRemovesUndeliveredAnswer`); reject dead-owner delivery and clean transient answers without finalizing resource ownership
+  - reproduced standalone engine `Result.Success=true` alongside a final evidence-write failure (`TestReviewFinalEvidenceWriteFailureChangesSuccessResult`); normalize the returned result after that failure
+  - recommended sharing terminal-record construction across engine/daemon/direct CLI and removing redundant reads/result writes; retain caller-owned cleanup boundaries. Existing focused CLI/prompt tests pass; no full-suite rerun for this review. Only this ledger changed in the repository
+
+- Agent-verification item 5 — run evidence and unattended control:
+  - added unique run/task-attempt identities, owner-only atomic records, immutable terminal results and separate append-only attempt logs; retained target/graph/executable identity, computed keys, timestamps, outcomes and executed/cache-reused evidence
+  - added projectless `runs list/show/cancel`, `prompts list/respond` and historical `logs --run --attempt`; expired IDs are explicit, cancellation remains scoped, and current development status is preserved by existing worktree admission
+  - defaulted unattended prompts to `fail`/`interaction_required`; explicit `wait` persists run/task/attempt-bound typed prompts for at most five minutes or an earlier deadline; rejected duplicate, expired, stopped/replaced-attempt and mismatched responses; transient answers are removed, secret input is masked and subsequent subprocess output suppressed
+  - propagated operation deadlines through daemon admission/execution and direct CLI/Git finalization; cancellation while queued preserves existing development, detached observers do not own execution, and final events follow durable cleanup results
+  - applied completed-only retention targets of 100 runs, seven days and 64 MiB with constant-size issuance tracking; atomically retire before deletion and prune before terminal publication so maintenance failures are recorded; active/interrupted records are protected, with read-only owner-liveness diagnostics and no automatic cleanup claims
+  - kept selected-attempt log following explicit; cross-attempt/cursor retrieval and compact/progress controls remain item 7, planner remains item 6; removed the retired answer API and updated CLI/TUI/example/validation callers
+  - recorded actual log/prompt/deadline/readiness/secret/stale-attempt/event failures and additional regression coverage in `docs_contributors/run-control-verification.md`; updated subsystem docs, shared memory, roadmap and plan
+  - passed final `go test -count=1 ./...`, `go test -race -count=1 ./...` and examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0, module/format/diff checks, version JSON and Linux/Windows amd64 affected test/CLI compilation. Local changes only; no commits, pushes, installs, existing-service operations or external-project changes
 
 - Agent-verification item 4 — CLI logs, errors and cancellation:
   - replaced whole-file tails and the independent zero-offset follower with bounded `internal/logstream` reading; preserved blank/partial UTF-8 lines, one consumed-byte cursor, append/truncate/replacement handling, cancellation and writer failures; oversized lines or detected mid-read rewrites fail explicitly
@@ -980,7 +998,7 @@ Last updated: 2026-09-06
 
 ## Next Steps
 
-- Review item 4 (log following, JSON error paths and direct cancellation), then begin item 5 (run identity, retained evidence and unattended control); continue the approved plan one item at a time with review after each.
+- Fix and regression-test the five item 5 review findings, then obtain review before item 6 (metadata and verification planning); continue the approved plan one item at a time with review after each.
 - Confirm the reliability changes on the native Linux/macOS/Windows CI matrix; retest the historical readiness symptom through the real daemon/TUI only if it recurs (the engine early-exit restart regression passes).
 - Confirm the Delve v1.27.1 pin on the next native Linux/macOS/Windows GitHub Actions run
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
@@ -992,7 +1010,7 @@ Last updated: 2026-09-06
 ## Deferred / Known Gaps
 
 - Flush proves a processed observation boundary for declared, metadata-visible inputs and selected-target health; it cannot cover transient/metadata-preserving edits, undeclared dependencies, writes made inside a producer-owned output scope during its execution, or edits after the final scan. Restart/warmup policy blocks require explicit rerun/restart.
-- Execution admission is conservative and cooperative: same-worktree overlap is rejected; finer resource scheduling, run histories, planner, broader JSON/input protocols and scoped cancellation remain later approved items. Unresolved orphan/PID-less resources require explicit reconciliation. Current recovery still uses recorded PIDs rather than OS process-birth identities; do not interpret process-exit/lease release as proof that arbitrary external resources stopped.
+- Execution admission is conservative and cooperative: same-worktree overlap is rejected; finer resource scheduling remains deferred; planner and compact/cursor retrieval are the remaining approved items. Active/interrupted run records and logs are protected from completed-only retention and may exceed its bounds. Unresolved orphan/PID-less resources require explicit reconciliation. Current recovery still uses recorded PIDs rather than OS process-birth identities; do not interpret process-exit/lease release as proof that arbitrary external resources stopped.
 - Successful upgrade clears the global task artifact cache without coordinating active cache operations; run upgrades between executions. It does not clear worktree state, outputs or database volumes.
 - Interrupted snapshots can record different PIDs for one task in instance/status maps; current name-based cleanup may retain only one reference. This pre-existing reconciliation gap remains separate follow-up work.
 - Cache restore rollback covers reported operation failures, not abrupt process/machine crashes; staging and output roots must share a filesystem. Failed rollback retains a recovery directory and reports its path.

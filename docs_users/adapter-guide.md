@@ -351,6 +351,14 @@ Recommended precedence:
 
 Use dotenv values for normal app configuration, but let CI/shell values override defaults. Devflow selects only keys referenced by project env, task `InputEnv`/`RequiredEnv`, or project-wide `RequiredEnv` rather than persisting the caller's entire environment. Leased ports, instance IDs, and per-instance DB URLs remain under devflow control and win last.
 
+## Execution identity and evidence
+
+Inside normal engine task callbacks, `Runtime.RunID` identifies the operation and `Runtime.AttemptID` identifies the current task attempt. `BeforeRun` and `Run` share that attempt; a watch rerun or service restart receives a fresh attempt. `Runtime.LogPath` points to its append-only retained log. Use `RunCmdSpec`, `StartServiceSpec`, `EmitLogLine` and registered service handles so output and cleanup remain attached to the owning attempt; do not construct or truncate a shared per-task log path.
+
+Cache/stamp skips also have attempt records and report that callbacks were not executed. Group nodes are resolved by the scheduler without an attempt record. Run results, node states, events and prompt metadata carry their execution identities. `runs show <run-id> --json` retrieves the retained provenance, outcomes and log references after a later run. Retention applies only to completed evidence; run IDs do not permit simultaneous conflicting execution in one worktree.
+
+Observe the supplied callback context in external calls and loops. `run`, `watch` and actions accept an operation `--timeout`, and `runs cancel <run-id>` cancels only the addressed execution. A disconnected observer or an expired `flush` wait does not cancel daemon-owned development work. Service cleanup must finish within the engine's bounded cleanup phase and preserve failures when a resource remains alive. Validation remains a separate finite sandbox workflow and does not create normal retained run/attempt identities.
+
 ## Explicit Interactive Actions
 
 Prompting commands should be explicit authoring or operator actions, not hidden in normal `up`/watch paths. For custom tools, use interactive command specs:
@@ -610,7 +618,7 @@ Adapters should prefer non-interactive subprocesses.
 Rules:
 - for package installs and similar setup commands, prefer explicit confirmation flags such as `-y`, `--yes`, `--force`, or `CI=1` when the adapter has already decided the action is correct
 - do not rely on hidden stdin prompts during normal `run` or `watch` targets
-- if a task needs a real user choice, model it as an explicit command, target, or future TUI action instead of letting the process stall
+- if a task needs a real user choice, model it as an explicit command, target, or registered TUI action instead of letting the process stall
 
 This is especially important for detached runs and watch mode, where a blocked prompt is easy to miss and hard to recover from.
 
@@ -630,9 +638,16 @@ return rt.RunCmdSpec(ctx, process.CommandSpec{
 
 Semantics:
 - Devflow watches subprocess output for the declared prompt patterns
-- matching prompts become `interaction_requested` events
-- detached runs can then be answered from the TUI
-- the answer is written back to subprocess stdin and recorded as `interaction_answered`
+- normal CLI and engine execution defaults to headless `fail`; a prompt returns `interaction_required`, stops the owned subprocess, and leaves a closed diagnostic
+- intentional `--headless wait` and TUI execution publish `interaction_requested` events and persist pending metadata for inspection/reconnection
+- `--timeout` bounds the operation; each prompt also has a five-minute maximum or the earlier operation deadline
+- `prompts list --run <run-id>` discovers requests; `prompts respond` requires the exact run, task, attempt and prompt identities and a typed boolean or text answer
+- a boolean response becomes `y` or `n` on subprocess stdin; text is written as the provided value plus a newline
+- `interaction_answered` records identity only; cancellation, expiry, task completion and attempt replacement close requests so duplicate or stale answers cannot reach a retry
+
+Use `Secret: true` on a `process.PromptSpec` for sensitive text input. `process.PromptRequest` carries the prompt text, kind and secret flag; the engine allocates the durable prompt ID when it binds the request to its run/task/attempt. Do not create process-local IDs or answer files. The TUI masks secret input, and `prompts respond --stdin` supplies text without putting it in command arguments. The prompt store never places answer values in retained metadata, events or result JSON; temporary owner-only delivery files are removed when consumed or cancelled.
+
+After the first secret response, Devflow emits `[output hidden after secret response]` and hides subsequent subprocess output from logs/events while still matching later prompt patterns. A child may echo or transform its input, so suppression begins before the value is written to its stdin. Adapters remain responsible for avoiding secret values in their own log calls and returned errors.
 
 This path should still be the exception, not the default adapter style.
 

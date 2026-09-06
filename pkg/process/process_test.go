@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -143,6 +144,64 @@ func TestRunInteractiveAnswersPrompts(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected greeting in output, got %v", lines)
+	}
+}
+
+func TestInteractivePromptFailureStopsOwnedProcess(t *testing.T) {
+	bin := buildPromptCLI(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	want := errors.New("interaction requires an explicit response")
+	_, err := Run(ctx, CommandSpec{
+		Name: bin, Interactive: true,
+		Prompts:  []PromptSpec{{Pattern: "Continue? [y/N]: ", Kind: PromptConfirm}},
+		OnPrompt: func(PromptRequest) (PromptResponse, error) { return PromptResponse{}, want },
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("prompt rejection did not stop the child and preserve its error: %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("child survived until operation deadline: %v", ctx.Err())
+	}
+}
+
+func TestSecretPromptResponseHidesSubprocessOutput(t *testing.T) {
+	bin := buildPromptCLI(t)
+	root := t.TempDir()
+	logPath := filepath.Join(root, "secret.log")
+	const secret = "private-answer"
+	var lines []string
+	_, err := Run(context.Background(), CommandSpec{
+		Name: bin, Interactive: true, LogPath: logPath,
+		Prompts: []PromptSpec{
+			{Pattern: "Continue? [y/N]: ", Kind: PromptConfirm},
+			{Pattern: "Name: ", Kind: PromptText, Secret: true},
+		},
+		OnPrompt: func(req PromptRequest) (PromptResponse, error) {
+			if req.Kind == PromptConfirm {
+				return PromptResponse{Value: "y"}, nil
+			}
+			if !req.Secret {
+				t.Error("secret flag did not reach prompt handler")
+			}
+			return PromptResponse{Value: secret}, nil
+		},
+		OnLine: func(_, line string) { lines = append(lines, line) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, output := range []string{string(data), strings.Join(lines, "\n")} {
+		if strings.Contains(output, secret) || strings.Contains(output, "Hello,") {
+			t.Errorf("secret-bearing subprocess output escaped suppression: %q", output)
+		}
+		if !strings.Contains(output, "[output hidden after secret response]") {
+			t.Errorf("missing explanation for hidden output: %q", output)
+		}
 	}
 }
 

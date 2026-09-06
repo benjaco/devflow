@@ -333,7 +333,10 @@ func TestPayloadCMSNewMigrationForDeletedFieldRequiresConfirmation(t *testing.T)
 				t.Errorf("unexpected prompt text %q", evt.Prompt)
 				return
 			}
-			if err := instance.WriteInteractionAnswer(worktree, evt.InstanceID, evt.PromptID, "y"); err != nil {
+			yes := true
+			if err := instance.RespondPrompt(context.Background(), worktree, evt.InstanceID, api.PromptAnswer{
+				RunID: evt.RunID, Task: evt.Task, AttemptID: evt.AttemptID, PromptID: evt.PromptID, Confirm: &yes,
+			}); err != nil {
 				t.Errorf("write interaction answer: %v", err)
 				return
 			}
@@ -347,6 +350,7 @@ func TestPayloadCMSNewMigrationForDeletedFieldRequiresConfirmation(t *testing.T)
 		Worktree:    worktree,
 		Mode:        api.ModeCI,
 		MaxParallel: 1,
+		Headless:    api.HeadlessWait,
 	})
 	if err != nil {
 		t.Fatal(err)

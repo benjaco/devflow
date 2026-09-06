@@ -169,7 +169,7 @@ func (a *App) parseFlags(fs *flag.FlagSet, args []string) error {
 	}
 	maxArgs := 0
 	switch fs.Name() {
-	case "run", "watch", "flush", "restart", "logs", "validate", "graph show", "migration create":
+	case "run", "watch", "flush", "restart", "logs", "validate", "graph show", "migration create", "runs show", "runs cancel", "prompts respond":
 		maxArgs = 1
 	case "action run":
 		maxArgs = 2

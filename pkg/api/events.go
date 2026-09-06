@@ -20,6 +20,9 @@ const (
 )
 
 type Event struct {
+	RunID              string    `json:"runId,omitempty"`
+	AttemptID          string    `json:"attemptId,omitempty"`
+	PromptSecret       bool      `json:"promptSecret,omitempty"`
 	TS                 string    `json:"ts"`
 	Type               EventType `json:"type"`
 	InstanceID         string    `json:"instanceId,omitempty"`

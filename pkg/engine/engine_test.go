@@ -389,7 +389,7 @@ func (p *taskLogAttemptProject) Targets() []project.Target {
 	return []project.Target{{Name: "build", RootTasks: []string{"prepare"}}}
 }
 
-func TestTaskLogTruncatedBeforeCustomRunAttempt(t *testing.T) {
+func TestEachTaskAttemptStartsWithAnEmptyLog(t *testing.T) {
 	worktree := t.TempDir()
 	p := &taskLogAttemptProject{}
 	eng, err := New(p, worktree)
@@ -400,7 +400,7 @@ func TestTaskLogTruncatedBeforeCustomRunAttempt(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected first run to fail")
 	}
-	logPath := instance.LogPath(worktree, first.Instance.ID, "prepare")
+	logPath := first.Result.Nodes[0].LogPath
 	firstLog, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
@@ -409,10 +409,11 @@ func TestTaskLogTruncatedBeforeCustomRunAttempt(t *testing.T) {
 		t.Fatalf("expected first attempt log, got %q", firstLog)
 	}
 
-	if _, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI}); err != nil {
+	second, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI})
+	if err != nil {
 		t.Fatal(err)
 	}
-	secondLog, err := os.ReadFile(logPath)
+	secondLog, err := os.ReadFile(second.Result.Nodes[0].LogPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -806,17 +807,20 @@ func TestRunInteractiveTaskAnswersViaInstanceFiles(t *testing.T) {
 			if evt.Type != api.EventInteractionReq {
 				continue
 			}
-			answer := "y"
+			yes := true
+			answer := api.PromptAnswer{RunID: evt.RunID, Task: evt.Task, AttemptID: evt.AttemptID, PromptID: evt.PromptID, Confirm: &yes}
 			if evt.PromptKind == string(process.PromptText) {
-				answer = "Ada"
+				text := "Ada"
+				answer.Confirm = nil
+				answer.Text = &text
 			}
-			if err := instance.WriteInteractionAnswer(worktree, evt.InstanceID, evt.PromptID, answer); err != nil {
+			if err := instance.RespondPrompt(context.Background(), worktree, evt.InstanceID, answer); err != nil {
 				t.Errorf("write interaction answer: %v", err)
 				return
 			}
 		}
 	}()
-	outcome, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI})
+	outcome, err := eng.Run(context.Background(), Request{Target: "build", Worktree: worktree, Mode: api.ModeCI, Headless: api.HeadlessWait})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -824,7 +828,7 @@ func TestRunInteractiveTaskAnswersViaInstanceFiles(t *testing.T) {
 		t.Fatalf("expected success, got %+v", outcome.Result)
 	}
 	waitFor(t, 3*time.Second, func() bool {
-		lines, err := os.ReadFile(instance.LogPath(worktree, outcome.Instance.ID, "prompt"))
+		lines, err := os.ReadFile(outcome.Result.Nodes[0].LogPath)
 		return err == nil && string(lines) != "" && strings.Contains(string(lines), "Hello, Ada")
 	})
 }
@@ -3008,7 +3012,7 @@ func main() {
 	if err != nil {
 		logPath := ""
 		if out != nil {
-			logPath = instance.LogPath(worktree, out.Instance.ID, "api_debug")
+			logPath = out.Result.Nodes[0].LogPath
 		}
 		t.Fatalf("real dlv debug run failed: %v\nlog:\n%s", err, readFileForFailure(logPath))
 	}
@@ -3103,7 +3107,11 @@ func TestGoDebugServiceWatchRestartsRealDelveAfterSourceEdit(t *testing.T) {
 	if apiPort == 0 {
 		t.Fatalf("expected api port to be allocated: %+v", inst.Ports)
 	}
-	logPath := instance.LogPath(worktree, instanceID, "api_debug")
+	initialStatus, err := instance.LoadStatus(worktree, instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := initialStatus.Nodes["api_debug"].LogPath
 	failIfWatchExited(t, watchDone, watchError, worktree, instanceID)
 
 	var firstPID int

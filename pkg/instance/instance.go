@@ -19,6 +19,7 @@ import (
 )
 
 type State struct {
+	RunID     string                    `json:"runId,omitempty"`
 	Target    string                    `json:"target"`
 	Mode      api.RunMode               `json:"mode"`
 	Nodes     map[string]api.NodeStatus `json:"nodes"`
@@ -103,6 +104,10 @@ func SaveStatus(worktree, instanceID, target string, mode api.RunMode, nodes map
 		Mode:      mode,
 		Nodes:     nodes,
 		UpdatedAt: time.Now().UTC(),
+	}
+	for _, node := range nodes {
+		state.RunID = node.RunID
+		break
 	}
 	return jsonutil.WriteFileAtomic(filepath.Join(instancePath(worktree, instanceID), "status.json"), state)
 }
@@ -320,33 +325,6 @@ func RemoveFlushRequest(worktree, instanceID, requestID string) error {
 		return err
 	}
 	return nil
-}
-
-func InteractionAnswerPath(worktree, instanceID, promptID string) string {
-	return filepath.Join(instancePath(worktree, instanceID), "interactions", promptID+".json")
-}
-
-func WriteInteractionAnswer(worktree, instanceID, promptID, value string) error {
-	path := InteractionAnswerPath(worktree, instanceID, promptID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return jsonutil.WriteFileAtomic(path, map[string]string{"value": value})
-}
-
-func ConsumeInteractionAnswer(worktree, instanceID, promptID string) (string, bool, error) {
-	path := InteractionAnswerPath(worktree, instanceID, promptID)
-	var payload map[string]string
-	if err := jsonutil.ReadFile(path, &payload); err != nil {
-		if os.IsNotExist(err) {
-			return "", false, nil
-		}
-		return "", false, err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return "", false, err
-	}
-	return payload["value"], true, nil
 }
 
 func CacheRoot() string {

@@ -2998,7 +2998,11 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 	}
 
 	waitForCondition(t, 3*time.Second, func() bool {
-		data, err := os.ReadFile(instance.LogPath(worktree, runResult.InstanceID, "backend_dev"))
+		state, err := instance.LoadStatus(worktree, runResult.InstanceID)
+		if err != nil {
+			return false
+		}
+		data, err := os.ReadFile(state.Nodes["backend_dev"].LogPath)
 		return err == nil && len(data) > 0
 	})
 
@@ -3057,6 +3061,10 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 		Mode:     api.ModeDev,
 		Detached: true,
 	}, daemonHandle.PID(), filepath.Join(worktree, ".devflow", "logs", runResult.InstanceID, "daemon.log")); err != nil {
+		t.Fatal(err)
+	}
+	// Daemon diagnostics own their directory; task attempts live under run records.
+	if err := os.MkdirAll(filepath.Join(worktree, ".devflow", "logs", runResult.InstanceID), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(worktree, ".devflow", "logs", runResult.InstanceID, "daemon.log"), []byte("daemon line\n"), 0o644); err != nil {

@@ -1045,27 +1045,27 @@ func TestDetachedTargetStateDistinguishesStartingReadyAndFailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &Server{worktree: worktree, instanceID: inst.ID}
-	if ready, state := s.detachedTargetState("dev"); ready || state != "starting" {
+	if ready, state := s.detachedTargetState("dev", "run-state"); ready || state != "starting" {
 		t.Fatalf("missing status = ready=%v state=%q", ready, state)
 	}
 	if err := instance.SaveStatus(worktree, inst.ID, "dev", api.ModeWatch, map[string]api.NodeStatus{
-		"build":   {Name: "build", State: api.StateDone},
-		"backend": {Name: "backend", State: api.StateRunning, Ready: true},
+		"build":   {Name: "build", RunID: "run-state", State: api.StateDone},
+		"backend": {Name: "backend", RunID: "run-state", State: api.StateRunning, Ready: true},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if ready, state := s.detachedTargetState("dev"); !ready || state != "ready" {
+	if ready, state := s.detachedTargetState("dev", "run-state"); !ready || state != "ready" {
 		t.Fatalf("healthy status = ready=%v state=%q", ready, state)
 	}
 	if err := instance.SaveStatus(worktree, inst.ID, "dev", api.ModeWatch, map[string]api.NodeStatus{
-		"backend": {Name: "backend", State: api.StateFailed, LastError: "exit status 17"},
+		"backend": {Name: "backend", RunID: "run-state", State: api.StateFailed, LastError: "exit status 17"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if ready, state := s.detachedTargetState("dev"); ready || state != "failed" {
+	if ready, state := s.detachedTargetState("dev", "run-state"); ready || state != "failed" {
 		t.Fatalf("failed status = ready=%v state=%q", ready, state)
 	}
-	if ready, state := s.detachedTargetState("other"); ready || state != "starting" {
+	if ready, state := s.detachedTargetState("other", "run-state"); ready || state != "starting" {
 		t.Fatalf("stale other-target status = ready=%v state=%q", ready, state)
 	}
 }

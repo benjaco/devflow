@@ -3,13 +3,13 @@
 Devflow is designed so humans and agents use the same execution surface:
 - operational CLI commands have stable JSON output
 - instance and task state are persisted
-- logs are addressable by instance and task
+- results and task logs are addressable by instance, run and attempt
 - one per-worktree daemon owns mutable dev/watch/operator work and publishes a typed event stream for live consumers
 - `run --ci` is the exception: it stays direct and finite for CI-style validation
 
 Executions are exclusive within a worktree. While a watcher owns it, `run --ci --json` returns `error.code: "resource_conflict"` with the owner's target/PID and leaves the development execution intact. Run independent verification in a separate worktree containing the actual edits and relevant untracked files, or explicitly stop development first. Flushing does not make concurrent CI safe. Worktrees do not automatically isolate a shared external database.
 
-`resourceConflict.recoveryRequired` means a prior execution ended without confirmed cleanup. Inspect the recorded owner and use explicit `stop --all --json` to reconcile known resources; unresolved resources remain conflicts. Do not delete execution lock or owner files as an automatic retry strategy. Read-only status, graph and log inspection remains available. Run histories and scoped run cancellation are separate planned capabilities.
+`resourceConflict.recoveryRequired` means a prior execution ended without confirmed cleanup. Inspect the recorded owner and use explicit `stop --all --json` to reconcile known resources; unresolved resources remain conflicts. Do not delete execution lock or owner files as an automatic retry strategy. Status, graph, logs and retained run inspection remain available.
 
 Agents should use the normal installed command:
 
@@ -40,7 +40,37 @@ The intended sequencing is:
 
 For any failed finite JSON command, inspect `error.code`, `error.phase` and `error.message`. This includes invalid arguments, a missing/broken adapter and unknown projects/targets before execution begins. Stdout contains one result, with any available task, validation, lifecycle or repository evidence preserved. For example, `unknown_target` in `resolution` means select a declared target; `adapter_compile_failed` in `bootstrap` means fix the adapter; `resource_conflict` in `admission` means inspect the current owner. Codes come from typed failures, not message matching. The full current code table is in the contributor CLI contract.
 
-`logs --json` and attached `watch --json` are JSONL streams, including terminal errors. Finite CI/validation still stream progress to stderr, so tools that combine streams must keep that distinction. Ctrl+C cancels direct work and its subprocesses; `operation_cancelled` and `deadline_exceeded` identify the interrupted phase. Canceling a log/watch observer or flush wait does not stop development services. Public run-scoped cancellation, retained attempts and unattended prompt responses remain planned.
+`logs --json` and attached `watch --json` are JSONL streams, including terminal errors. Finite CI/validation still stream progress to stderr, so tools that combine streams must keep that distinction. Ctrl+C cancels direct work and its subprocesses; `operation_cancelled` and `deadline_exceeded` identify the interrupted phase. Canceling a log/watch observer or flush wait does not stop development services. Use `runs cancel` when the intention is to cancel a specific execution.
+
+## Retained Results and Unattended Control
+
+Engine runs, watches and actions have a `runId`; every task attempt has an `attemptId`, including finite tasks and cache decisions. Keep the IDs returned by execution or detached acceptance. An action's outer result and nested run share one run ID; a subsequent development relaunch has its own ID. An idempotent detached start returns the existing execution's ID.
+
+```bash
+devflow runs list --json
+devflow runs show <run-id> --json
+devflow logs <task> --run <run-id> --attempt <attempt-id> --tail 100 --json
+devflow runs cancel <run-id> --json
+```
+
+`runs show` contains the selected target/mode, state, timestamps, deadline when set, graph/adapter digests, all attempts, final `result` and prompt metadata. An attempt's `executed` flag distinguishes callback execution from cache reuse; state and cache key explain its outcome. Blocked or skipped tasks without an attempt did not run. These are observations from that execution, not evidence that later edits have passed. Result/log retrieval and prompt/cancellation commands do not compile the adapter, so a newly broken adapter does not hide prior evidence.
+
+Retained attempts use separate append-only log files; new runs and retries preserve earlier output. Retention targets 100 completed runs, seven days and 64 MiB, oldest first. Completed-run pruning runs before the current terminal result is committed, so retention failures are included in that immutable result (`retention_failed`). The newly completed result can put evidence over the count/age/byte thresholds until the next pruning pass.
+
+Pruning first renames a completed run into a hidden retirement directory; a blocked rename preserves its published record, and failed physical deletion leaves hidden data retried by later pruning. Retired IDs return `run_expired`; following a retired attempt stops with that error. Active/interrupted records and pending physical cleanup can exceed the retention budget. Export important results/logs before pruning removes them.
+
+Cancellation acceptance means the request was recorded; inspect `runs show` for the owner's terminal result and cleanup outcome. `runs list/show` include `ownerAlive` for nonterminal records with a recorded owner PID. If it is `false`, the interrupted record can remain nonterminal: acceptance does not prove cleanup or promise that a final result will arrive. Cancellation targets only the supplied run ID, and `run_not_active` means it already finished. Canceling an old or queued check never selects the currently active watcher as a fallback. Attached daemon runs/actions appear as queued records before admission; detached launches receive a new ID only upon admission or return the existing ID when reused. Ownership conflicts and incomplete cleanup continue to apply.
+
+`run`, `watch` and `action run` accept `--timeout <duration>`, which reaches execution and queued admission rather than only limiting socket waits. Zero disables the operation deadline. A detached execution survives an observing CLI disconnect; use its run ID for explicit cancellation.
+
+Prompt handling defaults to `--headless fail`: an unexpected typed prompt ends with `interaction_required` and cleanup. Supply declared action inputs first. When intentional interaction is required, select `--headless wait` and an operation timeout. Each prompt also has a five-minute wait limit. The waiting run can be inspected and answered from another CLI:
+
+```bash
+devflow prompts list --run <run-id> --json
+devflow prompts respond <prompt-id> --run <run-id> --task <task> --attempt <attempt-id> --confirm true --json
+```
+
+Status includes `runId` and `pendingPrompts`. Responses must match the complete run/task/attempt/prompt identity and provide the declared answer type: `--confirm true|false`, `--text <value>`, or `--stdin` for text input without putting the answer in process arguments. Stale, duplicate, expired, canceled and mismatched answers fail. A diagnostic prompt from a failed run cannot be answered. Secret answers are transient and do not appear in ordinary prompt metadata or result/event output; adapters must avoid echoing them. Devflow never automatically confirms a question.
 
 ## Readiness Workflow
 
@@ -67,7 +97,7 @@ devflow stop --task backend_debug --preview --json
 devflow stop --task backend_debug --json
 ```
 
-The preview/result contract is `api.LifecyclePlan` plus `api.LifecycleResult`. A plan names the selected task/target and exact invalidate, stop, execute, preserve, and restart sets. The actual result reports exact affected/confirmed-stopped/restarted tasks and old/new PID plus generation; optional lifecycle `issues` explain a partial plan/result difference. Restart success means the replacement passed readiness. A restart from an already-stopped service has an empty stopped set and no previous identity. A known already-stopped task returns an empty successful stop result. An unknown task or a restart that did not create a replacement is non-success. `stop --task` leaves the daemon and independent services running; only `stop --all` performs complete cleanup. Detached launch JSON always contains `accepted`, `daemonStarted`, `daemonPid`, `ready`, and `state`; acceptance is not readiness, so continue to use `flush` as the agent readiness gate. Status exposes the daemon through `daemon`, and `logs daemon --json` retrieves its log.
+The preview/result contract is `api.LifecyclePlan` plus `api.LifecycleResult`. A plan names the selected task/target and exact invalidate, stop, execute, preserve, and restart sets. The actual result reports exact affected/confirmed-stopped/restarted tasks and old/new PID plus generation; optional lifecycle `issues` explain a partial plan/result difference. Restart success means the replacement passed readiness. A restart from an already-stopped service has an empty stopped set and no previous identity. A known already-stopped task returns an empty successful stop result. An unknown task or a restart that did not create a replacement is non-success. `stop --task` leaves the daemon and independent services running; only `stop --all` performs complete cleanup. Detached launch JSON always contains `runId`, `accepted`, `daemonStarted`, `daemonPid`, `ready`, and `state`; acceptance is not readiness, so continue to use `flush` as the agent readiness gate. Status exposes the daemon through `daemon`, and `logs daemon --json` retrieves its log.
 
 Embedded engine users that provide their own long-lived execution owner can use the same ownership primitive directly:
 
@@ -103,7 +133,7 @@ For finite test/check targets that depend on services, use `devflow run <target>
 
 In `--ci --json` mode, progress and task log lines stream to stderr and stdout remains exactly one final `RunResult`. On failure, inspect `error`, `failedNode`, `failedNodeLogPath`, and `failureExcerpts` before the terminal `logTail`. Excerpts find early test assertions, panic/fatal output, compiler errors, `AssertionError`, conventional errors/summaries, and process-failure markers even when hundreds of cleanup lines follow. An unclassified early service exit instead gets a `process-exit-tail` excerpt with up to 12 meaningful terminal lines. All excerpts remain within five windows, 200 lines, 64 KiB total, and 8 KiB per line and redact known environment secrets and PostgreSQL URLs; empty logs produce `[]`. The `nodes` array supplies every selected node's final state and duration; downstream work skipped after a dependency failure is `blocked` with the dependency named in `lastError`, while unrelated interrupted work is `canceled`. Cacheable nodes include hit/miss and key/read/write/manifest timing. Use `devflow logs` only when both bounded diagnostics are insufficient.
 
-`devflow logs <task> --tail 100 --follow --json` emits JSONL records containing `task` and `line`, preserving blank lines and continuing after the initial tail without replay. Omit `--follow` for a finite read; `--tail 0` streams all currently available lines. A finite read includes the last partial line, while follow waits for its newline so characters split across writes stay intact. Cancellation stops this reader without stopping development services. Individual lines above 4 MiB fail explicitly instead of silently losing text. Following detects observed truncation/replacement and resumes at the new file's beginning, but polling cannot recover overwritten history or distinguish every identical-content rewrite. Save required evidence before another task attempt replaces its log; persistent attempt history and resumable cursors are still planned.
+`devflow logs <task> --tail 100 --follow --json` emits JSONL records containing `task`, `line` and available run/attempt identity, preserving blank lines and continuing after the initial tail without replay. Omit `--follow` for a finite read; `--tail 0` streams all currently available lines. Use `--run` and optionally `--attempt` to retrieve a retained attempt instead of the current one. Selection happens once: `--follow` stays on that attempt after a restart; reissue the command or select the newer attempt to see its output. A finite read includes the last partial line, while follow waits for its newline so characters split across writes stay intact. Cancellation stops this reader without stopping development services. Individual lines above 4 MiB fail explicitly instead of silently losing text. Following detects observed truncation/replacement, but polling cannot recover external rewrites; normal task attempts now have separate retained logs. Following across attempts and resumable log cursors remain planned for item 7.
 
 For CI jobs that intentionally repair generated or formatted repository files, use the atomic repository mode instead of scripting status/add/commit/push around Devflow:
 

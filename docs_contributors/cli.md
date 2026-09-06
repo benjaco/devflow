@@ -16,6 +16,11 @@ Available command-specific evidence stays at the top level: a failed run retains
 | `adapter_not_found`, `adapter_source_invalid` | `bootstrap` | Missing marker or invalid adapter source file |
 | `adapter_compile_failed`, `bootstrap_failed` | `bootstrap` | Go compilation failure or another local build/launch failure |
 | `unknown_project`, `ambiguous_project`, `unknown_target`, `invalid_graph`, `unknown_instance`, `invalid_worktree` | `resolution` | Project, graph, target or instance could not be resolved |
+| `unknown_run`, `run_expired` | `resolution` | The run was never issued here or its evidence was pruned |
+| `interaction_required` | `execution` | Headless fail policy stopped a task that requested input |
+| `invalid_prompt`, `unknown_prompt`, `prompt_mismatch`, `invalid_prompt_answer`, `prompt_not_pending` | `interaction` | Prompt identity, type or lifecycle rejected the request |
+| `run_mismatch` | `admission` | A supplied run identity does not match the execution selection |
+| `run_not_active`, `evidence_unavailable`, `evidence_write_failed`, `retention_failed` | `execution` | A terminal run cannot be cancelled, or retained evidence could not be read |
 | `resource_conflict` | `admission` | Worktree ownership prevented execution; inspect `resourceConflict` |
 | `daemon_unavailable` | `transport` | Daemon startup or socket communication failed |
 | `task_failed`, `validation_failed`, `flush_failed`, `doctor_failed`, `repository_failed`, `upgrade_failed`, `log_read_failed` | `execution` | Inspect the command's retained evidence |
@@ -26,7 +31,7 @@ Codes are assigned from error types and source boundaries, never inferred from p
 
 Logs and attached watch use JSONL: each record occupies one line, including watch start metadata, events and a terminal error when the stream fails. Watch emits no plain banner in JSON mode. A failed output writer returns an error without attempting another document on that writer. Progress remains independent stderr text for finite runs and validation; progress verbosity controls are a later item.
 
-`App.Context`, Ctrl+C and termination signals propagate to direct CI, validation, bootstrap compilation and local lock waits, repository repair, CLI installers and client waits. A canceled adapter build does not publish its temporary binary/key. Finite subprocess and Git cancellation stops their process trees. Unix bootstrap transfers into the local binary; Windows owns a child process and preserves its exit/result ownership. Cancelling a log reader, watch subscription or flush wait leaves the daemon's development execution running. Server operation deadlines, run-scoped cancellation and unattended prompt responses remain item 5; cancellation of a client wait alone does not cancel server work.
+`App.Context`, Ctrl+C and termination signals propagate to direct CI, validation, bootstrap compilation and local lock waits, repository repair, CLI installers and client waits. A canceled adapter build does not publish its temporary binary/key. Finite subprocess and Git cancellation stops their process trees. Unix bootstrap transfers into the local binary; Windows owns a child process and preserves its exit/result ownership. Cancelling a log reader, watch subscription or flush wait leaves the daemon's development execution running. Execution deadlines and `runs cancel <run-id>` address the operation itself; cancellation of a client wait alone does not cancel server work. A cancel response acknowledges the request; `runs show` supplies the eventual cleanup and terminal result.
 
 Implemented commands:
 
@@ -46,6 +51,8 @@ Implemented commands:
 - `devflow cache gc`
 - `devflow status`
 - `devflow logs <task>`
+- `devflow runs list|show|cancel`
+- `devflow prompts list|respond`
 - `devflow instances`
 - `devflow doctor`
 - `devflow clis`
@@ -84,11 +91,11 @@ Ownership failures add `error.code: "resource_conflict"` and `resourceConflict` 
 Use a separate worktree containing the changes to run CI while keeping development active, or explicitly stop the development execution first. A successful flush does not grant concurrent CI admission. Stop timeouts reject replacement and preserve ownership. `stop --all` can reconcile known abandoned resources, but reports a conflict when it cannot establish that resources stopped; it never kills a competing live direct-CI owner to obtain admission.
 
 Service lifecycle contract:
-- attached non-CI `devflow run <target>` connects to the per-worktree daemon, waits for service readiness, and then keeps supervised services alive until interrupted or until a service exits
+- attached non-CI `devflow run <target>` connects to the per-worktree daemon and waits for service readiness and execution completion. Interrupting this client ends its wait; daemon-owned services continue until `runs cancel <run-id>`, an applicable `stop` command, or execution termination
 - if a service exits during attached `run`, the command returns a service-exited error
 - `devflow run <target> --ci --json` is finite and deliberately bypasses the daemon; service tasks are started, readiness is checked, services are stopped, and status records those services as `stopped`
 - in that CI/JSON mode, task state, cache hit/miss, and task-log progress streams to stderr while stdout remains exactly one final JSON document
-- `devflow run <target> --detach --json` returns after asking the daemon to launch the target; it is not a health/readiness gate. `accepted`, `daemonStarted`, `ready`, and `state` distinguish daemon acceptance, daemon startup, and the response-time `starting|ready|failed|degraded` target snapshot. `daemonPid` identifies the daemon; the result also includes `instanceId`, `target`, `mode`, and `logPath`.
+- `devflow run <target> --detach --json` returns after asking the daemon to launch the target; it is not a health/readiness gate. `accepted`, `daemonStarted`, `ready`, and `state` distinguish daemon acceptance, daemon startup, and the response-time `starting|ready|failed|degraded` target snapshot. `daemonPid` identifies the daemon; the result also includes `runId`, `instanceId`, `target`, `mode`, and `logPath`.
 - use `devflow watch <target> --detach --json` plus `devflow flush <target> --json` when automation needs a detached environment that is proven settled and healthy
 - finite check/test targets with service dependencies should generally use `devflow run <target> --ci --json`
 - `devflow stop --all --json` also stops the instance-managed database container when one is recorded; it does not remove the Docker volume
@@ -101,6 +108,8 @@ Implemented `run` flags include:
 - `--worktree`
 - `--project`
 - `--max-parallel`
+- `--headless fail|wait` (default `fail`)
+- `--timeout <duration>` (operation deadline; default `0` means no overall deadline)
 - `--cache-key-manifest` (finite `--ci` runs only)
 - `--commit-changes` (finite `--ci` runs only)
 - repeated `--commit-path <git-pathspec>`
@@ -109,9 +118,42 @@ Implemented `run` flags include:
 - `--fail-after-commit`
 - `--pedantic` (treat CRLF/LF-only changes as commit-worthy)
 
-The final `RunResult` includes top-level failure text, failed-node name and log path, an optional bounded terminal tail, `failureExcerpts`, cache hit/miss lists, optional `repositoryChanges`, and the final run snapshot of every selected node. Downstream work skipped after a dependency failure is `blocked` with the dependency in `lastError`; unrelated interrupted work is `canceled`. Each node includes `durationMs`; cacheable nodes also include cache outcome plus key/read/write/manifest/total timing. `failureExcerpts` scans the log as a stream and recognizes Go `--- FAIL:` blocks and `*_test.go:line:` diagnostics, panic/fatal output, compiler keywords or `file.go:line:column:` locations, `AssertionError`, conventional error/failed-test summaries, and process-failure markers. It keeps up to five context lines before and 30 after, merges nearby windows, removes overlap between adjacent windows, and is capped at five windows, 200 total lines, 64 KiB total text, and 8 KiB per line. A window is omitted if the aggregate cap cannot retain its triggering marker. For an early service exit with no recognized marker, one `process-exit-tail` window keeps the last 12 meaningful bounded lines. Excerpts and the terminal tail use the same environment-secret/PostgreSQL-URL redaction. Empty logs still produce `[]`.
+The final `RunResult` includes `runId`, structured `error`, failed-node name and log path, an optional bounded terminal tail, `failureExcerpts`, cache hit/miss lists, optional `repositoryChanges`, and the final run snapshot of every selected node. Downstream work skipped after a dependency failure is `blocked` with the dependency in `lastError`; unrelated interrupted work is `canceled`. Each node includes `durationMs`; cacheable nodes also include cache outcome plus key/read/write/manifest/total timing. `failureExcerpts` scans the log as a stream and recognizes Go `--- FAIL:` blocks and `*_test.go:line:` diagnostics, panic/fatal output, compiler keywords or `file.go:line:column:` locations, `AssertionError`, conventional error/failed-test summaries, and process-failure markers. It keeps up to five context lines before and 30 after, merges nearby windows, removes overlap between adjacent windows, and is capped at five windows, 200 total lines, 64 KiB total text, and 8 KiB per line. A window is omitted if the aggregate cap cannot retain its triggering marker. For an early service exit with no recognized marker, one `process-exit-tail` window keeps the last 12 meaningful bounded lines. Excerpts and the terminal tail use the same environment-secret/PostgreSQL-URL redaction. Empty logs still produce `[]`.
 
 Engine configuration failures, including cached tasks without output declarations, also produce one failed `RunResult` for `run --ci --json`. They return before instance configuration or task execution; `nodes` is empty, and `repositoryChanges` is present only when repository repair was requested.
+
+### Retained runs, prompts and scoped cancellation
+
+Every admitted operation has one `runId`, including direct CI, daemon runs, watch sessions and foreground actions. Every task attempt has a new `attemptId`; task state and log events carry both identities. Watch reruns keep the watch run ID and allocate new attempts. `runId` identifies evidence, while the worktree execution lease still determines whether execution may overlap.
+
+```bash
+devflow runs list --json
+devflow runs show <run-id> --json
+devflow runs cancel <run-id> --json
+devflow logs <task> --run <run-id> --attempt <attempt-id> --tail 100 --json
+```
+
+These commands, `prompts`, and ordinary `logs` inspection do not compile or load the adapter. They accept `--worktree` or `--instance`, so retained evidence remains accessible after adapter compilation breaks. `runs list --json` returns `instanceId` and run summaries; `runs show --json` returns the retained record plus `prompts`. A run record includes project/target/mode, timestamps, deadline, graph digest, compiled adapter digest, attempts and the available final `result`. Each attempt records its task, identity, timestamps, outcome, log path, failure details, and the cache/input key when computed. `executed` distinguishes callback execution from cache/stamp skips. Group nodes and tasks never started by the scheduler have no attempt record. A successful historical result describes the inputs consumed in that run; it does not certify later edits.
+
+Run states are `queued`, `running`, `waiting`, `succeeded`, `failed` and `canceled`. A run remains `waiting` while any of its parallel tasks has a pending prompt. `runs cancel` returns `accepted: true` after recording a request for that exact run. The owner stops its resources and writes the terminal result; canceling an old run never targets a replacement development session. Unknown or pruned IDs report `unknown_run` or `run_expired`; a terminal run rejects cancellation with `run_not_active`. Status remains the current development view, while `runs show` supplies historical results. `runs list/show` include `ownerAlive` for nonterminal records with a recorded owner PID. When it is `false`, the interrupted record can remain nonterminal; cancellation acceptance proves neither cleanup nor that a final result will arrive.
+
+Run evidence and attempt logs live under `.devflow/state/instances/<instance-id>/runs/<run-id>/`. Records are replaced atomically and files are owner-only on Unix-like systems. Retention targets 100 completed records, seven days and 64 MiB of completed evidence, oldest first. Completed-run pruning runs before the current terminal result is committed, so retention failures are included in that immutable result (`retention_failed`). The newly completed result can put evidence over the count/age/byte thresholds until the next pruning pass.
+
+Pruning first renames a completed run into a hidden retirement directory; a blocked rename preserves its published record, and failed physical deletion leaves hidden data retried by later pruning. Retired IDs return `run_expired`; following a retired attempt stops with that error. Active/interrupted records and pending physical cleanup can exceed the retention budget.
+
+`run`, `watch`, `action run`, and the migration shortcut accept `--headless fail|wait` and `--timeout`. Headless defaults to `fail`: a declared prompt stops the task with `interaction_required`, closes the diagnostic prompt, and cleans up owned resources. Supply known action inputs first. Explicit `--headless wait` leaves a discoverable waiting operation; each prompt expires after five minutes or the earlier operation/context deadline. A nonzero operation timeout must be at least 1 ms and covers execution, including daemon work after an observer disconnect. It is distinct from the existing `flush --timeout` wait budget. No headless mode automatically confirms choices.
+
+```bash
+devflow run verify --ci --headless wait --timeout 10m --json
+devflow prompts list --run <run-id> --json
+devflow prompts respond <prompt-id> --run <run-id> --task <task> --attempt <attempt-id> --confirm false --json
+devflow prompts respond <prompt-id> --run <run-id> --task <task> --attempt <attempt-id> --text 'migration-name' --json
+devflow prompts respond <prompt-id> --run <run-id> --task <task> --attempt <attempt-id> --stdin --json
+```
+
+Use another CLI while the first command waits. Prompt metadata contains `id`, `runId`, `task`, `attemptId`, `kind`, `message`, optional `secret`, `state`, `createdAt` and `deadline`. States are `pending`, `answered`, `cancelled` and `expired`. Inspection reconstructs deadline/cancellation state without changing retained prompt metadata. Responses require exactly one boolean `--confirm true|false`, text `--text`, or text `--stdin`; false and empty text are valid answers. Stdin reads UTF-8 through EOF, removes one trailing LF or CRLF, and is limited to 64 KiB. Kind mismatches return `invalid_prompt_answer`; identity mismatches return `prompt_mismatch`; duplicate, cancelled, expired or finished requests return `prompt_not_pending`. Prompt identity is unique across parallel tasks and retries. Only the latest active attempt of a task may create, answer or consume a prompt; a stopped or replaced service attempt is closed even while its old process reader is still unwinding. An answer accepted just before that transition is removed without delivery. Response admission shares a cross-process lock with run cancellation, finalization and pruning.
+
+Response JSON acknowledges identities and `accepted`; it never echoes the value. Values travel through temporary owner-only answer files that are removed on consumption or cleanup, separate from retained prompt metadata, events and results. Marking an adapter prompt `Secret` also masks TUI input. Once that response is sent, Devflow hides subsequent subprocess output and emits `[output hidden after secret response]`, while continuing to recognize later prompts. This prevents child echoes from entering task logs/events; adapters must still avoid printing secrets themselves or including them in returned errors.
 
 ### Atomic repository repair
 
@@ -307,14 +349,14 @@ devflow stop --task backend_debug --json
 
 `status` is read-only: it uses a live daemon when one is already running, otherwise it reads the persisted instance/status files without starting a daemon. It reports instance metadata in both text and JSON forms, including:
 - worktree
-- target and mode
+- target, mode, active `runId` and `pendingPrompts`
 - assigned ports
 - sanitized DB details
 - derived local URLs such as `backend`
 - `daemon` metadata with PID, liveness, and log path when present
 - per-node debug metadata for `debug_service` tasks, including host, port, port name, binary path, package, protocol, and a Go remote-attach shape
 
-`NodeStatus.pid` is a host-process identifier, not a universal service identity. `generation` is the monotonic engine-owned service identity and also works for PID-less handles; `attempt` exposes the corresponding attempt number. `ready` is set only after the service readiness callback succeeds. Process-backed services report a positive PID. Engine-managed resources such as the managed Postgres container report PID `0` while running; their liveness is held by the daemon's registered service handle and verified by `flush`, and their output still uses the normal task log/typed log-event surfaces. Detached start JSON always emits boolean `accepted`, `daemonStarted`, and `ready`, plus `daemonPid` and the response-time `state`; use status/flush as the continuing health gate.
+`NodeStatus.pid` is a host-process identifier, not a universal service identity. `generation` is the monotonic engine-owned service identity and also works for PID-less handles; `attempt` is the task-local attempt count; `runId` and `attemptId` are the durable execution identities, including for finite tasks. `ready` is set only after the service readiness callback succeeds. Process-backed services report a positive PID. Engine-managed resources such as the managed Postgres container report PID `0` while running; their liveness is held by the daemon's registered service handle and verified by `flush`, and their output still uses the normal task log/typed log-event surfaces. Detached start JSON always emits boolean `accepted`, `daemonStarted`, and `ready`, plus `daemonPid` and the response-time `state`; use status/flush as the continuing health gate.
 
 Task states now distinguish:
 - `pending`, `starting`, `running`, `ready`, and `restarting`
@@ -330,9 +372,9 @@ Task states now distinguish:
 
 `logs --tail N` selects the last N lines (default 50); zero streams the whole file and negative values are argument errors. Empty files produce no log records, and blank lines are preserved. Tail selection scans backward in fixed-size chunks, then the same consumed-byte cursor continues through `--follow`, so initial output is not replayed and appends during tail delivery are retained. Memory stays bounded independently of file size and requested line count. A line above 4 MiB fails explicitly with `log_read_failed`; CLI logs do not use the TUI's line truncation policy. Output-writer failures and command cancellation terminate reading.
 
-Finite reads include a final unterminated line. Follow mode buffers it until a newline arrives, preserving characters split across writes. When polling detects replacement, shrinkage, or changed bytes at the cursor, it emits any remaining old partial line and reads the new file from its beginning. Follow closes file handles between 250 ms polls and tolerates a briefly absent replacement path; an initially missing log remains an error. A rewrite detected during a read fails with `log_read_failed` so mixed or incomplete evidence cannot appear as a successful finite read. This observes current files rather than retaining history: content overwritten between polls cannot be recovered, and a truncate-and-regrow with identical bytes in the bounded cursor check can be indistinguishable from an append. Retained attempts and resumable log cursors remain separate work.
+Finite reads include a final unterminated line. Follow mode buffers it until a newline arrives, preserving characters split across writes. When polling detects replacement, shrinkage, or changed bytes at the cursor, it emits any remaining old partial line and reads the new file from its beginning. Follow closes file handles between 250 ms polls and tolerates a briefly absent replacement path; an initially missing log remains an error. A rewrite detected during a read fails with `log_read_failed` so mixed or incomplete evidence cannot appear as a successful finite read. This observes current files rather than retaining history: content overwritten between polls cannot be recovered, and a truncate-and-regrow with identical bytes in the bounded cursor check can be indistinguishable from an append. Immutable task attempts preserve older task output. Resumable cursors and following across attempts remain separate work.
 
-Task log files now represent the current run attempt for that task. The engine truncates the log at task-attempt start before adapter code can emit progress, and subprocess output appends within that attempt. Older successful, failed, or canceled output must not stay mixed into a newer running attempt. Task, daemon, TUI, and event-stream logs are owner-only (`0600`) on Unix-like systems.
+Task logs are created once at `runs/<run-id>/attempts/<attempt-id>.log` beneath the instance state directory, then appended only within that attempt. A new attempt never truncates an older log. `logs <task>` selects the current status attempt; `--run` selects the latest retained attempt of that task within the chosen run, and `--attempt` selects one exact attempt and requires `--run`. The task and attempt must match. JSON task log records include `task`, `runId`, `attemptId` and `line`. Selection is pinned when the command starts: `--follow` follows that one attempt, including when selected from current status. Reissue the command after a watch rerun or restart to select its new attempt. Task, daemon, TUI, and event-stream logs are owner-only (`0600`) on Unix-like systems.
 
 `tui` now opens a live operator console connected to the per-worktree daemon. Without `--instance`, `devflow tui` follows the same default launch path as bare `devflow`: resolve the default target, ensure the per-worktree daemon is running it in watch mode, wait for a matching non-empty status snapshot, then render. With `--instance`, `tui` is attach-only and does not start or retarget work.
 
@@ -359,7 +401,7 @@ Daemon ownership is session-scoped. If `devflow tui` or bare `devflow` has to st
 
 TUI startup creates/appends the owner-only per-instance `tui.log` before terminal initialization. Panics on the application goroutine are caught after tview finalizes the screen; Devflow records the panic and stack and returns a concise error containing the log path. Every Devflow-owned TUI background worker uses the same recovery boundary, records the first panic, and stops the application so the terminal can be restored. Go fatal output and panics in dependency-owned goroutines, which cannot be recovered by those boundaries, are duplicated directly to the same file by the runtime crash-output hook. Normal application errors are also retained there.
 
-Interactive prompt answers are written back through the instance interaction directory, so detached runs can still receive operator input from the TUI.
+TUI executions explicitly select headless waiting. The TUI restores pending prompt metadata when reconnecting, keeps an open dialog while parallel requests queue, and responds through the same run/task/attempt-bound protocol as `prompts respond`. It never echoes submitted answer values into its status log.
 
 Implemented `tui` flags include:
 - `--worktree`

@@ -11,7 +11,7 @@
 - `pkg/process`: one-shot execution, supervised services, line-buffered logs
 - `pkg/project`: also defines readiness hooks for service tasks
 - `pkg/database`: Docker-backed dedicated Postgres runtime and snapshot helpers
-- `pkg/instance`: worktree-scoped instance identity and persisted state
+- `pkg/instance`: worktree-scoped instance identity, retained run/attempt evidence, prompt responses and cancellation requests
 - `pkg/ports`: shared port registry with lock-safe allocation
 - `pkg/engine`: bounded parallel ready-queue execution engine and status persistence
 - `pkg/daemon`: per-worktree daemon, JSON-line socket protocol, action queue, and event fanout for mutable dev/watch/operator work
@@ -81,6 +81,10 @@ Per-worktree state lives under `.devflow/`:
 - `.devflow/logs/<instance-id>/tui.log` for interactive-client session, error, and crash diagnostics
 - `.devflow/state/instances/<instance-id>/`
 - `.devflow/state/instances/<instance-id>/flush/`
+- `.devflow/state/instances/<instance-id>/runs/<run-id>/record.json` for execution identity, provenance, attempts and the final result
+- `.devflow/state/instances/<instance-id>/runs/<run-id>/attempts/<attempt-id>.log` for append-only task-attempt output
+- `.devflow/state/instances/<instance-id>/runs/<run-id>/prompts/` for pending/completed prompt metadata and transient answers
+- `.devflow/state/instances/<instance-id>/runs/<run-id>/cancel.request` for scoped cancellation
 - `.devflow/state/instances/<instance-id>/payload-schema/` for password-free Payload schema-push fingerprints
 - `.devflow/execution.lock` for cross-process execution admission; never unlink this lock file during operation
 - `.devflow/execution-owner.json` for owner identity and retained recovery evidence
@@ -95,7 +99,7 @@ The engine, not the CLI or persisted PID registry, owns live service handles. Ea
 
 Execution admission is deliberately conservative: one executor owns a canonical worktree at a time, regardless of project or target. `internal/execution` uses nonblocking OS file locking plus an owner-only marker. Direct CI, daemon execution, cache-key preparation and local cache/stamp invalidation participate. The lease spans configuration, environment/port/state changes, task execution, cleanup, temporary-env restoration and CI repository finalization. Engine callers borrow only a valid enclosing lease for the same worktree; otherwise the engine acquires its own. Existing parallel DAG scheduling remains inside that ownership boundary.
 
-Daemon admission and stop/replace/retarget/invalidate transitions have a separate transition mutex. Foreground execution and lifecycle readiness waits release it; status and stop remain available. A monotonically increasing selection generation prevents a completed action from relaunching over newer operator intent. Stop timeout preserves the active owner. The active completion signal is closed only after environment restoration and lease finalization. Starting or refreshing daemon control metadata never rewrites `instance.json` or `runtime.env`.
+Daemon admission and stop/replace/retarget/invalidate transitions have a separate transition mutex. Foreground execution and lifecycle readiness waits release it; status, cancellation and prompt responses remain available. Run/action admission uses cancellable lock waiting and rechecks a queued run's cancellation marker before stopping the current owner. A monotonically increasing selection generation prevents a completed action from relaunching over newer operator intent. Stop timeout preserves the active owner. The active completion signal is closed only after environment restoration, lease finalization and retained-result publication. Starting or refreshing daemon control metadata never rewrites `instance.json` or `runtime.env`.
 
 `ServiceHandle.Stop` must both succeed and leave `Alive()==false`. Failed cleanup retains the handle/process identity, reports degraded state, and marks ownership as requiring recovery. The OS lock remains held through final persistence; releasing it retains the marker on incomplete cleanup. Owner process exit alone does not authorize replacement: explicit stop-all recovery must reconcile known resources, and unresolved resources remain conflicts. This is cooperative Devflow ownership, not a sandbox for arbitrary external commands or a scheduler for shared external databases across worktrees.
 
@@ -127,6 +131,26 @@ Structured state files and `runtime.env` are replaced through unique temporary f
 Instance resolution creates state only when `instance.json` is absent. Unreadable or malformed existing state returns a contextual error and preserves both that file and `runtime.env`, so a recovery attempt cannot silently discard persisted configuration or service references.
 
 Task, daemon, TUI, and event-stream log files are also created and repaired to owner-only `0600` permissions on Unix-like systems. They can contain command output, errors, or panic data derived from runtime configuration and must not default to group/world-readable files.
+
+### Run identity and retained evidence
+
+`instance.CreateRun` allocates an instance-bound, monotonically increasing run ID before execution; `ClaimRun` permits exactly one executor to claim a queued record. Every task attempt receives a separate random identity, including finite work and cache lookups. Run and attempt IDs propagate through runtime callbacks, node status, events, log selection, prompts and results. The action result uses its task execution's run ID. A successful action's development relaunch receives a new run ID and does not inherit the completed action's deadline or cancellation.
+
+Attached daemon runs and actions publish a queued record before waiting for admission, so they can be inspected and canceled while another transition is in progress. Detached admission allocates a record only when it starts a new execution; an idempotent ensure request returns the existing run ID. Its admission wait honors cancellation/deadlines, but has no separately cancelable run ID before acceptance. Detached readiness compares both run ID and target, preventing an earlier successful run of the same target from satisfying the new launch.
+
+The instance status snapshot remains the current development view. Retained records identify target, mode, timestamps, owner PID, graph digest, compiled executable digest, task input/cache keys already computed for execution, whether each attempt executed callbacks, cache reuse, outcomes and bounded failure excerpts. These describe the observed execution and do not establish freshness after later edits. Adapter callbacks and environment values are not serialized as provenance. Task logs are created once per attempt and appended; starting a later attempt selects another path instead of truncating historical output.
+
+Engine sessions serialize attempt/status evidence updates across parallel tasks. Final records are written atomically after execution cleanup. Enclosing operations use `Request.DeferCompletion` so daemon environment restoration and direct CI repository finalization can contribute to the same terminal result. The per-instance run-store file lock serializes record changes, cancellation, prompt responses and pruning; it is never held across task execution or prompt waiting.
+
+The execution owner emits `run_finished` after terminal evidence is durable; a deferred engine leaves that publication to its owner. Daemon completion includes cleanup failures and uses the same success/error as the retained result. A request-scoped event stream detaches and drains its queued events before sending the terminal response, which ends the client's read loop. Live daemon subscribers remain best-effort and do not block task execution.
+
+Retention targets 100 completed runs, seven days and 64 MiB of completed record/log data. Completed-run pruning runs before the current terminal result is committed, so retention failures are included in that immutable result (`retention_failed`). The newly completed result can put evidence over the count/age/byte thresholds until the next pruning pass.
+
+Pruning first renames a completed run into a hidden retirement directory; a blocked rename preserves its published record, and failed physical deletion leaves hidden data retried by later pruning. Retired IDs return `run_expired`; following a retired attempt stops with that error. Active/interrupted records and pending physical cleanup can exceed the retention budget. The issued-ID watermark distinguishes expired from unknown IDs without per-run tombstones. No old state or log-path reader is retained.
+
+CLI log selection resolves a current or retained attempt once. `--follow` remains on that selected append-only file; it does not jump to another attempt after a restart. Cross-attempt traversal and resumable cursors remain item 7 work. The TUI can select the latest path from refreshed node status independently.
+
+`runs cancel` writes only the named run's marker. Direct and daemon owners observe that marker through their execution contexts; a completed ID returns `run_not_active` and never targets the newer instance owner. Acceptance confirms a cancellation request, not completed cleanup. Explicit operation deadlines reach queued/running/waiting execution, while cancellation of a status, flush or log observer only ends its wait. Cleanup retains its bounded independent context and existing execution-recovery rules; an uncooperative callback cannot be killed safely in-process.
 
 Flush coordination is per instance:
 - `flush/requests/<request-id>.json` records the requested sync point
@@ -200,6 +224,8 @@ Current service restart policy meanings in watch mode:
 ## Flush Readiness Gate
 
 `devflow flush [target]` captures the daemon's active watch, verifies its project and target, and waits for that execution's observer baseline before publishing a request and sync sentinel. This applies both when flush starts watch and when a watch is already starting. Request publication is serialized with daemon transitions. Readiness and acknowledgement waits honor the request context and timeout, and a stopped or replaced watch fails with `watch_stopped`, including replacement by the same project and target. There is no fixed readiness sleep or sentinel-retouch loop.
+
+Cancellation classification follows the typed cause across admission, observer establishment and acknowledgement. A deadline that expires before watch starts still reports issue `timeout` and `timedOut=true`; a canceled caller reports `canceled`. The phase that notices cancellation does not turn it into a generic watch-start failure.
 
 The watcher normally ignores `.devflow`, but explicitly observes the flush sync directory. The engine separates sync files from task inputs and retains their request IDs while reconciling changes:
 
@@ -286,19 +312,11 @@ Design implication:
 
 Devflow now supports prompt-driven interactive one-shot commands without blocking invisibly in detached mode.
 
-Current behavior:
-- tasks can mark a subprocess command as interactive through `process.CommandSpec`
-- the command declares expected prompt patterns and prompt kinds
-- prompt specs can provide alternate `Patterns` and `Repeat` for tools that emit different or repeated confirmations, such as destructive migration warnings
-- when a prompt pattern is detected in subprocess output, the engine emits an `interaction_requested` event
-- the engine waits for an answer file under the instance state directory
-- when an answer arrives, the engine writes it back to the subprocess stdin and emits `interaction_answered`
+Tasks declare expected prompt patterns and typed confirm/text questions through `process.CommandSpec`. Alternate `Patterns` and `Repeat` handle repeated questions. The engine allocates prompt identity bound to run, task and attempt; subprocess-local counters do not identify public prompts. Pending metadata is persisted and exposed through events, status, `runs show` and `prompts list`, so reconnecting clients can recover a waiting question.
 
-The current transport is file-backed:
-- request metadata is carried on the event stream
-- answers are written to `.devflow/state/instances/<instance-id>/interactions/<prompt-id>.json`
+Headless execution defaults to `fail`: a detected question ends with `interaction_required`, closes the diagnostic prompt and cleans up. Explicit `--headless wait` permits typed responses until the earlier of the operation deadline and the five-minute prompt wait limit; it never chooses an answer automatically. The TUI explicitly opts into waiting. Known action inputs remain the preferred unattended path.
 
-This is enough for detached runs and the TUI to cooperate without shared in-memory state.
+`prompts respond` and the TUI submit the complete run/task/attempt/prompt identity plus exactly one typed answer. The shared run-store lock rejects mismatched, duplicate, expired, canceled or completed responses, including a cancellation that arrived before the execution owner observed its marker. Answers exist only in transient owner-only files, are consumed once and are deleted during prompt closure. Secret answers never enter ordinary prompt metadata, result documents or interaction events; adapters must still avoid echoing them in subprocess output. Accepted answers are written to subprocess stdin and produce an `interaction_answered` event without the answer value.
 
 Current limitation:
 - this is prompt-pattern and stdin based, not full TTY emulation

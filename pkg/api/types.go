@@ -112,6 +112,8 @@ type Instance struct {
 }
 
 type NodeStatus struct {
+	AttemptID       string           `json:"attemptId,omitempty"`
+	RunID           string           `json:"runId,omitempty"`
 	Name            string           `json:"name"`
 	Kind            string           `json:"kind"`
 	State           NodeState        `json:"state"`
@@ -268,6 +270,7 @@ type DebugAttachConfig struct {
 }
 
 type RunResult struct {
+	RunID             string                  `json:"runId,omitempty"`
 	Target            string                  `json:"target"`
 	Mode              RunMode                 `json:"mode"`
 	InstanceID        string                  `json:"instanceId"`
@@ -498,6 +501,7 @@ type FlushRequest struct {
 }
 
 type FlushResult struct {
+	RunID            string            `json:"runId,omitempty"`
 	Error            *CommandError     `json:"error,omitempty"`
 	ResourceConflict *ResourceConflict `json:"resourceConflict,omitempty"`
 	RequestID        string            `json:"requestId"`
@@ -535,16 +539,18 @@ type FlushIssue struct {
 }
 
 type StatusResult struct {
-	InstanceID string            `json:"instanceId"`
-	Worktree   string            `json:"worktree,omitempty"`
-	Target     string            `json:"target"`
-	Mode       RunMode           `json:"mode,omitempty"`
-	UpdatedAt  time.Time         `json:"updatedAt,omitempty"`
-	Ports      map[string]int    `json:"ports,omitempty"`
-	DB         DBInstance        `json:"db,omitempty"`
-	URLs       map[string]string `json:"urls,omitempty"`
-	Daemon     *DaemonStatus     `json:"daemon,omitempty"`
-	Nodes      []NodeStatus      `json:"nodes"`
+	PendingPrompts []Prompt          `json:"pendingPrompts,omitempty"`
+	RunID          string            `json:"runId,omitempty"`
+	InstanceID     string            `json:"instanceId"`
+	Worktree       string            `json:"worktree,omitempty"`
+	Target         string            `json:"target"`
+	Mode           RunMode           `json:"mode,omitempty"`
+	UpdatedAt      time.Time         `json:"updatedAt,omitempty"`
+	Ports          map[string]int    `json:"ports,omitempty"`
+	DB             DBInstance        `json:"db,omitempty"`
+	URLs           map[string]string `json:"urls,omitempty"`
+	Daemon         *DaemonStatus     `json:"daemon,omitempty"`
+	Nodes          []NodeStatus      `json:"nodes"`
 }
 
 type GraphAffectedResult struct {

@@ -27,12 +27,13 @@ type PromptSpec struct {
 	Prompt   string
 	Kind     PromptKind
 	Repeat   bool
+	Secret   bool
 }
 
 type PromptRequest struct {
-	ID     string
 	Prompt string
 	Kind   PromptKind
+	Secret bool
 }
 
 type PromptResponse struct {
@@ -351,6 +352,7 @@ func startInteractive(ctx context.Context, spec CommandSpec) (*Handle, error) {
 		onLine:   spec.OnLine,
 		onPrompt: spec.OnPrompt,
 		prompts:  spec.Prompts,
+		failed:   make(chan struct{}),
 	}
 	readWG.Add(2)
 	go func() {
@@ -382,7 +384,13 @@ func startInteractive(ctx context.Context, spec CommandSpec) (*Handle, error) {
 		handle.setWaitError(err)
 	}()
 	go func() {
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-reader.failed:
+			// Stop outside the reader: Stop waits for pipe readers to finish.
+		case <-handle.done:
+			return
+		}
 		_ = handle.Stop()
 	}()
 
@@ -390,18 +398,19 @@ func startInteractive(ctx context.Context, spec CommandSpec) (*Handle, error) {
 }
 
 type interactiveReader struct {
-	stdin       io.Writer
-	writer      io.Writer
-	onLine      func(string, string)
-	onPrompt    func(PromptRequest) (PromptResponse, error)
-	prompts     []PromptSpec
-	promptIndex int
-	requestSeq  int
-	lineBuf     string
-	recentBuf   string
-	mu          sync.Mutex
-	errMu       sync.Mutex
-	readErr     error
+	stdin            io.Writer
+	writer           io.Writer
+	onLine           func(string, string)
+	onPrompt         func(PromptRequest) (PromptResponse, error)
+	prompts          []PromptSpec
+	promptIndex      int
+	failed           chan struct{}
+	outputSuppressed bool
+	lineBuf          string
+	recentBuf        string
+	mu               sync.Mutex
+	errMu            sync.Mutex
+	readErr          error
 }
 
 func (r *interactiveReader) read(input io.Reader, stream string) {
@@ -410,9 +419,6 @@ func (r *interactiveReader) read(input io.Reader, stream string) {
 		n, err := input.Read(buf)
 		if n > 0 {
 			chunk := string(buf[:n])
-			if r.writer != nil {
-				_, _ = io.WriteString(r.writer, chunk)
-			}
 			r.consumeChunk(stream, chunk)
 		}
 		if err != nil {
@@ -427,21 +433,26 @@ func (r *interactiveReader) read(input io.Reader, stream string) {
 func (r *interactiveReader) consumeChunk(stream, chunk string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.lineBuf += chunk
 	r.recentBuf += chunk
 	if len(r.recentBuf) > 4096 {
 		r.recentBuf = r.recentBuf[len(r.recentBuf)-4096:]
 	}
-	for {
-		idx := indexNewline(r.lineBuf)
-		if idx < 0 {
-			break
+	if !r.outputSuppressed {
+		if r.writer != nil {
+			_, _ = io.WriteString(r.writer, chunk)
 		}
-		line := trimLineEnding(r.lineBuf[:idx])
-		if r.onLine != nil {
-			r.onLine(stream, line)
+		r.lineBuf += chunk
+		for {
+			idx := indexNewline(r.lineBuf)
+			if idx < 0 {
+				break
+			}
+			line := trimLineEnding(r.lineBuf[:idx])
+			if r.onLine != nil {
+				r.onLine(stream, line)
+			}
+			r.lineBuf = r.lineBuf[idx+1:]
 		}
-		r.lineBuf = r.lineBuf[idx+1:]
 	}
 	r.maybePrompt()
 }
@@ -459,16 +470,28 @@ func (r *interactiveReader) maybePrompt() {
 		r.setErr(fmt.Errorf("interactive prompt encountered without handler: %s", pattern))
 		return
 	}
-	r.requestSeq++
 	req := PromptRequest{
-		ID:     fmt.Sprintf("prompt-%d", r.requestSeq),
 		Prompt: firstNonEmpty(spec.Prompt, pattern),
 		Kind:   spec.Kind,
+		Secret: spec.Secret,
 	}
 	resp, err := r.onPrompt(req)
 	if err != nil {
 		r.setErr(err)
 		return
+	}
+	if spec.Secret && !r.outputSuppressed {
+		// A child can transform or split an echoed answer. Suppress subsequent
+		// output before writing the secret, while still detecting later prompts.
+		r.outputSuppressed = true
+		r.lineBuf = ""
+		const marker = "[output hidden after secret response]"
+		if r.writer != nil {
+			_, _ = io.WriteString(r.writer, "\n"+marker+"\n")
+		}
+		if r.onLine != nil {
+			r.onLine("stderr", marker)
+		}
 	}
 	if _, err := io.WriteString(r.stdin, resp.Value+"\n"); err != nil {
 		r.setErr(err)
@@ -509,6 +532,9 @@ func (r *interactiveReader) setErr(err error) {
 	defer r.errMu.Unlock()
 	if r.readErr == nil {
 		r.readErr = err
+		if r.failed != nil {
+			close(r.failed)
+		}
 	}
 }
 

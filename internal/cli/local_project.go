@@ -477,7 +477,7 @@ func isProjectlessCommand(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "version", "upgrade", "docs", "instances":
+	case "logs", "runs", "prompts", "version", "upgrade", "docs", "instances":
 		return true
 	default:
 		return false

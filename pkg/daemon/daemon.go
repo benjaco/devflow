@@ -50,25 +50,26 @@ const (
 )
 
 type Request struct {
-	ID           string            `json:"id,omitempty"`
-	Action       Action            `json:"action"`
-	Project      string            `json:"project,omitempty"`
-	Target       string            `json:"target,omitempty"`
-	Mode         api.RunMode       `json:"mode,omitempty"`
-	MaxParallel  int               `json:"maxParallel,omitempty"`
-	Detach       bool              `json:"detach,omitempty"`
-	StreamEvents bool              `json:"streamEvents,omitempty"`
-	TimeoutMs    int64             `json:"timeoutMs,omitempty"`
-	Task         string            `json:"task,omitempty"`
-	All          bool              `json:"all,omitempty"`
-	Upstream     bool              `json:"upstream,omitempty"`
-	Downstream   bool              `json:"downstream,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
-	ActionID     string            `json:"actionId,omitempty"`
-	ActionKind   string            `json:"actionKind,omitempty"`
-	Component    string            `json:"component,omitempty"`
-	Inputs       map[string]string `json:"inputs,omitempty"`
-	Preview      bool              `json:"preview,omitempty"`
+	ID           string             `json:"id,omitempty"`
+	Action       Action             `json:"action"`
+	Project      string             `json:"project,omitempty"`
+	Target       string             `json:"target,omitempty"`
+	Mode         api.RunMode        `json:"mode,omitempty"`
+	MaxParallel  int                `json:"maxParallel,omitempty"`
+	Detach       bool               `json:"detach,omitempty"`
+	StreamEvents bool               `json:"streamEvents,omitempty"`
+	TimeoutMs    int64              `json:"timeoutMs,omitempty"`
+	Headless     api.HeadlessPolicy `json:"headless,omitempty"`
+	Task         string             `json:"task,omitempty"`
+	All          bool               `json:"all,omitempty"`
+	Upstream     bool               `json:"upstream,omitempty"`
+	Downstream   bool               `json:"downstream,omitempty"`
+	Env          map[string]string  `json:"env,omitempty"`
+	ActionID     string             `json:"actionId,omitempty"`
+	ActionKind   string             `json:"actionKind,omitempty"`
+	Component    string             `json:"component,omitempty"`
+	Inputs       map[string]string  `json:"inputs,omitempty"`
+	Preview      bool               `json:"preview,omitempty"`
 }
 
 type Response struct {
@@ -87,6 +88,7 @@ type Response struct {
 }
 
 type StartResult struct {
+	RunID         string      `json:"runId"`
 	InstanceID    string      `json:"instanceId"`
 	Target        string      `json:"target"`
 	Mode          api.RunMode `json:"mode"`
@@ -160,6 +162,9 @@ type Server struct {
 }
 
 type activeRun struct {
+	runID       string
+	headless    api.HeadlessPolicy
+	operation   *runOperation
 	projectName string
 	target      string
 	mode        api.RunMode
@@ -657,26 +662,29 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			}
 		}
 	}
-	var eventCh chan api.Event
+	var eventsDone chan struct{}
+	var detachEvents func()
 	if req.StreamEvents {
-		eventCh = s.addSubscriber()
-		defer s.removeSubscriber(eventCh)
-		done := make(chan struct{})
-		defer close(done)
+		eventCh := s.addSubscriber()
+		detachEvents = sync.OnceFunc(func() { s.removeSubscriber(eventCh) })
+		defer detachEvents()
+		eventsDone = make(chan struct{})
 		go func() {
-			for {
-				select {
-				case <-done:
+			defer close(eventsDone)
+			for evt := range eventCh {
+				if err := writeFrame(frame{Type: "event", ID: req.ID, Event: &evt}); err != nil {
 					return
-				case evt := <-eventCh:
-					if err := writeFrame(frame{Type: "event", ID: req.ID, Event: &evt}); err != nil {
-						return
-					}
 				}
 			}
 		}()
 	}
 	resp := s.handleRequest(ctx, req)
+	if detachEvents != nil {
+		// A response ends the client's read loop. Drain already queued events,
+		// including durable completion, before allowing that terminal response.
+		detachEvents()
+		<-eventsDone
+	}
 	if err := writeFrame(frame{Type: responseFrameType, ID: req.ID, Response: &resp}); err != nil {
 		return
 	}
@@ -706,6 +714,13 @@ func awaitResponseAck(conn net.Conn, dec *json.Decoder, requestID string) {
 
 func (s *Server) handleRequest(ctx context.Context, req Request) Response {
 	resp := Response{ID: req.ID, OK: true}
+	switch req.Action {
+	case ActionRun, ActionWatch, ActionRunAction, ActionRetarget, ActionInvalidate, ActionRestart:
+		if err := validateRunControls(req); err != nil {
+			return errorResponse(req.ID, err)
+		}
+		ctx = requestRunContext(ctx, req)
+	}
 	switch req.Action {
 	case ActionPing:
 		return resp
@@ -985,12 +1000,17 @@ func (s *Server) resolveTarget(p project.Project, target string) (project.Projec
 }
 
 func (s *Server) startActive(ctx context.Context, projectName, target string, mode api.RunMode, maxParallel int) (*StartResult, error) {
-	s.transitionMu.Lock()
+	if err := s.lockRunAdmission(ctx); err != nil {
+		return nil, err
+	}
 	defer s.transitionMu.Unlock()
 	return s.startActiveLocked(ctx, projectName, target, mode, maxParallel)
 }
 
 func (s *Server) startActiveLocked(ctx context.Context, projectName, target string, mode api.RunMode, maxParallel int) (*StartResult, error) {
+	if err := s.checkRunAdmission(ctx); err != nil {
+		return nil, err
+	}
 	if s.closing {
 		return nil, errors.New("daemon is shutting down")
 	}
@@ -1007,26 +1027,37 @@ func (s *Server) startActiveLocked(ctx context.Context, projectName, target stri
 	matches := active != nil && !active.stopping && active.projectName == projectName && active.target == resolvedTarget && active.mode == mode
 	s.mu.Unlock()
 	if !matches {
-		if _, err := s.beginRunLocked(ctx, projectName, execProject, resolvedTarget, mode, maxParallel, true, nil); err != nil {
+		active, err = s.beginRunLocked(ctx, projectName, execProject, resolvedTarget, mode, maxParallel, true, nil)
+		if err != nil {
 			return nil, err
 		}
 	}
-	result := &StartResult{InstanceID: s.instanceID, Target: resolvedTarget, Mode: mode, DaemonPID: os.Getpid(), LogPath: s.logPath, Accepted: true, DaemonStarted: true}
-	result.Ready, result.State = s.detachedTargetState(resolvedTarget)
+	result := &StartResult{RunID: active.runID, InstanceID: s.instanceID, Target: resolvedTarget, Mode: mode, DaemonPID: os.Getpid(), LogPath: s.logPath, Accepted: true, DaemonStarted: true}
+	result.Ready, result.State = s.detachedTargetState(resolvedTarget, active.runID)
 	return result, nil
 }
 
 // beginRunLocked reserves the full mutation lifetime, including environment restoration.
 // Callers release transitionMu before waiting on done so stop and status remain available.
-func (s *Server) beginRunLocked(ctx context.Context, projectName string, p project.Project, target string, mode api.RunMode, maxParallel int, detached bool, env map[string]string) (*activeRun, error) {
+func (s *Server) beginRunLocked(ctx context.Context, projectName string, p project.Project, target string, mode api.RunMode, maxParallel int, detached bool, env map[string]string) (_ *activeRun, returnedErr error) {
 	if s.closing {
 		return nil, errors.New("daemon is shutting down")
+	}
+	ctx, operation, err := s.prepareRun(ctx, projectName, target, mode, detached)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { returnedErr = s.finishUnadoptedRun(operation, returnedErr) }()
+	if err := s.checkRunAdmission(ctx); err != nil {
+		return nil, err
 	}
 	if !s.stopActiveLocked(5 * time.Second) {
 		return nil, s.activeStopConflict()
 	}
+	if err := s.checkRunAdmission(ctx); err != nil {
+		return nil, err
+	}
 	lease := execution.FromContext(ctx)
-	var err error
 	if lease == nil || !lease.ValidFor(s.worktree) {
 		lease, err = executionstate.Acquire(s.worktree, execution.Owner{Kind: "daemon", Target: target, Mode: string(mode)})
 	}
@@ -1037,12 +1068,10 @@ func (s *Server) beginRunLocked(ctx context.Context, projectName string, p proje
 		_ = lease.Release()
 		return nil, err
 	}
-	if detached {
-		ctx = context.Background()
-	}
 	runCtx, cancel := context.WithCancel(execution.ContextWithLease(ctx, lease))
 	s.generation++
-	active := &activeRun{projectName: projectName, target: target, mode: mode, maxParallel: maxParallel, cancel: cancel, done: make(chan struct{}), watchReady: make(chan struct{}), startedAt: time.Now().UTC(), controller: engine.NewLifecycleController(), generation: s.generation, lease: lease}
+	active := &activeRun{runID: operation.id, headless: operation.headless, operation: operation, projectName: projectName, target: target, mode: mode, maxParallel: maxParallel, cancel: cancel, done: make(chan struct{}), watchReady: make(chan struct{}), startedAt: time.Now().UTC(), controller: engine.NewLifecycleController(), generation: s.generation, lease: lease}
+	operation.adopted = true
 	s.mu.Lock()
 	s.active = active
 	s.mu.Unlock()
@@ -1067,6 +1096,30 @@ func (s *Server) finishActiveRun(active *activeRun) {
 	if active.lease != nil {
 		active.err = errors.Join(active.err, active.lease.Release())
 	}
+	if active.operation != nil {
+		active.operation.cancel()
+		if active.result == nil {
+			record, err := instance.LoadRun(s.worktree, s.instanceID, active.runID)
+			active.err = errors.Join(active.err, err)
+			if record != nil {
+				active.result = record.Result
+			}
+		}
+		if active.result == nil {
+			active.result = &api.RunResult{RunID: active.runID, InstanceID: s.instanceID, Target: active.target, Mode: active.mode, Success: active.err == nil}
+		}
+		completionErr := s.completeRun(active.runID, active.result, active.err)
+		active.err = errors.Join(active.err, completionErr)
+		if completionErr == nil {
+			// The owner publishes once, after its cleanup contributes to the same
+			// durable result. Deferred engines do not publish an earlier finish.
+			success := active.result.Success
+			s.publish(api.Event{TS: process.NowRFC3339Nano(), Type: api.EventRunFinished,
+				RunID: active.runID, InstanceID: s.instanceID, Worktree: s.worktree,
+				Target: active.target, Mode: active.mode, Task: active.result.FailedNode,
+				Success: &success, Error: active.result.Error.Error()})
+		}
+	}
 	s.mu.Lock()
 	if s.active == active {
 		s.active = nil
@@ -1078,12 +1131,12 @@ func (s *Server) finishActiveRun(active *activeRun) {
 // detachedTargetState is a response-time snapshot, not a promise that the
 // target will remain in this state. Detached callers use it to distinguish an
 // accepted launch from a target that is already ready or has already failed.
-func (s *Server) detachedTargetState(target string) (bool, string) {
+func (s *Server) detachedTargetState(target, runID string) (bool, string) {
 	status, err := instance.LoadStatus(s.worktree, s.instanceID)
 	// recordRun updates the selected target before the engine publishes its
-	// first status snapshot. Never attribute a prior target's terminal state to
-	// the newly accepted launch during that small interval.
-	if err != nil || status.Target != target || len(status.Nodes) == 0 {
+	// first status snapshot. The same target can still contain the preceding
+	// run's successful nodes until the newly accepted execution publishes.
+	if err != nil || status.Target != target || status.RunID != runID || len(status.Nodes) == 0 {
 		return false, "starting"
 	}
 	ready := true
@@ -1117,9 +1170,20 @@ func (s *Server) runAttached(ctx context.Context, projectName, target string, mo
 	return s.runAttachedProject(ctx, projectName, p, target, mode, maxParallel, env)
 }
 
-func (s *Server) runAttachedProject(ctx context.Context, projectName string, p project.Project, target string, mode api.RunMode, maxParallel int, env map[string]string) (*api.RunResult, error) {
-	s.transitionMu.Lock()
-	active, err := s.startAttachedProjectLocked(ctx, projectName, p, target, mode, maxParallel, env)
+func (s *Server) runAttachedProject(ctx context.Context, projectName string, p project.Project, target string, mode api.RunMode, maxParallel int, env map[string]string) (_ *api.RunResult, returnedErr error) {
+	execProject, resolvedTarget, err := s.resolveTarget(p, target)
+	if err != nil {
+		return nil, err
+	}
+	ctx, operation, err := s.prepareRun(ctx, projectName, resolvedTarget, mode, false)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { returnedErr = s.finishUnadoptedRun(operation, returnedErr) }()
+	if err := s.lockRunAdmission(ctx); err != nil {
+		return nil, err
+	}
+	active, err := s.beginRunLocked(ctx, projectName, execProject, resolvedTarget, mode, maxParallel, false, env)
 	s.transitionMu.Unlock()
 	if err != nil {
 		return nil, err
@@ -1164,6 +1228,9 @@ func (s *Server) runEngine(ctx context.Context, p project.Project, target string
 		}
 	}()
 	req := engine.Request{
+		RunID:               active.runID,
+		Headless:            active.headless,
+		DeferCompletion:     true,
 		Target:              target,
 		Worktree:            s.worktree,
 		Mode:                mode,
@@ -2017,17 +2084,33 @@ func (s *Server) statusResult() (*api.StatusResult, error) {
 		nodes = append(nodes, node)
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+	pending := []api.Prompt{}
+	if state.RunID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		prompts, promptErr := instance.ListPrompts(ctx, s.worktree, s.instanceID, state.RunID)
+		cancel()
+		if promptErr != nil && !errors.Is(promptErr, instance.ErrRunExpired) && !errors.Is(promptErr, instance.ErrRunUnknown) {
+			return nil, promptErr
+		}
+		for _, prompt := range prompts {
+			if prompt.State == api.PromptPending {
+				pending = append(pending, prompt)
+			}
+		}
+	}
 	return &api.StatusResult{
-		InstanceID: s.instanceID,
-		Worktree:   s.worktree,
-		Target:     state.Target,
-		Mode:       state.Mode,
-		UpdatedAt:  state.UpdatedAt,
-		Ports:      inst.Ports,
-		DB:         instance.DisplayDB(inst.DB),
-		URLs:       InstanceURLs(inst),
-		Daemon:     DaemonStatus(inst),
-		Nodes:      nodes,
+		RunID:          state.RunID,
+		PendingPrompts: pending,
+		InstanceID:     s.instanceID,
+		Worktree:       s.worktree,
+		Target:         state.Target,
+		Mode:           state.Mode,
+		UpdatedAt:      state.UpdatedAt,
+		Ports:          inst.Ports,
+		DB:             instance.DisplayDB(inst.DB),
+		URLs:           InstanceURLs(inst),
+		Daemon:         DaemonStatus(inst),
+		Nodes:          nodes,
 	}, nil
 }
 
@@ -2051,9 +2134,17 @@ func (s *Server) flushFailure(requestID, projectName, target string, startedAt t
 	// Go error here would make the daemon protocol serialize an all-zero result.
 	result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, target, startedAt)
 	result.Started = started
-	if executionconflict.Details(cause) != nil {
+	// The same wait can expire during watch admission or acknowledgement.
+	// Derive cancellation fields from the cause, not the phase that noticed it.
+	switch {
+	case executionconflict.Details(cause) != nil:
 		kind = "resource_conflict"
+	case errors.Is(cause, context.DeadlineExceeded):
+		kind = "timeout"
+	case errors.Is(cause, context.Canceled):
+		kind = "canceled"
 	}
+	result.TimedOut = kind == "timeout"
 	result.Issues = append(result.Issues, api.FlushIssue{
 		Kind:    kind,
 		Message: cause.Error(),
@@ -2066,17 +2157,10 @@ var errFlushWatchStopped = errors.New("watch stopped or was replaced before flus
 
 func (s *Server) flushWaitFailure(requestID, projectName, target string, startedAt time.Time, started bool, cause error) (api.FlushResult, error) {
 	kind := "ack_read_error"
-	switch {
-	case errors.Is(cause, context.DeadlineExceeded):
-		kind = "timeout"
-	case errors.Is(cause, context.Canceled):
-		kind = "canceled"
-	case errors.Is(cause, errFlushWatchStopped):
+	if errors.Is(cause, errFlushWatchStopped) {
 		kind = "watch_stopped"
 	}
-	result, err := s.flushFailure(requestID, projectName, target, startedAt, started, kind, cause)
-	result.TimedOut = kind == "timeout"
-	return result, err
+	return s.flushFailure(requestID, projectName, target, startedAt, started, kind, cause)
 }
 
 func (s *Server) checkFlushWatch(ctx context.Context, active *activeRun) error {
@@ -2580,7 +2664,7 @@ func (s *Server) listActions(projectName string) (*ActionListResult, error) {
 	}, nil
 }
 
-func (s *Server) runProjectAction(ctx context.Context, projectName, actionID, kind, component string, inputs, env map[string]string) (*ActionRunResult, error) {
+func (s *Server) runProjectAction(ctx context.Context, projectName, actionID, kind, component string, inputs, env map[string]string) (_ *ActionRunResult, returnedErr error) {
 	projectName, p, err := s.resolveProject(projectName)
 	if err != nil {
 		return nil, err
@@ -2599,7 +2683,14 @@ func (s *Server) runProjectAction(ctx context.Context, projectName, actionID, ki
 			Inputs:    normalizedInputs,
 		}, err
 	}
-	s.transitionMu.Lock()
+	ctx, operation, err := s.prepareRun(ctx, projectName, action.Task, api.ModeCI, false)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { returnedErr = s.finishUnadoptedRun(operation, returnedErr) }()
+	if err := s.lockRunAdmission(ctx); err != nil {
+		return nil, err
+	}
 	unlock := sync.OnceFunc(s.transitionMu.Unlock)
 	defer unlock()
 	inst, err := instance.Load(s.worktree, s.instanceID)
@@ -2615,7 +2706,7 @@ func (s *Server) runProjectAction(ctx context.Context, projectName, actionID, ki
 	shouldRelaunch := action.Relaunch == project.ActionRelaunchPreviousTargetAfterSuccess && inst.LastRun.Detached && relaunchTarget != ""
 
 	result := &ActionRunResult{
-		RunID:     requestID(),
+		RunID:     operation.id,
 		ActionID:  action.ID,
 		Kind:      action.Kind,
 		Component: action.Component,
@@ -2655,7 +2746,11 @@ func (s *Server) runProjectAction(ctx context.Context, projectName, actionID, ki
 			return result, nil
 		}
 		s.publishStatus("relaunching detached target %s after action %s", relaunchTarget, action.ID)
-		started, err := s.startActiveLocked(ctx, projectName, relaunchTarget, relaunchMode, relaunchMaxParallel)
+		// Resuming development starts another execution; the completed action's
+		// identity, cancellation and deadline must not transfer to that watcher.
+		relaunchCtx := context.WithValue(context.WithoutCancel(ctx), runOperationKey{}, (*runOperation)(nil))
+		relaunchCtx = context.WithValue(relaunchCtx, runOptionsKey{}, runOptions{})
+		started, err := s.startActiveLocked(relaunchCtx, projectName, relaunchTarget, relaunchMode, relaunchMaxParallel)
 		if err != nil {
 			result.Status = "succeeded_with_relaunch_failed"
 			return result, err

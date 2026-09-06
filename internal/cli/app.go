@@ -40,6 +40,7 @@ import (
 
 type App struct {
 	localChildOwnsExecution bool
+	Stdin                   io.Reader
 	Stdout                  io.Writer
 	Stderr                  io.Writer
 	Context                 context.Context
@@ -52,7 +53,7 @@ type App struct {
 }
 
 func New() *App {
-	return &App{Stdout: os.Stdout, Stderr: os.Stderr}
+	return &App{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
 }
 
 func (a *App) dispatch(args []string) error {
@@ -74,6 +75,10 @@ func (a *App) dispatch(args []string) error {
 		return a.actionCmd(args[1:])
 	case "migration":
 		return a.migrationCmd(args[1:])
+	case "runs":
+		return a.runsCmd(args[1:])
+	case "prompts":
+		return a.promptsCmd(args[1:])
 	case "status":
 		return a.statusCmd(args[1:])
 	case "logs":
@@ -123,10 +128,11 @@ func (a *App) launchDefaultTUI(root string) error {
 		return err
 	}
 	if _, err := client.Call(a.context(), daemon.Request{
-		Action:  daemon.ActionWatch,
-		Project: plan.projectName,
-		Target:  plan.target,
-		Detach:  true,
+		Action:   daemon.ActionWatch,
+		Headless: api.HeadlessWait,
+		Project:  plan.projectName,
+		Target:   plan.target,
+		Detach:   true,
 	}); err != nil {
 		return err
 	}
@@ -352,7 +358,12 @@ func (a *App) runCmd(args []string) error {
 	failAfterCommit := fs.Bool("fail-after-commit", false, "(--fail-after-commit) return nonzero after a repository repair commit (and requested push) succeeds")
 	pedantic := fs.Bool("pedantic", false, "(--pedantic) treat CRLF/LF-only repository changes as commit-worthy in --commit-changes mode")
 	projectName := fs.String("project", defaultProject(), "registered project adapter name")
+	executionFlags := addExecutionFlags(fs)
 	if err := a.parseFlags(fs, args); err != nil {
+		return err
+	}
+	opts, err := executionFlags.options()
+	if err != nil {
 		return err
 	}
 	if target != "" && fs.NArg() != 0 {
@@ -408,18 +419,18 @@ func (a *App) runCmd(args []string) error {
 		if *modeWatch {
 			return clierror.Wrap(fmt.Errorf("run --ci is finite and does not support --watch"), "invalid_arguments", "parsing")
 		}
-		return a.runDirect(target, *jsonOut, *worktree, *projectName, api.ModeCI, *maxParallel, *cacheKeyManifest, repairOptions)
+		return a.runDirect(target, *jsonOut, *worktree, *projectName, api.ModeCI, *maxParallel, *cacheKeyManifest, repairOptions, opts)
 	}
 	if *cacheKeyManifest != "" {
 		return clierror.Wrap(fmt.Errorf("--cache-key-manifest is supported only with run --ci"), "invalid_arguments", "parsing")
 	}
 	if *modeWatch {
-		return a.watchViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel)
+		return a.watchViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel, opts)
 	}
-	return a.runViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel)
+	return a.runViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel, opts)
 }
 
-func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName string, mode api.RunMode, maxParallel int, cacheKeyManifest string, repairOptions *reporepair.Options) error {
+func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName string, mode api.RunMode, maxParallel int, cacheKeyManifest string, repairOptions *reporepair.Options, opts executionOptions) (returnErr error) {
 	commandStarted := time.Now().UTC()
 	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
@@ -453,6 +464,53 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 		}
 		return err
 	}
+	// The CLI owns the whole operation, including Git finalization after the DAG.
+	operationCtx := a.context()
+	if opts.Timeout > 0 {
+		var cancel context.CancelFunc
+		operationCtx, cancel = context.WithTimeout(operationCtx, opts.Timeout)
+		defer cancel()
+	}
+	id, _, err := instance.IDForWorktree(root)
+	if err != nil {
+		return err
+	}
+	record := &api.RunRecord{Project: execProject.Name(), Target: resolvedTarget, Mode: mode, OwnerPID: os.Getpid()}
+	record.Deadline, _ = operationCtx.Deadline()
+	if err := instance.CreateRun(root, id, record); err != nil {
+		return err
+	}
+	var retainedResult *api.RunResult
+	stopObservation := func() {}
+	defer func() {
+		defer stopObservation()
+		if retainedResult == nil {
+			result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, returnErr)
+			retainedResult = &result
+		}
+		retainedResult.RunID = record.RunID
+		if operationCtx.Err() != nil && returnErr == nil {
+			returnErr = operationCtx.Err()
+			retainedResult.Success = false
+			retainedResult.Error = clierror.Describe(returnErr, "task_failed", "execution")
+		}
+		if evidenceErr := completeDirectRun(root, retainedResult, returnErr); evidenceErr != nil {
+			returnErr = errors.Join(returnErr, evidenceErr)
+			retainedResult.Success = false
+			retainedResult.Error = clierror.Describe(returnErr, "evidence_write_failed", "execution")
+		}
+		if mode == api.ModeCI && jsonOut {
+			_, _ = fmt.Fprintf(a.Stderr, "[devflow] run %s finished success=%t\n", retainedResult.Target, retainedResult.Success)
+		}
+		if jsonOut && !a.outputFailed {
+			returnErr = errors.Join(returnErr, a.writeResult(retainedResult))
+		}
+	}()
+	observedCtx, observeCancel, err := instance.ObserveRunCancellation(operationCtx, root, id, record.RunID)
+	if err != nil {
+		return err
+	}
+	operationCtx, stopObservation = observedCtx, observeCancel
 	lease, err := executionstate.Acquire(root, execution.Owner{Target: resolvedTarget, Mode: string(mode), Kind: "ci"})
 	if err != nil {
 		if jsonOut {
@@ -463,12 +521,13 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 		return err
 	}
 	defer lease.Release()
-	runCtx := execution.ContextWithLease(a.context(), lease)
+	runCtx := execution.ContextWithLease(operationCtx, lease)
 	if repairRunner != nil {
 		repositoryResult, preflightErr := repairRunner.Preflight(runCtx)
 		if preflightErr != nil {
 			result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, preflightErr)
 			result.RepositoryChanges = &repositoryResult
+			retainedResult = &result
 			if jsonOut {
 				if writeErr := a.writeResult(result); writeErr != nil {
 					return writeErr
@@ -491,12 +550,16 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 		}()
 	}
 	outcome, runErr := eng.Run(runCtx, engine.Request{
+		RunID: record.RunID, Headless: opts.Headless, DeferCompletion: true,
 		Target:               resolvedTarget,
 		Worktree:             root,
 		Mode:                 mode,
 		MaxParallel:          maxParallel,
 		CacheKeyManifestPath: cacheKeyManifest,
 	})
+	if outcome != nil {
+		retainedResult = &outcome.Result
+	}
 	stopProgress()
 	progressWG.Wait()
 	runErr = clierror.Wrap(runErr, "task_failed", "execution")
@@ -506,6 +569,7 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 				repositoryResult := repairRunner.SkippedDAGFailure()
 				result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, runErr)
 				result.RepositoryChanges = &repositoryResult
+				retainedResult = &result
 				if jsonOut {
 					if writeErr := a.writeResult(result); writeErr != nil {
 						return writeErr
@@ -532,7 +596,7 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	}
 	if outcome != nil {
 		if jsonOut {
-			if err := a.writeResult(outcome.Result); err != nil {
+			if err := a.writeResult(&outcome.Result); err != nil {
 				return err
 			}
 			return runErr
@@ -635,7 +699,7 @@ func streamCIProgress(ctx context.Context, out io.Writer, events <-chan api.Even
 	}
 }
 
-func (a *App) runViaDaemon(target string, jsonOut bool, worktreeFlag, projectName string, detach bool, maxParallel int) error {
+func (a *App) runViaDaemon(target string, jsonOut bool, worktreeFlag, projectName string, detach bool, maxParallel int, opts executionOptions) error {
 	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
 		return a.reportResourceConflict(err, jsonOut)
@@ -645,6 +709,7 @@ func (a *App) runViaDaemon(target string, jsonOut bool, worktreeFlag, projectNam
 		return a.reportResourceConflict(err, jsonOut)
 	}
 	resp, err := client.Call(a.context(), daemon.Request{
+		Headless: opts.Headless, TimeoutMs: opts.Timeout.Milliseconds(),
 		Action:      daemon.ActionRun,
 		Project:     projectName,
 		Target:      target,
@@ -690,7 +755,12 @@ func (a *App) watchCmd(args []string) error {
 	projectName := fs.String("project", defaultProject(), "")
 	detach := fs.Bool("detach", false, "")
 	maxParallel := fs.Int("max-parallel", 0, "")
+	executionFlags := addExecutionFlags(fs)
 	if err := a.parseFlags(fs, args); err != nil {
+		return err
+	}
+	opts, err := executionFlags.options()
+	if err != nil {
 		return err
 	}
 	if target != "" && fs.NArg() != 0 {
@@ -705,10 +775,10 @@ func (a *App) watchCmd(args []string) error {
 	if target == "" {
 		return clierror.Wrap(fmt.Errorf("usage: devflow watch <target>"), "invalid_arguments", "parsing")
 	}
-	return a.watchViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel)
+	return a.watchViaDaemon(target, *jsonOut, *worktree, *projectName, *detach, *maxParallel, opts)
 }
 
-func (a *App) watchViaDaemon(target string, jsonOut bool, worktreeFlag, projectName string, detach bool, maxParallel int) error {
+func (a *App) watchViaDaemon(target string, jsonOut bool, worktreeFlag, projectName string, detach bool, maxParallel int, opts executionOptions) error {
 	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
 		return a.reportResourceConflict(err, jsonOut)
@@ -718,6 +788,7 @@ func (a *App) watchViaDaemon(target string, jsonOut bool, worktreeFlag, projectN
 		return a.reportResourceConflict(err, jsonOut)
 	}
 	resp, err := client.Call(a.context(), daemon.Request{
+		Headless: opts.Headless, TimeoutMs: opts.Timeout.Milliseconds(),
 		Action:      daemon.ActionWatch,
 		Project:     projectName,
 		Target:      target,
@@ -1136,7 +1207,12 @@ func (a *App) actionRunCmd(args []string) error {
 	component := fs.String("component", "", "component ID used to disambiguate action kind")
 	name := fs.String("name", "", "common input value named \"name\"")
 	fs.Var(&inputFlags, "input", "action input as key=value; may be repeated")
+	executionFlags := addExecutionFlags(fs)
 	if err := a.parseFlags(fs, args); err != nil {
+		return err
+	}
+	opts, err := executionFlags.options()
+	if err != nil {
 		return err
 	}
 	if actionID == "" && fs.NArg() > 0 {
@@ -1154,7 +1230,7 @@ func (a *App) actionRunCmd(args []string) error {
 	if actionID == "" && *kind == "" {
 		return clierror.Wrap(fmt.Errorf("usage: devflow action run <action-id> [--input key=value]"), "invalid_arguments", "parsing")
 	}
-	return a.runAction(actionID, *kind, *component, inputs, *jsonOut, *worktree, *projectName)
+	return a.runAction(actionID, *kind, *component, inputs, *jsonOut, *worktree, *projectName, opts)
 }
 
 func (a *App) migrationCmd(args []string) error {
@@ -1177,7 +1253,12 @@ func (a *App) migrationCreateCmd(args []string) error {
 	projectName := fs.String("project", defaultProject(), "registered project adapter name")
 	component := fs.String("component", "", "component ID used when several migration systems exist")
 	force := fs.Bool("force", false, "allow component-specific force/accept-warning behavior when declared")
+	executionFlags := addExecutionFlags(fs)
 	if err := a.parseFlags(fs, args); err != nil {
+		return err
+	}
+	opts, err := executionFlags.options()
+	if err != nil {
 		return err
 	}
 	if name != "" && fs.NArg() != 0 {
@@ -1193,10 +1274,10 @@ func (a *App) migrationCreateCmd(args []string) error {
 	if *force {
 		inputs["force"] = "true"
 	}
-	return a.runAction("", database.ActionMigrationCreate, *component, inputs, *jsonOut, *worktree, *projectName)
+	return a.runAction("", database.ActionMigrationCreate, *component, inputs, *jsonOut, *worktree, *projectName, opts)
 }
 
-func (a *App) runAction(actionID, kind, component string, inputs map[string]string, jsonOut bool, worktreeFlag, projectName string) error {
+func (a *App) runAction(actionID, kind, component string, inputs map[string]string, jsonOut bool, worktreeFlag, projectName string, opts executionOptions) error {
 	root, err := resolveWorktree(worktreeFlag)
 	if err != nil {
 		return a.reportResourceConflict(err, jsonOut)
@@ -1206,6 +1287,7 @@ func (a *App) runAction(actionID, kind, component string, inputs map[string]stri
 		return a.reportResourceConflict(err, jsonOut)
 	}
 	resp, callErr := client.Call(a.context(), daemon.Request{
+		Headless: opts.Headless, TimeoutMs: opts.Timeout.Milliseconds(),
 		Action:       daemon.ActionRunAction,
 		Project:      projectName,
 		ActionID:     actionID,
@@ -1545,7 +1627,20 @@ func statusResult(ctx context.Context, root, instanceID string) (api.StatusResul
 		nodes = append(nodes, node)
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+	var pending []api.Prompt
+	if state.RunID != "" {
+		prompts, promptErr := instance.ListPrompts(ctx, root, instanceID, state.RunID)
+		if promptErr != nil && !errors.Is(promptErr, instance.ErrRunExpired) {
+			return api.StatusResult{}, promptErr
+		}
+		for _, prompt := range prompts {
+			if prompt.State == api.PromptPending {
+				pending = append(pending, prompt)
+			}
+		}
+	}
 	return api.StatusResult{
+		RunID: state.RunID, PendingPrompts: pending,
 		InstanceID: instanceID,
 		Worktree:   root,
 		Target:     state.Target,
@@ -1570,6 +1665,8 @@ func (a *App) logsCmd(args []string) error {
 	jsonOut := fs.Bool("json", false, "")
 	worktree := fs.String("worktree", "", "")
 	instanceID := fs.String("instance", "", "")
+	runID := fs.String("run", "", "retained run ID; defaults to the current task attempt")
+	attemptID := fs.String("attempt", "", "specific task attempt in --run; defaults to its latest attempt")
 	tail := fs.Int("tail", 50, "")
 	follow := fs.Bool("follow", false, "")
 	if err := a.parseFlags(fs, args); err != nil {
@@ -1595,14 +1692,51 @@ func (a *App) logsCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	logPath, err := resolveLogPath(root, id, task)
+	var logPath string
+	selectedRun, selectedAttempt := *runID, *attemptID
+	if *attemptID != "" && *runID == "" {
+		return clierror.Wrap(errors.New("--attempt requires --run"), "invalid_arguments", "parsing")
+	}
+	if *runID != "" {
+		var record *api.RunRecord
+		record, err = instance.LoadRun(root, id, *runID)
+		if err != nil {
+			return runEvidenceError(err)
+		}
+		for _, attempt := range record.Attempts {
+			if attempt.Task == task && (*attemptID == "" || attempt.AttemptID == *attemptID) {
+				logPath = attempt.LogPath
+				selectedAttempt = attempt.AttemptID
+			}
+		}
+		if logPath == "" {
+			return clierror.Wrap(fmt.Errorf("no matching attempt for task %q in run %s", task, *runID), "unknown_attempt", "resolution")
+		}
+	} else {
+		logPath, err = resolveLogPath(root, id, task)
+		if task != "daemon" && task != "tui" {
+			if state, stateErr := instance.LoadStatus(root, id); stateErr == nil {
+				selectedRun = state.RunID
+				selectedAttempt = state.Nodes[task].AttemptID
+			}
+		}
+	}
 	if err != nil {
 		return err
 	}
-	err = logstream.Stream(a.context(), logPath, *tail, *follow, func(line string) error {
+	logCtx := a.context()
+	if *follow && selectedRun != "" {
+		observed, stop, observeErr := observeLogEvidence(logCtx, root, id, selectedRun)
+		if observeErr != nil {
+			return runEvidenceError(observeErr)
+		}
+		logCtx = observed
+		defer stop()
+	}
+	err = logstream.Stream(logCtx, logPath, *tail, *follow, func(line string) error {
 		var writeErr error
 		if *jsonOut {
-			writeErr = writeJSONLine(a.Stdout, map[string]string{"task": task, "line": line})
+			writeErr = writeJSONLine(a.Stdout, map[string]string{"task": task, "runId": selectedRun, "attemptId": selectedAttempt, "line": line})
 		} else {
 			_, writeErr = fmt.Fprintln(a.Stdout, line)
 		}
@@ -1611,6 +1745,7 @@ func (a *App) logsCmd(args []string) error {
 		}
 		return writeErr
 	})
+	err = retainedLogError(logCtx, root, id, selectedRun, err)
 	return clierror.Wrap(err, "log_read_failed", "execution")
 }
 
@@ -2414,8 +2549,19 @@ func resolveInstance(worktreeFlag, instanceID string) (string, string, error) {
 }
 
 func resolveLogPath(worktree, instanceID, task string) (string, error) {
-	if task != "daemon" {
+	if task == "tui" {
 		return instance.LogPath(worktree, instanceID, task), nil
+	}
+	if task != "daemon" {
+		state, err := instance.LoadStatus(worktree, instanceID)
+		if err != nil {
+			return "", err
+		}
+		node, ok := state.Nodes[task]
+		if !ok || node.LogPath == "" {
+			return "", clierror.Wrap(fmt.Errorf("task %q has no attempt log", task), "unknown_attempt", "resolution")
+		}
+		return node.LogPath, nil
 	}
 	ref, err := instance.LoadDaemon(worktree, instanceID)
 	if err != nil {

@@ -162,3 +162,12 @@ The current example coverage splits cleanly across three shapes:
 - `embedded-web-app`: real repository adapter for a Go server + embedded frontend + dedicated Postgres flow
 
 All three real-DB paths use `pkg/database` Engine APIs for container service logs, shutdown, and in-container SQL; source examples must not teach `docker info`, `docker logs`, or `docker exec` subprocesses.
+
+
+## Retained execution and unattended control
+
+See [run-control verification](run-control-verification.md) for item 5's observed failures and focused commands. Test run/attempt identity across finite execution, cache reuse, watch retries and daemon restarts. Retained terminal results must be immutable; old logs must survive a later task attempt. Retention must exclude all nonterminal records and distinguish malformed, never-issued and expired IDs.
+
+Prompt tests must exercise simultaneous tasks, strict typed answers, reconnect, cancellation/deadlines, duplicate/stale responses and transient secret cleanup. A rejected prompt handler must stop its blocked subprocess. After a secret response, subprocess output is suppressed before stdin is written; raw output may still match later declared prompts. CLI tests must prove flags reach direct and daemon execution and that public cancellation remains active during Git finalization after the DAG.
+
+Use file/channel handshakes for queued cancellation and child-process pauses, portable Go helpers and explicit executable suffixes. Poll historical state through public commands without loading the adapter. Verify the final event/result against retained evidence after cleanup, and distinguish accepted cancellation from confirmed completion. Existing live services and external projects are outside the test fixtures.
