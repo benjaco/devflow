@@ -91,6 +91,8 @@ func (a *App) dispatch(args []string) error {
 		return a.clisCmd(args[1:])
 	case "graph":
 		return a.graphCmd(args[1:])
+	case "plan":
+		return a.planCmd(args[1:])
 	case "validate":
 		return a.validateCmd(args[1:])
 	case "watch":
@@ -169,7 +171,7 @@ func (a *App) defaultLaunchPlan(root string) (launchPlan, error) {
 }
 
 func (a *App) usage() error {
-	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|action|migration|cache|status|logs|instances|doctor|clis|graph|validate|tui|version|upgrade|docs>")
+	_, _ = fmt.Fprintln(a.Stderr, "usage: devflow <run|watch|flush|restart|stop|action|migration|cache|status|logs|instances|doctor|clis|graph|plan|validate|tui|version|upgrade|docs>")
 	return clierror.Wrap(flag.ErrHelp, "invalid_arguments", "parsing")
 }
 
@@ -2345,7 +2347,11 @@ func (a *App) graphShowCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	payload := map[string]any{"target": target, "closure": closure}
+	metadata, err := g.MetadataForTarget(target)
+	if err != nil {
+		return err
+	}
+	payload := map[string]any{"target": target, "closure": closure, "metadata": metadata}
 	if *jsonOut {
 		return a.writeResult(payload)
 	}

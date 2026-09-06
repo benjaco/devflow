@@ -39,12 +39,6 @@ type ActionInput struct {
 	Default     string          `json:"default,omitempty"`
 }
 
-type ActionEffects struct {
-	Writes      []string `json:"writes,omitempty"`
-	Touches     []string `json:"touches,omitempty"`
-	Invalidates []string `json:"invalidates,omitempty"`
-}
-
 type Action struct {
 	ID          string               `json:"id"`
 	Kind        string               `json:"kind,omitempty"`
@@ -54,7 +48,7 @@ type Action struct {
 	Component   string               `json:"component,omitempty"`
 	Task        string               `json:"task,omitempty"`
 	Inputs      []ActionInput        `json:"inputs,omitempty"`
-	Effects     ActionEffects        `json:"effects,omitempty"`
+	Effects     Effects              `json:"effects,omitempty"`
 	Relaunch    ActionRelaunchPolicy `json:"relaunch,omitempty"`
 	Aliases     []string             `json:"aliases,omitempty"`
 }
@@ -76,7 +70,7 @@ func Actions(p Project) []Action {
 	for _, action := range actions {
 		action.Aliases = uniqueStrings(action.Aliases)
 		action.Inputs = cloneActionInputs(action.Inputs)
-		action.Effects = cloneActionEffects(action.Effects)
+		action.Effects = cloneEffects(action.Effects)
 		out = append(out, action)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -142,12 +136,4 @@ func cloneActionInputs(in []ActionInput) []ActionInput {
 		return nil
 	}
 	return append([]ActionInput(nil), in...)
-}
-
-func cloneActionEffects(in ActionEffects) ActionEffects {
-	return ActionEffects{
-		Writes:      append([]string(nil), in.Writes...),
-		Touches:     append([]string(nil), in.Touches...),
-		Invalidates: append([]string(nil), in.Invalidates...),
-	}
 }

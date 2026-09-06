@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/benjaco/devflow/internal/adaptersource"
 	"github.com/benjaco/devflow/internal/clierror"
 	"github.com/benjaco/devflow/internal/lock"
 	"github.com/benjaco/devflow/internal/version"
@@ -157,7 +158,7 @@ func localProjectSourceFiles(projectPath string) (sources []string, err error) {
 	seen := map[string]struct{}{projectPath: {}}
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasPrefix(name, "devflow_") || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+		if !adaptersource.IsSource(name) {
 			continue
 		}
 		path := filepath.Join(projectDir, name)

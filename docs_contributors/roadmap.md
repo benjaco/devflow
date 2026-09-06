@@ -40,8 +40,8 @@
 
 The CM Navigator agent-integration review has an approved engineering sequence in [Agent verification: assessment and implementation plan](agent-verification-plan.md). Item 1 (execution ownership), its current-only revision and CI correction are accepted. Item 2 (startup/flush freshness) and its Windows CI correction are accepted; see [regression evidence](watch-freshness-verification.md). Item 3 (validation lifecycle parity) is accepted; see [lifecycle evidence](validation-lifecycle-verification.md). Item 4 (log following, JSON errors and direct cancellation) is accepted; see [CLI evidence](cli-reliability-verification.md). Successful upgrades discard the shared task artifact cache; future work targets the current API/state contracts directly. Continue one item at a time after review; the original assessment baseline is `a7fe4f8`.
 
-1. Review implemented item 5 run/attempt evidence, scoped cancellation and recoverable prompts with passing local verification; see [run-control evidence](run-control-verification.md).
-2. Expose existing graph metadata and add a conservative verification planner using declared purposes/effects and bootstrap-aware configuration-change detection.
+1. Retain and resolve the five item 5 review findings listed in `PROGRESS.md`; its implementation is committed at `9dc1354`.
+2. Review item 6 metadata and advisory verification planning, implemented at the user's request while those findings remain open; see [planning evidence](planning-verification.md).
 3. Add opt-in compact results, progress control and cursor retrieval; defer broader same-worktree concurrency and MCP until the underlying contracts are proven.
 
 The earlier BikeCoach adoption work remains useful alongside that sequence:

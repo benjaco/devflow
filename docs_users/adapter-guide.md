@@ -153,6 +153,61 @@ Important details:
 - `database.Postgres("prisma")` defaults the snapshot directory; set `SnapshotRoot(...)` only when the default is wrong.
 - `CloneFromEnvContainerized(...)` uses the clients bundled in the managed Postgres image, so this example needs a reachable Docker Engine but not host `pg_dump`/`psql` binaries.
 
+## Verification Purposes and Effects
+
+Declare verification intent separately from task names, tags, and cache outputs. `devflow plan --files <paths> --intent verify --json` uses `PurposeTest`, `PurposeLint`, `PurposeTypecheck`, and `PurposeBuild` to select checks. `PurposeGenerate` identifies generators that can be required dependencies; `PurposeFormat` identifies formatting work. A task can declare multiple purposes.
+
+```go
+generated := b.Task("generate").
+    Command("go", "generate", "./schema").
+    Inputs("schema").
+    Outputs("internal/generated").
+    Purposes(project.PurposeGenerate).
+    Effects(project.Effects{
+        Writes: []string{"internal/generated/**"},
+        Touches: []string{"go-tool-cache"},
+    })
+
+unit := b.Task("unit").
+    Command("go", "test", "./internal/...").
+    DependsOn(generated).
+    Inputs("go.mod", "go.sum", "internal").
+    Purposes(project.PurposeTest).
+    Effects(project.Effects{Touches: []string{"go-tool-cache"}}).
+    NoCache()
+
+lint := b.Task("lint").
+    Command("go", "vet", "./internal/...").
+    DependsOn(generated).
+    Inputs("go.mod", "go.sum", "internal").
+    Purposes(project.PurposeLint).
+    Effects(project.Effects{Touches: []string{"go-tool-cache"}}).
+    NoCache()
+
+b.VerificationTarget("verify", unit, lint)
+```
+
+The example declares shared Go cache writes, so unordered checks can produce a conservative resource-conflict notice even when the Go toolchain coordinates those writes itself. Add any project-specific effects of the tests or generators as well.
+
+Use `VerificationTarget` for the adapter's complete finite verification suite. Changes to the root `devflow.project.go` or a root `devflow_*.go` companion, including added, deleted, and renamed sources, select all declared verification targets and recommend finite artifact validation. Runtime bootstrap excludes `devflow_*_test.go` and nested files, so they keep ordinary input-matching behavior. Ordinary source changes prefer checks with declared purposes; verification targets also provide fallback coverage where task purposes are missing. If the declarations cannot establish coverage, the plan remains unresolved.
+
+`Effects` records declarations for inspection and planning:
+
+| Field | Declaration |
+| --- | --- |
+| `Writes []string` | Worktree paths or globs the task may write, including generated source. |
+| `Touches []string` | Logical resources the task may change; treated as write access. |
+| `Invalidates []string` | Task names whose results the action or task invalidates. |
+| `Resources []project.ResourceUse` | Named logical resources with `Access: project.ResourceRead` or `Access: project.ResourceWrite`. |
+
+Use the same resource name for tasks that share a database, external service, or other mutable resource. For example, `Effects(project.Effects{Resources: []project.ResourceUse{{Name: "database:test", Access: project.ResourceWrite}}})` declares a test database writer. The planner reports potentially overlapping unordered access when a writer is involved. It also compares declared file reads with output/effect writes. Dependency edges express required ordering; these declarations do not add scheduling, isolate external resources, or authorize execution.
+
+Omitting `Effects` leaves task effects unknown (`null` in graph metadata). `Effects(project.Effects{})` explicitly declares an empty effects set (`{}`). Declare actual writes and resource use before choosing the empty form: artifact `Outputs` describe cacheable results and are not a complete side-effect declaration. Custom fingerprints and cache-key callbacks remain opaque during planning and produce an uncertainty issue.
+
+Low-level adapters set `Task.Purposes`, `Task.Effects` (a `*project.Effects`), and `Target.Verification` directly. Actions use the same `project.Effects` value type. `GoDebugServiceBuilder` also accepts `Purposes` and `Effects`, but a verification closure containing a service, registered action, formatter, or invalidation is not recommended for automatic checking. Keep such work outside finite verification targets.
+
+`graph show <target> --json` exposes these declarations, input paths/filter signatures/environment names, and hook-presence flags. Inspection and planning do not execute task hooks, fingerprints, readiness checks, or instance provisioning. They omit command signatures, environment values, and debug configuration. Loading a Go adapter remains executable configuration; planning output is advisory and does not prove that any check ran or passed.
+
 ## Commands That Must Produce Files
 
 Some generators incorrectly exit with code zero before producing their files. Use `project.CommandOutputTasklet` when command success must converge on specific filesystem outputs:

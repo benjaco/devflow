@@ -22,6 +22,8 @@ Available command-specific evidence stays at the top level: a failed run retains
 | `run_mismatch` | `admission` | A supplied run identity does not match the execution selection |
 | `run_not_active`, `evidence_unavailable`, `evidence_write_failed`, `retention_failed` | `execution` | A terminal run cannot be cancelled, or retained evidence could not be read |
 | `resource_conflict` | `admission` | Worktree ownership prevented execution; inspect `resourceConflict` |
+| `invalid_prerequisite` | `resolution` | A selected check references a CLI absent from the adapter catalog |
+| `ownership_read_failed` | `planning` | The planner could not read its advisory execution-owner snapshot |
 | `daemon_unavailable` | `transport` | Daemon startup or socket communication failed |
 | `task_failed`, `validation_failed`, `flush_failed`, `doctor_failed`, `repository_failed`, `upgrade_failed`, `log_read_failed` | `execution` | Inspect the command's retained evidence |
 | `operation_cancelled`, `deadline_exceeded` | phase where interrupted | Context cancellation or deadline interrupted the operation |
@@ -64,9 +66,34 @@ Implemented commands:
 - `devflow graph list`
 - `devflow graph show <target>`
 - `devflow graph affected --files ...`
+- `devflow plan --files ... --intent verify`
 - `devflow validate <target>`
 
 All implemented commands support `--json` except `devflow docs setup` and `devflow docs development`, which intentionally print plain bundled user Markdown only.
+
+## Verification Planning
+
+```bash
+devflow graph show verify --json
+devflow plan --files frontend/src/page.tsx,backend/server.go --intent verify --json
+devflow plan --worktree /path/to/project --files devflow_frontend.go --json
+```
+
+`graph show` retains `target` and topological `closure`, and adds `metadata`: lexically ordered task/target declarations and a metadata digest. It exposes descriptions, tags, dependencies, inputs, filter signatures, env/CLI prerequisite names, outputs, cache/stamp/restart policies, purposes, effects and hook-presence booleans. It never serializes callbacks, command signatures, env values or debug configuration. Duration values such as `readyTimeout` are nanoseconds, matching Go's declared duration.
+
+`plan` accepts comma-separated worktree-relative changed paths, including deleted paths. Paths are deduplicated/sorted; absolute paths and parent traversal reject. `verify` is the only intent and the default. Explicit `Task.Purposes` selects test/lint/typecheck/build checks; names and tags never establish purpose. Formatters, action tasks, invalidations and service closures are excluded. Generators may appear as prerequisites. Declared verification targets cover eligible branches without narrower checks and provide the full fallback for adapter changes.
+
+The JSON result has `advisory: true`, `resolved`, `files`, `fileImpacts`, `checks`, combined topological `closure`, selected task metadata, `sharedDependencies`, `prerequisites`, `conflicts` and `issues`. Each check has selection reasons, its closure and an argument-vector `command` bound to the resolved project/worktree. Configuration changes also suggest finite `validationCommand` artifact checks. The combined closure is deduplicated for inspection; executing separate suggested commands can still repeat their shared prerequisites. There is no saved-plan executor.
+
+`resolved` means the declared selection has no unresolved issues or potential resource conflicts. It does not mean checks passed, tools/env are available, all real test coverage is known, or execution is admitted. Unresolved advice still exits successfully with `resolved: false`; parsing, loading and inspection failures use the normal structured error boundary, preserving partial advice where available. Text output shows selections, resolution, prerequisites, conflicts and issues.
+
+`fileImpacts[].state` distinguishes `matched`, `ignored`, `unmatched` and `configuration`. Issues include `unmatched_file`, `uncovered_impact`, `no_verification_check`, `configuration_impact_unknown`, `configuration_identity_unknown`, `unknown_effects`, `opaque_inputs`, `invalid_resource`, `unsafe_verification` and `ambiguous_execution_name`. An input branch is not covered merely because another consumer of the same file has a check. Custom fingerprints/cache-key callbacks are not evaluated and leave input coverage uncertain. Explicit effects `{}` differ from unknown `null`; outputs alone do not declare all effects.
+
+Resources compare unordered tasks' declared named-resource and file access. Read/write overlaps are reported; dependency-ordered use and read/read use are permitted. File/glob directory prefixes deliberately overestimate possible access, and do not attempt to prove that tools' own locking makes concurrent writes safe. These are advisory conflicts, not a new execution scheduler.
+
+`graphDigest` identifies safe graph/action/prerequisite declarations. `configDigest` hashes the exact validated root adapter source names and bytes (empty with an issue when unavailable); `scopeDigest` hashes the complete normalized path list, not changed-file contents. None is a saved execution authorization or freshness guarantee. Root `devflow.project.go` and `devflow_*.go` companions except `_test.go` share bootstrap's filename classifier, including deleted/renamed names. Configuration changes require declared full verification targets; absent that declaration, the planner reports unknown impact instead of claiming a narrow safe subset.
+
+Prerequisite availability remains `unchecked`. Planning does not provision an instance, run doctor probes, execute task/hook/readiness/fingerprint callbacks, or acquire an execution lease. `execution` reports `exclusiveWorktree: true`, `admission: "required"` and a read-only owner snapshot. A missing owner is not permission to overlap with another run; actual execution still enforces admission. Loading a Go adapter uses the normal compilation/bootstrap path and executes its configuration code; that is not a sandbox.
 
 Running bare `devflow` now acts as the default operator entry path:
 - it can be the installed Go binary or the repo-local launcher script

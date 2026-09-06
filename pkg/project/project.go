@@ -23,6 +23,17 @@ const (
 	KindWarmup       Kind = "warmup"
 )
 
+type Purpose string
+
+const (
+	PurposeTest      Purpose = "test"
+	PurposeLint      Purpose = "lint"
+	PurposeTypecheck Purpose = "typecheck"
+	PurposeBuild     Purpose = "build"
+	PurposeFormat    Purpose = "format"
+	PurposeGenerate  Purpose = "generate"
+)
+
 type RestartPolicy string
 
 const (
@@ -92,9 +103,12 @@ type Task struct {
 	AllowInWatch              bool
 	Tags                      []string
 	Description               string
-	Signature                 string
-	CacheKeyOverride          CacheKeyFunc
-	Debug                     *DebugConfig
+	Purposes                  []Purpose
+	// Nil means effects are unknown; an explicit empty declaration is distinct.
+	Effects          *Effects
+	Signature        string
+	CacheKeyOverride CacheKeyFunc
+	Debug            *DebugConfig
 }
 
 type DebugConfig struct {
@@ -117,6 +131,8 @@ type Target struct {
 	RequiredCLIs []string
 	RequiredEnv  []string
 	Description  string
+	// Verification marks a full fallback for adapter or configuration changes.
+	Verification bool
 }
 
 type InstanceConfig struct {

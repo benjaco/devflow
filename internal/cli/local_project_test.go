@@ -19,7 +19,15 @@ func TestLocalProjectSourceFilesDiscoversOnlyAdapterSources(t *testing.T) {
 	writeTestFile(t, filepath.Join(worktree, "devflow_z.go"), "package main\n")
 	writeTestFile(t, filepath.Join(worktree, "devflow_a.go"), "package main\n")
 	writeTestFile(t, filepath.Join(worktree, "devflow_watch_test.go"), "not valid Go on purpose\n")
+	writeTestFile(t, filepath.Join(worktree, "devflow.project_test.go"), "not valid Go on purpose\n")
 	writeTestFile(t, filepath.Join(worktree, "backend.go"), "not valid Go on purpose\n")
+	for _, name := range []string{"nested", "devflow_nested"} {
+		if err := os.Mkdir(filepath.Join(worktree, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTestFile(t, filepath.Join(worktree, "nested", "devflow.project.go"), "not valid Go on purpose\n")
+	writeTestFile(t, filepath.Join(worktree, "devflow_nested", "tasks.go"), "not valid Go on purpose\n")
 
 	got, err := localProjectSourceFiles(projectPath)
 	if err != nil {

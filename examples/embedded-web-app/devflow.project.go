@@ -157,6 +157,7 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 			Kind:        project.KindOnce,
 			Description: "Verify the build toolchain required for the embedded web app example",
 			Signature:   "embedded-web-app-check-build-tools-v1",
+			Effects:     &project.Effects{},
 			RequiredCLIs: []string{
 				"go",
 				"npm",
@@ -174,6 +175,10 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 			Description: "Warm Go module downloads",
 			Signature:   "embedded-web-app-go-download-v1",
 			Inputs:      project.Inputs{Files: []string{"go.mod", "go.sum"}},
+			Effects: &project.Effects{
+				Writes:    []string{"go.mod", "go.sum"},
+				Resources: []project.ResourceUse{{Name: "go-module-cache", Access: project.ResourceWrite}},
+			},
 			Run: func(ctx context.Context, rt *project.Runtime) error {
 				return rt.RunCmd(ctx, "go", "mod", "download")
 			},
@@ -186,6 +191,7 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 			Kind:        project.KindGroup,
 			Deps:        []string{"build_frontend_main", "build_frontend_internal", "build_frontend_admin"},
 			Description: "Aggregate embedded web app frontend builds",
+			Effects:     &project.Effects{},
 		},
 		{
 			Name:        "sqlc_generate",
@@ -194,6 +200,8 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 			Cache:       true,
 			Description: "Generate sqlc storage bindings",
 			Signature:   "embedded-web-app-sqlc-generate-v1",
+			Purposes:    []project.Purpose{project.PurposeGenerate},
+			Effects:     &project.Effects{Writes: []string{"internal/storage/sqlc"}},
 			Inputs: project.Inputs{
 				Files: []string{"sqlc.yaml"},
 				Dirs:  []string{"internal/storage/queries", "internal/storage/migrations"},
@@ -203,8 +211,8 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 				return rt.RunCmd(ctx, "sqlc", "generate")
 			},
 		},
-		toolsBin.BuildTask(),
-		coachBin.BuildTask(),
+		embeddedWebAppBinaryBuildTask(toolsBin),
+		embeddedWebAppBinaryBuildTask(coachBin),
 		{
 			Name:        "prepare_db_base",
 			Kind:        project.KindOnce,
@@ -415,6 +423,7 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 			Kind:        project.KindGroup,
 			Deps:        []string{"frontend_assets", "build_tools", "build_coach"},
 			Description: "Aggregate embedded web app build target",
+			Effects:     &project.Effects{},
 		},
 		{
 			Name:                      "backend_dev",
@@ -438,9 +447,10 @@ func (embeddedWebAppProject) Tasks() []project.Task {
 func (embeddedWebAppProject) Targets() []project.Target {
 	return []project.Target{
 		{
-			Name:        "build-all",
-			RootTasks:   []string{"build_all"},
-			Description: "Build embedded web app frontend assets and Go binaries",
+			Name:         "build-all",
+			RootTasks:    []string{"build_all"},
+			Description:  "Build embedded web app frontend assets and Go binaries",
+			Verification: true,
 		},
 		{
 			Name:        "db-only",
@@ -468,6 +478,12 @@ func embeddedWebAppFrontendBuildTask(name, dir, outputDir string) project.Task {
 		Cache:       true,
 		Description: "Build " + dir + " into embedded frontend assets",
 		Signature:   "embedded-web-app-frontend-build-v1:" + dir,
+		Purposes:    []project.Purpose{project.PurposeBuild},
+		// npm installation and build scripts also write dependencies and lockfiles.
+		Effects: &project.Effects{
+			Writes:    []string{dir, outputDir},
+			Resources: []project.ResourceUse{{Name: "npm-cache", Access: project.ResourceWrite}},
+		},
 		Inputs: project.Inputs{
 			Files: []string{
 				filepath.Join(dir, "package.json"),
@@ -499,6 +515,20 @@ func embeddedWebAppFrontendBuildTask(name, dir, outputDir string) project.Task {
 			})
 		},
 	}
+}
+
+func embeddedWebAppBinaryBuildTask(tool project.BinaryTool) project.Task {
+	task := tool.BuildTask()
+	task.Purposes = []project.Purpose{project.PurposeBuild}
+	// Go builds may download modules and update module metadata as well as caches.
+	task.Effects = &project.Effects{
+		Writes: []string{tool.Output, "go.mod", "go.sum"},
+		Resources: []project.ResourceUse{
+			{Name: "go-module-cache", Access: project.ResourceWrite},
+			{Name: "go-build-cache", Access: project.ResourceWrite},
+		},
+	}
+	return task
 }
 
 func embeddedWebAppBinaryTool(taskName, description, output string, deps, files, dirs []string, build process.CommandSpec) project.BinaryTool {

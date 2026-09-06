@@ -6,6 +6,7 @@
 
 - `pkg/project`: task, target, runtime, adapter interfaces, and generic tasklets such as output-converging finite commands
 - `pkg/graph`: validation, topo ordering, closures, and affected-task calculation
+- `pkg/planner`: pure advisory verification selection, declared coverage/effects and resource conflicts
 - `pkg/fingerprint`: deterministic file, directory, env, and task-key hashing
 - `pkg/cache`: manifest, snapshot, restore, and cache lookup
 - `pkg/process`: one-shot execution, supervised services, line-buffered logs
@@ -21,6 +22,7 @@
 - `internal/clierror`: source classification preserving error causes and the shared `api.CommandError` transport contract
 - `internal/logstream`: bounded CLI line reading/following with a consumed-byte cursor and rewrite detection
 - `internal/taskexec`: shared `BeforeRun` and optional `Run` callbacks for engine and validation execution
+- `internal/adaptersource`: filename classification shared by adapter discovery and changed-file planning
 
 CLI invocations discover their command's flag definitions before bootstrap so early JSON detection shares the parser's value semantics. Finite handlers hold their result as a value until the shared presentation boundary knows the outcome; failures retain that evidence alongside one typed error. Streaming handlers write JSONL directly and propagate writer failures. Installed and generated main functions use the same error/exit presentation helpers, including Windows child-result ownership.
 
@@ -73,6 +75,20 @@ This model intentionally avoids:
 - built-in runtime adapter registries
 - runtime JSON adapter protocols
 - dynamic plugin loading tricks
+
+## Metadata and verification planning
+
+The project API carries explicit `Task.Purposes`, optional `Task.Effects` and `Target.Verification`. `Effects` is shared by tasks and actions, with file writes, named touches/invalidations and resource read/write declarations. A nil task effects pointer means unknown; an explicit empty object declares no effects. This metadata neither grants concurrency permission nor changes execution/caching behavior. Tags remain descriptive, and purpose is never inferred from a task name.
+
+`graph.Metadata` projects declaration values and callback-presence flags, without invoking callbacks or serializing function values, command signatures, env values or debug config. It clones mutable declarations and supplies a metadata-only digest. CLI graph inspection retains the ordered closure alongside that projection.
+
+`planner.Build` uses graph input matching, upstream/downstream traversal and existing prerequisite selection. It prefers eligible purpose tasks, adds explicit verification targets for uncovered finite branches and uses the declared verification targets for configuration changes. Authoring/action tasks, formatters, invalidations and service closures cannot become automatic verification goals; required generators remain visible. Unknown inputs/effects and uncovered paths remain issues. A combined closure and shared-dependency references are an inspection plan, not a new executor.
+
+The planner compares declared resource/file access only between tasks without dependency ordering; input reads, outputs and effect writes participate. Named read/read use is compatible; possible read/write or write/write overlap is reported. Glob footprints use literal directory prefixes, deliberately overestimating access without filesystem scans. Instance ownership remains an independent execution admission boundary.
+
+Planning itself has no filesystem or process operations. The CLI separately reads a diagnostic owner snapshot and hashes the exact validated adapter-source set. Source classification is filename-based, so deleted/renamed adapter files remain configuration changes without needing to exist. Normal adapter bootstrap still compiles and executes Go configuration; pure planning does not turn that loader into a sandbox.
+
+Planner identity records safe graph/action/prerequisite declarations, current adapter source names/bytes and the supplied normalized changed-path list. A path-list digest is not a source-content snapshot. Plans remain advisory, and subsequent commands perform their normal current-input/admission checks. A saved-plan executor would require new graph and complete change-scope revalidation; it is deliberately absent.
 
 ## State Layout
 

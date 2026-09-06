@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -213,6 +214,14 @@ func (b *Builder) Target(name string, roots ...any) *Builder {
 	return b
 }
 
+// VerificationTarget declares a full verification fallback for changes to
+// adapter or project configuration that cannot be narrowed to task inputs.
+func (b *Builder) VerificationTarget(name string, roots ...any) *Builder {
+	b.Target(name, roots...)
+	b.targets[len(b.targets)-1].Verification = true
+	return b
+}
+
 func (b *Builder) Action(id string) *ActionBuilder {
 	id = strings.TrimSpace(id)
 	if existing := b.actionMap[id]; existing != nil {
@@ -407,7 +416,7 @@ func (a *ActionBuilder) build() Action {
 	action := a.action
 	action.Aliases = uniqueStrings(action.Aliases)
 	action.Inputs = cloneActionInputs(action.Inputs)
-	action.Effects = cloneActionEffects(action.Effects)
+	action.Effects = cloneEffects(action.Effects)
 	if action.Relaunch == "" {
 		action.Relaunch = ActionRelaunchNever
 	}
@@ -545,6 +554,16 @@ func (t *TaskBuilder) Tags(tags ...string) *TaskBuilder {
 	return t
 }
 
+func (t *TaskBuilder) Purposes(purposes ...Purpose) *TaskBuilder {
+	t.task.Purposes = append(t.task.Purposes, purposes...)
+	return t
+}
+
+func (t *TaskBuilder) Effects(effects Effects) *TaskBuilder {
+	t.task.Effects = cloneTaskEffects(&effects)
+	return t
+}
+
 func (t *TaskBuilder) Ready(fn ReadyFunc) *TaskBuilder {
 	t.task.Ready = fn
 	return t
@@ -614,6 +633,8 @@ func (t *TaskBuilder) CacheKey(fn CacheKeyFunc) *TaskBuilder {
 
 func (t *TaskBuilder) build(requiredCatalog map[string]bool) Task {
 	task := t.task
+	task.Purposes = slices.Clone(task.Purposes)
+	task.Effects = cloneTaskEffects(task.Effects)
 	task.Deps = uniqueStrings(task.Deps)
 	task.RequiredCLIs = uniqueStrings(task.RequiredCLIs)
 	task.RequiredEnv = uniqueStrings(task.RequiredEnv)
@@ -741,7 +762,12 @@ func (p builtProject) RequiredEnvs() []string {
 }
 
 func (p builtProject) Tasks() []Task {
-	return append([]Task(nil), p.tasks...)
+	tasks := slices.Clone(p.tasks)
+	for i := range tasks {
+		tasks[i].Purposes = slices.Clone(tasks[i].Purposes)
+		tasks[i].Effects = cloneTaskEffects(tasks[i].Effects)
+	}
+	return tasks
 }
 
 func (p builtProject) Targets() []Target {
@@ -752,7 +778,7 @@ func (p builtProject) Actions() []Action {
 	actions := make([]Action, 0, len(p.actions))
 	for _, action := range p.actions {
 		action.Inputs = cloneActionInputs(action.Inputs)
-		action.Effects = cloneActionEffects(action.Effects)
+		action.Effects = cloneEffects(action.Effects)
 		action.Aliases = append([]string(nil), action.Aliases...)
 		actions = append(actions, action)
 	}

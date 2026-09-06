@@ -1,6 +1,6 @@
 # Agent verification: assessment and implementation plan
 
-Status: all seven items approved for sequential implementation with user review after each item. Items 1–4 and their CI corrections are accepted; item 5 is implemented and locally verified, awaiting user review. See [ownership evidence](execution-ownership-verification.md), [freshness evidence](watch-freshness-verification.md), [lifecycle evidence](validation-lifecycle-verification.md), [CLI reliability evidence](cli-reliability-verification.md), [run-control evidence](run-control-verification.md) and `PROGRESS.md`. Items 6–7 remain queued. The original assessment below was made on 2026-09-05 against `a7fe4f8`, one commit after the supplied review's `b46220f`; source references describe that baseline and may move. This does not establish which binary is installed in the external project.
+Status: all seven items approved for sequential implementation with user review after each item. Items 1–4 and their CI corrections are accepted; item 5 is committed at `9dc1354`, with five review findings still outstanding. The user requested moving to item 6; metadata and advisory planning are implemented and locally verified, ready for review. Item 7 remains queued. See [ownership evidence](execution-ownership-verification.md), [freshness evidence](watch-freshness-verification.md), [lifecycle evidence](validation-lifecycle-verification.md), [CLI reliability evidence](cli-reliability-verification.md), [run-control evidence](run-control-verification.md), [planning evidence](planning-verification.md) and `PROGRESS.md`. The original assessment below was made on 2026-09-05 against `a7fe4f8`, one commit after the supplied review's `b46220f`; source references describe that baseline and may move. This does not establish which binary is installed in the external project.
 
 User review policy: implement one item at a time and stop for review. Devflow is current-only: update current callers and docs directly, remove retired APIs/state readers, and clear disposable task artifacts after successful upgrades instead of maintaining migrations. Older adapter compilation is not guaranteed. This supersedes the compatibility-preservation assumptions in the original assessment.
 
@@ -177,7 +177,7 @@ Acceptance: large healthy graph produces bounded requested summaries; failures r
 
 ## Delivery and verification
 
-Review item 5 run evidence and unattended control before starting item 6 metadata/planning. Item 7 compact retrieval remains separate. Stop after each approved item for review.
+Review item 6 metadata/planning before starting item 7 compact retrieval. The item 5 review findings remain tracked separately at the user's request to proceed. Stop after each approved item for review.
 
 Each change needs its targeted failing regression, subsystem docs, current JSON contract coverage where relevant, examples that still build, `go test ./...`, `go test -race ./...`, vet and the repository quality gates. Cross-process ownership/cancellation/log behavior needs native Linux/macOS/Windows CI; compilation alone cannot prove those behaviors. Use opt-in Docker coverage when resource ownership affects managed containers and a real daemon/TUI smoke for action interruption and prompt recovery.
 

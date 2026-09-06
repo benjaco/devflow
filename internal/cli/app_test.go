@@ -430,7 +430,7 @@ func (actionCLIProject) Actions() []project.Action {
 			Inputs: []project.ActionInput{
 				{Name: "name", Type: project.ActionInputString, Required: true, Positional: true, Env: "MIGRATION_NAME"},
 			},
-			Effects:  project.ActionEffects{Writes: []string{"action.txt"}},
+			Effects:  project.Effects{Writes: []string{"action.txt"}},
 			Relaunch: project.ActionRelaunchNever,
 			Aliases:  []string{"db:migration:create"},
 		},

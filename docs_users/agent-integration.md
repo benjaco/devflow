@@ -42,6 +42,23 @@ For any failed finite JSON command, inspect `error.code`, `error.phase` and `err
 
 `logs --json` and attached `watch --json` are JSONL streams, including terminal errors. Finite CI/validation still stream progress to stderr, so tools that combine streams must keep that distinction. Ctrl+C cancels direct work and its subprocesses; `operation_cancelled` and `deadline_exceeded` identify the interrupted phase. Canceling a log/watch observer or flush wait does not stop development services. Use `runs cancel` when the intention is to cancel a specific execution.
 
+## Selecting verification checks
+
+```bash
+devflow plan --files frontend/src/page.tsx,backend/server.go --intent verify --json
+devflow graph show verify --json
+```
+
+Supply every changed path relevant to the work, including untracked files and both old/new names for renames. The planner recommends checks from explicit task purposes and declared verification targets. Inspect `checks[].reasons`, their command argument vectors, the combined `closure`, `sharedDependencies`, prerequisites, effects, conflicts and issues. The commands include the resolved worktree/project. Shared dependencies appear once in the combined plan, but separately executing the suggested commands may repeat them.
+
+`advisory: true` means nothing ran. `resolved: true` means the declared selection has no unresolved metadata/coverage issues or potential resource conflicts; it does not mean checks passed or all real test coverage is known. Prerequisite availability remains `unchecked`. `execution.owner` is a diagnostic snapshot; execution still needs exclusive worktree admission. Resolve conflicts using project policy and the existing worktree workflow rather than treating a plan as permission to run over development services.
+
+`fileImpacts` distinguishes matched, ignored, unmatched and configuration paths. Unmatched files, custom input callbacks and unknown effects remain explicit uncertainty. Task names and tags never substitute for declared purposes. Formatters, action tasks, invalidations and service closures are excluded from automatic verification; generators can remain required dependencies with visible writes. Resource overlap detection is conservative, including file reads and glob directory prefixes.
+
+Changes to the root entrypoint or compiled `devflow_*.go` companions set `configurationChanged`, including removed names. The planner selects explicitly declared full verification targets and suggests finite artifact validation commands. If the adapter declares no such targets, impact remains unknown. Broken Go adapter compilation still produces the normal structured bootstrap error.
+
+`graphDigest`, `configDigest` and `scopeDigest` identify declarations, inspected adapter sources and the supplied changed-path set. They are not proof that later edits are verified; refresh the plan after the change scope or adapter changes. This command is advisory and has no saved-plan execution mode. Actual runs supply the retained result/attempt evidence described below. `graph show` also exposes safe metadata without provisioning an instance or running task hooks/probes.
+
 ## Retained Results and Unattended Control
 
 Engine runs, watches and actions have a `runId`; every task attempt has an `attemptId`, including finite tasks and cache decisions. Keep the IDs returned by execution or detached acceptance. An action's outer result and nested run share one run ID; a subsequent development relaunch has its own ID. An idempotent detached start returns the existing execution's ID.

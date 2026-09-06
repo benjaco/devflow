@@ -5,14 +5,23 @@ Last updated: 2026-09-06
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: items 1–4 accepted; item 5 (run identity, retained evidence and unattended control) is implemented but review identified five defects to fix before acceptance. Items 6–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: the existing item 5 full default/race suites, examples and quality/build checks pass. Review then reproduced five additional defects with six isolated overlay regressions; those findings remain unfixed. Native Windows behavior still requires CI. See the review entry below.
+- State: item 6 (metadata and verification planning) is implemented and locally verified at the user's request, based on `9dc1354`; ready for review. Item 5 is committed; its five review findings remain outstanding. Item 7 is queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: final item 6 full default/race tests and examples, compiled-bootstrap checks, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), format/module/diff/version checks and Linux/Windows amd64 affected test/CLI compilation pass. Native Windows behavior still requires CI. The five earlier review findings remain unfixed.
 
 ## In Progress
 
-- Await review of the item 5 findings; fix them before acceptance. Item 6 metadata/planning has not started.
+- Await review of item 6. Retain item 5 findings as known gaps; item 7 has not started.
 
 ## Completed
+
+- Agent-verification item 6 — metadata and advisory planning:
+  - added explicit task purposes, generic shared task/action effects, resource read/write declarations and verification-target builders; safe copied graph metadata preserves target/closure inspection without exposing callbacks, command signatures or env values
+  - added pure changed-file planning with narrow checks, per-branch fallback coverage, shared dependency closure, prerequisites, declared effects/conflicts and explicit unmatched/ignored/opaque/configuration uncertainty
+  - shared bootstrap adapter filename classification for added/deleted/renamed source names; bound advice to safe graph, inspected configuration-source and changed-path digests without introducing saved-plan execution
+  - added JSON/text `plan`, worktree-bound command/validation argv, read-only ownership snapshots and structured partial errors; actual compiled adapter tests reject runtime callback/state changes and keep unavailable prerequisites unchecked
+  - annotated the existing embedded-web-app finite build graph and verified real frontend/backend/shared/config selection; recorded initial API/CLI/example failures and review regressions for missing file reads, uncovered shared-input branches, mixed-target reasons and CLI enrichment/text gaps in `docs_contributors/planning-verification.md`
+  - passed final `go test -count=1 ./...`, `go test -race -count=1 ./...`, examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0, format/module/diff checks, version JSON and Linux/Windows amd64 affected test-binary/CLI compilation; native Windows execution awaits CI
+  - kept the five item 5 review findings outstanding under the user's instruction to proceed. Local changes only; no commits, pushes, installs, existing development-service operations or external-project edits
 
 - Item 5 review — source review and focused temporary overlays, no implementation edits:
   - reproduced expired queued daemon invalidation stopping the current watcher before reporting its deadline (`TestReviewExpiredInvalidationPreservesWatcher`); deadline admission does not cover invalidation's earlier mutation path
@@ -998,7 +1007,7 @@ Last updated: 2026-09-06
 
 ## Next Steps
 
-- Fix and regression-test the five item 5 review findings, then obtain review before item 6 (metadata and verification planning); continue the approved plan one item at a time with review after each.
+- Review item 6 metadata/planning before item 7 compact retrieval; the five item 5 review findings remain outstanding and need their own fixes/regressions.
 - Confirm the reliability changes on the native Linux/macOS/Windows CI matrix; retest the historical readiness symptom through the real daemon/TUI only if it recurs (the engine early-exit restart regression passes).
 - Confirm the Delve v1.27.1 pin on the next native Linux/macOS/Windows GitHub Actions run
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
