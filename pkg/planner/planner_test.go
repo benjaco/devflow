@@ -3,6 +3,7 @@ package planner
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -180,7 +181,7 @@ func TestDeclaredResourceConflictsRespectDependencies(t *testing.T) {
 
 func TestScopeDigestDeterminismAndInvalidFiles(t *testing.T) {
 	a, _ := Build(sample(), Request{Files: []string{"frontend/a", "backend/b"}})
-	b, _ := Build(sample(), Request{Files: []string{"backend/b", "./frontend/a", "backend/b"}})
+	b, _ := Build(sample(), Request{Files: []string{"backend/b", "./frontend/a", filepath.Join("frontend", "a"), "backend/b"}})
 	c, _ := Build(sample(), Request{Files: []string{"frontend/a", "backend/b", "new.txt"}})
 	if a.ScopeDigest == "" || a.ScopeDigest != b.ScopeDigest || a.ScopeDigest == c.ScopeDigest {
 		t.Fatal("scope must track complete normalized change set")
@@ -192,7 +193,11 @@ func TestScopeDigestDeterminismAndInvalidFiles(t *testing.T) {
 	if strings.Contains(string(bytes), "must-not-execute") {
 		t.Fatal("serialized command configuration")
 	}
-	for _, file := range []string{"../outside", "nested/../frontend/a", "/absolute", "C:/absolute", "."} {
+	for _, file := range []string{
+		"../outside", "nested/../frontend/a", "/", "/absolute", "//server/share/file", "C:/absolute", "C:relative", ".",
+		filepath.FromSlash("/absolute"), filepath.FromSlash("//server/share/file"),
+		filepath.FromSlash("../outside"), filepath.FromSlash("nested/../frontend/a"),
+	} {
 		if _, err := Build(sample(), Request{Files: []string{file}}); err == nil {
 			t.Errorf("accepted %q", file)
 		}

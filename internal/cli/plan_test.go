@@ -400,17 +400,23 @@ func TestPlanJSONConfigurationIdentityTracksExactAdapterSources(t *testing.T) {
 }
 
 func TestPlanJSONArgumentFailures(t *testing.T) {
+	p := &planningCLIProject{}
+	project.Register(p)
+	root := t.TempDir()
 	for _, test := range []struct {
-		name string
-		args []string
-		code string
+		name  string
+		args  []string
+		code  string
+		phase string
 	}{
-		{name: "missing files", args: []string{"plan", "--json"}, code: "invalid_arguments"},
-		{name: "blank files", args: []string{"plan", "--files", " , ", "--json"}, code: "invalid_arguments"},
-		{name: "unknown intent", args: []string{"plan", "--files", "x.go", "--intent", "deploy", "--json"}, code: "invalid_arguments"},
-		{name: "unknown flag", args: []string{"plan", "--files", "x.go", "--bogus", "--json"}, code: "invalid_arguments"},
-		{name: "extra argument", args: []string{"plan", "unexpected", "--files", "x.go", "--json"}, code: "invalid_arguments"},
-		{name: "unknown project", args: []string{"plan", "--files", "x.go", "--project", "not-a-planning-project", "--json"}, code: "unknown_project"},
+		{name: "missing files", args: []string{"plan", "--json"}, code: "invalid_arguments", phase: "parsing"},
+		{name: "blank files", args: []string{"plan", "--files", " , ", "--json"}, code: "invalid_arguments", phase: "parsing"},
+		{name: "unknown intent", args: []string{"plan", "--files", "x.go", "--intent", "deploy", "--json"}, code: "invalid_arguments", phase: "parsing"},
+		{name: "unknown flag", args: []string{"plan", "--files", "x.go", "--bogus", "--json"}, code: "invalid_arguments", phase: "parsing"},
+		{name: "extra argument", args: []string{"plan", "unexpected", "--files", "x.go", "--json"}, code: "invalid_arguments", phase: "parsing"},
+		{name: "unknown project", args: []string{"plan", "--files", "x.go", "--project", "not-a-planning-project", "--json"}, code: "unknown_project", phase: "resolution"},
+		{name: "rooted file", args: []string{"plan", "--files", "/absolute", "--project", p.Name(), "--worktree", root, "--json"}, code: "invalid_arguments", phase: "parsing"},
+		{name: "native rooted file", args: []string{"plan", "--files", filepath.FromSlash("/absolute"), "--project", p.Name(), "--worktree", root, "--json"}, code: "invalid_arguments", phase: "parsing"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			result, err := runPlanJSON(t, test.args...)
@@ -421,7 +427,7 @@ func TestPlanJSONArgumentFailures(t *testing.T) {
 			if err := json.Unmarshal(result["error"], &failure); err != nil {
 				t.Fatal(err)
 			}
-			if failure.Code != test.code || failure.Phase == "" || failure.Message == "" || string(result["success"]) != "false" {
+			if failure.Code != test.code || failure.Phase != test.phase || failure.Message == "" || string(result["success"]) != "false" {
 				t.Errorf("failure = %+v, result = %s", failure, result)
 			}
 		})

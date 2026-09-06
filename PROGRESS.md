@@ -5,14 +5,20 @@ Last updated: 2026-09-06
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: item 6 (metadata and verification planning) is implemented and locally verified at the user's request, based on `9dc1354`; ready for review. Item 5 is committed; its five review findings remain outstanding. Item 7 is queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: final item 6 full default/race tests and examples, compiled-bootstrap checks, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), format/module/diff/version checks and Linux/Windows amd64 affected test/CLI compilation pass. Native Windows behavior still requires CI. The five earlier review findings remain unfixed.
+- State: item 6's Windows rooted-path correction is ready for review and native CI after failure at `54a5ec5`. Item 5's five review findings remain outstanding; item 7 is queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: planner and CLI planning tests, compiled-bootstrap planning, all examples, focused race checks, vet, Staticcheck v0.8.1, formatting/diff checks and Windows amd64 planner/CLI test compilation pass. Native Windows runtime confirmation awaits CI; all other jobs passed on `54a5ec5`.
 
 ## In Progress
 
-- Await review of item 6. Retain item 5 findings as known gaps; item 7 has not started.
+- Await review and native Windows CI for the rooted-path correction. Retain item 5 findings as known gaps; item 7 has not started.
 
 ## Completed
+
+- Windows planner path correction:
+  - [run `34057692957`, job `101552479071`](https://github.com/benjaco/devflow/actions/runs/34057692957/job/101552479071) failed `TestScopeDigestDeterminismAndInvalidFiles`: the planner accepted `/absolute` because Windows `filepath.IsAbs` requires a volume
+  - reject leading slashes after native separator normalization; extend rooted/UNC/drive/traversal rejection and valid native-relative deduplication coverage, plus exact `invalid_arguments/parsing` CLI JSON checks
+  - passed `go test ./pkg/planner ./examples/... -count=1`, CLI `TestPlan|TestBootstrapPlan`, full planner and focused CLI planning race checks, affected vet/Staticcheck v0.8.1, format/diff checks and Windows amd64 planner/CLI test compilation; independent diff review found no issues
+  - recorded the native CI failure and local verification limits in planning evidence, testing guidance and shared memory. Local changes only; no commits, pushes or workflow reruns. Native Windows execution awaits CI
 
 - Agent-verification item 6 — metadata and advisory planning:
   - added explicit task purposes, generic shared task/action effects, resource read/write declarations and verification-target builders; safe copied graph metadata preserves target/closure inspection without exposing callbacks, command signatures or env values

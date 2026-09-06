@@ -354,7 +354,8 @@ func normalizeFiles(files []string) ([]string, error) {
 	out := []string{}
 	for _, file := range files {
 		file = filepath.ToSlash(strings.TrimSpace(file))
-		if filepath.IsAbs(file) || filepath.VolumeName(file) != "" || (len(file) > 1 && file[1] == ':') {
+		// Windows IsAbs returns false for /path, but it is still rooted outside the worktree.
+		if strings.HasPrefix(file, "/") || filepath.VolumeName(file) != "" || (len(file) > 1 && file[1] == ':') {
 			return nil, fmt.Errorf("file must be worktree-relative: %q", file)
 		}
 		for _, part := range strings.Split(file, "/") {

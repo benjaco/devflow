@@ -35,6 +35,18 @@ Focused review then reproduced and fixed these additional failures:
 | `TestPlanJSONEnrichmentErrorsLeaveResolvedFalse` | Corrupt ownership and invalid adapter sources preserved `resolved:true` alongside `success:false`. |
 | `TestPlanTextShowsConflictsAndUncheckedPrerequisites` | Text output omitted the resolved state, unchecked prerequisite names and declared resource conflicts. |
 
+## Windows rooted-path regression
+
+[Windows CI run `34057692957` at `54a5ec5`](https://github.com/benjaco/devflow/actions/runs/34057692957/job/101552479071)
+failed `TestScopeDigestDeterminismAndInvalidFiles` with `accepted "/absolute"`.
+Windows `filepath.IsAbs` requires a volume, so the old check accepted a path
+rooted in the current drive. The correction rejects a leading slash after native
+separator normalization. Coverage also includes native rooted/UNC/traversal
+paths, drive-relative paths, valid relative-path deduplication and the CLI's
+`invalid_arguments/parsing` JSON. The expanded tests pass on macOS before the
+fix; the recorded failure is native Windows CI, not a local reproduction.
+Post-fix check results and the native Windows CI status are in `PROGRESS.md`.
+
 ## Contract coverage
 
 The CLI regressions exercise narrow frontend selection, expanded frontend and
