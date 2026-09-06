@@ -18,7 +18,11 @@
 - `pkg/event`: typed event bus used by the engine for run, task-state, cache, process, instance, and log events
 - `pkg/watch`: Devflow-owned polling file scanner and debounced change batching
 - `pkg/validation`: finite sandbox execution for input/output contract checks and exhaustive dependency-valid task-order checks
+- `internal/clierror`: source classification preserving error causes and the shared `api.CommandError` transport contract
+- `internal/logstream`: bounded CLI line reading/following with a consumed-byte cursor and rewrite detection
 - `internal/taskexec`: shared `BeforeRun` and optional `Run` callbacks for engine and validation execution
+
+CLI invocations discover their command's flag definitions before bootstrap so early JSON detection shares the parser's value semantics. Finite handlers hold their result as a value until the shared presentation boundary knows the outcome; failures retain that evidence alongside one typed error. Streaming handlers write JSONL directly and propagate writer failures. Installed and generated main functions use the same error/exit presentation helpers, including Windows child-result ownership.
 
 ## Local Project Bootstrap
 
@@ -30,14 +34,16 @@ Flow:
 - if the file is missing, the command fails
 - if the file exists, the bootstrap CLI discovers it first plus lexically sorted, regular root-level `devflow_*.go` companions; `devflow_*_test.go`, unrelated Go files, nested files, and non-regular matches are excluded or rejected as appropriate
 - the bootstrap CLI compiles that ordered source set into a worktree-local full CLI binary
-- stale checks and rebuilds are guarded by a per-worktree lock at `<worktree>/.devflow/localbuild.lock`; commands that waited for another builder re-check the build key before compiling
+- stale checks and rebuilds are guarded by a per-worktree lock at `<worktree>/.devflow/localbuild.lock`; cancellable lock waiters re-check the build key before compiling
 - execution is then transferred into that compiled local binary for all normal commands
 
 `localProjectSourceFiles` owns the adapter discovery contract. Every adapter filename/source label and its contents participate in the content key along with the existing Devflow version/bootstrap inputs. Discovery happens again after acquiring the localbuild lock, and that exact post-lock ordered adapter set is copied into the reconstructed generated module. This preserves add/remove/rename invalidation, stable timestamp-only reuse, serialized builds, and removal of stale companions.
 
 The worktree does not have to live under the Devflow source checkout. Source-local bootstrap hashes repo sources relative to the checkout when possible, and hashes external project files with stable external labels so Windows temp worktrees on another drive still build.
 
-On Unix platforms, transfer into the worktree-local binary uses process replacement. Windows does not support `syscall.Exec`, so the bootstrap process runs the worktree-local binary as a child and exits with the child's status.
+Bootstrap builds use the invocation context, stop their process trees on cancellation, and publish only a completed non-canceled temporary binary. Direct CI passes that same context into the engine and repository repair. `pkg/process.CommandContext` is the finite-command constructor for owned process-tree cancellation; supervised services retain their handle lifecycle. Client-wait cancellation does not imply cancellation of a daemon-owned run.
+
+On Unix platforms, transfer into the worktree-local binary uses process replacement. Windows does not support `syscall.Exec`, so bootstrap owns a child process group and propagates its status without duplicating its result. On cancellation it sends a scoped console break, allows up to two seconds for cleanup/result publication, then falls back to tree termination for direct finite work. Observer cancellation terminates only its local CLI, preserving daemon descendants; daemons use independent console groups. A missing console or unresponsive child can require forced cleanup; the existing execution ownership record remains the recovery authority.
 
 Current local binary location:
 - `<worktree>/.devflow/bin/devflow-local`

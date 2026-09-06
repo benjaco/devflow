@@ -8,6 +8,8 @@ import (
 	"sort"
 
 	"github.com/benjaco/devflow/pkg/process"
+
+	"github.com/benjaco/devflow/internal/clierror"
 )
 
 type RequiredCLIProvider interface {
@@ -53,7 +55,7 @@ func RequiredCLIsFor(p Project) []RequiredCLI {
 func RequiredCLIsForTarget(p Project, target string) ([]RequiredCLI, error) {
 	targetDef, ok := targetByName(p.Targets(), target)
 	if !ok {
-		return nil, fmt.Errorf("unknown target %q", target)
+		return nil, clierror.Wrap(fmt.Errorf("unknown target %q", target), "unknown_target", "resolution")
 	}
 	catalog := RequiredCLIsFor(p)
 	index := requiredCLIIndex(catalog)

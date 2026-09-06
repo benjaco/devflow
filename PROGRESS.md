@@ -5,14 +5,24 @@ Last updated: 2026-09-06
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: item 2 and its Windows correction accepted; item 3 (validation lifecycle parity) implemented and locally verified; awaiting user review. Items 4–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: item 3 full default/race suites and examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0, module/format/diff checks, version JSON and Linux/Windows compilation pass. Native CI has not run this local change. The previous Windows correction was accepted at `f55be34`.
+- State: items 1–3 accepted; item 4 (log following, structured CLI errors and direct cancellation) implemented and locally verified; awaiting user review. Items 5–7 remain queued. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: item 4 final default/race suites and examples pass, along with vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), module/format/diff checks, version JSON and Linux/Windows compilation. Native Windows console/socket/process tests still require CI. One upgrade-streaming timeout during concurrent verification passed unchanged in focused and final full reruns.
 
 ## In Progress
 
-- Await user review of item 3 and its recorded red-to-green evidence. Changes remain local and uncommitted; item 4 has not started.
+- Await user review of item 4 and its recorded red-to-green evidence. Changes remain local and uncommitted; item 5 has not started.
 
 ## Completed
+
+- Agent-verification item 4 — CLI logs, errors and cancellation:
+  - replaced whole-file tails and the independent zero-offset follower with bounded `internal/logstream` reading; preserved blank/partial UTF-8 lines, one consumed-byte cursor, append/truncate/replacement handling, cancellation and writer failures; oversized lines or detected mid-read rewrites fail explicitly
+  - established one finite JSON presentation boundary with current `error: {code, phase, message}`, typed source classification and retained task/validation/flush/lifecycle/repository evidence; removed string-error/root-code contracts from affected result types and eliminated duplicate parent/child diagnostics
+  - discovered actual command flag definitions before bootstrap; preserved flag-value/`--` semantics, accepted interspersed flags, rejected extra arguments and normalized action positionals; watch now emits compact JSONL start/events/terminal errors without a plain banner
+  - propagated invocation cancellation through direct CI, validation, bootstrap locks/builds, finite subprocess trees, Git repair and client waits; canceled builds retain prior binary/key, canceled DAGs clean registered handles and skip repair commit/push
+  - isolated Windows daemon console groups, preserved local-child result/exit ownership and bounded graceful interruption; forced cancellation stops finite owned trees or only the observing CLI so daemon descendants survive
+  - recorded observed pre-fix failures and focused commands in `docs_contributors/cli-reliability-verification.md`; updated CLI/architecture/agent/testing docs, shared memory, plan and roadmap
+  - passed final `go test -count=1 ./...`, `go test -race -count=1 ./...` and examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0, module/format/diff checks, version JSON and Linux/Windows amd64 affected test/CLI compilation; final Windows CLI/daemon binaries also compile after ownership review fixes
+  - local changes only; no commits, pushes, installs, existing-service operations or external-project changes. Stop for review before item 5
 
 - Agent-verification item 3 — validation lifecycle parity:
   - shared `BeforeRun` then optional `Run` through `internal/taskexec.Run`, removed the engine-local implementation, and kept the effective runtime available to service readiness
@@ -970,7 +980,7 @@ Last updated: 2026-09-06
 
 ## Next Steps
 
-- Review item 3 (validation lifecycle parity), then implement item 4 (log following and JSON error paths) test-first; continue the approved plan one item at a time with review after each.
+- Review item 4 (log following, JSON error paths and direct cancellation), then begin item 5 (run identity, retained evidence and unattended control); continue the approved plan one item at a time with review after each.
 - Confirm the reliability changes on the native Linux/macOS/Windows CI matrix; retest the historical readiness symptom through the real daemon/TUI only if it recurs (the engine early-exit restart regression passes).
 - Confirm the Delve v1.27.1 pin on the next native Linux/macOS/Windows GitHub Actions run
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`

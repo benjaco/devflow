@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/benjaco/devflow/internal/clierror"
 	"github.com/benjaco/devflow/internal/execution"
 	"github.com/benjaco/devflow/internal/executionconflict"
 	"github.com/benjaco/devflow/internal/executionstate"
@@ -163,7 +164,7 @@ func (e *Engine) Watch(ctx context.Context, req Request) (runErr error) {
 			StartedAt: started.Format(time.RFC3339), FinishedAt: time.Now().UTC().Format(time.RFC3339),
 		}
 		finalizeRunResult(&result, state, runErr)
-		e.publishRunFinished(result, req.Worktree, result.Error)
+		e.publishRunFinished(result, req.Worktree, result.Error.Error())
 	}()
 	readyPath := instance.FlushWatchReadyPath(req.Worktree, inst.ID)
 	if err := os.Remove(readyPath); err != nil && !os.IsNotExist(err) {
@@ -284,11 +285,8 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 		StartedAt: started.Format(time.RFC3339),
 	}
 	failAdmission := func(err error) (*Outcome, error) {
-		result.Error = err.Error()
+		result.Error = clierror.Describe(err, "task_failed", "execution")
 		result.ResourceConflict = executionconflict.Details(err)
-		if result.ResourceConflict != nil {
-			result.Code = "resource_conflict"
-		}
 		result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 		result.DurationMs = time.Since(started).Milliseconds()
 		return &Outcome{Result: result}, err
@@ -326,6 +324,7 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 	}
 	// A return from execution is not proof of cleanup. Keep failed handles and
 	// ownership evidence until every registered resource confirms it stopped.
+	runErr = clierror.Wrap(runErr, "task_failed", "execution")
 	if cleanupErr := state.stopServices(req, sortedHandles(state.snapshotServices())); cleanupErr != nil {
 		lease.RequireRecovery()
 		runErr = errors.Join(runErr, cleanupErr)
@@ -337,9 +336,9 @@ func (e *Engine) Run(ctx context.Context, req Request) (*Outcome, error) {
 	if err := instance.SaveStatus(req.Worktree, inst.ID, req.Target, req.Mode, state.statusSnapshot()); err != nil {
 		runErr = errors.Join(runErr, err)
 		result.Success = false
-		result.Error = runErr.Error()
+		result.Error = clierror.Describe(runErr, "task_failed", "execution")
 	}
-	e.publishRunFinished(result, req.Worktree, result.Error)
+	e.publishRunFinished(result, req.Worktree, result.Error.Error())
 	return &Outcome{Result: result, Instance: inst}, runErr
 }
 
@@ -2066,7 +2065,7 @@ func finalizeRunResult(result *api.RunResult, state *runState, runErr error) {
 	if runErr == nil {
 		return
 	}
-	result.Error = runErr.Error()
+	result.Error = clierror.Describe(runErr, "task_failed", "execution")
 	if result.FailedNode == "" {
 		result.FailedNode = state.failedNode()
 	}

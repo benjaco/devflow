@@ -542,7 +542,7 @@ func TestClientCallAcknowledgesFinalErrorResponse(t *testing.T) {
 				Message: `live watch target is "gen", requested "build"`,
 			}},
 		}
-		resp := Response{ID: req.ID, OK: false, Error: "flush failed", Flush: &result}
+		resp := Response{ID: req.ID, OK: false, Error: &api.CommandError{Code: "flush_failed", Phase: "execution", Message: "flush failed"}, Flush: &result}
 		if err := enc.Encode(frame{Type: responseFrameType, ID: req.ID, Response: &resp}); err != nil {
 			serverDone <- err
 			return

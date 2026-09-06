@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/process"
 )
 
 const (
@@ -527,7 +528,7 @@ func (r *Runner) git(ctx context.Context, stdin io.Reader, overrides map[string]
 	}
 	stdout := &boundedBuffer{max: maxGitStdoutBytes}
 	stderr := &boundedBuffer{max: maxGitStderrBytes}
-	cmd := exec.CommandContext(ctx, r.gitPath, args...)
+	cmd := process.CommandContext(ctx, r.gitPath, args...)
 	cmd.Dir = r.root
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
@@ -540,7 +541,7 @@ func (r *Runner) git(ctx context.Context, stdin io.Reader, overrides map[string]
 		baseOverrides[key] = value
 	}
 	cmd.Env = mergedEnv(os.Environ(), baseOverrides)
-	err := cmd.Run()
+	err := errors.Join(cmd.Run(), ctx.Err())
 	operation := "command"
 	if len(args) > 0 {
 		operation = args[0]
@@ -566,7 +567,7 @@ func (r *Runner) gitProducesOutput(ctx context.Context, args ...string) (bool, e
 	}
 	stdout := &presenceWriter{}
 	stderr := &boundedBuffer{max: maxGitStderrBytes}
-	cmd := exec.CommandContext(ctx, r.gitPath, args...)
+	cmd := process.CommandContext(ctx, r.gitPath, args...)
 	cmd.Dir = r.root
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -574,7 +575,7 @@ func (r *Runner) gitProducesOutput(ctx context.Context, args ...string) (bool, e
 		"GIT_TERMINAL_PROMPT": "0",
 		"GCM_INTERACTIVE":     "Never",
 	})
-	if err := cmd.Run(); err != nil {
+	if err := errors.Join(cmd.Run(), ctx.Err()); err != nil {
 		exitCode := -1
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {

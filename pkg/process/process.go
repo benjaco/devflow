@@ -80,8 +80,7 @@ func Run(ctx context.Context, spec CommandSpec) (Result, error) {
 	if spec.Interactive {
 		return runInteractive(ctx, spec)
 	}
-	cmd := exec.CommandContext(ctx, spec.Name, spec.Args...)
-	prepareCmd(cmd)
+	cmd := CommandContext(ctx, spec.Name, spec.Args...)
 	cmd.Dir = spec.Dir
 	cmd.Env = mergeEnv(spec.Env)
 	stdout, err := cmd.StdoutPipe()

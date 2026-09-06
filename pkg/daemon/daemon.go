@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/benjaco/devflow/internal/clierror"
 	"github.com/benjaco/devflow/internal/execution"
 	"github.com/benjaco/devflow/internal/executionconflict"
 	"github.com/benjaco/devflow/internal/executionstate"
@@ -73,8 +74,7 @@ type Request struct {
 type Response struct {
 	ID               string                `json:"id,omitempty"`
 	OK               bool                  `json:"ok"`
-	Error            string                `json:"error,omitempty"`
-	Code             string                `json:"code,omitempty"`
+	Error            *api.CommandError     `json:"error,omitempty"`
 	ResourceConflict *api.ResourceConflict `json:"resourceConflict,omitempty"`
 	Started          *StartResult          `json:"started,omitempty"`
 	Run              *api.RunResult        `json:"run,omitempty"`
@@ -273,7 +273,8 @@ func Serve(ctx context.Context, opts Options) error {
 	}
 }
 
-func Ensure(ctx context.Context, worktree, projectName string) (*Client, bool, error) {
+func Ensure(ctx context.Context, worktree, projectName string) (outClient *Client, outStarted bool, returnedErr error) {
+	defer func() { returnedErr = clierror.Wrap(returnedErr, "daemon_unavailable", "transport") }()
 	root, id, err := resolveWorktreeAndID(worktree)
 	if err != nil {
 		return nil, false, err
@@ -287,7 +288,7 @@ func Ensure(ctx context.Context, worktree, projectName string) (*Client, bool, e
 		_ = ensureDaemonLog(root, id)
 		return client, false, nil
 	}
-	startLock, err := lock.Acquire(daemonLockPath(root, id))
+	startLock, err := lock.AcquireContext(ctx, daemonLockPath(root, id))
 	if err != nil {
 		return nil, false, err
 	}
@@ -301,6 +302,9 @@ func Ensure(ctx context.Context, worktree, projectName string) (*Client, bool, e
 			return nil, false, err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	if err := startDaemonForEnsure(root, id, projectName); err != nil {
 		return nil, false, err
 	}
@@ -309,7 +313,11 @@ func Ensure(ctx context.Context, worktree, projectName string) (*Client, bool, e
 		if err := client.Ping(ctx); err == nil {
 			return client, true, nil
 		}
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 	return nil, false, fmt.Errorf("timed out waiting for devflow daemon for %s", root)
 }
@@ -358,7 +366,8 @@ func (c *Client) Ping(ctx context.Context) error {
 	return err
 }
 
-func (c *Client) Call(ctx context.Context, req Request, onEvent ...func(api.Event)) (Response, error) {
+func (c *Client) Call(ctx context.Context, req Request, onEvent ...func(api.Event)) (outResponse Response, returnedErr error) {
+	defer func() { returnedErr = clierror.Wrap(returnedErr, "daemon_unavailable", "transport") }()
 	if req.ID == "" {
 		req.ID = requestID()
 	}
@@ -407,11 +416,11 @@ func (c *Client) Call(ctx context.Context, req Request, onEvent ...func(api.Even
 		// ACK cannot undo the received result or make a completed mutation fail.
 		_ = enc.Encode(frame{Type: responseAckFrameType, ID: req.ID})
 		if !resp.OK {
-			if resp.Error == "" {
-				resp.Error = "daemon request failed"
+			if resp.Error == nil {
+				resp.Error = &api.CommandError{Code: "operation_failed", Phase: "execution", Message: "daemon request failed"}
 			}
-			if resp.Code == "resource_conflict" {
-				conflict := &execution.ConflictError{Cause: errors.New(resp.Error)}
+			if resp.Error.Code == "resource_conflict" {
+				conflict := &execution.ConflictError{Cause: resp.Error}
 				if detail := resp.ResourceConflict; detail != nil {
 					conflict.Worktree = detail.Worktree
 					conflict.Owner = &execution.Owner{Worktree: detail.Worktree, PID: detail.PID, Target: detail.Target, Mode: detail.Mode, Kind: detail.Kind}
@@ -419,7 +428,7 @@ func (c *Client) Call(ctx context.Context, req Request, onEvent ...func(api.Even
 				}
 				return resp, conflict
 			}
-			return resp, fmt.Errorf("%s", resp.Error)
+			return resp, resp.Error
 		}
 		return resp, nil
 	}
@@ -837,9 +846,12 @@ func errorResponse(id string, err error) Response {
 
 func responseWithError(resp Response, err error) Response {
 	resp.OK = false
-	resp.Error = err.Error()
+	code := "operation_failed"
+	if resp.Run != nil || resp.ActionResult != nil {
+		code = "task_failed"
+	}
+	resp.Error = clierror.Describe(err, code, "execution")
 	if detail := executionconflict.Details(err); detail != nil {
-		resp.Code = "resource_conflict"
 		resp.ResourceConflict = detail
 	}
 	return resp
@@ -956,9 +968,9 @@ func (s *Server) resolveProject(projectName string) (string, project.Project, er
 		return p.Name(), p, nil
 	}
 	if len(names) == 0 {
-		return "", nil, fmt.Errorf("no project is registered")
+		return "", nil, clierror.Wrap(fmt.Errorf("no project is registered"), "unknown_project", "resolution")
 	}
-	return "", nil, fmt.Errorf("multiple projects are registered; pass --project explicitly")
+	return "", nil, clierror.Wrap(fmt.Errorf("multiple projects are registered; pass --project explicitly"), "ambiguous_project", "resolution")
 }
 
 func (s *Server) resolveTarget(p project.Project, target string) (project.Project, string, error) {
@@ -1319,7 +1331,11 @@ func (s *Server) recordRun(projectName, target string, mode api.RunMode, maxPara
 	return instance.Save(inst)
 }
 
-func (s *Server) flush(ctx context.Context, projectName, target string, timeout time.Duration, maxParallel int) (api.FlushResult, error) {
+func (s *Server) flush(ctx context.Context, projectName, target string, timeout time.Duration, maxParallel int) (outResult api.FlushResult, returnedErr error) {
+	defer func() {
+		returnedErr = clierror.Wrap(returnedErr, "flush_failed", "execution")
+		outResult.Error = clierror.Describe(returnedErr, "flush_failed", "execution")
+	}()
 	s.transitionMu.Lock()
 	unlock := sync.OnceFunc(s.transitionMu.Unlock)
 	defer unlock()
@@ -1335,7 +1351,7 @@ func (s *Server) flush(ctx context.Context, projectName, target string, timeout 
 	if err != nil {
 		result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, target, startedAt)
 		result.Issues = append(result.Issues, api.FlushIssue{Kind: "project_error", Message: err.Error()})
-		return result, fmt.Errorf("flush failed")
+		return result, fmt.Errorf("flush failed: %w", err)
 	}
 	s.mu.Lock()
 	active := s.active
@@ -1353,7 +1369,7 @@ func (s *Server) flush(ctx context.Context, projectName, target string, timeout 
 	if err != nil {
 		result := newFlushResult(requestID, s.worktree, s.instanceID, projectName, target, startedAt)
 		result.Issues = append(result.Issues, api.FlushIssue{Kind: "target_error", Message: err.Error()})
-		return result, fmt.Errorf("flush failed")
+		return result, fmt.Errorf("flush failed: %w", err)
 	}
 	startedWatch := false
 	if active != nil {
@@ -1481,7 +1497,7 @@ func (s *Server) stopWorkLocked(ctx context.Context, all bool, task string) (_ *
 		}
 		if !activeStopped {
 			err = s.activeStopConflict()
-			lifecycle.Error = err.Error()
+			lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 			lifecycle.Stopped = uniqueSortedStrings(stopped)
 			lifecycle.Affected = append([]string(nil), lifecycle.Stopped...)
 			addUnconfirmedLifecycleIssues(lifecycle, err)
@@ -1492,7 +1508,7 @@ func (s *Server) stopWorkLocked(ctx context.Context, all bool, task string) (_ *
 			mutationLease, recovered, err = s.acquireStopLease(ctx, true)
 			stopped = append(stopped, recovered...)
 			if err != nil {
-				lifecycle.Error = err.Error()
+				lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 				return &StopResult{InstanceID: s.instanceID, Lifecycle: lifecycle}, err
 			}
 		}
@@ -1500,7 +1516,7 @@ func (s *Server) stopWorkLocked(ctx context.Context, all bool, task string) (_ *
 		var loadErr error
 		inst, loadErr = instance.Load(s.worktree, s.instanceID)
 		if loadErr != nil {
-			lifecycle.Error = loadErr.Error()
+			lifecycle.Error = clierror.Describe(loadErr, "task_failed", "execution")
 			lifecycle.Stopped = uniqueSortedStrings(stopped)
 			lifecycle.Affected = append([]string(nil), lifecycle.Stopped...)
 			addUnconfirmedLifecycleIssues(lifecycle, loadErr)
@@ -1536,7 +1552,7 @@ func (s *Server) stopWorkLocked(ctx context.Context, all bool, task string) (_ *
 			if mutationLease == nil {
 				mutationLease, _, err = s.acquireStopLease(ctx, false)
 				if err != nil {
-					lifecycle.Error = err.Error()
+					lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 					return &StopResult{InstanceID: s.instanceID, Lifecycle: lifecycle}, err
 				}
 			}
@@ -1547,7 +1563,7 @@ func (s *Server) stopWorkLocked(ctx context.Context, all bool, task string) (_ *
 				change, stopErr := active.controller.Stop(ctx, name)
 				if stopErr != nil {
 					lifecycle.Success = false
-					lifecycle.Error = stopErr.Error()
+					lifecycle.Error = clierror.Describe(stopErr, "task_failed", "execution")
 					return &StopResult{InstanceID: s.instanceID, Stopped: lifecycle.Stopped, Lifecycle: lifecycle}, stopErr
 				}
 				if change.Stopped {
@@ -1568,7 +1584,7 @@ func (s *Server) stopWorkLocked(ctx context.Context, all bool, task string) (_ *
 			stopped = append(stopped, names...)
 			if err != nil {
 				lifecycle.Success = false
-				lifecycle.Error = err.Error()
+				lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 				return &StopResult{InstanceID: s.instanceID, Stopped: uniqueSortedStrings(stopped), Lifecycle: lifecycle}, err
 			}
 			lifecycle.Stopped = append(lifecycle.Stopped, names...)
@@ -1580,7 +1596,7 @@ func (s *Server) stopWorkLocked(ctx context.Context, all bool, task string) (_ *
 		return &StopResult{InstanceID: s.instanceID, Stopped: lifecycle.Stopped, Lifecycle: lifecycle}, nil
 	}
 	if err != nil {
-		lifecycle.Error = err.Error()
+		lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 		lifecycle.Stopped = uniqueSortedStrings(stopped)
 		lifecycle.Affected = append([]string(nil), lifecycle.Stopped...)
 		addUnconfirmedLifecycleIssues(lifecycle, err)
@@ -1589,7 +1605,7 @@ func (s *Server) stopWorkLocked(ctx context.Context, all bool, task string) (_ *
 	if all && inst.DB.ContainerName != "" {
 		databaseStopped, stopErr := database.New().StopRuntimeIfRunning(ctx, inst.DB)
 		if stopErr != nil {
-			lifecycle.Error = stopErr.Error()
+			lifecycle.Error = clierror.Describe(stopErr, "task_failed", "execution")
 			lifecycle.Stopped = uniqueSortedStrings(stopped)
 			lifecycle.Affected = append([]string(nil), lifecycle.Stopped...)
 			addUnconfirmedLifecycleIssues(lifecycle, stopErr)
@@ -2205,12 +2221,12 @@ func (s *Server) invalidateAndRelaunchLocked(ctx context.Context, task string, u
 	}
 	if !s.stopActiveLocked(5 * time.Second) {
 		err := s.activeStopConflict()
-		lifecycle.Error = err.Error()
+		lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 		return lifecycle, err
 	}
 	lease, err := executionstate.Acquire(s.worktree, execution.Owner{Kind: "daemon", Target: resolvedTarget, Mode: string(inst.LastRun.Mode)})
 	if err != nil {
-		lifecycle.Error = err.Error()
+		lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 		return lifecycle, err
 	}
 	transferred := false
@@ -2221,18 +2237,18 @@ func (s *Server) invalidateAndRelaunchLocked(ctx context.Context, task string, u
 	}()
 	ctx = execution.ContextWithLease(ctx, lease)
 	if err := writeInvalidateTransition(s.worktree, s.instanceID, resolvedTarget, g, toInvalidate); err != nil {
-		lifecycle.Error = err.Error()
+		lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 		return lifecycle, err
 	}
 	s.publishStatus("invalidated downstream from %s, relaunching %s", task, inst.LastRun.Target)
 	store := cache.NewNamespaced(instance.CacheRoot(), project.CacheNamespace(p))
 	for _, name := range toInvalidate {
 		if err := store.Invalidate(name); err != nil {
-			lifecycle.Error = err.Error()
+			lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 			return lifecycle, err
 		}
 		if err := instance.RemoveTaskStamp(s.worktree, s.instanceID, name); err != nil {
-			lifecycle.Error = err.Error()
+			lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 			return lifecycle, err
 		}
 	}
@@ -2243,7 +2259,7 @@ func (s *Server) invalidateAndRelaunchLocked(ctx context.Context, task string, u
 	lifecycle.Restarted = append(lifecycle.Restarted, plan.ServicesToRestart...)
 	lifecycle.Success = err == nil
 	if err != nil {
-		lifecycle.Error = err.Error()
+		lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 	}
 	return lifecycle, err
 }
@@ -2293,7 +2309,7 @@ func (s *Server) restartLocked(ctx context.Context, projectName, task string, up
 	if project.IsServiceKind(taskDef.Kind) {
 		if inst.LastRun.Target == "" {
 			err := fmt.Errorf("service restart requires a previously detached run for this instance")
-			lifecycle.Error = err.Error()
+			lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 			return nil, lifecycle, err
 		}
 		s.mu.Lock()
@@ -2302,7 +2318,7 @@ func (s *Server) restartLocked(ctx context.Context, projectName, task string, up
 		if active == nil || active.controller == nil {
 			if len(plan.ServicesToPreserve) > 0 {
 				restartErr := fmt.Errorf("cannot restart service %q without its owning active run while preserving %s; no restart occurred", task, strings.Join(plan.ServicesToPreserve, ", "))
-				lifecycle.Error = restartErr.Error()
+				lifecycle.Error = clierror.Describe(restartErr, "task_failed", "execution")
 				return nil, lifecycle, restartErr
 			}
 			// A prior startup failure has no live engine left to own a
@@ -2310,7 +2326,7 @@ func (s *Server) restartLocked(ctx context.Context, projectName, task string, up
 			// unlike the old same-target path this always starts real work.
 			started, startErr := s.startActiveLocked(ctx, projectName, inst.LastRun.Target, inst.LastRun.Mode, inst.LastRun.MaxParallel)
 			if startErr != nil {
-				lifecycle.Error = startErr.Error()
+				lifecycle.Error = clierror.Describe(startErr, "task_failed", "execution")
 				return nil, lifecycle, startErr
 			}
 			unlock()
@@ -2320,7 +2336,7 @@ func (s *Server) restartLocked(ctx context.Context, projectName, task string, up
 			}
 			readyNode, readyErr := waitForTaskTerminalReadiness(ctx, s.worktree, s.instanceID, task, readyTimeout)
 			if readyErr != nil {
-				lifecycle.Error = readyErr.Error()
+				lifecycle.Error = clierror.Describe(readyErr, "task_failed", "execution")
 				return nil, lifecycle, readyErr
 			}
 			lifecycle.Affected = append(lifecycle.Affected, task)
@@ -2338,12 +2354,12 @@ func (s *Server) restartLocked(ctx context.Context, projectName, task string, up
 		for _, name := range plan.ServicesToRestart {
 			change, restartErr := active.controller.Restart(ctx, name)
 			if restartErr != nil {
-				lifecycle.Error = restartErr.Error()
+				lifecycle.Error = clierror.Describe(restartErr, "task_failed", "execution")
 				return nil, lifecycle, restartErr
 			}
 			if change.Previous.Generation == change.Current.Generation || !change.Ready {
 				restartErr = fmt.Errorf("service %q did not produce a ready replacement", name)
-				lifecycle.Error = restartErr.Error()
+				lifecycle.Error = clierror.Describe(restartErr, "task_failed", "execution")
 				return nil, lifecycle, restartErr
 			}
 			lifecycle.Affected = append(lifecycle.Affected, name)
@@ -2362,7 +2378,7 @@ func (s *Server) restartLocked(ctx context.Context, projectName, task string, up
 		}
 		if len(lifecycle.Restarted) == 0 {
 			err := fmt.Errorf("service %q was not restarted", task)
-			lifecycle.Error = err.Error()
+			lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 			return nil, lifecycle, err
 		}
 		lifecycle.Success = true
@@ -2380,7 +2396,7 @@ func (s *Server) restartLocked(ctx context.Context, projectName, task string, up
 	lifecycle.Affected = append(lifecycle.Affected, selected...)
 	lifecycle.Success = runErr == nil
 	if runErr != nil {
-		lifecycle.Error = runErr.Error()
+		lifecycle.Error = clierror.Describe(runErr, "task_failed", "execution")
 	}
 	return result, lifecycle, runErr
 }
@@ -2517,7 +2533,7 @@ func (s *Server) retargetLocked(ctx context.Context, target string) (*api.Lifecy
 	s.mu.Unlock()
 	if active != nil && active.target == resolvedTarget && active.projectName == projectName {
 		err := fmt.Errorf("target %q is already active; no retarget occurred", resolvedTarget)
-		lifecycle.Error = err.Error()
+		lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 		return lifecycle, err
 	}
 	_, err = s.startActiveLocked(ctx, projectName, resolvedTarget, inst.LastRun.Mode, inst.LastRun.MaxParallel)
@@ -2526,7 +2542,7 @@ func (s *Server) retargetLocked(ctx context.Context, target string) (*api.Lifecy
 	lifecycle.Restarted = append(lifecycle.Restarted, plan.ServicesToRestart...)
 	lifecycle.Success = err == nil
 	if err != nil {
-		lifecycle.Error = err.Error()
+		lifecycle.Error = clierror.Describe(err, "task_failed", "execution")
 	}
 	return lifecycle, err
 }

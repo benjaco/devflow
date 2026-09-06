@@ -165,7 +165,7 @@ type LifecycleResult struct {
 	Processes []LifecycleProcessChange `json:"processes"`
 	Issues    []LifecycleIssue         `json:"issues,omitempty"`
 	Success   bool                     `json:"success"`
-	Error     string                   `json:"error,omitempty"`
+	Error     *CommandError            `json:"error,omitempty"`
 }
 
 type CacheTiming struct {
@@ -273,8 +273,7 @@ type RunResult struct {
 	InstanceID        string                  `json:"instanceId"`
 	Success           bool                    `json:"success"`
 	DurationMs        int64                   `json:"durationMs"`
-	Error             string                  `json:"error,omitempty"`
-	Code              string                  `json:"code,omitempty"`
+	Error             *CommandError           `json:"error,omitempty"`
 	ResourceConflict  *ResourceConflict       `json:"resourceConflict,omitempty"`
 	FailedNode        string                  `json:"failedNode,omitempty"`
 	FailedNodeLogPath string                  `json:"failedNodeLogPath,omitempty"`
@@ -499,7 +498,7 @@ type FlushRequest struct {
 }
 
 type FlushResult struct {
-	Code             string            `json:"code,omitempty"`
+	Error            *CommandError     `json:"error,omitempty"`
 	ResourceConflict *ResourceConflict `json:"resourceConflict,omitempty"`
 	RequestID        string            `json:"requestId"`
 	InstanceID       string            `json:"instanceId"`
@@ -612,12 +611,12 @@ type VersionResult struct {
 }
 
 type UpgradeResult struct {
-	Command       []string `json:"command"`
-	Package       string   `json:"package"`
-	VersionTarget string   `json:"versionTarget"`
-	Success       bool     `json:"success"`
-	CacheCleared  bool     `json:"cacheCleared"`
-	DurationMs    int64    `json:"durationMs"`
-	Error         string   `json:"error,omitempty"`
-	Output        string   `json:"output,omitempty"`
+	Command       []string      `json:"command"`
+	Package       string        `json:"package"`
+	VersionTarget string        `json:"versionTarget"`
+	Success       bool          `json:"success"`
+	CacheCleared  bool          `json:"cacheCleared"`
+	DurationMs    int64         `json:"durationMs"`
+	Error         *CommandError `json:"error,omitempty"`
+	Output        string        `json:"output,omitempty"`
 }

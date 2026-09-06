@@ -108,6 +108,21 @@ go test ./pkg/daemon -run 'Test.*Flush' -count=1
 
 `TestWatchFlushIncludesChangesDuringInitialRun` and `TestWatchFlushIncludesChangesDuringRebuild` pause execution after it reads input, change that input, then require the flushed artifact to contain the update. Initial baseline setup or passing old node state is insufficient evidence. `TestFlushRejectsReplacementWatchAcknowledgement` deliberately uses an unchanged target to prove that a different watch cannot supply the result. These tests verify declared, polling-visible inputs; they do not claim complete history of transient filesystem changes or coverage of undeclared sources.
 
+## CLI reliability regressions
+
+The [CLI reliability evidence](cli-reliability-verification.md) records the observed pre-fix failures and focused reruns. Compiled CLI tests must check exactly one finite JSON result (including early errors) or valid JSONL, nonzero failure exits, and preserved partial evidence. Test `--json` around invalid flags and positional arguments, explicit false, known flag values equal to `--json`, and tokens after `--`. Socket peers must synchronize observed events before closing; arbitrary sleeps cannot prove streaming delivery. Existing validation failures now assert structured stdout errors rather than requiring duplicated plain stderr messages.
+
+Tail/follow tests cover empty/blank/partial lines, UTF-8 split across writes, appends during initial reading, truncation and replacement, cursor-prefix rewrites, bounded large files/lines, cancellation and output writer errors. A 128 MiB sparse-file suffix and a million-line finite stream verify that the reader does not accumulate the requested tail in memory.
+
+Cancellation tests pause an adapter build, localbuild lock, owned task or Git child, then cancel and assert cleanup, preserved previous binary/key and no repair commit/push after a canceled DAG. Subprocess fixtures use Go helpers with portable cache isolation and native executable suffixes; Windows child ownership tests run natively in Windows CI, while the actual Unix signal test is platform-scoped. Windows bootstrap gives the child a bounded console-interruption window; forceful fallback cannot prove arbitrary resource cleanup.
+
+Bootstrap build keys include repository Go source. Freeze source edits before full CLI verification: editing source during the timestamp-only/cache-key test legitimately invalidates its key. Cross-compilation checks buildability only; native Windows remains necessary for socket, console signal and file replacement behavior.
+
+```bash
+go test ./internal/cli -run 'TestBootstrapJSON|TestCompiled.*JSON|TestLogs|TestBootstrapInterrupt|TestLocalProjectBuild.*Cancellation|TestRunCancellation' -count=1
+go test -race ./internal/logstream ./internal/clierror ./internal/reporepair ./pkg/process -count=1
+```
+
 ## Example/Smoke Coverage
 
 The bundled example adapters are now deterministic smoke targets. Current smoke coverage includes:

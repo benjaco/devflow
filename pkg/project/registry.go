@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+
+	"github.com/benjaco/devflow/internal/clierror"
 )
 
 var (
@@ -45,7 +47,7 @@ func Lookup(name string) (Project, error) {
 	defer registryMu.RUnlock()
 	p, ok := registry[name]
 	if !ok {
-		return nil, fmt.Errorf("unknown project %q", name)
+		return nil, clierror.Wrap(fmt.Errorf("unknown project %q", name), "unknown_project", "resolution")
 	}
 	return p, nil
 }
@@ -86,14 +88,14 @@ func Detect(worktree string) (Project, error) {
 	case 1:
 		return matches[0], nil
 	case 0:
-		return nil, fmt.Errorf("unable to detect project for worktree %q", worktree)
+		return nil, clierror.Wrap(fmt.Errorf("unable to detect project for worktree %q", worktree), "unknown_project", "resolution")
 	default:
 		names := make([]string, 0, len(matches))
 		for _, p := range matches {
 			names = append(names, p.Name())
 		}
 		sort.Strings(names)
-		return nil, fmt.Errorf("ambiguous project detection for %q: %s", worktree, stringsJoin(names, ", "))
+		return nil, clierror.Wrap(fmt.Errorf("ambiguous project detection for %q: %s", worktree, stringsJoin(names, ", ")), "ambiguous_project", "resolution")
 	}
 }
 
@@ -143,7 +145,7 @@ func ResolveExecutionProject(p Project, target string) (Project, string, error) 
 			}, target, nil
 		}
 	}
-	return nil, "", fmt.Errorf("unknown target or task %q", target)
+	return nil, "", clierror.Wrap(fmt.Errorf("unknown target or task %q", target), "unknown_target", "resolution")
 }
 
 func (p syntheticTargetProject) Name() string  { return p.base.Name() }

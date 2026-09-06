@@ -1,5 +1,33 @@
 # CLI
 
+## JSON errors and cancellation
+
+Finite JSON commands emit one result on stdout, including argument, adapter bootstrap, resolution, admission, transport and execution failures. Failure results have `success: false` and a shared `error` object:
+
+```json
+{"success":false,"error":{"code":"unknown_target","phase":"resolution","message":"unknown target \"missing\""}}
+```
+
+Available command-specific evidence stays at the top level: a failed run retains `nodes`, `failedNode`, log paths, excerpts, cache timings and repository changes; validation retains its issues and metrics; flush retains synchronization and health evidence. `api.CommandError` is the common error type in run, lifecycle, upgrade, flush and daemon results. Nested task diagnostics and event errors remain text. There are no string-error readers or top-level code aliases.
+
+| Code | Phase | Meaning |
+| --- | --- | --- |
+| `invalid_arguments` | `parsing` | Unknown flag/subcommand, missing value, extra positional argument or invalid option combination |
+| `adapter_not_found`, `adapter_source_invalid` | `bootstrap` | Missing marker or invalid adapter source file |
+| `adapter_compile_failed`, `bootstrap_failed` | `bootstrap` | Go compilation failure or another local build/launch failure |
+| `unknown_project`, `ambiguous_project`, `unknown_target`, `invalid_graph`, `unknown_instance`, `invalid_worktree` | `resolution` | Project, graph, target or instance could not be resolved |
+| `resource_conflict` | `admission` | Worktree ownership prevented execution; inspect `resourceConflict` |
+| `daemon_unavailable` | `transport` | Daemon startup or socket communication failed |
+| `task_failed`, `validation_failed`, `flush_failed`, `doctor_failed`, `repository_failed`, `upgrade_failed`, `log_read_failed` | `execution` | Inspect the command's retained evidence |
+| `operation_cancelled`, `deadline_exceeded` | phase where interrupted | Context cancellation or deadline interrupted the operation |
+| `operation_failed` | `execution` | Unclassified operational failure; inspect the message and any result evidence |
+
+Codes are assigned from error types and source boundaries, never inferred from prose. The outer entrypoint discovers the selected command's actual flag definitions before bootstrap. `--json`/`--json=true` are recognized around malformed flags and on either side of positional arguments; a value such as `--project --json`, or a token after `--`, does not enable JSON. `--json=false` opts out. Ordinary text errors are reported once on stderr. JSON errors already presented by the local binary are not printed again by bootstrap entrypoints.
+
+Logs and attached watch use JSONL: each record occupies one line, including watch start metadata, events and a terminal error when the stream fails. Watch emits no plain banner in JSON mode. A failed output writer returns an error without attempting another document on that writer. Progress remains independent stderr text for finite runs and validation; progress verbosity controls are a later item.
+
+`App.Context`, Ctrl+C and termination signals propagate to direct CI, validation, bootstrap compilation and local lock waits, repository repair, CLI installers and client waits. A canceled adapter build does not publish its temporary binary/key. Finite subprocess and Git cancellation stops their process trees. Unix bootstrap transfers into the local binary; Windows owns a child process and preserves its exit/result ownership. Cancelling a log reader, watch subscription or flush wait leaves the daemon's development execution running. Server operation deadlines, run-scoped cancellation and unattended prompt responses remain item 5; cancellation of a client wait alone does not cancel server work.
+
 Implemented commands:
 
 - `devflow` (default launcher behavior)
@@ -51,7 +79,7 @@ There is currently no built-in adapter fallback. Missing `devflow.project.go` is
 
 Only one execution may own a worktree at a time. Direct `run --ci` remains daemon-independent, but returns a nonzero `resource_conflict` if a watcher or another run owns that worktree. Rejected execution leaves its owner's task status, task logs, environment and outputs intact. `cache key` (which prepares instance configuration) and direct `cache invalidate` use the same admission boundary. Status/graph/log inspection remains available; existing parallel tasks within one DAG are unaffected.
 
-Ownership failures add `code: "resource_conflict"` and `resourceConflict` to JSON without replacing existing successful response shapes. `resourceConflict` identifies the worktree and, when available, owner PID, target, mode and kind; `recoveryRequired: true` distinguishes abandoned/incompletely cleaned execution. CI retains its failed `RunResult` shape with empty task results when rejected before execution. Daemon mutations propagate the same typed conflict over the socket and CLI.
+Ownership failures add `error.code: "resource_conflict"` and `resourceConflict` to JSON without replacing existing successful response shapes. `resourceConflict` identifies the worktree and, when available, owner PID, target, mode and kind; `recoveryRequired: true` distinguishes abandoned/incompletely cleaned execution. CI retains its failed `RunResult` shape with empty task results when rejected before execution. Daemon mutations propagate the same typed conflict over the socket and CLI.
 
 Use a separate worktree containing the changes to run CI while keeping development active, or explicitly stop the development execution first. A successful flush does not grant concurrent CI admission. Stop timeouts reject replacement and preserve ownership. `stop --all` can reconcile known abandoned resources, but reports a conflict when it cannot establish that resources stopped; it never kills a competing live direct-CI owner to obtain admission.
 
@@ -299,6 +327,10 @@ Task states now distinguish:
 - `stopped` and `dirty`
 
 `logs` accepts task names and the reserved sources `daemon` and `tui`. `logs daemon` reads the daemon log directly. `logs tui` reads `.devflow/logs/<instance-id>/tui.log`, including session boundaries, returned terminal errors, recovered panic stacks, and any Go fatal output duplicated while the TUI owned stderr. JSON mode uses JSON lines with `task: "daemon"` or `task: "tui"` for those sources.
+
+`logs --tail N` selects the last N lines (default 50); zero streams the whole file and negative values are argument errors. Empty files produce no log records, and blank lines are preserved. Tail selection scans backward in fixed-size chunks, then the same consumed-byte cursor continues through `--follow`, so initial output is not replayed and appends during tail delivery are retained. Memory stays bounded independently of file size and requested line count. A line above 4 MiB fails explicitly with `log_read_failed`; CLI logs do not use the TUI's line truncation policy. Output-writer failures and command cancellation terminate reading.
+
+Finite reads include a final unterminated line. Follow mode buffers it until a newline arrives, preserving characters split across writes. When polling detects replacement, shrinkage, or changed bytes at the cursor, it emits any remaining old partial line and reads the new file from its beginning. Follow closes file handles between 250 ms polls and tolerates a briefly absent replacement path; an initially missing log remains an error. A rewrite detected during a read fails with `log_read_failed` so mixed or incomplete evidence cannot appear as a successful finite read. This observes current files rather than retaining history: content overwritten between polls cannot be recovered, and a truncate-and-regrow with identical bytes in the bounded cursor check can be indistinguishable from an append. Retained attempts and resumable log cursors remain separate work.
 
 Task log files now represent the current run attempt for that task. The engine truncates the log at task-attempt start before adapter code can emit progress, and subprocess output appends within that attempt. Older successful, failed, or canceled output must not stay mixed into a newer running attempt. Task, daemon, TUI, and event-stream logs are owner-only (`0600`) on Unix-like systems.
 

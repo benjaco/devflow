@@ -314,7 +314,7 @@ func TestDaemonContentionPreservesExecutionState(t *testing.T) {
 		{Action: ActionStop, All: true},
 	} {
 		resp := s.handleRequest(context.Background(), req)
-		if resp.OK || resp.Code != "resource_conflict" || resp.ResourceConflict == nil || resp.ResourceConflict.Target != "external" {
+		if resp.OK || resp.Error == nil || resp.Error.Code != "resource_conflict" || resp.ResourceConflict == nil || resp.ResourceConflict.Target != "external" {
 			t.Errorf("%s: expected structured ownership conflict, got %+v", req.Action, resp)
 		}
 		after, err := os.ReadFile(statePath)
@@ -364,7 +364,7 @@ func TestStopAllRecoveryRefusesUnconfirmedResources(t *testing.T) {
 			}
 			s := &Server{worktree: worktree, instanceID: inst.ID}
 			resp := s.handleRequest(context.Background(), Request{Action: ActionStop, All: true})
-			if resp.OK || resp.Code != "resource_conflict" || resp.ResourceConflict == nil || !resp.ResourceConflict.RecoveryRequired {
+			if resp.OK || resp.Error == nil || resp.Error.Code != "resource_conflict" || resp.ResourceConflict == nil || !resp.ResourceConflict.RecoveryRequired {
 				t.Fatalf("uncertain orphan resource was treated as stopped: %+v", resp)
 			}
 			owner, err := execution.ReadOwner(worktree)
@@ -407,7 +407,7 @@ func TestStopExistingDaemonFailurePreservesSocket(t *testing.T) {
 			resp := Response{ID: req.ID, OK: true}
 			if req.Action == ActionStop {
 				resp.OK = false
-				resp.Error = "active execution did not stop"
+				resp.Error = &api.CommandError{Code: "resource_conflict", Phase: "admission", Message: "active execution did not stop"}
 			}
 			_ = enc.Encode(frame{Type: responseFrameType, ID: req.ID, Response: &resp})
 			var ack frame
@@ -439,7 +439,7 @@ func TestStopAllWithoutMarkerPreservesUnknownResource(t *testing.T) {
 	}
 	s := &Server{worktree: worktree, instanceID: inst.ID}
 	resp := s.handleRequest(context.Background(), Request{Action: ActionStop, All: true})
-	if resp.OK || resp.Code != "resource_conflict" {
+	if resp.OK || resp.Error == nil || resp.Error.Code != "resource_conflict" {
 		t.Errorf("stop-all claimed unknown resource stopped: %+v", resp)
 	}
 	status, err := instance.LoadStatus(worktree, inst.ID)

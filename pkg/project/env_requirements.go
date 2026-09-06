@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/benjaco/devflow/internal/clierror"
 )
 
 type RequiredEnvProvider interface {
@@ -27,7 +29,7 @@ func RequiredEnvsFor(p Project) []string {
 func RequiredEnvsForTarget(p Project, target string) ([]string, error) {
 	targetDef, ok := targetByName(p.Targets(), target)
 	if !ok {
-		return nil, fmt.Errorf("unknown target %q", target)
+		return nil, clierror.Wrap(fmt.Errorf("unknown target %q", target), "unknown_target", "resolution")
 	}
 	selected := map[string]bool{}
 	if provider, ok := p.(RequiredEnvProvider); ok {

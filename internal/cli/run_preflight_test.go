@@ -64,7 +64,7 @@ func TestRunCIJSONReportsEnginePreflightFailureWithoutMutation(t *testing.T) {
 	if err := decoder.Decode(&result); err != nil {
 		t.Fatalf("preflight failure did not emit a RunResult: %v; stderr=%s", err, stderr)
 	}
-	if result.Success || result.Error != runErr.Error() || result.Target != "build" || result.Mode != api.ModeCI || result.InstanceID == "" {
+	if result.Success || result.Error == nil || result.Error.Message != runErr.Error() || result.Target != "build" || result.Mode != api.ModeCI || result.InstanceID == "" {
 		t.Fatalf("unexpected preflight failure JSON: %+v", result)
 	}
 	if result.RepositoryChanges != nil || len(result.Nodes) != 0 {

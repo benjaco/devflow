@@ -1035,7 +1035,7 @@ func TestUpgradeJSONReportsFailure(t *testing.T) {
 	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
-	if result.Success || result.Error == "" {
+	if result.Success || result.Error == nil || result.Error.Message == "" {
 		t.Fatalf("expected structured failure, got %+v", result)
 	}
 }
@@ -1123,7 +1123,7 @@ func TestRunJSONStillReturnsExecutionError(t *testing.T) {
 	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
 		t.Fatalf("decode failure JSON: %v\nstdout=%s\nstderr=%s", decodeErr, stdout.String(), stderr.String())
 	}
-	if result.Success || result.Error != "boom" || result.FailedNode != "fail" || result.FailedNodeLogPath == "" {
+	if result.Success || result.Error == nil || result.Error.Message != "boom" || result.FailedNode != "fail" || result.FailedNodeLogPath == "" {
 		t.Fatalf("failure JSON lacks actionable details: %+v", result)
 	}
 	if len(result.Nodes) != 1 || result.Nodes[0].State != api.StateFailed || result.Nodes[0].DurationMs <= 0 {
@@ -1419,7 +1419,7 @@ func TestRunRepositoryRepairDAGFailureNeverCommitsOrPushes(t *testing.T) {
 	if runErr == nil {
 		t.Fatal("expected DAG failure")
 	}
-	if result.Success || result.Error != "repair DAG failure" || result.RepositoryChanges == nil {
+	if result.Success || result.Error == nil || result.Error.Message != "repair DAG failure" || result.RepositoryChanges == nil {
 		t.Fatalf("unexpected DAG failure result: %+v", result)
 	}
 	repository := result.RepositoryChanges
@@ -1485,7 +1485,7 @@ func TestRunRepositoryRepairPushFailureReportsCreatedLocalCommit(t *testing.T) {
 	if head := repairGitText(t, worktree, "rev-parse", "HEAD"); head != repository.CommitSHA {
 		t.Fatalf("local commit was not retained after push failure: head=%s result=%+v", head, repository)
 	}
-	if !strings.Contains(result.Error, "created locally, but git push failed") || !strings.Contains(stderr, "repository repair: pushing commit") {
+	if result.Error == nil || !strings.Contains(result.Error.Message, "created locally, but git push failed") || !strings.Contains(stderr, "repository repair: pushing commit") {
 		t.Fatalf("push partial failure was unclear:\nresult=%+v\nstderr=%s", result, stderr)
 	}
 }
@@ -1531,7 +1531,7 @@ func TestRunRepositoryRepairFailAfterCommitReturnsDeliberateFailure(t *testing.T
 	if head := repairGitText(t, worktree, "rev-parse", "HEAD"); head != repository.CommitSHA {
 		t.Fatalf("fail-after-commit did not retain commit: head=%s result=%+v", head, repository)
 	}
-	if !strings.Contains(result.Error, "failing deliberately") {
+	if result.Error == nil || !strings.Contains(result.Error.Message, "failing deliberately") {
 		t.Fatalf("deliberate error missing from final JSON: %+v", result)
 	}
 }
@@ -2304,7 +2304,7 @@ func TestEnsureLocalProjectBinarySerializesConcurrentBuilds(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			path, err := ensureLocalProjectBinary(repoRoot, worktree)
+			path, err := ensureLocalProjectBinary(context.Background(), repoRoot, worktree)
 			if err != nil {
 				errs <- err
 				return
@@ -2756,7 +2756,7 @@ func TestRunWithInvalidCacheKeyManifestReturnsStructuredJSON(t *testing.T) {
 	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
 		t.Fatalf("invalid-manifest JSON: %v\nstdout=%s\nstderr=%s", decodeErr, stdout, stderr)
 	}
-	if result.Success || result.CacheKeyManifest == nil || result.CacheKeyManifest.Validated || !strings.Contains(result.Error, "cache key manifest rejected") {
+	if result.Success || result.CacheKeyManifest == nil || result.CacheKeyManifest.Validated || result.Error == nil || !strings.Contains(result.Error.Message, "cache key manifest rejected") {
 		t.Fatalf("manifest rejection was not structured: %+v", result)
 	}
 	for _, value := range []string{stdout.String(), stderr.String(), err.Error()} {
@@ -2998,8 +2998,8 @@ func TestExampleProjectCLIJSONLifecycle(t *testing.T) {
 	}
 
 	waitForCondition(t, 3*time.Second, func() bool {
-		lines, err := readLastLines(instance.LogPath(worktree, runResult.InstanceID, "backend_dev"), 5)
-		return err == nil && len(lines) > 0
+		data, err := os.ReadFile(instance.LogPath(worktree, runResult.InstanceID, "backend_dev"))
+		return err == nil && len(data) > 0
 	})
 
 	logsStdout := &bytes.Buffer{}

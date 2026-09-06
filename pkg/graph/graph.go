@@ -9,6 +9,8 @@ import (
 
 	"github.com/benjaco/devflow/internal/pathspec"
 	"github.com/benjaco/devflow/pkg/project"
+
+	"github.com/benjaco/devflow/internal/clierror"
 )
 
 type FileImpact struct {
@@ -26,7 +28,8 @@ type Graph struct {
 	Targets map[string]project.Target
 }
 
-func New(tasks []project.Task, targets []project.Target) (*Graph, error) {
+func New(tasks []project.Task, targets []project.Target) (outGraph *Graph, returnedErr error) {
+	defer func() { returnedErr = clierror.Wrap(returnedErr, "invalid_graph", "resolution") }()
 	g := &Graph{
 		Tasks:   make(map[string]project.Task, len(tasks)),
 		Targets: make(map[string]project.Target, len(targets)),
@@ -116,7 +119,7 @@ func (g *Graph) Validate() error {
 func (g *Graph) TargetClosure(target string) ([]string, error) {
 	t, ok := g.Targets[target]
 	if !ok {
-		return nil, fmt.Errorf("unknown target %q", target)
+		return nil, clierror.Wrap(fmt.Errorf("unknown target %q", target), "unknown_target", "resolution")
 	}
 	seen := map[string]bool{}
 	var visit func(string)

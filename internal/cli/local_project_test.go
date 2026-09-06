@@ -51,13 +51,13 @@ func TestLocalProjectDetectionRequiresEntrypointMarker(t *testing.T) {
 	worktree := t.TempDir()
 	t.Chdir(worktree)
 	writeTestFile(t, filepath.Join(worktree, "devflow_shared.go"), "package main\n")
-	if shouldExecLocalProject([]string{"graph", "list"}) {
+	if shouldExecLocalProject([]string{"graph", "list"}, worktree) {
 		t.Fatal("companion file alone activated local project bootstrap")
 	}
 	if err := os.Mkdir(filepath.Join(worktree, localProjectFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if !shouldExecLocalProject([]string{"graph", "list"}) {
+	if !shouldExecLocalProject([]string{"graph", "list"}, worktree) {
 		t.Fatal("non-regular entrypoint marker bypassed source validation")
 	}
 }

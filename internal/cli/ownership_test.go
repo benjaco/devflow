@@ -135,7 +135,7 @@ func TestFlushOwnershipConflictRetainsDaemonIssues(t *testing.T) {
 	owner := &execution.Owner{Worktree: "/worktree", PID: 1234, Target: "development", Mode: "watch"}
 	result := preserveFlushCallError(api.FlushResult{RequestID: "flush-request", Issues: []api.FlushIssue{issue}},
 		fmt.Errorf("daemon: %w", &execution.ConflictError{Owner: owner}), "/worktree", "instance", "project", "verify", 0)
-	if result.Code != "resource_conflict" || result.ResourceConflict == nil || result.ResourceConflict.Target != owner.Target || result.ResourceConflict.PID != owner.PID {
+	if result.Error == nil || result.Error.Code != "resource_conflict" || result.ResourceConflict == nil || result.ResourceConflict.Target != owner.Target || result.ResourceConflict.PID != owner.PID {
 		t.Fatalf("flush discarded structured ownership error: %+v", result)
 	}
 	if result.RequestID != "flush-request" || len(result.Issues) != 1 || result.Issues[0] != issue {
@@ -210,15 +210,14 @@ func (f *cliOwnershipFixture) runRejected(t *testing.T, command []string) {
 		t.Error("command succeeded while another execution owned the worktree")
 	}
 	var result struct {
-		Code             string                `json:"code"`
-		Error            string                `json:"error"`
+		Error            *api.CommandError     `json:"error"`
 		ResourceConflict *api.ResourceConflict `json:"resourceConflict"`
 	}
 	decoder := json.NewDecoder(stdout)
 	if decodeErr := decoder.Decode(&result); decodeErr != nil {
 		t.Errorf("expected structured ownership conflict: decode=%v command=%v stderr=%s", decodeErr, err, stderr)
 	} else {
-		if result.Code != "resource_conflict" || result.Error == "" {
+		if result.Error == nil || result.Error.Code != "resource_conflict" || result.Error.Message == "" {
 			t.Errorf("missing structured ownership error: %+v", result)
 		}
 		if result.ResourceConflict == nil || result.ResourceConflict.Target != "development" || result.ResourceConflict.PID != os.Getpid() || result.ResourceConflict.Worktree != f.inst.Worktree {

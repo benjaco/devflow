@@ -7,7 +7,7 @@ Devflow is designed so humans and agents use the same execution surface:
 - one per-worktree daemon owns mutable dev/watch/operator work and publishes a typed event stream for live consumers
 - `run --ci` is the exception: it stays direct and finite for CI-style validation
 
-Executions are exclusive within a worktree. While a watcher owns it, `run --ci --json` returns `code: "resource_conflict"` with the owner's target/PID and leaves the development execution intact. Run independent verification in a separate worktree containing the actual edits and relevant untracked files, or explicitly stop development first. Flushing does not make concurrent CI safe. Worktrees do not automatically isolate a shared external database.
+Executions are exclusive within a worktree. While a watcher owns it, `run --ci --json` returns `error.code: "resource_conflict"` with the owner's target/PID and leaves the development execution intact. Run independent verification in a separate worktree containing the actual edits and relevant untracked files, or explicitly stop development first. Flushing does not make concurrent CI safe. Worktrees do not automatically isolate a shared external database.
 
 `resourceConflict.recoveryRequired` means a prior execution ended without confirmed cleanup. Inspect the recorded owner and use explicit `stop --all --json` to reconcile known resources; unresolved resources remain conflicts. Do not delete execution lock or owner files as an automatic retry strategy. Read-only status, graph and log inspection remains available. Run histories and scoped run cancellation are separate planned capabilities.
 
@@ -37,6 +37,11 @@ The intended sequencing is:
 4. TUI
 5. MCP wrapper
 
+
+For any failed finite JSON command, inspect `error.code`, `error.phase` and `error.message`. This includes invalid arguments, a missing/broken adapter and unknown projects/targets before execution begins. Stdout contains one result, with any available task, validation, lifecycle or repository evidence preserved. For example, `unknown_target` in `resolution` means select a declared target; `adapter_compile_failed` in `bootstrap` means fix the adapter; `resource_conflict` in `admission` means inspect the current owner. Codes come from typed failures, not message matching. The full current code table is in the contributor CLI contract.
+
+`logs --json` and attached `watch --json` are JSONL streams, including terminal errors. Finite CI/validation still stream progress to stderr, so tools that combine streams must keep that distinction. Ctrl+C cancels direct work and its subprocesses; `operation_cancelled` and `deadline_exceeded` identify the interrupted phase. Canceling a log/watch observer or flush wait does not stop development services. Public run-scoped cancellation, retained attempts and unattended prompt responses remain planned.
+
 ## Readiness Workflow
 
 For AI coding agents, `devflow flush --json` is the readiness gate when a daemon-owned watch loop is available or desired.
@@ -49,7 +54,7 @@ Recommended loop:
 
 Require `success=true` before relying on detached watch results for downstream tests. Observation starts before the initial DAG, and flush reconciles queued and newly observed changes after startup, rebuilds, and health probes. Its result belongs to the captured daemon watch and selected project/target; a replacement watch, even with the same target, cannot satisfy the request.
 
-`synced` and `success` are distinct: JSON `synced=true` confirms observation processing and acknowledgement, while `success=true` also requires freshness and healthy services. `watch_restart_required` means a restart policy or blocked warmup prevented changed work from rerunning. It persists across flushes until that task executes successfully or the target is explicitly restarted. `watch_stopped` means the captured watch ended or was replaced; inspect the current execution and issue a new flush. Context cancellation and deadlines report `canceled` and `timeout`.
+`synced` and `success` are distinct: JSON `synced=true` confirms observation processing and acknowledgement, while `success=true` also requires freshness and healthy services. `watch_restart_required` means a restart policy or blocked warmup prevented changed work from rerunning. It persists across flushes until that task executes successfully or the target is explicitly restarted. `watch_stopped` means the captured watch ended or was replaced; inspect the current execution and issue a new flush. Flush issues retain `canceled` and `timeout` kinds; the command error codes are `operation_cancelled` and `deadline_exceeded`.
 
 This guarantee is limited to declared inputs visible to polling through the final scan. It cannot prove transient or metadata-preserving edits were observed, and it does not execute tests absent from the target. Generated task outputs are excluded only when their current metadata still matches the producer's completion record. Adjacent source edits and later edits to input/output paths remain observable, including changes made while downstream tasks are still running.
 
@@ -97,6 +102,8 @@ Avoid using attached `devflow run <service-target>` as an agent readiness gate. 
 For finite test/check targets that depend on services, use `devflow run <target> --ci --json` rather than plain `run`. Plain attached `run` is for keeping services alive in an operator terminal.
 
 In `--ci --json` mode, progress and task log lines stream to stderr and stdout remains exactly one final `RunResult`. On failure, inspect `error`, `failedNode`, `failedNodeLogPath`, and `failureExcerpts` before the terminal `logTail`. Excerpts find early test assertions, panic/fatal output, compiler errors, `AssertionError`, conventional errors/summaries, and process-failure markers even when hundreds of cleanup lines follow. An unclassified early service exit instead gets a `process-exit-tail` excerpt with up to 12 meaningful terminal lines. All excerpts remain within five windows, 200 lines, 64 KiB total, and 8 KiB per line and redact known environment secrets and PostgreSQL URLs; empty logs produce `[]`. The `nodes` array supplies every selected node's final state and duration; downstream work skipped after a dependency failure is `blocked` with the dependency named in `lastError`, while unrelated interrupted work is `canceled`. Cacheable nodes include hit/miss and key/read/write/manifest timing. Use `devflow logs` only when both bounded diagnostics are insufficient.
+
+`devflow logs <task> --tail 100 --follow --json` emits JSONL records containing `task` and `line`, preserving blank lines and continuing after the initial tail without replay. Omit `--follow` for a finite read; `--tail 0` streams all currently available lines. A finite read includes the last partial line, while follow waits for its newline so characters split across writes stay intact. Cancellation stops this reader without stopping development services. Individual lines above 4 MiB fail explicitly instead of silently losing text. Following detects observed truncation/replacement and resumes at the new file's beginning, but polling cannot recover overwritten history or distinguish every identical-content rewrite. Save required evidence before another task attempt replaces its log; persistent attempt history and resumable cursors are still planned.
 
 For CI jobs that intentionally repair generated or formatted repository files, use the atomic repository mode instead of scripting status/add/commit/push around Devflow:
 

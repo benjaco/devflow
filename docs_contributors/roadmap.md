@@ -38,13 +38,12 @@
 
 ## Next Milestones
 
-The CM Navigator agent-integration review has an approved engineering sequence in [Agent verification: assessment and implementation plan](agent-verification-plan.md). Item 1 (execution ownership), its current-only revision and CI correction are accepted. Item 2 (startup/flush freshness) and its Windows CI correction are accepted; see [regression evidence](watch-freshness-verification.md). Item 3 (validation lifecycle parity) is implemented and locally verified, awaiting review; see [lifecycle evidence](validation-lifecycle-verification.md). Successful upgrades discard the shared task artifact cache; future work targets the current API/state contracts directly. Continue one item at a time after review; the original assessment baseline is `a7fe4f8`.
+The CM Navigator agent-integration review has an approved engineering sequence in [Agent verification: assessment and implementation plan](agent-verification-plan.md). Item 1 (execution ownership), its current-only revision and CI correction are accepted. Item 2 (startup/flush freshness) and its Windows CI correction are accepted; see [regression evidence](watch-freshness-verification.md). Item 3 (validation lifecycle parity) is accepted; see [lifecycle evidence](validation-lifecycle-verification.md). Item 4 (log following, JSON errors and direct cancellation) is implemented and locally verified, awaiting user review; see [CLI evidence](cli-reliability-verification.md). Successful upgrades discard the shared task artifact cache; future work targets the current API/state contracts directly. Continue one item at a time after review; the original assessment baseline is `a7fe4f8`.
 
-1. Review validation lifecycle parity, then proceed with item 4.
-2. Repair log following and JSON error paths; propagate direct execution cancellation.
-3. Introduce consistent run/attempt identities, retained evidence, scoped cancellation and a recoverable prompt protocol.
-4. Expose existing graph metadata and add a conservative verification planner using declared purposes/effects and bootstrap-aware configuration-change detection.
-5. Add opt-in compact results, progress control and cursor retrieval; defer broader same-worktree concurrency and MCP until the underlying contracts are proven.
+1. Review item 4 before starting item 5.
+2. Introduce consistent run/attempt identities, retained evidence, scoped cancellation and a recoverable prompt protocol.
+3. Expose existing graph metadata and add a conservative verification planner using declared purposes/effects and bootstrap-aware configuration-change detection.
+4. Add opt-in compact results, progress control and cursor retrieval; defer broader same-worktree concurrency and MCP until the underlying contracts are proven.
 
 The earlier BikeCoach adoption work remains useful alongside that sequence:
 
