@@ -81,6 +81,17 @@ lines; `logs` includes those lines. `quiet` suppresses progress while preserving
 the final error/result. Validation retains its own existing details and progress
 behavior. A summary of status describes observed states, not a new health check.
 
+Run/status `counts.services` includes regular and debug services from the full
+snapshot, including resources without an OS PID. `counts.unreadyServices` counts
+services that are not recorded as both running and ready. Flush uses its live
+service probes instead. Stopped services still count as services, so use readiness
+and state alongside the total.
+
+`devflow action list --json` inspects the current adapter's action declarations
+without starting or replacing a daemon. It can rebuild an edited adapter while
+preserving the active watcher and services. The returned declarations describe
+the current adapter; they do not prove an older running watcher has reloaded it.
+
 ## Retained Results and Unattended Control
 
 Engine runs, watches and actions have a `runId`; every task attempt has an `attemptId`, including finite tasks and cache decisions. Keep the IDs returned by execution or detached acceptance. An action's outer result and nested run share one run ID; a subsequent development relaunch has its own ID. An idempotent detached start returns the existing execution's ID.

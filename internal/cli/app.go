@@ -1165,6 +1165,11 @@ func (a *App) actionCmd(args []string) error {
 	}
 }
 
+type actionListResult struct {
+	Project string           `json:"project"`
+	Actions []project.Action `json:"actions"`
+}
+
 func (a *App) actionListCmd(args []string) error {
 	fs := flag.NewFlagSet("action list", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
@@ -1178,24 +1183,17 @@ func (a *App) actionListCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	client, _, err := daemon.Ensure(a.context(), root, *projectName)
+	// Inspect the freshly loaded adapter without authorizing replacement of
+	// the daemon that still owns the running watcher and its services.
+	p, err := resolvedProject(*projectName, root)
 	if err != nil {
 		return err
 	}
-	resp, err := client.Call(a.context(), daemon.Request{
-		Action:  daemon.ActionListActions,
-		Project: *projectName,
-	})
-	if err != nil {
-		return err
-	}
-	if resp.Actions == nil {
-		return fmt.Errorf("daemon did not return action list")
-	}
+	result := actionListResult{Project: p.Name(), Actions: project.Actions(p)}
 	if *jsonOut {
-		return a.writeResult(resp.Actions)
+		return a.writeResult(result)
 	}
-	for _, action := range resp.Actions.Actions {
+	for _, action := range result.Actions {
 		label := action.Label
 		if label == "" {
 			label = action.ID

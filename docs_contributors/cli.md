@@ -167,11 +167,18 @@ Both compact views preserve available run/instance/request identity, outcome,
 timings, structured errors, ownership conflicts and flush `synced`/`timedOut`
 state. Status does not invent a success/health verdict: `counts.nodeStates`
 describes its observed snapshot. Exact counts cover all nodes, problem nodes,
-cache hits/misses, flush services/unready services, issues, pending prompts and
+cache hits/misses, services/unready services, issues, pending prompts and
 failure excerpt windows. Problem nodes include failures, blocked/canceled work,
 migration-needed, degraded or dirty states and nodes with errors. Healthy nodes
 are omitted from compact samples, with primary failures ordered before blocked
 or canceled dependents.
+
+For run/status, `counts.services` counts all `service` and `debug_service` nodes
+in the full snapshot, including PID-less resources and stopped/pending services.
+`counts.unreadyServices` counts those without both `state: running` and
+`ready: true`. These are recorded observations, not live health probes. Flush
+uses its explicit `services` probes instead: unready means `alive: false` or
+`ready: false`. A probe can be newer than the associated node snapshot.
 
 `summary` lists at most five nodes/issues/prompts per category with an 8 KiB
 shared sample-text budget. `issues` raises those limits to 50 and 64 KiB and adds
@@ -363,7 +370,7 @@ Daemon behavior:
 
 The guarantee covers declared inputs visible to metadata-based polling through the final scan. It does not prove transient or metadata-preserving edits were observed, or execute checks outside the target. Scanner failures cancel watch execution and trigger normal cleanup. Generated-output changes are suppressed only when their current metadata matches the producer's completion record. Edits made after that producer finishes remain eligible for reruns, including edits to files the task also rewrites while downstream work is still running. Sibling source paths are not suppressed.
 
-`action` is the generic foreground operation surface for explicit project operations that are not normal DAG targets. Actions are discovered from the project adapter through the daemon.
+`action` is the generic foreground operation surface for explicit project operations that are not normal DAG targets. Listing reads declarations from the locally loaded project adapter; running an action uses the daemon.
 
 Usage:
 
@@ -376,6 +383,12 @@ devflow action run --kind devflow.database.migration.create --component prisma -
 ```
 
 `action list --json` returns the project name plus registered action specs, including stable action ID, semantic kind, category, component, input schema, effects, relaunch policy, and aliases. `action run --json` returns an action result with action ID, kind, status, inputs, created files discovered from declared write effects, the underlying run result when the action is task-backed, and relaunch metadata when the action restarts the previous daemon target.
+
+`action list` never starts or replaces a daemon or provisions an instance. Normal
+adapter bootstrap may rebuild the local executable, so listing reflects edited
+action declarations while the existing watcher, services and execution owner
+remain intact. The executing daemon keeps its loaded adapter until an explicit
+execution/lifecycle command replaces it. Listing is not an execution-health check.
 
 `migration create` is a convenience command over the standard action kind `devflow.database.migration.create`.
 

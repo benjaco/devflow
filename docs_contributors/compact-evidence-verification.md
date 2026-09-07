@@ -57,6 +57,33 @@ checks passed. Results are also recorded in `PROGRESS.md`. Native Windows filesy
 CI; cross-compilation only proves buildability. Tests use isolated temporary
 worktrees and process fixtures, not existing development services.
 
+## Adoption regressions, 2026-09-07
+
+The CM Navigator report against `12e51b058199` was reproduced on the accepted
+Devflow checkout at `36ca7b8`. The copied fixture evidence was read without
+running its machine-specific Python script or changing its original files.
+Permanent tests use independent temporary worktrees and a portable Go sleep
+service, with no ports, databases or application dependencies.
+
+| Regression | Observed before the fix |
+| --- | --- |
+| `TestActionListDoesNotStartDaemon` | Both JSON and text listing attempted to start a daemon. |
+| `TestBootstrapActionInspectionPreservesWatcherAfterAdapterRebuild` | The unchanged control preserved the watcher. A comment-only edit replaced daemon PID 15394 with 15425, stopped service PID 15401, cleared its execution owner and released the lease while preserving the old run/attempt IDs. |
+| `TestCompactServiceCountsFromSnapshot` | Ready status and run views returned services/unready `0/0` instead of `1/0`; unready, debug, PID-less and mixed fixtures also failed. Both summary/issues and run value/pointer paths were exercised. |
+
+These tests now pass. The compiled inspection test also edits an action label
+and verifies that the new metadata is returned while the original watcher,
+service and execution lease survive. Cleanup waits for the fixture processes to
+exit. Flush tests keep live probes authoritative when their health differs from
+the node snapshot and reject double-counting. Full result evidence is unchanged.
+
+```sh
+go test ./internal/cli -run 'TestActionList|TestBootstrapActionInspection|TestCompact(ServiceCounts|FlushServiceCounts)' -count=1
+```
+
+Final broader verification is recorded in `PROGRESS.md`. Native Windows runtime
+coverage remains a CI check, beyond local cross-compilation.
+
 ## Limits
 
 Cursors remain within one immutable attempt. Their bounded observations cannot

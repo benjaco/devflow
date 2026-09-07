@@ -35,18 +35,17 @@ import (
 type Action string
 
 const (
-	ActionPing        Action = "ping"
-	ActionRun         Action = "run"
-	ActionWatch       Action = "watch"
-	ActionFlush       Action = "flush"
-	ActionStop        Action = "stop"
-	ActionStatus      Action = "status"
-	ActionSubscribe   Action = "subscribe"
-	ActionRestart     Action = "restart"
-	ActionInvalidate  Action = "invalidate"
-	ActionRetarget    Action = "retarget"
-	ActionListActions Action = "action_list"
-	ActionRunAction   Action = "action_run"
+	ActionPing       Action = "ping"
+	ActionRun        Action = "run"
+	ActionWatch      Action = "watch"
+	ActionFlush      Action = "flush"
+	ActionStop       Action = "stop"
+	ActionStatus     Action = "status"
+	ActionSubscribe  Action = "subscribe"
+	ActionRestart    Action = "restart"
+	ActionInvalidate Action = "invalidate"
+	ActionRetarget   Action = "retarget"
+	ActionRunAction  Action = "action_run"
 )
 
 type Request struct {
@@ -82,7 +81,6 @@ type Response struct {
 	Flush            *api.FlushResult      `json:"flush,omitempty"`
 	Stop             *StopResult           `json:"stop,omitempty"`
 	Status           *api.StatusResult     `json:"status,omitempty"`
-	Actions          *ActionListResult     `json:"actions,omitempty"`
 	ActionResult     *ActionRunResult      `json:"actionResult,omitempty"`
 	Lifecycle        *api.LifecycleResult  `json:"lifecycle,omitempty"`
 }
@@ -104,11 +102,6 @@ type StopResult struct {
 	InstanceID string               `json:"instanceId"`
 	Stopped    []string             `json:"stopped"`
 	Lifecycle  *api.LifecycleResult `json:"lifecycle,omitempty"`
-}
-
-type ActionListResult struct {
-	Project string           `json:"project"`
-	Actions []project.Action `json:"actions"`
 }
 
 type ActionRunResult struct {
@@ -831,13 +824,6 @@ func (s *Server) handleRequest(ctx context.Context, req Request) Response {
 		if err != nil {
 			return responseWithError(resp, err)
 		}
-		return resp
-	case ActionListActions:
-		result, err := s.listActions(req.Project)
-		if err != nil {
-			return errorResponse(req.ID, err)
-		}
-		resp.Actions = result
 		return resp
 	case ActionRunAction:
 		result, err := s.runProjectAction(ctx, req.Project, req.ActionID, req.ActionKind, req.Component, req.Inputs, req.Env)
@@ -2672,17 +2658,6 @@ func serviceNamesInTasks(g *graph.Graph, tasks []string) []string {
 	}
 	sort.Strings(names)
 	return names
-}
-
-func (s *Server) listActions(projectName string) (*ActionListResult, error) {
-	projectName, p, err := s.resolveProject(projectName)
-	if err != nil {
-		return nil, err
-	}
-	return &ActionListResult{
-		Project: projectName,
-		Actions: project.Actions(p),
-	}, nil
 }
 
 func (s *Server) runProjectAction(ctx context.Context, projectName, actionID, kind, component string, inputs, env map[string]string) (_ *ActionRunResult, returnedErr error) {
