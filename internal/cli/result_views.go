@@ -10,6 +10,7 @@ import (
 
 	"github.com/benjaco/devflow/internal/clierror"
 	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 func addResultFlags(fs *flag.FlagSet) {
@@ -61,6 +62,7 @@ func (a *App) resultView(value any) any {
 	var issues []api.FlushIssue
 	var prompts []api.Prompt
 	var excerpts []api.FailureExcerpt
+	countNodeServices := true
 	switch result := value.(type) {
 	case *api.RunResult:
 		if result == nil {
@@ -93,6 +95,8 @@ func (a *App) resultView(value any) any {
 		view.Worktree, view.UpdatedAt, view.Daemon = result.Worktree, result.UpdatedAt, result.Daemon
 		nodes, prompts = result.Nodes, result.PendingPrompts
 	case api.FlushResult:
+		// Flush probes can be newer than node readiness; keep them authoritative.
+		countNodeServices = false
 		view.RunID, view.InstanceID, view.Target, view.Mode = result.RunID, result.InstanceID, result.Target, result.Mode
 		view.Worktree, view.UpdatedAt = result.Worktree, result.UpdatedAt
 		view.Success, view.Error, view.ResourceConflict = &result.Success, result.Error, result.ResourceConflict
@@ -113,6 +117,12 @@ func (a *App) resultView(value any) any {
 	problemNodes := []api.NodeStatus{}
 	for _, node := range nodes {
 		view.Counts.NodeStates[node.State]++
+		if countNodeServices && project.IsServiceKind(project.Kind(node.Kind)) {
+			view.Counts.Services++
+			if node.State != api.StateRunning || !node.Ready {
+				view.Counts.UnreadyServices++
+			}
+		}
 		if problemNode(node) {
 			problemNodes = append(problemNodes, node)
 		}

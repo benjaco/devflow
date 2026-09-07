@@ -82,6 +82,13 @@ The project API carries explicit `Task.Purposes`, optional `Task.Effects` and `T
 
 `graph.Metadata` projects declaration values and callback-presence flags, without invoking callbacks or serializing function values, command signatures, env values or debug config. It clones mutable declarations and supplies a metadata-only digest. CLI graph inspection retains the ordered closure alongside that projection.
 
+CLI action listing likewise reads `project.Actions` from the current local
+adapter, without daemon admission or instance provisioning. Rebuilding that
+adapter for inspection must preserve the executable and execution lease of a
+running watcher. `daemon.Ensure` can replace an outdated daemon for mutable
+commands; metadata inspection must not call it. There is no daemon action-list
+protocol: the daemon remains responsible for action execution.
+
 `planner.Build` uses graph input matching, upstream/downstream traversal and existing prerequisite selection. It prefers eligible purpose tasks, adds explicit verification targets for uncovered finite branches and uses the declared verification targets for configuration changes. Authoring/action tasks, formatters, invalidations and service closures cannot become automatic verification goals; required generators remain visible. Unknown inputs/effects and uncovered paths remain issues. A combined closure and shared-dependency references are an inspection plan, not a new executor.
 
 The planner compares declared resource/file access only between tasks without dependency ordering; input reads, outputs and effect writes participate. Named read/read use is compatible; possible read/write or write/write overlap is reported. Glob footprints use literal directory prefixes, deliberately overestimating access without filesystem scans. Instance ownership remains an independent execution admission boundary.
@@ -167,6 +174,9 @@ and JSON both wait until enclosing completion has contributed its outcome.
 Compact `api.ExecutionView` values are presentation-only copies made by
 `internal/cli`; engine/daemon/store records stay full. The CLI validates details
 and progress flags before bootstrap and derives exact counts before sampling.
+Run/status service counts come from service/debug-service nodes regardless of
+PID; unready means the snapshot lacks running state or readiness. Flush keeps
+its live service probes authoritative, without adding node counts again.
 Diagnostic text is bounded; operational identifiers are exact or omitted with
 truncation metadata, never shortened into another task or path. Final error
 presentation applies the same bound even before a result exists. Quiet progress

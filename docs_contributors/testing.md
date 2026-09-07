@@ -51,7 +51,7 @@ Cache manifest output paths use native separators after normalization. Keep slas
 - daemon transport cancellation without a deadline, canceled handlers blocked on request reads, and idle subscription cleanup after client disconnect
 - task-scoped stop JSON/preview coverage proving the exact affected set and no mutation during preview
 - stop cleanup for daemon-owned handles, daemon shutdown after `stop --all`, explicitly recorded process refs and their descendants, tracked services, and PID-bearing status process groups
-- read-only `status` coverage proving stopped-state inspection does not start a daemon
+- read-only `status` and `action list` coverage proving inspection does not start a daemon; compiled action inspection must preserve daemon/service PIDs, running/readiness state, run/attempt IDs and the held execution lease after comment-only and action-metadata adapter rebuilds while returning the updated declarations
 - `stop --all` cleanup for the instance-managed database container while preserving the volume
 - service readiness success and timeout behavior
 - service startup/dependent-task failure cleanup for PID-less handles, rejecting dead-service readiness before `AfterReady`, prompt exit detection and enforced callback deadlines during flush, and immediate-exit lifecycle restart diagnostics while preserving independent services
@@ -185,6 +185,13 @@ prompt/task identities and unmodified retained results. Cover full defaults,
 summary/issues text and JSON, early errors, CI quiet/states/logs, real bootstrap
 failure diagnostics and daemon flush freshness fields. Freeze source before
 compiled-bootstrap and full suites.
+
+Service counts must include regular/debug services and PID-less resources for
+both run and status. Cover ready, unready, pending, stopped, degraded and mixed
+snapshots in summary/issues views; full evidence must remain unchanged. Flush
+counts come from its live probes even when they differ from the node snapshot,
+and must not count the same service again through nodes. The adoption regressions
+and observed failures are recorded in the compact evidence note.
 
 Permanent review regressions exercise expired queued invalidation/restart/retarget
 preserving the watcher, immutable predecessor attempts on manual restart, missing

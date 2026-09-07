@@ -1,18 +1,28 @@
 # Progress
 
-Last updated: 2026-09-06
+Last updated: 2026-09-07
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: item 7 compact results/resumable logs and all five item 5 review corrections are implemented and verified together; ready for review. Item 6 and its Windows correction are accepted at `e04dee3`. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: full default/race suites and examples, compiled CLI boundaries, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), format/module/diff/version checks and 14 Linux/Windows amd64 affected test/CLI compilation checks pass. Native Windows behavior awaits CI.
+- State: both adoption regressions after accepted item 7 at `36ca7b8` are fixed with observed red-to-green tests; ready for review. Action listing preserves the watcher across adapter rebuilds, and compact status/run count service nodes. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: full default/race suites and examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), changed-file format/module/diff/version checks and six Linux/Windows amd64 affected test/CLI compilation checks pass. Native Windows runtime awaits CI.
 
 ## In Progress
 
-- Await user review and native Windows CI. Admitted service-local execution deadlines and cross-attempt following remain separate from this change (see compact evidence verification).
+- Await user review and native Windows CI for the two adoption fixes. Admitted service-local execution deadlines and cross-attempt following remain separate from this change (see compact evidence verification).
+- Adjacent source-review finding, outside these two fixes: `stop --preview` and `restart --preview` still use `Ensure` and can refresh an outdated daemon. Preserve offline recovery-preview behavior when separating their daemon admission; this path has not yet had its own reproduction/regression test.
 
 ## Completed
+
+- CM Navigator adoption corrections:
+  - reproduced action inspection replacing a daemon after a comment-only adapter edit, stopping its service and releasing ownership while retaining the run/attempt IDs; the unchanged control passed
+  - made action listing read current local adapter metadata without daemon admission or instance provisioning; removed the unused daemon action-list protocol and kept current CLI JSON fields
+  - reproduced zero compact service counts in status/run, including both details modes and run value/pointer paths; count service/debug-service nodes and recorded readiness regardless of PID, preserving flush's authoritative live-probe counts
+  - added permanent no-start and compiled rebuild/metadata regressions checking daemon/service identity, process liveness and held execution lease, plus snapshot/unready/flush count coverage and fixture process-exit cleanup
+  - updated CLI/architecture/agent/testing documentation, memory and roadmap; recorded observed failures in `docs_contributors/compact-evidence-verification.md`
+  - passed `go test -count=1 ./...` (CLI 154.130s), `go test -race -count=1 ./...` (CLI 131.060s), examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0, changed-file formatting, tidy-diff, diff-check and version JSON; all six Linux/Windows amd64 CLI/daemon test and CLI binary compilation checks passed
+  - local changes only; no commits, pushes, installs, existing-service operations or external-project edits. Preserved the pre-existing `.gitignore` change and copied `tmp/` evidence. Native Windows execution remains a CI check
 
 - Agent-verification item 7 and all five item 5 review corrections:
   - added opt-in summary/issues/full views for finite run/status/flush with full defaults, exact counts, bounded actionable samples/excerpts and read-only evidence argv; presentation leaves full retained records intact and keeps task/path identities exact or omits them explicitly
