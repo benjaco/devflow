@@ -20,6 +20,12 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 
 Cache manifest output paths use native separators after normalization. Keep slash-form adapter declarations in fixtures, but build native expected paths with `filepath.Join`; continue verifying restored bytes. Cross-compilation alone cannot catch a Windows path assertion mismatch.
 
+Logical task names are not filesystem components. Cache tests must exercise
+colon names, case/punctuation distinctions, Windows device names, trailing dots,
+and long names through snapshot, restore, listing, GC and invalidation on every
+OS. Keep platform-specific output-filename tests separate: a colon in a task name
+is portable, while a colon in a declared output filename is not.
+
 ## Unit Tests
 
 - graph validation and closures

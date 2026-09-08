@@ -130,7 +130,14 @@ Task cache storage is global for the user:
 - `<os.UserCacheDir()>/devflow/cache`
 
 Entries are namespaced inside that physical cache root:
-- `entries/<project-cache-namespace>/<task>/<fingerprint-key>/`
+- `entries/<project-cache-namespace>/<sha256-of-task-name>/<fingerprint-key>/`
+
+Task directory names are fixed-length lowercase SHA-256 digests on every OS.
+Logical task names such as `shared:generate` stay unchanged in manifests and JSON;
+they must not become Windows filenames or alias other tasks on case-insensitive
+filesystems. Load and listing verify that each manifest's task matches its
+directory identity; invalidation and GC use the same mapping. This is the current
+layout only: disposable older task-cache entries are rebuilt, not migrated.
 
 Projects can implement `CacheNamespace() string`; otherwise the project name is used. This keeps one cache folder on the system while avoiding accidental collisions between project adapters. Resolving an individual task as a synthetic target preserves the project's cache namespace, so direct task commands and declared targets share the same cache entries.
 

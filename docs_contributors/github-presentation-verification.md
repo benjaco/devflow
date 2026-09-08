@@ -26,6 +26,30 @@ and `Runtime.EventLineEmitter`, matching subprocess logging while preserving
 all 2,048 events, the barrier, and the original deadline. Ten concurrent repeated
 normal and race checks passed after that fixture correction.
 
+## Windows cache-name correction
+
+[Run 34195733262, Windows job 101962921185](https://github.com/benjaco/devflow/actions/runs/34195733262/job/101962921185)
+at `9ce809a` failed `TestBootstrapGitHubCIPresentationUsesInvocationEnvironment`:
+the cached `shared:generate` task was rejected with
+`cache task "shared:generate" must be a single local path component`.
+All seven other jobs passed. The failure also occurred with GitHub presentation
+disabled; cache storage had treated a logical task name as a native filename.
+
+The new `pkg/cache/task_identity_test.go` tests failed against that implementation
+for colon names, case collisions, Windows device names, trailing dots/spaces and
+oversized names. The cache now maps every task name to a fixed-length SHA-256
+directory while retaining its exact logical name in manifests and JSON. Listing
+and GC verify that identity before using it, and invalidation uses the same
+mapping. Cache-key and output-path validation remain separate. There is no old
+layout fallback or migration; older disposable artifacts are rebuilt.
+
+Portable regressions exercise snapshot/load/restore/list/GC/invalidate across
+16 names, deterministic GC ordering, scoped invalidation and forged manifest
+identity rejection. The pre-existing colon-output test remains host-specific;
+colon task-name coverage now runs on Windows too. The compiled demo test keeps
+`shared:generate` unchanged. Final local gates are recorded in `PROGRESS.md`;
+cross-compilation does not replace the required native Windows CI rerun.
+
 ## Permanent coverage
 
 - Invocation true/false/empty/unset selection, text/JSON, quiet/states/logs,

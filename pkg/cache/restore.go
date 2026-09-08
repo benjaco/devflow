@@ -20,10 +20,19 @@ func validateComponent(kind, value string) error {
 }
 
 func validateEntryNames(task, key string) error {
-	if err := validateComponent("task", task); err != nil {
+	if err := validateTaskName(task); err != nil {
 		return err
 	}
 	return validateComponent("key", key)
+}
+
+func validateTaskName(task string) error {
+	// Task identity is encoded before touching the filesystem. Keep lexical
+	// name checks portable instead of applying the host's filename rules.
+	if task == "" || task == "." || task == ".." || strings.ContainsAny(task, "/\\\x00") {
+		return fmt.Errorf("cache task %q is not a valid task name", task)
+	}
+	return nil
 }
 
 func validateOutputPath(rel string) error {

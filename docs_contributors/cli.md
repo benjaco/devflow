@@ -593,6 +593,10 @@ Implemented `tui` flags include:
 
 `cache status` lists entries for the selected project cache namespace, `cache invalidate` removes entries for that namespace globally or per task, and `cache gc` keeps only the newest N entries per task in that namespace. Task cache storage is physically global under the OS user cache directory, but entries are grouped by project namespace.
 
+Task directories use a fixed-length digest of the exact task name on every OS,
+so cached names such as `shared:generate` work on Windows too. Commands and JSON
+continue to use logical task names; use `cache path` for the namespace location.
+
 `cache key --target <target>` prints the aggregate key for all cacheable/stamped tasks in the selected closure. Its JSON form returns `project`, `target`, `instanceId`, `namespace`, `key`, and `taskKeys`; each task item includes its real task key and whether it is a local stamp. It computes keys with the normal resolved instance environment and finalizers but does not execute target tasks.
 
 Use the explicit manifest handoff when that preflight includes expensive semantic fingerprint callbacks:

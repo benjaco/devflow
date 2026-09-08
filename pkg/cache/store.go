@@ -2,6 +2,8 @@ package cache
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,7 +72,14 @@ func (s *Store) EntriesRoot() string {
 }
 
 func (s *Store) EntryDir(task, key string) string {
-	return filepath.Join(s.entriesRoot(), task, key)
+	return filepath.Join(s.entriesRoot(), taskDirectory(task), key)
+}
+
+func taskDirectory(task string) string {
+	// Logical names can contain Windows-reserved characters or differ only by
+	// case. A fixed-length digest keeps their storage distinct on every host.
+	sum := sha256.Sum256([]byte(task))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Store) manifestPath(task, key string) string {
@@ -81,7 +90,25 @@ func (s *Store) Load(task, key string) (*Manifest, bool, error) {
 	if err := validateEntryNames(task, key); err != nil {
 		return nil, false, err
 	}
-	path := s.manifestPath(task, key)
+	manifest, ok, err := s.loadEntry(taskDirectory(task), key)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	if manifest.Task != task {
+		return nil, false, nil
+	}
+	return manifest, true, nil
+}
+
+func (s *Store) loadEntry(taskDir, key string) (*Manifest, bool, error) {
+	if err := validateComponent("task directory", taskDir); err != nil {
+		return nil, false, err
+	}
+	if err := validateComponent("key", key); err != nil {
+		return nil, false, err
+	}
+	entryDir := filepath.Join(s.entriesRoot(), taskDir, key)
+	path := filepath.Join(entryDir, "manifest.json")
 	if err := validateParents(s.Root, path); err != nil {
 		return nil, false, err
 	}
@@ -100,10 +127,12 @@ func (s *Store) Load(task, key string) (*Manifest, bool, error) {
 		if !errors.As(err, &syntaxError) && !errors.As(err, &typeError) {
 			return nil, false, err
 		}
-		_ = fsutil.RemoveAllWritable(s.EntryDir(task, key))
+		_ = fsutil.RemoveAllWritable(entryDir)
 		return nil, false, nil
 	}
-	if manifest.Version != 1 || manifest.Task != task || manifest.Key != key {
+	// Listing starts from disk names, so bind the manifest's logical identity
+	// before it can enter status or drive garbage collection.
+	if manifest.Version != 1 || validateTaskName(manifest.Task) != nil || taskDirectory(manifest.Task) != taskDir || manifest.Key != key {
 		return nil, false, nil
 	}
 	if err := validateOutputs(manifest.Outputs); err != nil {
@@ -294,7 +323,7 @@ func (s *Store) List() ([]EntrySummary, error) {
 			if !keyDir.IsDir() {
 				continue
 			}
-			manifest, ok, err := s.Load(taskDir.Name(), keyDir.Name())
+			manifest, ok, err := s.loadEntry(taskDir.Name(), keyDir.Name())
 			if err != nil || !ok {
 				continue
 			}
@@ -318,10 +347,10 @@ func (s *Store) List() ([]EntrySummary, error) {
 func (s *Store) Invalidate(task string) error {
 	path := s.entriesRoot()
 	if task != "" {
-		if err := validateComponent("task", task); err != nil {
+		if err := validateTaskName(task); err != nil {
 			return err
 		}
-		path = filepath.Join(path, task)
+		path = filepath.Join(path, taskDirectory(task))
 	}
 	if err := validateParents(s.Root, path); err != nil {
 		return err
@@ -349,14 +378,13 @@ func (s *Store) GC(keepPerTask int) (int, error) {
 		if !taskDir.IsDir() {
 			continue
 		}
-		taskName := taskDir.Name()
 		items, err := s.List()
 		if err != nil {
 			return removed, err
 		}
 		filtered := make([]EntrySummary, 0)
 		for _, item := range items {
-			if item.Task == taskName {
+			if taskDirectory(item.Task) == taskDir.Name() {
 				filtered = append(filtered, item)
 			}
 		}

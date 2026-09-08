@@ -168,21 +168,21 @@ func TestCacheRejectsEscapingTaskAndKeyNames(t *testing.T) {
 	}
 }
 
-func TestCachePreservesHostValidColonNames(t *testing.T) {
+func TestCachePreservesHostValidColonOutputNames(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("colons are not valid Windows path components")
+		t.Skip("colon output filenames are not valid on Windows; logical task names have portable coverage")
 	}
 	worktree := t.TempDir()
 	store := New(t.TempDir())
 	if err := os.WriteFile(filepath.Join(worktree, "result:client"), []byte("cached"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	task := project.Task{Name: "build:client", Outputs: project.Outputs{Files: []string{"result:client"}}}
+	task := project.Task{Name: "build", Outputs: project.Outputs{Files: []string{"result:client"}}}
 	if _, err := store.Snapshot(worktree, task, "key"); err != nil {
 		t.Fatal(err)
 	}
 	if ok, err := store.Restore(worktree, task.Name, "key"); !ok || err != nil {
-		t.Fatalf("restore host-valid colon names: %v, %v", ok, err)
+		t.Fatalf("restore host-valid colon output names: %v, %v", ok, err)
 	}
 }
 

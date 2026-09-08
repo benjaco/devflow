@@ -5,14 +5,22 @@ Last updated: 2026-09-08
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: automatic GitHub CI presentation is implemented locally for review on baseline `431603d`. Parallel execution, JSON stdout and execution/finalization ownership are preserved. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: full normal/race suites, quality gates, compiled bootstrap cases and Linux/Windows compilation pass. Actual hosted rendering and native Windows runtime remain external checks.
+- State: corrected Windows cached-task path handling after GitHub presentation commit `9ce809a`; local changes are ready for review. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: full normal/race suites, quality/build gates and focused compiled CLI checks pass. Windows binaries compile; the native Windows CI rerun remains outstanding.
 
 ## In Progress
 
-- No implementation work remains for the GitHub presentation request. Local changes are ready for review; the inactive hosted smoke example is prepared but has not been triggered.
+- No implementation work remains for the Windows correction. Await review and the next native Windows CI run.
 
 ## Completed
+
+- Windows cached-task path correction:
+  - pulled [run `34195733262`, job `101962921185`](https://github.com/benjaco/devflow/actions/runs/34195733262/job/101962921185) at `9ce809a`; only Windows failed, in the compiled GitHub demo because raw cached task `shared:generate` was rejected as a native path component
+  - reproduced nonportable components, case collisions, Windows device names and long-name filesystem failures with new tests before implementation; separated logical task names from host output-filename restrictions
+  - mapped task directories to fixed-length SHA-256 identities on every OS, preserving exact manifest/JSON names; updated load/list/GC/invalidation together and verified manifest-directory identity before maintenance. No old-layout fallback or migration
+  - added 16-name cache lifecycle coverage, deterministic GC ordering, scoped invalidation and forged-manifest rejection; retained the original colon-named compiled demo and existing traversal/key/symlink checks
+  - passed `go test -count=1 ./...`, `go test -race -count=1 ./...`, focused compiled GitHub/cache CLI normal/race checks, `go build ./...`, vet, Staticcheck v0.8.1, govulncheck v1.6.0, formatting, tidy-diff, diff-check and version JSON; Windows amd64 cache/CLI tests and CLI binary compile
+  - updated cache architecture, CLI/adapter/testing guidance, memory and GitHub verification evidence. Local changes only: no commits, pushes, remote reruns, installs or existing-service operations; native Windows execution remains a CI check
 
 - Automatic GitHub CI task presentation:
   - selected presentation only from literal invocation `GITHUB_ACTIONS=true`, including project-local bootstrap, for the existing single `run --ci` command with or without JSON; preserved ordinary modes, progress controls, machine JSONL, scheduler and execution ownership
