@@ -148,6 +148,7 @@ Important details:
 - `backend_build` depends on `sqlc`, Prisma client generation, and database migration state.
 - `Outputs("bin/coach")` and `Outputs("dist")` make those finite tasks cacheable.
 - Cached tasks must declare at least one output. `OutputFiles` requires regular files and `OutputDirs` requires real directories; paths must remain inside the worktree without symlink parents. Duplicate declarations and children of an already declared output directory are supported. Restores stage all artifacts before replacing outputs and roll back failed publication; an unrecoverable rollback error identifies the retained backups.
+- Task names such as `shared:generate` are portable logical identifiers: the cache stores them under digest directories while preserving their exact names in results. Declared output filenames must still be valid on the host OS.
 - Install/setup tasks such as `npm_install` should use `Stamp()` with local outputs like `node_modules` when they must run once per lockfile key without copying dependency folders into Devflow's global cache.
 - `unit.NoCache()` keeps tests as a live check even though they have declared inputs.
 - `database.Postgres("prisma")` defaults the snapshot directory; set `SnapshotRoot(...)` only when the default is wrong.
@@ -409,6 +410,15 @@ Use dotenv values for normal app configuration, but let CI/shell values override
 ## Execution identity and evidence
 
 Inside normal engine task callbacks, `Runtime.RunID` identifies the operation and `Runtime.AttemptID` identifies the current task attempt. `BeforeRun` and `Run` share that attempt; a watch rerun or service restart receives a fresh attempt. `Runtime.LogPath` points to its append-only retained log. Use `RunCmdSpec`, `StartServiceSpec`, `EmitLogLine` and registered service handles so output and cleanup remain attached to the owning attempt; do not construct or truncate a shared per-task log path.
+
+Finite CI runs on GitHub automatically group each completed attempt's retained
+logs; adapters need no setting or GitHub-specific task wrapper. Join finite
+output producers before returning, and make a registered service's `Wait` return
+only after its output writers drain. Readiness is not log completion. Devflow
+records `TaskAttempt.LogsComplete` and emits `task_attempt_finished` only after
+the callbacks and registered writers are known to have returned. Timed-out
+readiness callbacks or unresolved service drainage leave output explicitly
+incomplete. Detached, unregistered adapter goroutines are outside this guarantee.
 
 Cache/stamp skips also have attempt records and report that callbacks were not executed. Group nodes are resolved by the scheduler without an attempt record. Run results, node states, events and prompt metadata carry their execution identities. `runs show <run-id> --json` retrieves the retained provenance, outcomes and log references after a later run. Retention applies only to completed evidence; run IDs do not permit simultaneous conflicting execution in one worktree.
 

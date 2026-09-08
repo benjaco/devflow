@@ -52,6 +52,9 @@ type App struct {
 	result                  any
 	details                 string
 	progress                string
+	githubActions           bool
+	githubCI                bool
+	githubStepSummary       string
 }
 
 func New() *App {
@@ -449,15 +452,47 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	if err != nil {
 		return err
 	}
+	var retainedResult *api.RunResult
+	var record *api.RunRecord
+	var github *githubPresenter
+	if mode == api.ModeCI && a.githubActions {
+		github = newGitHubPresenter(a.Stderr, a.progress, a.githubStepSummary)
+	}
+	finishGitHub := func() {
+		if github == nil {
+			return
+		}
+		if retainedResult == nil {
+			result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, returnErr)
+			retainedResult = &result
+		}
+		var evidence api.RunRecord
+		if record != nil {
+			loaded, loadErr := instance.LoadRun(root, record.InstanceID, record.RunID)
+			if loadErr != nil {
+				github.message("presentation: read final run evidence: %v", loadErr)
+			} else {
+				evidence = *loaded
+			}
+		}
+		github.finish(evidence, *retainedResult)
+		github = nil
+	}
+	defer finishGitHub()
 	var repairRunner *reporepair.Runner
 	if repairOptions != nil {
-		repairRunner = reporepair.New(root, *repairOptions, a.progressWriter())
+		progressOut := a.progressWriter()
+		if github != nil {
+			progressOut = github
+		}
+		repairRunner = reporepair.New(root, *repairOptions, progressOut)
 	}
 
 	eng, err := engine.New(execProject, root)
 	if err != nil {
 		err = clierror.Wrap(err, "invalid_graph", "resolution")
 		result := newDirectRunFailureResult(root, resolvedTarget, mode, commandStarted, err)
+		retainedResult = &result
 		if repairRunner != nil {
 			repositoryResult := repairRunner.SkippedDAGFailure()
 			result.RepositoryChanges = &repositoryResult
@@ -480,12 +515,11 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	if err != nil {
 		return err
 	}
-	record := &api.RunRecord{Project: execProject.Name(), Target: resolvedTarget, Mode: mode, OwnerPID: os.Getpid()}
+	record = &api.RunRecord{Project: execProject.Name(), Target: resolvedTarget, Mode: mode, OwnerPID: os.Getpid()}
 	record.Deadline, _ = operationCtx.Deadline()
 	if err := instance.CreateRun(root, id, record); err != nil {
 		return err
 	}
-	var retainedResult *api.RunResult
 	stopObservation := func() {}
 	defer func() {
 		defer stopObservation()
@@ -504,11 +538,18 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 			retainedResult.Success = false
 			retainedResult.Error = clierror.Describe(returnErr, "evidence_write_failed", "execution")
 		}
-		if mode == api.ModeCI && jsonOut && a.progress != "quiet" {
+		if mode == api.ModeCI && jsonOut && a.progress != "quiet" && github == nil {
 			_, _ = fmt.Fprintf(a.Stderr, "[devflow] run %s finished success=%t\n", retainedResult.Target, retainedResult.Success)
 		}
+		finishGitHub()
 		if jsonOut && !a.outputFailed {
 			returnErr = errors.Join(returnErr, a.writeResult(retainedResult))
+		} else if a.githubCI && !a.outputFailed {
+			var view *api.ExecutionView
+			if a.compactOutput() {
+				view = a.resultView(retainedResult).(*api.ExecutionView)
+			}
+			returnErr = errors.Join(returnErr, githubWriteRunText(a.Stdout, retainedResult, view))
 		} else if a.compactOutput() && !a.outputFailed {
 			returnErr = errors.Join(returnErr, writeExecutionView(a.Stdout, a.resultView(retainedResult).(*api.ExecutionView)))
 		} else if !jsonOut && !a.outputFailed {
@@ -548,15 +589,20 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	}
 	progressCtx, stopProgress := context.WithCancel(context.Background())
 	var progressWG sync.WaitGroup
-	if mode == api.ModeCI && jsonOut && a.progress != "quiet" {
+	if mode == api.ModeCI && (jsonOut || github != nil) && a.progress != "quiet" {
 		// Subscribe synchronously so a fast run cannot publish run_started
 		// before the progress goroutine has been scheduled. Direct CI output is
-		// lossless because stderr is the only live execution record.
+		// lossless. GitHub collection only queues bounded metadata, so slow
+		// retained-log replay cannot backpressure the task workers.
 		progressEvents := eng.SubscribeEventsLossless()
 		progressWG.Add(1)
 		go func() {
 			defer progressWG.Done()
-			streamCIProgress(progressCtx, a.Stderr, progressEvents, a.progress)
+			if github != nil {
+				consumeCIEvents(progressCtx, progressEvents, github.observe)
+			} else {
+				streamCIProgress(progressCtx, a.Stderr, progressEvents, a.progress)
+			}
 		}()
 	}
 	outcome, runErr := eng.Run(runCtx, engine.Request{
@@ -683,6 +729,10 @@ func streamCIProgress(ctx context.Context, out io.Writer, events <-chan api.Even
 			_, _ = fmt.Fprintf(out, "[devflow] run %s finished success=%t\n", evt.Target, evt.Success != nil && *evt.Success)
 		}
 	}
+	consumeCIEvents(ctx, events, write)
+}
+
+func consumeCIEvents(ctx context.Context, events <-chan api.Event, write func(api.Event)) {
 	for {
 		select {
 		case evt, ok := <-events:

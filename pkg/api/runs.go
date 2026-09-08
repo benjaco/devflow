@@ -48,4 +48,7 @@ type TaskAttempt struct {
 	FinishedAt      time.Time        `json:"finishedAt,omitempty"`
 	LastError       string           `json:"lastError,omitempty"`
 	FailureExcerpts []FailureExcerpt `json:"failureExcerpts,omitempty"`
+
+	// LogsComplete is independent of State: failed cleanup can leave output open.
+	LogsComplete bool `json:"logsComplete"`
 }

@@ -245,7 +245,7 @@ func TestNamespacedStoreKeepsEntriesUnderNamespace(t *testing.T) {
 	if _, err := store.Snapshot(worktree, task, "key1"); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := store.EntryDir("gen", "key1"), filepath.Join(worktree, "cache", "entries", "project_a", "gen", "key1"); got != want {
+	if got, want := store.EntryDir("gen", "key1"), filepath.Join(worktree, "cache", "entries", "project_a", taskDirectory("gen"), "key1"); got != want {
 		t.Fatalf("unexpected namespaced entry dir: got %q want %q", got, want)
 	}
 	plain := New(filepath.Join(worktree, "cache"))

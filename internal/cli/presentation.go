@@ -54,6 +54,10 @@ func (a *App) context() context.Context {
 
 func (a *App) Run(args []string) error {
 	call := *a
+	// Capture presentation from the invocation before adapter execution applies
+	// its runtime environment. Bootstrap forwards the same invocation environment.
+	call.githubActions = os.Getenv("GITHUB_ACTIONS") == "true"
+	call.githubStepSummary = os.Getenv("GITHUB_STEP_SUMMARY")
 	ctx, stop := signal.NotifyContext(a.context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	call.Context = ctx
@@ -78,6 +82,7 @@ func (a *App) Run(args []string) error {
 		case "run":
 			if ci := probe.flagSet.Lookup("ci"); ci != nil {
 				call.localChildOwnsExecution = ci.Value.String() == "true"
+				call.githubCI = call.githubActions && call.localChildOwnsExecution
 			}
 		}
 	}
@@ -112,6 +117,13 @@ func (a *App) Run(args []string) error {
 		err = call.dispatch(args)
 	}
 	if !call.jsonOutput {
+		var presented interface{ Presented() bool }
+		if call.githubCI && err != nil && !(errors.As(err, &presented) && presented.Presented()) {
+			// Final errors are deliberately visible even with quiet progress, but
+			// adapter error text cannot inject another workflow command.
+			_, _ = fmt.Fprintln(call.Stderr, githubSafeLogText(err.Error()))
+			return presentedError{err}
+		}
 		return err
 	}
 	var presented interface{ Presented() bool }
@@ -164,15 +176,22 @@ func (a *App) Run(args []string) error {
 			if writeErr := writeJSONLine(call.Stdout, payload); writeErr != nil {
 				return writeErr
 			}
-		} else if writeErr := writeJSON(call.Stdout, payload); writeErr != nil {
+		} else if writeErr := call.writeFiniteJSON(payload); writeErr != nil {
 			return writeErr
 		}
 		return presentedError{err}
 	}
 	if call.result != nil {
-		return writeJSON(call.Stdout, call.result)
+		return call.writeFiniteJSON(call.result)
 	}
 	return nil
+}
+
+func (a *App) writeFiniteJSON(value any) error {
+	if a.githubCI {
+		return githubWriteJSON(a.Stdout, value)
+	}
+	return writeJSON(a.Stdout, value)
 }
 
 // Finite command results are held as values until the command returns, allowing

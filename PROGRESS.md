@@ -1,19 +1,36 @@
 # Progress
 
-Last updated: 2026-09-07
+Last updated: 2026-09-08
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: both adoption regressions after accepted item 7 at `36ca7b8` are fixed with observed red-to-green tests; ready for review. Action listing preserves the watcher across adapter rebuilds, and compact status/run count service nodes. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: full default/race suites and examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), changed-file format/module/diff/version checks and six Linux/Windows amd64 affected test/CLI compilation checks pass. Native Windows runtime awaits CI.
+- State: corrected Windows cached-task path handling after GitHub presentation commit `9ce809a`; local changes are ready for review. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: full normal/race suites, quality/build gates and focused compiled CLI checks pass. Windows binaries compile; the native Windows CI rerun remains outstanding.
 
 ## In Progress
 
-- Await user review and native Windows CI for the two adoption fixes. Admitted service-local execution deadlines and cross-attempt following remain separate from this change (see compact evidence verification).
-- Adjacent source-review finding, outside these two fixes: `stop --preview` and `restart --preview` still use `Ensure` and can refresh an outdated daemon. Preserve offline recovery-preview behavior when separating their daemon admission; this path has not yet had its own reproduction/regression test.
+- No implementation work remains for the Windows correction. Await review and the next native Windows CI run.
 
 ## Completed
+
+- Windows cached-task path correction:
+  - pulled [run `34195733262`, job `101962921185`](https://github.com/benjaco/devflow/actions/runs/34195733262/job/101962921185) at `9ce809a`; only Windows failed, in the compiled GitHub demo because raw cached task `shared:generate` was rejected as a native path component
+  - reproduced nonportable components, case collisions, Windows device names and long-name filesystem failures with new tests before implementation; separated logical task names from host output-filename restrictions
+  - mapped task directories to fixed-length SHA-256 identities on every OS, preserving exact manifest/JSON names; updated load/list/GC/invalidation together and verified manifest-directory identity before maintenance. No old-layout fallback or migration
+  - added 16-name cache lifecycle coverage, deterministic GC ordering, scoped invalidation and forged-manifest rejection; retained the original colon-named compiled demo and existing traversal/key/symlink checks
+  - passed `go test -count=1 ./...`, `go test -race -count=1 ./...`, focused compiled GitHub/cache CLI normal/race checks, `go build ./...`, vet, Staticcheck v0.8.1, govulncheck v1.6.0, formatting, tidy-diff, diff-check and version JSON; Windows amd64 cache/CLI tests and CLI binary compile
+  - updated cache architecture, CLI/adapter/testing guidance, memory and GitHub verification evidence. Local changes only: no commits, pushes, remote reruns, installs or existing-service operations; native Windows execution remains a CI check
+
+- Automatic GitHub CI task presentation:
+  - selected presentation only from literal invocation `GITHUB_ACTIONS=true`, including project-local bootstrap, for the existing single `run --ci` command with or without JSON; preserved ordinary modes, progress controls, machine JSONL, scheduler and execution ownership
+  - added retained `logsComplete` evidence and completion events after callbacks/readiness/output writers finish; service readiness remains live progress, interrupted unresolved output is explicitly incomplete, and original execution timestamps remain authoritative
+  - added one serialized renderer with a fixed 128-entry metadata queue, bounded streaming log reads and final run/task/attempt reconciliation; barrier/slow-output/overflow tests prove overlap, independent collection and one full group per attempt
+  - neutralized historical workflow commands during display while preserving raw logs and decoded JSON; emitted actual failed-task annotations and bounded exact-count summaries after owned cleanup, evidence commit and repository repair
+  - added runnable `examples/github-actions` and inactive hosted smoke workflow; isolated local ordinary-command runs proved overlapping recorded intervals, cache miss/hit, one failure annotation, exit codes 0/0/1, valid final JSON and appended summaries
+  - recorded observed failures and fixture corrections in `docs_contributors/github-presentation-verification.md`; updated CLI, architecture, testing, adapter, agent, memory and roadmap documentation
+  - passed `go test -count=1 ./...` (CLI 103.745s), `go test -race -count=1 ./...` (CLI 138.066s), compiled environment/watch normal/race checks, repeated slow-writer checks, `go build ./...`, examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), formatting, tidy-diff, diff-check and version JSON
+  - all 12 Linux/Windows amd64 test/CLI/demo compilation checks passed. No commits, pushes, PRs, remote workflow runs, installations or existing-service operations; hosted rendering and native Windows execution remain unverified locally
 
 - CM Navigator adoption corrections:
   - reproduced action inspection replacing a daemon after a comment-only adapter edit, stopping its service and releasing ownership while retaining the run/attempt IDs; the unchanged control passed
@@ -1032,7 +1049,7 @@ Last updated: 2026-09-07
 
 ## Next Steps
 
-- Review the combined item 7 compact/progress/cursor change and all five item 5 review corrections after final verification.
+- Review the automatic GitHub presentation change and prepared ordinary-command smoke workflow; validate hosted rendering when a remote run is wanted.
 - Confirm the reliability changes on the native Linux/macOS/Windows CI matrix; retest the historical readiness symptom through the real daemon/TUI only if it recurs (the engine early-exit restart regression passes).
 - Confirm the Delve v1.27.1 pin on the next native Linux/macOS/Windows GitHub Actions run
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
@@ -1043,6 +1060,8 @@ Last updated: 2026-09-07
 
 ## Deferred / Known Gaps
 
+- `stop --preview` and `restart --preview` still use `Ensure` and can refresh an outdated daemon. Preserve offline recovery-preview behavior when separating their daemon admission; this source-review finding remains outside the GitHub feature and needs its own reproduction/regression test.
+- GitHub output replay can delay final CLI draining, while bounded queue overflow defers live updates to final evidence reconciliation. Unregistered or unresolved adapter output producers can leave an explicitly incomplete retained snapshot. Native hosted rendering has not been exercised by this local change.
 - Flush proves a processed observation boundary for declared, metadata-visible inputs and selected-target health; it cannot cover transient/metadata-preserving edits, undeclared dependencies, writes made inside a producer-owned output scope during its execution, or edits after the final scan. Restart/warmup policy blocks require explicit rerun/restart.
 - Execution admission is conservative and cooperative: same-worktree overlap is rejected; finer resource scheduling remains deferred. Active/interrupted run records and logs are protected from completed-only retention and may exceed its bounds. Unresolved orphan/PID-less resources require explicit reconciliation. Current recovery still uses recorded PIDs rather than OS process-birth identities; do not interpret process-exit/lease release as proof that arbitrary external resources stopped.
 - Cursors stay within an immutable attempt and bounded observations cannot detect arbitrary external rewrites preserving the checked bytes. Cross-attempt following remains separate. Queued lifecycle admission honors deadlines, but admitted service-local commands retain their engine's execution context; CLI restart has no independent timeout option.

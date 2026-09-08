@@ -1,0 +1,22 @@
+name: Devflow GitHub presentation smoke
+on:
+  workflow_dispatch:
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build this checkout
+        run: go build -o "$RUNNER_TEMP/devflow" ./cmd/devflow
+      - name: Run parallel graph
+        working-directory: examples/github-actions
+        env:
+          # Bind the unreleased binary to this source checkout for adapter loading.
+          DEVFLOW_BOOTSTRAP_ROOT: ${{ github.workspace }}
+        run: |
+          export PATH="$RUNNER_TEMP:$PATH"
+          devflow run verify --ci --json

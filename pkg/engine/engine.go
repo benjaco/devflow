@@ -77,6 +77,7 @@ type runState struct {
 	// serviceGeneration distinguishes a replaced handle from late Wait results
 	// produced by the previous handle, including PID-less test/service handles.
 	serviceGeneration map[string]uint64
+	attemptOutputs    map[string]*attemptOutput
 	publish           func(api.Event)
 	manifest          *validatedCacheKeyManifest
 	manifestUsage     *api.CacheKeyManifestUsage
@@ -710,6 +711,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 		if result.err == nil {
 			state.clearWatchBlocked(task.Name)
 		}
+		state.finishAttemptCallback(rt.AttemptID)
 	}()
 	if err := e.beginAttempt(ctx, state, rt, task); err != nil {
 		state.setErrorState(task.Name, ctx, "", err, 0)
@@ -869,6 +871,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			state.setErrorState(task.Name, ctx, "", err, 0)
 			return taskResult{name: task.Name, err: err}
 		}
+		task.Ready = state.trackAttemptReadiness(rt.AttemptID, task.Ready)
 		if err := e.awaitServiceReady(ctx, taskRuntime, task, handle); err != nil {
 			err = errors.Join(err, state.stopServices(state.req, []string{task.Name}))
 			state.setErrorState(task.Name, ctx, "", err, 0)
@@ -1067,6 +1070,8 @@ func (e *Engine) handleUnexpectedServiceExit(ctx context.Context, req Request, i
 		state.setNodeState(exited.task, api.StateStopped, node.LastRunKey, "", 0)
 	}
 	updated := state.statusSnapshot()[exited.task]
+	state.drainAttemptOutput(node.AttemptID)
+	state.completeAttempt(node.AttemptID)
 	e.publish(api.Event{
 		TS:    process.NowRFC3339Nano(),
 		Type:  api.EventProcessExited,
@@ -1120,6 +1125,8 @@ func (e *Engine) applyServiceLifecycleCommand(ctx context.Context, req Request, 
 		return result, fmt.Errorf("service %q changed while %s was in progress", command.task, command.action)
 	}
 	state.setNodeState(command.task, api.StateStopped, node.LastRunKey, "", 0)
+	state.drainAttemptOutput(node.AttemptID)
+	state.completeAttempt(node.AttemptID)
 	if command.action == "stop" {
 		return result, nil
 	}
@@ -1412,6 +1419,7 @@ func (s *runState) registerService(task string, handle project.ServiceHandle) {
 		delete(s.inst.Processes, task)
 	}
 	node := s.status[task]
+	s.observeAttemptResourceLocked(node.AttemptID, handle)
 	node.PID = handle.PID()
 	node.Generation = generation
 	node.Ready = false
@@ -1496,6 +1504,8 @@ func (s *runState) serviceSnapshot(task string) (serviceSnapshot, bool) {
 
 func (s *runState) stopServices(req Request, tasks []string) error {
 	var stopErrors []error
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelDrain()
 	for _, task := range tasks {
 		current, ok := s.serviceSnapshot(task)
 		if !ok {
@@ -1518,6 +1528,8 @@ func (s *runState) stopServices(req Request, tasks []string) error {
 		}
 		s.setNodeState(task, api.StateStopped, node.LastRunKey, "", 0)
 		s.publishEvent(api.Event{TS: process.NowRFC3339Nano(), Type: api.EventProcessExited, InstanceID: s.inst.ID, Worktree: req.Worktree, Target: req.Target, Task: task, Mode: req.Mode, PID: node.PID, State: api.StateStopped, PreviousState: node.State})
+		s.drainAttemptOutputContext(drainCtx, node.AttemptID)
+		s.completeAttempt(node.AttemptID)
 	}
 	return errors.Join(stopErrors...)
 }

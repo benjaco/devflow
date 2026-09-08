@@ -130,7 +130,14 @@ Task cache storage is global for the user:
 - `<os.UserCacheDir()>/devflow/cache`
 
 Entries are namespaced inside that physical cache root:
-- `entries/<project-cache-namespace>/<task>/<fingerprint-key>/`
+- `entries/<project-cache-namespace>/<sha256-of-task-name>/<fingerprint-key>/`
+
+Task directory names are fixed-length lowercase SHA-256 digests on every OS.
+Logical task names such as `shared:generate` stay unchanged in manifests and JSON;
+they must not become Windows filenames or alias other tasks on case-insensitive
+filesystems. Load and listing verify that each manifest's task matches its
+directory identity; invalidation and GC use the same mapping. This is the current
+layout only: disposable older task-cache entries are rebuilt, not migrated.
 
 Projects can implement `CacheNamespace() string`; otherwise the project name is used. This keeps one cache folder on the system while avoiding accidental collisions between project adapters. Resolving an individual task as a synthetic target preserves the project's cache namespace, so direct task commands and declared targets share the same cache entries.
 
@@ -182,6 +189,44 @@ truncation metadata, never shortened into another task or path. Final error
 presentation applies the same bound even before a result exists. Quiet progress
 uses only the progress writer/subscription boundary: replacing the CLI's stderr
 would hide final diagnostics from a Windows bootstrap child.
+
+### GitHub presentation and completed attempt output
+
+`internal/cli/github_presenter.go` selects a finite-CI presentation from the
+invocation's literal `GITHUB_ACTIONS=true`. It never selects execution mode or
+changes graph admission, scheduling, service supervision or ownership. Its
+collector drains the existing lossless event subscription without touching the
+output writer. One renderer owns stderr and a fixed 128-entry queue holds only
+bounded progress text and attempt references. Overflow defers live updates to
+final retained-record reconciliation; identities deduplicate by run/task/attempt,
+not task name. Memory scales with identities and existing evidence, not log volume.
+
+`task_attempt_finished` carries a copied `TaskAttempt` with `logsComplete=true`.
+Terminal-looking node state alone cannot establish this boundary. The engine
+tracks callback return, asynchronous readiness callback return, resource exit and
+registered `ServiceHandle.Wait` completion. Events publish outside engine locks.
+Completed attempt records stop following subsequent node mutations. Existing
+StartedAt/FinishedAt remain execution timing; output draining/replay does not
+redefine them. Service cleanup has a shared five-second output-drain budget per
+stop operation. A stalled `Wait` or readiness callback can leave
+`logsComplete=false` without extending output drainage indefinitely or producing
+fabricated completion. Arbitrary adapter `Stop` implementations retain their
+existing contract; this budget does not interrupt them. Callbacks returning after
+finalization do not rewrite terminal evidence.
+
+The renderer uses bounded `internal/logstream.Stream` reads (including its 4 MiB
+line limit) and never replays within the event collector or task callback. Service
+readiness stays live progress; a completed service attempt follows stop/exit and
+writer drainage. After engine cleanup and collector shutdown, CLI finalization
+commits repository/evidence results before joining the renderer, reconciling
+unseen attempts and emitting the bounded final table/step summary. Incomplete
+output is explicitly a finite file snapshot, not proof that a writer finished.
+
+`github_format.go` owns ordinary group commands, deliberate failure annotations,
+inert child-marker rendering and escaped summary cells. JSON values keep their
+decoded content while escaping legacy runner markers in finite GitHub output;
+machine log/watch streams retain their own contracts. Output errors remain
+presentation diagnostics. Raw attempt files and cursor behavior are unchanged.
 
 The execution owner emits `run_finished` after terminal evidence is durable; a deferred engine leaves that publication to its owner. Daemon completion includes cleanup failures and uses the same success/error as the retained result. A request-scoped event stream detaches and drains its queued events before sending the terminal response, which ends the client's read loop. Live daemon subscribers remain best-effort and do not block task execution.
 

@@ -20,6 +20,12 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 
 Cache manifest output paths use native separators after normalization. Keep slash-form adapter declarations in fixtures, but build native expected paths with `filepath.Join`; continue verifying restored bytes. Cross-compilation alone cannot catch a Windows path assertion mismatch.
 
+Logical task names are not filesystem components. Cache tests must exercise
+colon names, case/punctuation distinctions, Windows device names, trailing dots,
+and long names through snapshot, restore, listing, GC and invalidation on every
+OS. Keep platform-specific output-filename tests separate: a colon in a task name
+is portable, while a colon in a declared output filename is not.
+
 ## Unit Tests
 
 - graph validation and closures
@@ -109,6 +115,29 @@ go test ./pkg/daemon -run 'Test.*Flush' -count=1
 `TestWatchFlushIncludesChangesDuringInitialRun` and `TestWatchFlushIncludesChangesDuringRebuild` pause execution after it reads input, change that input, then require the flushed artifact to contain the update. Initial baseline setup or passing old node state is insufficient evidence. `TestFlushRejectsReplacementWatchAcknowledgement` deliberately uses an unchanged target to prove that a different watch cannot supply the result. These tests verify declared, polling-visible inputs; they do not claim complete history of transient filesystem changes or coverage of undeclared sources.
 
 ## CLI reliability regressions
+
+Automatic GitHub presentation tests explicitly select literal true/false/empty/
+unset invocation environments, JSON/text, quiet/states/logs and project-local
+bootstrap. CLI `TestMain` unsets inherited GitHub presentation/summary variables
+so ordinary hosted fixtures retain their intended plain output. GitHub fixtures
+set their own environment; non-CI and machine log/watch stream contracts remain
+separate. The environment must never override selected mode or parallelism.
+
+Use task barriers to prove overlap/shared-dependency execution and block the
+presentation writer while a sibling emits beyond the lossless event capacity.
+Queue-overflow tests reconcile every attempt from retained evidence, including
+retries of the same task and duplicate terminal notifications. Check whole group
+boundaries, exact attribution, real recorded timings, cache/skipped/blocked/failed/
+canceled states, service stop output and timed-out readiness callbacks. Keep log
+replay outside engine locks and the event collector.
+
+Formatting regressions exercise large streamed logs, partial/blank/oversized
+lines, child/legacy workflow markers, generated annotations, inert final JSON
+with equal decoded values, human excerpt deduplication, bounded exact-count
+tables, summary appends and read/write failures. Summary/overall result must
+follow repository repair and final evidence errors. Local tests cannot prove
+GitHub's rendered UI; the inactive demo workflow prepares that hosted check.
+See [GitHub presentation evidence](github-presentation-verification.md).
 
 The [CLI reliability evidence](cli-reliability-verification.md) records the observed pre-fix failures and focused reruns. Compiled CLI tests must check exactly one finite JSON result (including early errors) or valid JSONL, nonzero failure exits, and preserved partial evidence. Test `--json` around invalid flags and positional arguments, explicit false, known flag values equal to `--json`, and tokens after `--`. Socket peers must synchronize observed events before closing; arbitrary sleeps cannot prove streaming delivery. Existing validation failures now assert structured stdout errors rather than requiring duplicated plain stderr messages.
 
