@@ -384,7 +384,7 @@ func newDashboard(root, instanceID string) *dashboard {
 	d.app.EnableMouse(true)
 	d.app.SetRoot(d.pages, true)
 	d.app.SetFocus(d.logs)
-	d.app.SetInputCapture(d.handleKeys)
+	d.app.SetInputCapture(d.captureKeys)
 	d.app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
 		width, height := screen.Size()
 		if d.applyResponsiveLayout(width, height) {
@@ -530,6 +530,16 @@ func (d *dashboard) daemonEventLoop(ctx context.Context, client *daemon.Client) 
 	})
 }
 
+func (d *dashboard) captureKeys(event *tcell.EventKey) *tcell.EventKey {
+	forwarded := d.handleKeys(event)
+	// tview itself stops on an unchanged Ctrl+C event. Observe only events
+	// actually forwarded so a modal consuming a key is not reported as an exit.
+	if forwarded == event && event.Key() == tcell.KeyCtrlC {
+		d.diagnostics.recordExitRequest("key_ctrl_c")
+	}
+	return forwarded
+}
+
 func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 	if d.helpOpen {
 		if event.Key() == tcell.KeyEsc || (event.Key() == tcell.KeyRune && (event.Rune() == '?' || event.Rune() == 'q')) {
@@ -547,6 +557,7 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 	logsFocused := d.focusedPane == dashboardPaneLogs
 	switch event.Key() {
 	case tcell.KeyEsc:
+		d.diagnostics.recordExitRequest("key_escape")
 		d.app.Stop()
 		return nil
 	case tcell.KeyTAB, tcell.KeyBacktab:
@@ -602,6 +613,7 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 			d.openHelp()
 			return nil
 		case 'q':
+			d.diagnostics.recordExitRequest("key_q")
 			d.app.Stop()
 			return nil
 		case 'j':

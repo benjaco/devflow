@@ -5,14 +5,21 @@ Last updated: 2026-09-08
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: PR #15 fixture cleanup correction is locally complete on `81b6ff5`, ready for review. Runtime code is unchanged. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: corrected test passes 100 repetitions; controlled shutdown ordering passes 20 repetitions. Full normal/race suites, quality gates and Linux/Windows test compilation pass. Native Linux CI rerun remains external.
+- State: Windows Delve/TUI exit-boundary audit and TUI exit-reason diagnostics are locally complete. The reported spontaneous Windows exit remains unconfirmed. PR #15 fixture cleanup correction remains ready for review; Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: full normal suite, TUI/process race checks, vet, build/examples, version JSON and Windows TUI test compilation pass for exit diagnostics. Native Windows reproduction remains external; prior PR #15 validation is recorded below.
 
 ## In Progress
 
-- None. Await review of the local PR #15 cleanup correction.
+- None. Next diagnostic step: reproduce the watched Go restart on Windows with the new TUI exit reason, terminal/IDE identity and debugger attachment state.
 
 ## Completed
+
+- Windows Delve/TUI exit-boundary audit and diagnostic improvement:
+  - traced build/start errors, readiness failure, service-generation exit handling, Windows tree termination and TUI-owned daemon cleanup; no direct restart-error path to a successful TUI exit was found. Existing early-exit, watch-restart, failed-readiness/independent-service and panic regressions pass
+  - record exit requests before cleanup and include `reason` in `tui_stopped`, distinguishing received Escape/q/Ctrl+C, unclassified application return, panic and error. Input events do not prove physical keypresses; no Windows console-isolation change or confirmed root-cause fix
+  - real application-loop tests distinguish all successful exit reasons and ensure help consumes Escape without creating a false exit request; CLI diagnostics, testing guidance and shared memory updated
+  - passed `go test ./...`, `go test -race ./pkg/tui ./pkg/process`, `go vet ./...`, `go build ./...`, version JSON, diff check and Windows amd64 TUI test compilation. Logs: `/tmp/devflow-tui-exit-tests.log`, `/tmp/devflow-tui-exit-race.log`
+  - local changes only; native Windows terminal/IDE reproduction and deployment to the affected installation remain outstanding
 
 - PR #15 Linux fixture cleanup correction:
   - pulled [run `34213141067`, job `102018585350`](https://github.com/benjaco/devflow/actions/runs/34213141067/job/102018585350): only `TestGitHubEnvironmentDoesNotSelectCIMode` failed, with temporary-directory cleanup reporting `.devflow: directory not empty`; its assertions and the other seven jobs passed
