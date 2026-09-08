@@ -94,6 +94,27 @@ the current adapter; they do not prove an older running watcher has reloaded it.
 
 ## Retained Results and Unattended Control
 
+On GitHub Actions, the same `devflow run verify --ci --json` command automatically
+prints live task/cache lifecycle messages and then each completed attempt's full
+retained output as one contiguous log group on stderr. Tasks still run in parallel;
+shared dependencies still execute once. `GITHUB_ACTIONS` must be exactly `true`;
+this environment detection does not select `--ci` or alter `--max-parallel`.
+
+Group titles use textual status and recorded execution duration. Service readiness
+is live progress; service logs are grouped after stop/exit and writer completion.
+Interrupted output whose closure cannot be proven is marked incomplete. Slow log
+output may defer lifecycle messages and group rendering, with final retained
+evidence supplying any groups that did not fit the bounded live queue.
+
+`--progress states` omits full log replay; `quiet` suppresses progress/groups.
+The final JSON document stays on stdout with the same decoded values. A final
+task/state/duration table and overall result follow cleanup and repository repair
+on stderr unless progress is quiet. The table is appended to `GITHUB_STEP_SUMMARY`
+when available even in quiet mode. Counts remain exact when large tables omit rows. Presentation-read/write
+diagnostics do not change the execution outcome. Child workflow markers are inert
+in the display, and raw retained logs remain available through the existing log
+commands. See the [portable demo](../examples/github-actions/README.md).
+
 Engine runs, watches and actions have a `runId`; every task attempt has an `attemptId`, including finite tasks and cache decisions. Keep the IDs returned by execution or detached acceptance. An action's outer result and nested run share one run ID; a subsequent development relaunch has its own ID. An idempotent detached start returns the existing execution's ID.
 
 ```bash

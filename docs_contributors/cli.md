@@ -203,6 +203,67 @@ lines (the default). Final errors/results remain visible in every mode, includin
 Windows bootstrap children. Status, flush and attached daemon runs do not start
 new progress subscriptions; their final results use the same details choices.
 
+### Automatic GitHub CI presentation
+
+When the invocation environment contains the literal `GITHUB_ACTIONS=true`, a
+finite `run --ci` automatically uses grouped GitHub progress, with or without
+`--json`. Unset, empty, `false` and other values retain ordinary presentation.
+The environment selects presentation only: it does not select CI mode, change
+`--max-parallel`, split the graph, or execute shared dependencies again. The
+project-local bootstrap inherits the invocation environment; adapter runtime
+environment declarations do not select this presentation.
+
+```sh
+devflow run verify --ci --json
+```
+
+Task/cache lifecycle messages appear live on stderr. After an attempt's callbacks
+and registered output writers finish, its retained log is streamed inside one
+ordinary `::group::` / `::endgroup::` pair. Titles contain the task, textual final
+state and recorded duration, for example `frontend:lint | SUCCESS | 1.8s`.
+`done` is displayed as `SUCCESS`; cached, skipped, blocked, canceled and other
+states keep their meanings. Durations use retained attempt timestamps, including
+cache decisions or service lifetime, never time spent replaying logs. Missing
+timings say `duration unavailable`. Alias/group nodes have summary rows but no
+invented attempts or log groups.
+
+Service readiness does not close its log. Finite CI cleanup precedes final
+reconciliation and draining; unproven writer completion is labeled
+`output incomplete` and only the available file snapshot is shown. Groups,
+annotations and lifecycle messages share one writer, so updates arriving during
+a group wait until it closes. A fixed 128-entry metadata queue keeps the event
+collector independent of slow replay. When full, live updates are deferred and
+every remaining attempt is recovered from final retained evidence. The CLI waits
+for final output to drain; task execution does not wait for group replay.
+
+`--progress states` keeps lifecycle messages and failure annotations without
+full log replay. `quiet` suppresses progress, groups and annotations, preserving
+final results/errors. Failed attempts get one intentional error annotation using
+their actual failure; stderr text alone never creates annotations. Child group
+markers become visible labels and other workflow-command delimiters become
+inert text. Raw retained logs are unchanged.
+
+JSON stdout remains one final document with unchanged decoded values. In this
+finite GitHub path, literal legacy `##[` markers are JSON-escaped so retained
+excerpts cannot execute as runner commands. Human compact results keep metadata
+and evidence commands, with excerpts available through grouped/retained logs
+instead of replaying them again. Log/watch JSONL streams remain separate and
+receive no GitHub presentation markers.
+
+After owned cleanup and enclosing finalization (including repository repair),
+stderr contains a final task/state/duration table unless progress is quiet.
+If `GITHUB_STEP_SUMMARY` names
+a file, the table is also appended there, including in quiet mode. Counts cover
+every node; at most 200 rows and bounded cell text are shown, with omitted rows
+identified. Missing summary configuration is harmless. Log-read and summary-write
+problems are presentation diagnostics; they do not replace the execution result
+or change retained evidence. Existing step-summary content is preserved, and an
+append that would exceed GitHub's 1 MiB step limit is diagnosed.
+
+See the [local demo and hosted smoke example](../examples/github-actions/README.md)
+and [verification evidence](github-presentation-verification.md). No workflow
+exporter, extra task invocations or integration settings are needed.
+
 ### Retained runs, prompts and scoped cancellation
 
 Every admitted operation has one `runId`, including direct CI, daemon runs, watch sessions and foreground actions. Every task attempt has a new `attemptId`; task state and log events carry both identities. Watch reruns keep the watch run ID and allocate new attempts. `runId` identifies evidence, while the worktree execution lease still determines whether execution may overlap.

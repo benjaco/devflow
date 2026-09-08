@@ -190,6 +190,10 @@ func (e *Engine) beginAttempt(ctx context.Context, state *runState, rt *project.
 		return e.waitForPromptAnswer(ctx, state.req, state.inst.ID, task.Name, rt.AttemptID, prompt)
 	}
 	state.mu.Lock()
+	if state.attemptOutputs == nil {
+		state.attemptOutputs = make(map[string]*attemptOutput)
+	}
+	state.attemptOutputs[rt.AttemptID] = &attemptOutput{task: task.Name}
 	node := state.status[task.Name]
 	node.RunID = rt.RunID
 	node.AttemptID = rt.AttemptID
@@ -243,6 +247,9 @@ func (s *runState) saveAttemptsLocked() {
 	defer session.mu.Unlock()
 	for i := range session.record.Attempts {
 		attempt := &session.record.Attempts[i]
+		if attempt.LogsComplete {
+			continue
+		}
 		node := s.status[attempt.Task]
 		if node.AttemptID != attempt.AttemptID {
 			continue

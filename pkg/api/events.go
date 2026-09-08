@@ -17,6 +17,10 @@ const (
 	EventInteractionAck  EventType = "interaction_answered"
 	EventInteractionStop EventType = "interaction_cancelled"
 	EventValidation      EventType = "validation_progress"
+
+	// EventTaskAttemptFinished follows callback return and supervised log-writer
+	// completion; terminal-looking task states alone do not close an attempt log.
+	EventTaskAttemptFinished EventType = "task_attempt_finished"
 )
 
 type Event struct {
@@ -52,4 +56,6 @@ type Event struct {
 	RemainingBytes     int64     `json:"remainingBytes,omitempty"`
 	IssueCount         int       `json:"issueCount,omitempty"`
 	Done               bool      `json:"done,omitempty"`
+
+	Attempt *TaskAttempt `json:"attempt,omitempty"`
 }

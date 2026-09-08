@@ -410,6 +410,15 @@ Use dotenv values for normal app configuration, but let CI/shell values override
 
 Inside normal engine task callbacks, `Runtime.RunID` identifies the operation and `Runtime.AttemptID` identifies the current task attempt. `BeforeRun` and `Run` share that attempt; a watch rerun or service restart receives a fresh attempt. `Runtime.LogPath` points to its append-only retained log. Use `RunCmdSpec`, `StartServiceSpec`, `EmitLogLine` and registered service handles so output and cleanup remain attached to the owning attempt; do not construct or truncate a shared per-task log path.
 
+Finite CI runs on GitHub automatically group each completed attempt's retained
+logs; adapters need no setting or GitHub-specific task wrapper. Join finite
+output producers before returning, and make a registered service's `Wait` return
+only after its output writers drain. Readiness is not log completion. Devflow
+records `TaskAttempt.LogsComplete` and emits `task_attempt_finished` only after
+the callbacks and registered writers are known to have returned. Timed-out
+readiness callbacks or unresolved service drainage leave output explicitly
+incomplete. Detached, unregistered adapter goroutines are outside this guarantee.
+
 Cache/stamp skips also have attempt records and report that callbacks were not executed. Group nodes are resolved by the scheduler without an attempt record. Run results, node states, events and prompt metadata carry their execution identities. `runs show <run-id> --json` retrieves the retained provenance, outcomes and log references after a later run. Retention applies only to completed evidence; run IDs do not permit simultaneous conflicting execution in one worktree.
 
 Observe the supplied callback context in external calls and loops. `run`, `watch` and actions accept an operation `--timeout`, and `runs cancel <run-id>` cancels only the addressed execution. A disconnected observer or an expired `flush` wait does not cancel daemon-owned development work. Service cleanup must finish within the engine's bounded cleanup phase and preserve failures when a resource remains alive. Validation remains a separate finite sandbox workflow and does not create normal retained run/attempt identities.

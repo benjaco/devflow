@@ -110,6 +110,29 @@ go test ./pkg/daemon -run 'Test.*Flush' -count=1
 
 ## CLI reliability regressions
 
+Automatic GitHub presentation tests explicitly select literal true/false/empty/
+unset invocation environments, JSON/text, quiet/states/logs and project-local
+bootstrap. CLI `TestMain` unsets inherited GitHub presentation/summary variables
+so ordinary hosted fixtures retain their intended plain output. GitHub fixtures
+set their own environment; non-CI and machine log/watch stream contracts remain
+separate. The environment must never override selected mode or parallelism.
+
+Use task barriers to prove overlap/shared-dependency execution and block the
+presentation writer while a sibling emits beyond the lossless event capacity.
+Queue-overflow tests reconcile every attempt from retained evidence, including
+retries of the same task and duplicate terminal notifications. Check whole group
+boundaries, exact attribution, real recorded timings, cache/skipped/blocked/failed/
+canceled states, service stop output and timed-out readiness callbacks. Keep log
+replay outside engine locks and the event collector.
+
+Formatting regressions exercise large streamed logs, partial/blank/oversized
+lines, child/legacy workflow markers, generated annotations, inert final JSON
+with equal decoded values, human excerpt deduplication, bounded exact-count
+tables, summary appends and read/write failures. Summary/overall result must
+follow repository repair and final evidence errors. Local tests cannot prove
+GitHub's rendered UI; the inactive demo workflow prepares that hosted check.
+See [GitHub presentation evidence](github-presentation-verification.md).
+
 The [CLI reliability evidence](cli-reliability-verification.md) records the observed pre-fix failures and focused reruns. Compiled CLI tests must check exactly one finite JSON result (including early errors) or valid JSONL, nonzero failure exits, and preserved partial evidence. Test `--json` around invalid flags and positional arguments, explicit false, known flag values equal to `--json`, and tokens after `--`. Socket peers must synchronize observed events before closing; arbitrary sleeps cannot prove streaming delivery. Existing validation failures now assert structured stdout errors rather than requiring duplicated plain stderr messages.
 
 Tail/follow tests cover empty/blank/partial lines, UTF-8 split across writes, appends during initial reading, truncation and replacement, cursor-prefix rewrites, bounded large files/lines, cancellation and output writer errors. A 128 MiB sparse-file suffix and a million-line finite stream verify that the reader does not accumulate the requested tail in memory.

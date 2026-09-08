@@ -61,10 +61,10 @@ func TestLifecycleRestartPreservesCompletedAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstRestart := attempts()
-	if len(firstRestart) != 2 || firstRestart[0].State != api.StateStopped || firstRestart[0].FinishedAt.IsZero() {
+	if len(firstRestart) != 2 || firstRestart[0].State != api.StateStopped || firstRestart[0].FinishedAt.IsZero() || !firstRestart[0].LogsComplete {
 		t.Fatalf("restart rewrote its completed predecessor: %+v", firstRestart)
 	}
-	if firstRestart[0].AttemptID == firstRestart[1].AttemptID || firstRestart[0].LogPath == firstRestart[1].LogPath || firstRestart[1].State != api.StateRunning {
+	if firstRestart[0].AttemptID == firstRestart[1].AttemptID || firstRestart[0].LogPath == firstRestart[1].LogPath || firstRestart[1].State != api.StateRunning || firstRestart[1].LogsComplete {
 		t.Fatalf("replacement did not get independent running evidence: %+v", firstRestart)
 	}
 	if _, err := controller.Stop(controlCtx, "backend"); err != nil {
