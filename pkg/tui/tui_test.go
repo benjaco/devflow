@@ -436,6 +436,72 @@ func TestApplicationRunRestoresScreenAfterDrawPanic(t *testing.T) {
 	}
 }
 
+func TestApplicationExitDiagnosticsDistinguishKeysFromReturn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  tcell.Key
+		r    rune
+	}{
+		{"key_escape", tcell.KeyEsc, 0},
+		{"key_q", tcell.KeyRune, 'q'},
+		{"key_ctrl_c", tcell.KeyCtrlC, 0},
+		{"application_returned", 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := prepareRunningDashboard(t)
+			screen := newObservedSimulationScreen(80, 24)
+			d.app.SetScreen(screen)
+			diagnostics, err := startTUIDiagnostics(t.TempDir(), "exit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.diagnostics = diagnostics
+			closed := false
+			defer func() {
+				if !closed {
+					diagnostics.close(diagnostics.recordedFailure())
+				}
+			}()
+			done := make(chan error, 1)
+			go func() { done <- runTUIApplicationWithDiagnostics(d.app, diagnostics) }()
+			screen.waitForFrame(t)
+			// Consumed help keys must not leave a false exit request behind.
+			screen.postKey(t, tcell.KeyRune, '?')
+			screen.postKey(t, tcell.KeyEsc, 0)
+			if tc.name == "application_returned" {
+				d.app.QueueUpdate(func() { d.app.Stop() })
+			} else {
+				d.app.QueueEvent(tcell.NewEventKey(tc.key, tc.r, tcell.ModNone))
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+				diagnostics.close(err)
+				closed = true
+			case <-time.After(3 * time.Second):
+				d.app.Stop()
+				t.Fatal("application did not exit")
+			}
+			data, err := os.ReadFile(diagnostics.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), "event=tui_stopped status=ok reason="+tc.name) {
+				t.Fatalf("missing exit reason: %s", data)
+			}
+			wantRequests := 1
+			if tc.name == "application_returned" {
+				wantRequests = 0
+			}
+			if strings.Count(string(data), "event=tui_exit_requested") != wantRequests {
+				t.Fatalf("incorrect exit requests: %s", data)
+			}
+		})
+	}
+}
+
 func TestApplicationPanicReturnsDiagnosticAfterRestoringScreen(t *testing.T) {
 	d := prepareRunningDashboard(t)
 	screen := newObservedSimulationScreen(80, 24)

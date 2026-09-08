@@ -165,6 +165,8 @@ go test -race ./internal/logstream ./internal/clierror ./internal/reporepair ./p
 
 ## Example/Smoke Coverage
 
+TUI exit-diagnostic regressions run the real application loop with a simulation screen: distinguish Escape, q, library-handled Ctrl+C, and a return without an observed exit key; first consume Escape inside help to prove it is not misreported. Delve failure/restart engine tests do not exercise the native Windows console shared with a live TUI. An unexpected Windows UI exit during restart still requires native reproduction with the terminal/IDE and debugger attachment state recorded.
+
 Item 6 planning regressions and observed red/green outcomes are recorded in [planning verification](planning-verification.md). Test pure planning against frontend/backend/shared inputs, shared dependency deduplication, ignored/unmatched/configuration paths, unknown metadata and custom callbacks, finite target fallbacks, unsafe action/service/formatter closures, task/target name collisions, deterministic mixed configuration/source reasons, uncovered input branches and dependency-ordered resource access. Resource tests include named read/read versus write access and unordered generated-file reads.
 
 Changed-path tests cover slash and native separators, drive/UNC paths, parent traversal and rooted paths without a drive. Windows `filepath.IsAbs("/absolute")` is false, so worktree-relative validation must explicitly reject a leading slash after separator normalization; keep CLI coverage of the resulting `invalid_arguments/parsing` JSON. Native Windows execution is needed to verify this distinction.

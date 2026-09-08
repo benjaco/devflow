@@ -17,8 +17,9 @@ const tuiDiagnosticTask = "tui"
 type tuiDiagnostics struct {
 	path string
 
-	mu      sync.Mutex
-	failure error
+	mu         sync.Mutex
+	failure    error
+	exitReason string
 }
 
 func startTUIDiagnostics(worktree, instanceID string) (*tuiDiagnostics, error) {
@@ -62,6 +63,7 @@ func (d *tuiDiagnostics) recordPanic(recovered any, stack []byte) error {
 	if d.failure != nil {
 		return d.failure
 	}
+	d.exitReason = "panic"
 
 	entry := fmt.Sprintf(
 		"%s level=error event=tui_panic panic=%q\n%s",
@@ -93,6 +95,7 @@ func (d *tuiDiagnostics) recordError(cause error) error {
 	if d.failure != nil {
 		return d.failure
 	}
+	d.exitReason = "error"
 	entry := fmt.Sprintf(
 		"%s level=error event=tui_error error=%q\n",
 		tuiDiagnosticTimestamp(),
@@ -112,16 +115,40 @@ func (d *tuiDiagnostics) recordedFailure() error {
 	return d.failure
 }
 
+func (d *tuiDiagnostics) recordExitRequest(reason string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.exitReason != "" {
+		return
+	}
+	d.exitReason = reason
+	// Record before daemon cleanup, which can block after the UI has stopped.
+	_ = appendTUIDiagnostic(d.path, fmt.Sprintf("%s level=info event=tui_exit_requested reason=%s\n", tuiDiagnosticTimestamp(), reason))
+}
+
 func (d *tuiDiagnostics) close(runErr error) {
 	_ = debug.SetCrashOutput(nil, debug.CrashOptions{})
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	status := "ok"
+	reason := d.exitReason
+	if reason == "" {
+		reason = "application_returned"
+	}
 	if runErr != nil {
 		status = "error"
+		if d.exitReason == "" {
+			reason = "error"
+		}
 	}
 	_ = appendTUIDiagnostic(d.path, fmt.Sprintf(
-		"%s level=info event=tui_stopped status=%s\n",
+		"%s level=info event=tui_stopped status=%s reason=%s\n",
 		tuiDiagnosticTimestamp(),
 		status,
+		reason,
 	))
 }
 
