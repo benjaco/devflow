@@ -5,14 +5,22 @@ Last updated: 2026-09-08
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: grouped GitHub CI headers now carry cache misses and replace standalone `done` lines. Local implementation and verification complete on baseline `ee561d9`; ready for review. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: focused and full normal/race tests, quality gates and Windows compilation pass. Local demo confirms correct miss/hit/failure headers and overlapping task execution; hosted rendering remains an external check.
+- State: PR #15 fixture cleanup correction is locally complete on `81b6ff5`, ready for review. Runtime code is unchanged. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: corrected test passes 100 repetitions; controlled shutdown ordering passes 20 repetitions. Full normal/race suites, quality gates and Linux/Windows test compilation pass. Native Linux CI rerun remains external.
 
 ## In Progress
 
-- None. Await review of the local GitHub header cleanup.
+- None. Await review of the local PR #15 cleanup correction.
 
 ## Completed
+
+- PR #15 Linux fixture cleanup correction:
+  - pulled [run `34213141067`, job `102018585350`](https://github.com/benjaco/devflow/actions/runs/34213141067/job/102018585350): only `TestGitHubEnvironmentDoesNotSelectCIMode` failed, with temporary-directory cleanup reporting `.devflow: directory not empty`; its assertions and the other seven jobs passed
+  - 900 unchanged macOS repetitions passed; a controlled real-protocol ACK reproduced the late shutdown log recreating `.devflow` after deletion before changing the fixture. ACK/disconnection before removal passed 20 controlled repetitions; logs and diagnostic sources retained under `/tmp/devflow-pr15-controlled-*`
+  - replaced the fixture's stop-only cleanup with existing `stopJSONContractDaemon`, which waits for disconnection after final shutdown writes; preserved all mode/presentation assertions and runtime/workflow behavior, with a short invariant comment and testing/verification documentation
+  - corrected fixture passed 100 repetitions. First full suite passed CLI but failed unrelated `TestRunRequestDeadlineCancelsExecution/attached` with `task did not start`; the unchanged standalone full rerun passed (CLI 127.342s), followed by full race suite (CLI 164.301s)
+  - passed build/examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0, formatting, tidy-diff, diff-check and version JSON; Linux/Windows amd64 CLI tests compile. Logs: `/tmp/devflow-pr15-*.log`
+  - local changes only; no commits, pushes, workflow triggers, installations or existing-service operations. Docker Engine was unavailable locally, so the exact intermittent Linux syscall error and native hosted rerun remain outside local verification
 
 - GitHub CI header cleanup:
   - reproduced redundant cache-miss/`done` lines before implementation; moved misses into completed group titles as `CACHE MISS`, preserving explicit states/quiet and ordinary output

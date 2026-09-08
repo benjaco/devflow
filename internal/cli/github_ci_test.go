@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/benjaco/devflow/pkg/api"
-	"github.com/benjaco/devflow/pkg/daemon"
 	"github.com/benjaco/devflow/pkg/instance"
 	"github.com/benjaco/devflow/pkg/project"
 )
@@ -614,18 +613,8 @@ func TestGitHubEnvironmentDoesNotSelectCIMode(t *testing.T) {
 		rt.EmitLogLine("stdout", "ordinary-development-output")
 		return nil
 	}}}, "check")
-	t.Cleanup(func() {
-		client, err := daemon.Dial(root)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if _, err := client.Call(ctx, daemon.Request{Action: daemon.ActionStop, All: true}); err != nil {
-			t.Error(err)
-		}
-	})
+	// The stop response precedes the daemon's final log write and shutdown.
+	t.Cleanup(func() { stopJSONContractDaemon(t, root) })
 	var stdout, stderr bytes.Buffer
 	app := &App{Stdout: &stdout, Stderr: &stderr}
 	err := app.Run([]string{"run", "verify", "--project", p.Name(), "--worktree", root, "--json"})

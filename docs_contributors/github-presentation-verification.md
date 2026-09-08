@@ -28,6 +28,28 @@ and `Runtime.EventLineEmitter`, matching subprocess logging while preserving
 all 2,048 events, the barrier, and the original deadline. Ten concurrent repeated
 normal and race checks passed after that fixture correction.
 
+## PR #15 fixture cleanup
+
+[Run `34213141067`, pinned Linux job `102018585350`](https://github.com/benjaco/devflow/actions/runs/34213141067/job/102018585350)
+at `81b6ff5` failed only `TestGitHubEnvironmentDoesNotSelectCIMode`: temporary-directory
+cleanup reported `.devflow: directory not empty`; its behavior assertions passed.
+The other seven jobs passed. The stop response preceded the daemon's final log write.
+
+Before the fix, 900 unchanged local repetitions with default scheduling,
+`GOMAXPROCS=1` and `GOMAXPROCS=8` passed. A controlled real-protocol reproduction held the response ACK,
+removed `.devflow`, then released the ACK: the shutdown log recreated the directory.
+This reproduced the late-write cause on macOS, rather than the intermittent Linux
+`unlinkat` error itself. Releasing the ACK and waiting for disconnection before removal
+passed 20 controlled repetitions. The fixture now reuses `stopJSONContractDaemon`;
+no runtime or workflow behavior changed. Local Docker was unavailable, so native
+Linux execution remains a hosted check.
+
+Focused verification of the corrected fixture:
+
+```sh
+go test ./internal/cli -run '^TestGitHubEnvironmentDoesNotSelectCIMode$' -count=100
+```
+
 ## Windows cache-name correction
 
 [Run 34195733262, Windows job 101962921185](https://github.com/benjaco/devflow/actions/runs/34195733262/job/101962921185)
