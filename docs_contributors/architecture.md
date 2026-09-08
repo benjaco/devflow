@@ -201,6 +201,12 @@ bounded progress text and attempt references. Overflow defers live updates to
 final retained-record reconciliation; identities deduplicate by run/task/attempt,
 not task name. Memory scales with identities and existing evidence, not log volume.
 
+Grouped completion titles replace standalone `done` and cache-miss progress;
+states-only output retains both. Attempts persist `cacheOutcome` from the node's
+recorded cache decision so live completion and final reconciliation use the same
+evidence. A computed key or executed callback alone cannot establish a cache miss:
+stamp tasks also have both.
+
 `task_attempt_finished` carries a copied `TaskAttempt` with `logsComplete=true`.
 Terminal-looking node state alone cannot establish this boundary. The engine
 tracks callback return, asynchronous readiness callback return, resource exit and

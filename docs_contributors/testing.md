@@ -8,6 +8,8 @@ The Linux quality job enforces `gofmt`, clean `go mod tidy -diff` output, `go ve
 
 Cross-platform tests should avoid Unix-only assumptions unless the test is guarded by build tags or an explicit platform skip. Prefer generated Go helper binaries over shell-script fake tools, add `.exe` to built helper paths on Windows, and use Go encoders for JSON fixtures so Windows paths are escaped correctly. Long-running process tests should verify process-tree cleanup on Windows because orphaned children can keep task log files locked after the parent exits. Daemon protocol tests must cover immediate structured error responses and the terminal response acknowledgment; without the bounded delivery handshake, Windows Unix-domain sockets can close before the client retains the response body.
 
+Daemon-backed CLI fixtures must wait for disconnection before removing their temporary worktree; use the existing `stopJSONContractDaemon` cleanup helper. A stop response arrives before the daemon writes its final shutdown log, so immediate `TempDir` cleanup can race directory recreation. PID checks cannot join the CLI harness's in-process daemon. See [the PR #15 reproduction](github-presentation-verification.md#pr-15-fixture-cleanup).
+
 Execution ownership regressions must prove rejection before configuration/callbacks and byte-for-byte preservation of the active execution's task status, logs, env and outputs. Cover CI/CI and CI/watch contention, canonical aliases and distinct worktrees, real child-process leases, stop timeouts, incomplete cleanup, owner death/recovery, daemon control separation, and action completion racing newer intent. Use channel barriers for engine transitions and subprocess handshakes for OS locking. Failed `Stop` or `Alive()==true` must prevent replacement, and terminal events must include cleanup failures. See [recorded red/green ownership cases](execution-ownership-verification.md).
 
 Repository-repair tests use the real Git executable through argument-vector subprocesses on every supported OS. Test repositories isolate system/global Git configuration, use Git environment identity only for the baseline commit, then clear it to prove HEAD-derived attribution. Line-ending coverage writes exact LF/CRLF bytes through Go, including a DAG-prestaged path, and must prove default exclusion from both permitted and unexpected sets, mixed-commit membership, substantive-content preservation, and `--pedantic` opt-in. Use native temporary paths and Git pathspec magic directly; do not replace the coverage with shell scripts or a fake Git parser.
@@ -130,6 +132,11 @@ retries of the same task and duplicate terminal notifications. Check whole group
 boundaries, exact attribution, real recorded timings, cache/skipped/blocked/failed/
 canceled states, service stop output and timed-out readiness callbacks. Keep log
 replay outside engine locks and the event collector.
+
+Header regressions reject standalone `done` and cache-miss lines in grouped mode,
+retain them for states/plain output, and verify miss tags through completion,
+queue overflow and final-evidence fallback. Cache hits and stamps must not gain
+false miss tags; failed cache misses retain both the tag and failure annotation.
 
 Formatting regressions exercise large streamed logs, partial/blank/oversized
 lines, child/legacy workflow markers, generated annotations, inert final JSON

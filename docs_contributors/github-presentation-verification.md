@@ -14,6 +14,8 @@ execution owner. It replaces the proposed composite-action export work.
 | `TestGitHubPresenterPreservesUnownedProgress` | Task-labeled setup output without an attempt identity disappeared; repository-repair lines gained a duplicate `[devflow]` prefix. |
 | Final-output helper regressions | Legacy runner commands remained literal inside final JSON values; human compact output repeated task excerpts after their groups. |
 | Compiled demo bootstrap | A library package in the demo adapter conflicted with the generated `main` package. The demo now uses the actual local-adapter package contract, with a separate ordinary entrypoint for repository builds. |
+| `TestGitHubCICompletedHeadersReplaceMissAndDoneLines` (baseline `ee561d9`) | Grouped CI printed separate cache-miss and `done` lines, while completion headers omitted the cache outcome. |
+| `TestBeginAttemptSaveFailureDoesNotInheritCacheOutcome` | A new attempt whose initial evidence save failed inherited the predecessor's cache miss before performing any lookup. Clear cache metadata when allocating the new identity. |
 
 All were exercised before their respective fixes. New formatter and queue tests
 also began with missing/no-op helpers before implementation; they are separate
@@ -25,6 +27,28 @@ exceeded its 15-second deadline under load. It now uses one open retained file
 and `Runtime.EventLineEmitter`, matching subprocess logging while preserving
 all 2,048 events, the barrier, and the original deadline. Ten concurrent repeated
 normal and race checks passed after that fixture correction.
+
+## PR #15 fixture cleanup
+
+[Run `34213141067`, pinned Linux job `102018585350`](https://github.com/benjaco/devflow/actions/runs/34213141067/job/102018585350)
+at `81b6ff5` failed only `TestGitHubEnvironmentDoesNotSelectCIMode`: temporary-directory
+cleanup reported `.devflow: directory not empty`; its behavior assertions passed.
+The other seven jobs passed. The stop response preceded the daemon's final log write.
+
+Before the fix, 900 unchanged local repetitions with default scheduling,
+`GOMAXPROCS=1` and `GOMAXPROCS=8` passed. A controlled real-protocol reproduction held the response ACK,
+removed `.devflow`, then released the ACK: the shutdown log recreated the directory.
+This reproduced the late-write cause on macOS, rather than the intermittent Linux
+`unlinkat` error itself. Releasing the ACK and waiting for disconnection before removal
+passed 20 controlled repetitions. The fixture now reuses `stopJSONContractDaemon`;
+no runtime or workflow behavior changed. Local Docker was unavailable, so native
+Linux execution remains a hosted check.
+
+Focused verification of the corrected fixture:
+
+```sh
+go test ./internal/cli -run '^TestGitHubEnvironmentDoesNotSelectCIMode$' -count=100
+```
 
 ## Windows cache-name correction
 

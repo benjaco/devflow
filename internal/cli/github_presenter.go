@@ -77,6 +77,10 @@ func (p *githubPresenter) observe(evt api.Event) {
 	case api.EventRunStarted:
 		p.message("run %s started", evt.Target)
 	case api.EventTaskState:
+		// Group headers already report success; states mode has no headers.
+		if evt.State == api.StateDone && p.progress != "states" {
+			return
+		}
 		state := string(evt.State)
 		if evt.State == api.StateRunning && evt.PreviousState != api.StateStarting {
 			state = "started"
@@ -89,7 +93,9 @@ func (p *githubPresenter) observe(evt api.Event) {
 	case api.EventCacheHit:
 		p.message("%s: cache hit", evt.Task)
 	case api.EventCacheMiss:
-		p.message("%s: cache miss", evt.Task)
+		if p.progress == "states" {
+			p.message("%s: cache miss", evt.Task)
+		}
 	case api.EventLogLine:
 		// Attempt output is replayed exactly once from its retained file.
 		// Setup/run-level messages have no such file and remain live progress.
@@ -170,7 +176,11 @@ func (p *githubPresenter) finish(record api.RunRecord, result api.RunResult) {
 		// Failed evidence reads still leave the returned node snapshot usable.
 		// It cannot prove writer completion or supply missing attempt timings.
 		for _, node := range result.Nodes {
-			p.renderAttempt(result.RunID, api.TaskAttempt{Task: node.Name, AttemptID: node.AttemptID, State: node.State, LogPath: node.LogPath, LastError: node.LastError})
+			attempt := api.TaskAttempt{Task: node.Name, AttemptID: node.AttemptID, State: node.State, LogPath: node.LogPath, LastError: node.LastError}
+			if node.Cache != nil {
+				attempt.CacheOutcome = node.Cache.Outcome
+			}
+			p.renderAttempt(result.RunID, attempt)
 		}
 		p.line(fmt.Sprintf("run %s finished success=%t", result.Target, result.Success))
 		p.diagnostic(githubWriteSummary(p.out, record, result))

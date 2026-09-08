@@ -88,6 +88,9 @@ func githubAttemptDuration(attempt api.TaskAttempt) string {
 // The caller owns serialization: replay never runs in an engine event callback.
 func githubWriteAttemptGroup(ctx context.Context, out io.Writer, attempt api.TaskAttempt) (resultErr error) {
 	title := fmt.Sprintf("%s | %s | %s", githubBoundedText(attempt.Task, 512), githubTaskStatus(attempt.State), githubAttemptDuration(attempt))
+	if attempt.CacheOutcome == "miss" {
+		title += " | CACHE MISS"
+	}
 	if !attempt.LogsComplete {
 		title += " | output incomplete"
 	}
