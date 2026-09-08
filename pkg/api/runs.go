@@ -43,6 +43,7 @@ type TaskAttempt struct {
 	State           NodeState        `json:"state"`
 	Executed        bool             `json:"executed"`
 	CacheKey        string           `json:"cacheKey,omitempty"`
+	CacheOutcome    string           `json:"cacheOutcome,omitempty"`
 	LogPath         string           `json:"logPath"`
 	StartedAt       time.Time        `json:"startedAt"`
 	FinishedAt      time.Time        `json:"finishedAt,omitempty"`

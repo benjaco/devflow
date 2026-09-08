@@ -131,6 +131,11 @@ boundaries, exact attribution, real recorded timings, cache/skipped/blocked/fail
 canceled states, service stop output and timed-out readiness callbacks. Keep log
 replay outside engine locks and the event collector.
 
+Header regressions reject standalone `done` and cache-miss lines in grouped mode,
+retain them for states/plain output, and verify miss tags through completion,
+queue overflow and final-evidence fallback. Cache hits and stamps must not gain
+false miss tags; failed cache misses retain both the tag and failure annotation.
+
 Formatting regressions exercise large streamed logs, partial/blank/oversized
 lines, child/legacy workflow markers, generated annotations, inert final JSON
 with equal decoded values, human excerpt deduplication, bounded exact-count

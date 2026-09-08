@@ -5,14 +5,22 @@ Last updated: 2026-09-08
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: corrected Windows cached-task path handling after GitHub presentation commit `9ce809a`; local changes are ready for review. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: full normal/race suites, quality/build gates and focused compiled CLI checks pass. Windows binaries compile; the native Windows CI rerun remains outstanding.
+- State: grouped GitHub CI headers now carry cache misses and replace standalone `done` lines. Local implementation and verification complete on baseline `ee561d9`; ready for review. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: focused and full normal/race tests, quality gates and Windows compilation pass. Local demo confirms correct miss/hit/failure headers and overlapping task execution; hosted rendering remains an external check.
 
 ## In Progress
 
-- No implementation work remains for the Windows correction. Await review and the next native Windows CI run.
+- None. Await review of the local GitHub header cleanup.
 
 ## Completed
+
+- GitHub CI header cleanup:
+  - reproduced redundant cache-miss/`done` lines before implementation; moved misses into completed group titles as `CACHE MISS`, preserving explicit states/quiet and ordinary output
+  - retained each attempt's actual `cacheOutcome` for completion events, deferred reconciliation and final-node fallback; tested cache hits, stamps, failed misses, duplicate notifications and queue overflow
+  - reproduced previous-attempt cache metadata leaking through an initial evidence-save failure; clear it when allocating the new attempt identity, without altering completed predecessors
+  - passed focused GitHub/bootstrap and attempt tests, `go test -count=1 ./...`, `go test -race -count=1 ./...`, build/examples, vet, Staticcheck v0.8.1, govulncheck v1.6.0, formatting, tidy-diff, diff-check and version JSON; Windows amd64 CLI/engine test binaries and CLI binary compile
+  - isolated demo used ordinary `devflow run verify --ci --json` twice and the failure target once: exits 0/0/1, valid JSON, exact group tags, no duplicate miss/done lines and recorded parallel overlap. Evidence: `/tmp/devflow-github-demo-sc5qef8c`
+  - updated CLI, architecture, testing, agent guidance, memory and demo documentation. Local changes only; no commits, pushes, remote workflows, installations or existing-service operations. Native Windows execution and hosted rendering remain CI checks
 
 - Windows cached-task path correction:
   - pulled [run `34195733262`, job `101962921185`](https://github.com/benjaco/devflow/actions/runs/34195733262/job/101962921185) at `9ce809a`; only Windows failed, in the compiled GitHub demo because raw cached task `shared:generate` was rejected as a native path component

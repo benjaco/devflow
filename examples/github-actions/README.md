@@ -2,6 +2,8 @@
 
 This adapter uses only Go callbacks and local files. Two independent checks share one cached generator. The normal parallel scheduler runs both checks together; GitHub presentation prints their completed retained logs in separate groups.
 
+Completed headers carry the final status and duration, for example `shared:generate | SUCCESS | 12ms | CACHE MISS`. The default grouped output omits separate `done` and cache-miss lines; `--progress states` retains these messages because it has no log groups.
+
 With Devflow available on `PATH`, run from this directory:
 
 ```sh

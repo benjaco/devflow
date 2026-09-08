@@ -201,6 +201,8 @@ func (e *Engine) beginAttempt(ctx context.Context, state *runState, rt *project.
 	node.Attempt++
 	node.LastError = ""
 	node.LastRunKey = ""
+	// A failed attempt save must not inherit its predecessor's cache decision.
+	node.Cache = nil
 	node.FailureExcerpts = nil
 	state.status[task.Name] = node
 	state.nodeStarted[task.Name] = time.Now()
@@ -256,6 +258,10 @@ func (s *runState) saveAttemptsLocked() {
 		}
 		attempt.State = node.State
 		attempt.CacheKey = node.LastRunKey
+		attempt.CacheOutcome = ""
+		if node.Cache != nil {
+			attempt.CacheOutcome = node.Cache.Outcome
+		}
 		attempt.LastError = node.LastError
 		attempt.FailureExcerpts = node.FailureExcerpts
 		if terminalNodeState(node.State) && attempt.FinishedAt.IsZero() {

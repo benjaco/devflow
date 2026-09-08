@@ -95,18 +95,21 @@ the current adapter; they do not prove an older running watcher has reloaded it.
 ## Retained Results and Unattended Control
 
 On GitHub Actions, the same `devflow run verify --ci --json` command automatically
-prints live task/cache lifecycle messages and then each completed attempt's full
-retained output as one contiguous log group on stderr. Tasks still run in parallel;
+prints live task starts and other lifecycle messages, then each completed attempt's
+full retained output as one contiguous log group on stderr. Tasks still run in parallel;
 shared dependencies still execute once. `GITHUB_ACTIONS` must be exactly `true`;
 this environment detection does not select `--ci` or alter `--max-parallel`.
 
-Group titles use textual status and recorded execution duration. Service readiness
-is live progress; service logs are grouped after stop/exit and writer completion.
+Group titles use textual status and recorded execution duration. A cache miss
+adds a `CACHE MISS` tag, for example `build | SUCCESS | 1.8s | CACHE MISS`.
+These headers replace separate `done` and cache-miss progress lines. Service
+readiness is live progress; service logs are grouped after stop/exit and writer completion.
 Interrupted output whose closure cannot be proven is marked incomplete. Slow log
 output may defer lifecycle messages and group rendering, with final retained
 evidence supplying any groups that did not fit the bounded live queue.
 
-`--progress states` omits full log replay; `quiet` suppresses progress/groups.
+`--progress states` omits full log replay and keeps `done` and cache-miss messages;
+`quiet` suppresses progress/groups.
 The final JSON document stays on stdout with the same decoded values. A final
 task/state/duration table and overall result follow cleanup and repository repair
 on stderr unless progress is quiet. The table is appended to `GITHUB_STEP_SUMMARY`
@@ -124,7 +127,7 @@ devflow logs <task> --run <run-id> --attempt <attempt-id> --tail 100 --json
 devflow runs cancel <run-id> --json
 ```
 
-`runs show` contains the selected target/mode, state, timestamps, deadline when set, graph/adapter digests, all attempts, final `result` and prompt metadata. An attempt's `executed` flag distinguishes callback execution from cache reuse; state and cache key explain its outcome. Blocked or skipped tasks without an attempt did not run. These are observations from that execution, not evidence that later edits have passed. Result/log retrieval and prompt/cancellation commands do not compile the adapter, so a newly broken adapter does not hide prior evidence.
+`runs show` contains the selected target/mode, state, timestamps, deadline when set, graph/adapter digests, all attempts, final `result` and prompt metadata. An attempt's `executed` flag distinguishes callback execution from cache reuse; state, cache key and optional `cacheOutcome` (`hit` or `miss`) explain its outcome. Stamps and uncached tasks have no cache outcome. Blocked or skipped tasks without an attempt did not run. These are observations from that execution, not evidence that later edits have passed. Result/log retrieval and prompt/cancellation commands do not compile the adapter, so a newly broken adapter does not hide prior evidence.
 
 Retained attempts use separate append-only log files; new runs and retries preserve earlier output. Retention targets 100 completed runs, seven days and 64 MiB, oldest first. Completed-run pruning runs before the current terminal result is committed, so retention failures are included in that immutable result (`retention_failed`). The newly completed result can put evidence over the count/age/byte thresholds until the next pruning pass.
 

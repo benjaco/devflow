@@ -40,6 +40,9 @@ func TestGitHubPresenterReconcilesOverflowAndDuplicateAttempts(t *testing.T) {
 	result := api.RunResult{RunID: "run", Success: true, Target: "verify"}
 	for i := 0; i < githubProgressCapacity*3; i++ {
 		attempt := api.TaskAttempt{Task: "same-task", AttemptID: fmt.Sprintf("attempt-%d", i), LogPath: path, State: api.StateDone, StartedAt: start, FinishedAt: start.Add(time.Second), LogsComplete: true}
+		if i%2 == 0 {
+			attempt.CacheOutcome = "miss"
+		}
 		record.Attempts = append(record.Attempts, attempt)
 	}
 	p.observe(api.Event{Type: api.EventTaskAttemptFinished, RunID: record.RunID, Task: "same-task", Attempt: &record.Attempts[0]})
@@ -67,6 +70,9 @@ func TestGitHubPresenterReconcilesOverflowAndDuplicateAttempts(t *testing.T) {
 	close(w.release)
 	p.finish(record, result)
 	output := w.output.String()
+	if got := strings.Count(output, " | CACHE MISS"); got != len(record.Attempts)/2 {
+		t.Errorf("cache-miss tags lost or leaked across attempts: got %d want %d", got, len(record.Attempts)/2)
+	}
 	for _, marker := range []string{"::group::", "::endgroup::", "retained-only-marker"} {
 		if got := strings.Count(output, marker); got != len(record.Attempts) {
 			t.Errorf("%q count=%d, want %d independent attempt groups", marker, got, len(record.Attempts))

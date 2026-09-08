@@ -14,6 +14,8 @@ execution owner. It replaces the proposed composite-action export work.
 | `TestGitHubPresenterPreservesUnownedProgress` | Task-labeled setup output without an attempt identity disappeared; repository-repair lines gained a duplicate `[devflow]` prefix. |
 | Final-output helper regressions | Legacy runner commands remained literal inside final JSON values; human compact output repeated task excerpts after their groups. |
 | Compiled demo bootstrap | A library package in the demo adapter conflicted with the generated `main` package. The demo now uses the actual local-adapter package contract, with a separate ordinary entrypoint for repository builds. |
+| `TestGitHubCICompletedHeadersReplaceMissAndDoneLines` (baseline `ee561d9`) | Grouped CI printed separate cache-miss and `done` lines, while completion headers omitted the cache outcome. |
+| `TestBeginAttemptSaveFailureDoesNotInheritCacheOutcome` | A new attempt whose initial evidence save failed inherited the predecessor's cache miss before performing any lookup. Clear cache metadata when allocating the new identity. |
 
 All were exercised before their respective fixes. New formatter and queue tests
 also began with missing/no-op helpers before implementation; they are separate

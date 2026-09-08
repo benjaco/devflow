@@ -9,6 +9,7 @@ import (
 
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/instance"
+	"github.com/benjaco/devflow/pkg/project"
 )
 
 func TestLifecycleRestartPreservesCompletedAttempts(t *testing.T) {
@@ -107,5 +108,52 @@ func TestFinalEvidenceSaveFailureChangesSuccessfulResult(t *testing.T) {
 	}
 	if retained.State.Terminal() || retained.Target != "verify" || retained.Result != nil {
 		t.Fatalf("failed terminal save changed retained evidence: %+v", retained)
+	}
+}
+
+func TestBeginAttemptSaveFailureDoesNotInheritCacheOutcome(t *testing.T) {
+	worktree := t.TempDir()
+	id, _, err := instance.IDForWorktree(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := api.TaskAttempt{AttemptID: instance.NewAttemptID(), Task: "build", State: api.StateDone, CacheOutcome: "miss", LogsComplete: true}
+	record := &api.RunRecord{Project: "attempt-cache-evidence", Target: "verify", Mode: api.ModeWatch, Attempts: []api.TaskAttempt{previous}}
+	if err := instance.CreateRun(worktree, id, record); err != nil {
+		t.Fatal(err)
+	}
+	// Reject the new attempt's save before its running transition, without
+	// platform-specific permissions or damage to the previous retained record.
+	record.Target = "changed-selection"
+	session := &runSession{worktree: worktree, record: record}
+	inst := &api.Instance{ID: id, Worktree: worktree}
+	state := &runState{
+		req:  Request{RunID: record.RunID, Target: "verify", Worktree: worktree, Mode: api.ModeWatch, session: session},
+		inst: inst,
+		status: map[string]api.NodeStatus{"build": {
+			Name: "build", AttemptID: previous.AttemptID, State: api.StateDone,
+			Cache: &api.CacheTiming{Outcome: "miss"},
+		}},
+		nodeStarted: map[string]time.Time{},
+	}
+	runtime := &project.Runtime{Worktree: worktree, Instance: inst}
+	eng := &Engine{}
+	err = eng.beginAttempt(context.Background(), state, runtime, project.Task{Name: "build", Kind: project.KindOnce})
+	if err == nil {
+		t.Fatal("expected new attempt save to fail")
+	}
+	state.setErrorState("build", context.Background(), "", err, 0)
+	node := state.status["build"]
+	if node.AttemptID == "" || node.AttemptID == previous.AttemptID || len(record.Attempts) != 2 {
+		t.Fatalf("failed start did not allocate an independent attempt: node=%+v attempts=%+v", node, record.Attempts)
+	}
+	if node.Cache != nil {
+		t.Errorf("new attempt inherited previous cache timing: %+v", node.Cache)
+	}
+	if attempt := record.Attempts[1]; attempt.CacheOutcome != "" {
+		t.Errorf("new attempt reported a cache decision before cache lookup: %+v", attempt)
+	}
+	if !reflect.DeepEqual(previous, record.Attempts[0]) {
+		t.Fatalf("failed start changed its completed predecessor: before=%+v after=%+v", previous, record.Attempts[0])
 	}
 }

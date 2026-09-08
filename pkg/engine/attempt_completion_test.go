@@ -76,11 +76,17 @@ func TestAttemptCompletionRetainsFinalCallbackOutputAndCacheEvidence(t *testing.
 					retained = &record.Attempts[i]
 				}
 			}
-			if retained == nil || !retained.LogsComplete || !retained.FinishedAt.Equal(attempt.FinishedAt) || retained.State != attempt.State {
+			if retained == nil || !retained.LogsComplete || !retained.FinishedAt.Equal(attempt.FinishedAt) || retained.State != attempt.State || retained.CacheOutcome != attempt.CacheOutcome {
 				t.Fatalf("completion differs from final retained evidence: event=%+v retained=%+v", attempt, retained)
 			}
 			if attempt.Task != "shared" {
+				if attempt.CacheOutcome != "" {
+					t.Fatalf("uncached execution reported a cache outcome: %+v", attempt)
+				}
 				continue
+			}
+			if want := []string{"miss", "hit"}[run]; attempt.CacheOutcome != want {
+				t.Fatalf("cache outcome=%q want %q in completed attempt", attempt.CacheOutcome, want)
 			}
 			data, err := os.ReadFile(attempt.LogPath)
 			if err != nil {

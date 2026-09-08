@@ -217,10 +217,12 @@ environment declarations do not select this presentation.
 devflow run verify --ci --json
 ```
 
-Task/cache lifecycle messages appear live on stderr. After an attempt's callbacks
-and registered output writers finish, its retained log is streamed inside one
+Task starts and other lifecycle messages appear live on stderr. After an attempt's
+callbacks and registered output writers finish, its retained log is streamed inside one
 ordinary `::group::` / `::endgroup::` pair. Titles contain the task, textual final
 state and recorded duration, for example `frontend:lint | SUCCESS | 1.8s`.
+A recorded cache miss adds ` | CACHE MISS` to that title. Group headers replace
+standalone `done` and cache-miss messages; stamps and uncached tasks have no miss tag.
 `done` is displayed as `SUCCESS`; cached, skipped, blocked, canceled and other
 states keep their meanings. Durations use retained attempt timestamps, including
 cache decisions or service lifetime, never time spent replaying logs. Missing
@@ -236,8 +238,9 @@ collector independent of slow replay. When full, live updates are deferred and
 every remaining attempt is recovered from final retained evidence. The CLI waits
 for final output to drain; task execution does not wait for group replay.
 
-`--progress states` keeps lifecycle messages and failure annotations without
-full log replay. `quiet` suppresses progress, groups and annotations, preserving
+`--progress states` keeps lifecycle messages, including `done` and cache misses,
+and failure annotations without full log replay. `quiet` suppresses progress,
+groups and annotations, preserving
 final results/errors. Failed attempts get one intentional error annotation using
 their actual failure; stderr text alone never creates annotations. Child group
 markers become visible labels and other workflow-command delimiters become
@@ -282,7 +285,7 @@ devflow runs cancel <run-id> --json
 devflow logs <task> --run <run-id> --attempt <attempt-id> --tail 100 --json
 ```
 
-These commands, `prompts`, and ordinary `logs` inspection do not compile or load the adapter. They accept `--worktree` or `--instance`, so retained evidence remains accessible after adapter compilation breaks. `runs list --json` returns `instanceId` and run summaries; `runs show --json` returns the retained record plus `prompts`. A run record includes project/target/mode, timestamps, deadline, graph digest, compiled adapter digest, attempts and the available final `result`. Each attempt records its task, identity, timestamps, outcome, log path, failure details, and the cache/input key when computed. `executed` distinguishes callback execution from cache/stamp skips. Group nodes and tasks never started by the scheduler have no attempt record. A successful historical result describes the inputs consumed in that run; it does not certify later edits.
+These commands, `prompts`, and ordinary `logs` inspection do not compile or load the adapter. They accept `--worktree` or `--instance`, so retained evidence remains accessible after adapter compilation breaks. `runs list --json` returns `instanceId` and run summaries; `runs show --json` returns the retained record plus `prompts`. A run record includes project/target/mode, timestamps, deadline, graph digest, compiled adapter digest, attempts and the available final `result`. Each attempt records its task, identity, timestamps, outcome, log path, failure details, and the cache/input key when computed. Optional `cacheOutcome` records `hit` or `miss` after a cache decision; it is absent for stamps, uncached tasks and failures before that decision. `executed` distinguishes callback execution from cache/stamp skips. Group nodes and tasks never started by the scheduler have no attempt record. A successful historical result describes the inputs consumed in that run; it does not certify later edits.
 
 Run states are `queued`, `running`, `waiting`, `succeeded`, `failed` and `canceled`. A run remains `waiting` while any of its parallel tasks has a pending prompt. `runs cancel` returns `accepted: true` after recording a request for that exact run. The owner stops its resources and writes the terminal result; canceling an old run never targets a replacement development session. Unknown or pruned IDs report `unknown_run` or `run_expired`; a terminal run rejects cancellation with `run_not_active`. Status remains the current development view, while `runs show` supplies historical results. `runs list/show` include `ownerAlive` for nonterminal records with a recorded owner PID. When it is `false`, the interrupted record can remain nonterminal; cancellation acceptance proves neither cleanup nor that a final result will arrive.
 
