@@ -109,6 +109,13 @@ Running bare `devflow` now acts as the default operator entry path:
 
 There is currently no built-in adapter fallback. Missing `devflow.project.go` is a hard error.
 
+For adapters using `b.DotEnv(".env")` or `LoadOptionalDotEnvInWorktree`, missing
+relative dotenv files in a linked Git worktree fall back to the corresponding
+main-checkout files when instance configuration loads. Existing local files win,
+including empty files. This applies to normal startup and configuration inspection
+such as `doctor`; JSON shapes and environment precedence are unchanged. See the
+[dotenv contract](../docs_users/adapter-guide.md#dotenv-loading).
+
 `run` provisions an instance, executes the target closure, and restores cacheable one-shot tasks when possible.
 
 Only one execution may own a worktree at a time. Direct `run --ci` remains daemon-independent, but returns a nonzero `resource_conflict` if a watcher or another run owns that worktree. Rejected execution leaves its owner's task status, task logs, environment and outputs intact. `cache key` (which prepares instance configuration) and direct `cache invalidate` use the same admission boundary. Status/graph/log inspection remains available; existing parallel tasks within one DAG are unaffected.

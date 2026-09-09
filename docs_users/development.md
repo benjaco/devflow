@@ -30,6 +30,12 @@ devflow flush up --json
 
 If `flush` fails, inspect `issues`, `nodes`, `services`, and referenced log paths before retrying.
 
+When the adapter declares `b.DotEnv(".env")`, a new linked Git worktree can start
+without its own `.env`: Devflow reads the main checkout's file instead. Create a
+local `.env` for worktree-specific values; an existing file, including an empty
+one, replaces the fallback completely. Instance state and managed runtime values
+remain specific to the linked worktree.
+
 ## Service Lifecycle
 
 One execution owns each worktree. A running watcher and `run --ci` cannot overlap there: the second executor returns `resource_conflict` without replacing the first one's task status, logs or outputs. For independent checks, use another worktree containing your changes, or explicitly stop development first. A stop timeout retains ownership. Abandoned execution requires confirmed resource cleanup before a new run; `stop --all --json` reports resources it cannot safely reconcile.

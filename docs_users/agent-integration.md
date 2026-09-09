@@ -28,6 +28,11 @@ Successful upgrades clear the global task artifact cache; `upgrade --json` repor
 
 Because project graph definitions are Go code, Go is expected to be available on machines where agents use Devflow.
 
+For adapters declaring `b.DotEnv(".env")`, a linked Git worktree without that file
+automatically reads the main checkout's `.env` during configuration. No manual
+copy is needed. A local file wins completely, including an empty file; task state,
+managed ports and database values remain specific to the linked worktree.
+
 `devflow docs setup` prints only the bundled setup/pipeline Markdown docs for the installed version. `devflow docs development` prints only the day-to-day CLI/TUI/operator docs. Both commands intentionally have no JSON mode. Use the scoped docs command that matches the task instead of fetching all docs or browsing the repository.
 
 The intended sequencing is:

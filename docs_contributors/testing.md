@@ -30,6 +30,13 @@ is portable, while a colon in a declared output filename is not.
 
 ## Unit Tests
 
+Keep scenario-defining setup, execution and assertions visible in tests. Helpers
+should have one responsibility, such as running one Git command or writing one
+file. In worktree dotenv tests, repository/worktree creation, the location and
+contents of each `.env`, the loader/engine call and expected values stay inline.
+The engine cases separately cover first startup, a local override on the next
+run, and persisted/process/managed environment precedence.
+
 - graph validation and closures
 - exhaustive topological-order enumeration with explicit combinatorial bounds
 - pathspec glob expansion equivalence, longest-literal-prefix scan scope, root-level fallback, native separator normalization, deterministic ordering, missing-prefix behavior, relevant-subtree errors, directory-symlink no-follow behavior, and absolute/volume/parent traversal rejection; retain a benchmark proving a prefixed glob is insensitive to a large irrelevant sibling tree
@@ -74,6 +81,7 @@ is portable, while a colon in a declared output filename is not.
 - Prisma schema/migration inspection and nearest-prefix snapshot planning coverage
 - PayloadCMS/Postgres example coverage for project detection, graph shape, migration apply command wiring, watch pickup for collection/global module edits, app restarts with schema push enabled only for the initial/schema-changing starts, deleted-field schema edits that create a migration only after a confirmation prompt, and retry after a fake Payload/npm zero exit that writes no migration
 - dotenv parsing and merged runtime-env coverage proving declared invoking-process values override defaults while devflow-managed ports/database URLs win last
+- real-Git dotenv fallback coverage for missing linked-worktree files, existing/empty/malformed local files, nested paths and declaration order, absolute/outside-root paths, missing Git/files, bare and separate-metadata layouts, Git routing env, and symlink/newline paths where supported; engine coverage must prove runtime/persisted values, env precedence, linked instance ownership and no copied or modified dotenv files
 - CLI JSON output shape, including detached `accepted`/`daemonStarted`/`daemonPid`/`ready`/`state` fields and `daemon` status metadata, command-level lifecycle coverage for `run`, lossless burst CI stderr progress with stdout-only final failure diagnostics, bounded early-marker and generic process-exit excerpts, Go test/compiler classification, non-overlapping windows, trigger retention under aggregate caps, and atomic repository repair with clean/no-change runs, exact literal/magic-pathspec commits and committed blob contents, out-of-pathspec untracked files left uncommitted, default CRLF/LF-only exclusion from permitted and unexpected paths, pre-staged line-ending cleanup, mixed substantive commits, pedantic byte-sensitive opt-in, HEAD-derived identity, DAG failure, dirty preflight, unexpected tracked paths, push partial failure, and deliberate fail-after-commit, plus `status`, task/`daemon`/`tui` logs, `instances`, target-scoped required-env doctor/strict exits, cache key/path/manifest handoff, and `stop`
 - published-module CLI coverage materializes embedded `.txt` fixture templates into `t.TempDir`; nested `go.mod` files must never be read from repository-relative example directories because the module-zip format excludes nested modules
 - validation sandbox coverage for declared-input sufficiency, transitive dependency-output transfer without a second expanded copy, read-only Go-module-like trees, large preserved pnpm symlink layouts, external symlink rejection, undeclared/missing outputs, bounded summary/issues JSON with exact counts and exhaustive full mode, stderr phase/counter progress, shared multi-phase budget exhaustion, disk reserve reporting, cancellation and writable cleanup, source/cache immutability, output-owner collisions, service rejection, every dependency-valid sequential order, missing dependency edges, cross-order artifact mismatches, order-limit refusal, real-worktree non-mutation, and stable stdout-only final JSON; the compiled-CLI bootstrap test must also load a project-local adapter and prove both artifact and missing-order-dependency findings end to end

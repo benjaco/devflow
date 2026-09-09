@@ -374,6 +374,22 @@ b.DotEnv(".env")
 b.Env("DEVFLOW_PROJECT", "my-project")
 ```
 
+In a linked Git worktree, a missing relative dotenv file is read from the same
+location in the main checkout. For example, `b.DotEnv(".env")` uses the main
+checkout's untracked `.env` when the linked worktree has none. No copy is created.
+An existing local file is loaded instead, including an empty file; local read or
+parse errors are reported. An empty file suppresses fallback loading, but does not
+clear previously persisted instance values from normal environment layering.
+Multiple declarations still load in order, with `b.Env(...)` overrides applied
+afterward.
+
+The shared `project.LoadOptionalDotEnvInWorktree` helper has the same behavior.
+Nested project directories map to the corresponding directory in the main
+checkout. Absolute paths remain literal, and paths outside the Git root do not
+fall back. If Git or a usable main checkout is unavailable, or neither file exists,
+the optional file contributes no values. Bare repositories have no main-checkout
+fallback. Only declared dotenv files are loaded.
+
 ### Runtime Env, Tests, And Secrets
 
 `InstanceConfig.Env` becomes the runtime environment for tasks and is persisted under `.devflow/state`. That makes runtime recovery and detached supervision deterministic, but it also means adapters should treat this env as local state, not as a secret vault.

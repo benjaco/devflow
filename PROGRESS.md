@@ -1,18 +1,36 @@
 # Progress
 
-Last updated: 2026-09-08
+Last updated: 2026-09-09
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: Windows Delve/TUI exit-boundary audit and TUI exit-reason diagnostics are locally complete. The reported spontaneous Windows exit remains unconfirmed. PR #15 fixture cleanup correction remains ready for review; Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: full normal suite, TUI/process race checks, vet, build/examples, version JSON and Windows TUI test compilation pass for exit diagnostics. Native Windows reproduction remains external; prior PR #15 validation is recorded below.
+- State: dotenv test readability review is complete on `088838e`; setup, execution and assertions are visible in each scenario. Go 1.27.1 and Delve 1.27.1 remain the baseline.
+- Confidence: the rewritten tests pass focused/full normal and race suites, vet, Staticcheck and Linux/Windows compilation; removing fallback through a temporary build overlay produces the expected missing-value failures.
 
 ## In Progress
 
-- None. Next diagnostic step: reproduce the watched Go restart on Windows with the new TUI exit reason, terminal/IDE identity and debugger attachment state.
+- None. Changes remain uncommitted for review; recovery stash `20149f1` and `/tmp/devflow-pre-rebase-20260909-bn5wphl6` remain available.
 
 ## Completed
+
+- Dotenv test readability review:
+  - replaced hidden multi-step Git fixtures and aggregate assertions with visible repository/worktree setup, dotenv writes, loader/engine calls and expected values; helpers only run one command, write one file or isolate Git environment
+  - gave loader cases independent fixtures and behavioral names; split engine coverage into first-ever startup, local override on a subsequent run, and persisted/process/adapter/managed precedence
+  - ran the new first-start and loader tests against the committed loader without fallback using a temporary Go build overlay: both failed because the expected main values were absent; evidence: `/tmp/devflow-dotenv-readable-red-kulr415y/result.log`
+  - passed focused tests/race checks, `go test -count=1 ./...`, `go test -race -count=1 ./...`, vet, Staticcheck v0.8.1, formatting/diff checks and Linux/Windows amd64 project/engine test compilation; logs: `/tmp/devflow-dotenv-readable-*.log`
+  - production code was unchanged during this review; recorded the user's preference for visible test steps and single-purpose helpers in contributor testing guidance and durable memory
+
+- Linked-worktree dotenv fallback and recovery onto current main:
+  - `LoadOptionalDotEnvInWorktree` reads an absent declared relative file from the corresponding main-checkout path; existing local files (including empty files), absolute paths, and read/parse errors retain their meaning
+  - discover and validate the main checkout through Git's NUL-delimited worktree records with a bounded lookup; never borrow from sibling worktrees, bare repositories, Git metadata, or paths outside the Git root
+  - preserve environment precedence and linked-worktree execution/state ownership; no dotenv files are copied or changed, and an empty local file suppresses fallback without clearing persisted recovery values
+  - real-Git loader/engine regressions cover fallback, local overrides/errors, nested paths, declaration/env layering, missing Git/files, metadata layouts, routing env and supported unusual paths; before the fix, the loader returned no main values and the engine retained the old persisted value
+  - original `b46220f` validation passed focused/full normal and race suites, vet/build, Staticcheck v0.8.1, govulncheck v1.6.0, tidy/format/diff checks, version JSON, examples, and Linux/Windows amd64 project/engine test compilation plus CLI builds
+  - original isolated compiled-CLI `doctor`, detached `watch`, `flush`, and finite `run --ci` proved fallback then local override with valid JSON; evidence remains in `/tmp/devflow-worktree-env-demo-ovjzy27y`
+  - recovered architecture, testing, durable-memory and ledger additions without replacing newer main documentation; removed the duplicate `/tmp/` ignore entry. Native Linux/Windows execution remains a CI check
+  - current `088838e` validation passed the focused dotenv regressions, `go test -count=1 ./...`, `go test -race -count=1 ./...`, vet/build, Staticcheck v0.8.1, govulncheck v1.6.0, tidy/format/diff checks, version JSON, the nested example build, and Linux/Windows amd64 project/engine test compilation plus CLI builds; logs: `/tmp/devflow-rebase-dotenv-*.log`
+  - reran the isolated compiled worktree demo on current main: `doctor`, `watch`, `flush`, `status`, `stop` and `run --ci` returned valid JSON and proved fallback/local override with current run evidence; artifacts: `/tmp/devflow-rebase-dotenv-demo-smydfnaq`. No pushes, installations or existing-service operations
 
 - Windows Delve/TUI exit-boundary audit and diagnostic improvement:
   - traced build/start errors, readiness failure, service-generation exit handling, Windows tree termination and TUI-owned daemon cleanup; no direct restart-error path to a successful TUI exit was found. Existing early-exit, watch-restart, failed-readiness/independent-service and panic regressions pass
