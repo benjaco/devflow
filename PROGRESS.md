@@ -5,20 +5,28 @@ Last updated: 2026-09-09
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: Windows malformed-main-dotenv test correction is locally complete on `feature/feat/linked-worktree-dotenv` at `d701b60`; the diagnostic now proves source-file identity without requiring the fixture's original path spelling.
-- Confidence: reproduced the assertion failure locally before fixing it; focused/full normal and race suites, vet, Staticcheck and Windows test compilation pass. Native Windows confirmation remains a CI check.
+- State: PR #17's Windows ownership-test deadline correction is implemented and locally verified; native Windows confirmation awaits CI. The run at `9616a60` already passed dotenv.
+- Confidence: controlled-delay reproduction failed before the correction and passed afterward; full normal/race suites, quality gates and Linux/Windows test compilation pass. Production admission and existing assertions are unchanged.
 
 ## In Progress
 
-- None. Test correction and documentation are uncommitted for review; no production changes or remote workflow runs.
+- None. The focused local correction is ready for review.
 
 ## Completed
+
+- PR #17 Windows ownership-test deadline correction:
+  - pulled [run `34407291406`, job `102653211221`](https://github.com/benjaco/devflow/actions/runs/34407291406/job/102653211221): `pkg/project` passed, but `TestExecutionOwnershipRejectsBeforeMutation/watch_ci` returned deadline exceeded instead of `resource_conflict`
+  - fifty unchanged local repetitions passed; a temporary Go overlay adding a 250 ms pause reproduced the 150 ms execution deadline failure in all three mode combinations before changing the fixture
+  - keep the owner held by its existing barrier; use a cancelable contender context with a separate five-second test watchdog, cancel/join it before owner release, and retain every conflict, callback and file-preservation assertion. No production changes or new helpers
+  - the same controlled delay passed ten repetitions after correction; focused race repetitions, `go test -count=1 ./...`, `go test -race -count=1 ./...`, vet, Staticcheck v0.8.1, govulncheck v1.6.0, tidy-diff, builds/examples, version JSON and Linux/Windows amd64 engine-test compilation passed
+  - tracked Go formatting and diff checks passed; repository-wide formatting also lists the pre-existing ignored `tmp/cm-devflow-action-inspection-evidence/devflow.project.go`, which remains untouched. Evidence: `/tmp/devflow-pr17-ownership-delay-ukapvkap/{red,green}.log` and `/tmp/devflow-pr17-ownership-*.log`; see the ownership verification note
+  - updated testing guidance and durable memory; local changes only, with no commits, pushes, workflow triggers, installations or existing-service operations. Native Windows execution of this fixture correction remains a CI check
 
 - Windows dotenv diagnostic path assertion:
   - the reported failure contained the correct parse error, but the test required its path to contain the fixture's literal spelling; retained a dot segment in the fixture filename to reproduce this false failure on every platform before changing the assertion
   - assert the exact parse-error prefix, line number and reason, then compare the reported and fixture files through inline `os.Stat`/`os.SameFile`; preserve source-file coverage across equivalent path spellings without changing the loader
   - passed the corrected regression, focused race coverage, `go test -count=1 ./...`, `go test -race -count=1 ./...`, `go vet ./...`, Staticcheck v0.8.1 for `pkg/project`, Windows amd64 project-test compilation and formatting/diff checks; evidence: `/tmp/devflow-windows-dotenv-path-{red,green,focused-race,full,race}.log`
-  - updated testing guidance and durable memory; native Windows runtime confirmation awaits CI
+  - updated testing guidance and durable memory; native Windows `pkg/project` passed in run `34407291406` at `9616a60`
 
 - Dotenv test readability review:
   - replaced hidden multi-step Git fixtures and aggregate assertions with visible repository/worktree setup, dotenv writes, loader/engine calls and expected values; helpers only run one command, write one file or isolate Git environment

@@ -107,13 +107,35 @@ func TestExecutionOwnershipRejectsBeforeMutation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			attemptCtx, stop := context.WithTimeout(context.Background(), 150*time.Millisecond)
-			defer stop()
-			req := Request{Target: "verify", Worktree: root, Mode: modes[1]}
-			if modes[1] == api.ModeWatch {
-				err = contender.Watch(attemptCtx, req)
-			} else {
-				_, err = contender.Run(attemptCtx, req)
+			// The owner barrier proves contention. A short operation deadline can
+			// expire during run-record I/O before the ownership check is reached.
+			attemptCtx, stop := context.WithCancel(context.Background())
+			attemptDone := make(chan struct{})
+			var attemptErr error
+			// Cleanup joins the contender before the earlier owner cleanup releases
+			// its lease, including when the watchdog below fails the test.
+			t.Cleanup(func() {
+				stop()
+				select {
+				case <-attemptDone:
+				case <-time.After(5 * time.Second):
+					t.Error("contender did not exit after cancellation")
+				}
+			})
+			go func() {
+				defer close(attemptDone)
+				req := Request{Target: "verify", Worktree: root, Mode: modes[1]}
+				if modes[1] == api.ModeWatch {
+					attemptErr = contender.Watch(attemptCtx, req)
+				} else {
+					_, attemptErr = contender.Run(attemptCtx, req)
+				}
+			}()
+			select {
+			case <-attemptDone:
+				err = attemptErr
+			case <-time.After(5 * time.Second):
+				t.Fatal("contender did not reject the active owner")
 			}
 			var conflict *execution.ConflictError
 			if !errors.As(err, &conflict) || conflict.Code() != "resource_conflict" {

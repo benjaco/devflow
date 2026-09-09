@@ -74,3 +74,23 @@ go test ./internal/cli -run 'TestUpgrade|TestDefaultLaunchPlan|TestDaemonLogsDoN
 ```
 
 Final validation results are recorded in `PROGRESS.md`. Native Linux/Windows CI and opt-in Docker checks are separate from local macOS execution; cross-compilation does not prove OS runtime behavior. No existing user development services or external project files are used by these tests.
+
+## PR #17 Windows fixture deadline
+
+At `9616a60`, [Windows job 102653211221](https://github.com/benjaco/devflow/actions/runs/34407291406/job/102653211221)
+passed `pkg/project` but failed `TestExecutionOwnershipRejectsBeforeMutation/watch_ci`
+with `context deadline exceeded` instead of `resource_conflict`. The fixture gave
+the contender a 150 ms execution deadline. Run-record creation and cancellation
+observation precede the ownership check, which correctly honors an expired context.
+
+Fifty unchanged local repetitions passed. A temporary Go overlay then inserted a
+250 ms pause after starting the contender context and before invoking the engine.
+All three mode combinations reproduced the reported deadline error. The corrected
+fixture uses a cancelable execution context, a separate five-second test watchdog,
+and cleanup that cancels and joins the contender before releasing the owner.
+Conflict, callback and owner-file assertions remain unchanged.
+
+The same controlled pause passed ten repetitions after the correction. No pause
+or timing injection is present in the repository test source. Reproduction output
+is retained under `/tmp/devflow-pr17-ownership-delay-ukapvkap`; the downloaded
+Windows log is `/tmp/devflow-pr17-windows-current.log`.
