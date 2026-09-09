@@ -411,6 +411,12 @@ Recommended precedence:
 
 With the builder API, use `b.DotEnv(".env")` and `b.Env(...)` instead of hand-rolling env parsing. Process values are selected only for keys the project references through configured env, `InputEnv`, or `RequiredEnv`; Devflow does not persist the whole caller environment.
 
+For a linked Git worktree with no local `.env`, that declaration automatically
+reads the main checkout's `.env` at startup. This covers untracked configuration
+that `git worktree add` does not copy. An existing local file, even an empty one,
+takes precedence; Devflow reads the fallback without copying or changing it.
+Other relative dotenv declarations use the corresponding main-checkout path too.
+
 Runtime env is persisted under `.devflow/state` for daemon-owned runs, status, and relaunches. Keep `.devflow/` ignored, avoid storing long-lived production secrets in runtime env, and override service-specific values such as `PORT` for test commands when needed.
 
 ## Required CLIs

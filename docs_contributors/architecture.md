@@ -271,6 +271,20 @@ The important rule is precedence:
 
 Devflow deliberately selects only project-relevant process variables instead of persisting the entire caller environment. That allows projects to keep normal local app settings in `.env`, lets CI override those defaults, and still ensures launched processes point at the correct per-instance Postgres runtime and leased ports.
 
+`project.LoadOptionalDotEnvInWorktree` owns missing-file fallback for builder and
+custom adapters. A relative file absent from a linked worktree is read at the same
+Git-root-relative path in its main checkout. Existing local files mask fallback,
+including empty files and broken symlinks; read/parse errors remain errors. This
+changes only configuration defaults, leaving env precedence, instance identity,
+state writes and process environment ownership intact.
+
+Discovery uses Git's NUL-delimited worktree listing, whose first record identifies
+the main checkout, and validates that the candidate is an actual checkout rather
+than metadata. It does not derive a checkout from the common Git directory.
+Bare repositories, unavailable Git/main checkouts and paths outside the Git root
+have no fallback. Git discovery has a shared five-second budget and ignores
+inherited repository-routing variables so it stays bound to the selected directory.
+
 Instance env is persisted under `.devflow/state` so daemon execution, status, and relaunches can recover the same runtime configuration. Do not treat it as encrypted secret storage. Adapters should avoid storing long-lived production secrets there, avoid logging full env maps, and override runtime values such as `PORT` for unit-test tasks when those tests should not inherit the service runtime port.
 
 ## Service Supervision Boundary

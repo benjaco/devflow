@@ -12,6 +12,11 @@ Daemon-backed CLI fixtures must wait for disconnection before removing their tem
 
 Execution ownership regressions must prove rejection before configuration/callbacks and byte-for-byte preservation of the active execution's task status, logs, env and outputs. Cover CI/CI and CI/watch contention, canonical aliases and distinct worktrees, real child-process leases, stop timeouts, incomplete cleanup, owner death/recovery, daemon control separation, and action completion racing newer intent. Use channel barriers for engine transitions and subprocess handshakes for OS locking. Failed `Stop` or `Alive()==true` must prevent replacement, and terminal events must include cleanup failures. See [recorded red/green ownership cases](execution-ownership-verification.md).
 
+The ownership contender's timeout is an external test watchdog. Keep its
+execution context cancelable without a short deadline: run-record I/O can exceed
+150 ms on a busy runner before ownership admission is checked. On watchdog
+failure, cancel and join the contender before releasing the owner's barrier.
+
 Repository-repair tests use the real Git executable through argument-vector subprocesses on every supported OS. Test repositories isolate system/global Git configuration, use Git environment identity only for the baseline commit, then clear it to prove HEAD-derived attribution. Line-ending coverage writes exact LF/CRLF bytes through Go, including a DAG-prestaged path, and must prove default exclusion from both permitted and unexpected sets, mixed-commit membership, substantive-content preservation, and `--pedantic` opt-in. Use native temporary paths and Git pathspec magic directly; do not replace the coverage with shell scripts or a fake Git parser.
 
 TUI tests render simulation screens at 60x24, 80x24, 100x12, 100x30, the 119/120-column desktop-layout boundary, 140x40, and 180x50. They cover help/modal key routing, focus, persistent action errors, stable ordering, every lifecycle badge, bounded log tails, pause/resume/task-switch following, detached quit guidance, compact vertical layout, and wide left-task/right-log geometry. The first-draw, lifecycle-overlay, durable paused-log, and recovered-background-panic regressions must call `tview.Application.Run` on a simulation screen, wait with a bounded timeout, exercise real application events/queued refreshes, and assert screen finalization; calling layout or key helpers directly is not lock-faithful. Panic coverage must also assert the owner-only per-instance TUI diagnostic contains the panic, and a subprocess test must prove an unrecovered dependency-goroutine panic is duplicated by the Go runtime crash hook. Preview tests prove Escape is consumed without exiting, the prior pane/selection/viewport is restored, Enter executes once, and dashboard navigation resumes. Retarget tests exercise the real vertical list with enough targets to scroll and a long selected name. The paused-log event-loop fixture uses 500 numbered lines, multiple full and temporarily incomplete refreshes, older/no-older `o` paths, and f/End/G resume; it asserts the absolute logical top line remains visible and the title remains PAUSED. Keep lifecycle execution tests below the TUI layer as well; a presentation test alone cannot prove that an unrelated service survives.
@@ -22,6 +27,12 @@ Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS
 
 Cache manifest output paths use native separators after normalization. Keep slash-form adapter declarations in fixtures, but build native expected paths with `filepath.Join`; continue verifying restored bytes. Cross-compilation alone cannot catch a Windows path assertion mismatch.
 
+Git-resolved diagnostic paths can use a different spelling from fixture paths,
+including Windows short/long path aliases. When the contract identifies an
+existing file, assert its identity with `os.Stat`/`os.SameFile` after checking the
+diagnostic format. The malformed-main-dotenv regression retains a dot segment in
+its fixture filename to exercise equivalent path spellings on every platform.
+
 Logical task names are not filesystem components. Cache tests must exercise
 colon names, case/punctuation distinctions, Windows device names, trailing dots,
 and long names through snapshot, restore, listing, GC and invalidation on every
@@ -29,6 +40,13 @@ OS. Keep platform-specific output-filename tests separate: a colon in a task nam
 is portable, while a colon in a declared output filename is not.
 
 ## Unit Tests
+
+Keep scenario-defining setup, execution and assertions visible in tests. Helpers
+should have one responsibility, such as running one Git command or writing one
+file. In worktree dotenv tests, repository/worktree creation, the location and
+contents of each `.env`, the loader/engine call and expected values stay inline.
+The engine cases separately cover first startup, a local override on the next
+run, and persisted/process/managed environment precedence.
 
 - graph validation and closures
 - exhaustive topological-order enumeration with explicit combinatorial bounds
@@ -74,6 +92,7 @@ is portable, while a colon in a declared output filename is not.
 - Prisma schema/migration inspection and nearest-prefix snapshot planning coverage
 - PayloadCMS/Postgres example coverage for project detection, graph shape, migration apply command wiring, watch pickup for collection/global module edits, app restarts with schema push enabled only for the initial/schema-changing starts, deleted-field schema edits that create a migration only after a confirmation prompt, and retry after a fake Payload/npm zero exit that writes no migration
 - dotenv parsing and merged runtime-env coverage proving declared invoking-process values override defaults while devflow-managed ports/database URLs win last
+- real-Git dotenv fallback coverage for missing linked-worktree files, existing/empty/malformed local files, nested paths and declaration order, absolute/outside-root paths, missing Git/files, bare and separate-metadata layouts, Git routing env, and symlink/newline paths where supported; engine coverage must prove runtime/persisted values, env precedence, linked instance ownership and no copied or modified dotenv files
 - CLI JSON output shape, including detached `accepted`/`daemonStarted`/`daemonPid`/`ready`/`state` fields and `daemon` status metadata, command-level lifecycle coverage for `run`, lossless burst CI stderr progress with stdout-only final failure diagnostics, bounded early-marker and generic process-exit excerpts, Go test/compiler classification, non-overlapping windows, trigger retention under aggregate caps, and atomic repository repair with clean/no-change runs, exact literal/magic-pathspec commits and committed blob contents, out-of-pathspec untracked files left uncommitted, default CRLF/LF-only exclusion from permitted and unexpected paths, pre-staged line-ending cleanup, mixed substantive commits, pedantic byte-sensitive opt-in, HEAD-derived identity, DAG failure, dirty preflight, unexpected tracked paths, push partial failure, and deliberate fail-after-commit, plus `status`, task/`daemon`/`tui` logs, `instances`, target-scoped required-env doctor/strict exits, cache key/path/manifest handoff, and `stop`
 - published-module CLI coverage materializes embedded `.txt` fixture templates into `t.TempDir`; nested `go.mod` files must never be read from repository-relative example directories because the module-zip format excludes nested modules
 - validation sandbox coverage for declared-input sufficiency, transitive dependency-output transfer without a second expanded copy, read-only Go-module-like trees, large preserved pnpm symlink layouts, external symlink rejection, undeclared/missing outputs, bounded summary/issues JSON with exact counts and exhaustive full mode, stderr phase/counter progress, shared multi-phase budget exhaustion, disk reserve reporting, cancellation and writable cleanup, source/cache immutability, output-owner collisions, service rejection, every dependency-valid sequential order, missing dependency edges, cross-order artifact mismatches, order-limit refusal, real-worktree non-mutation, and stable stdout-only final JSON; the compiled-CLI bootstrap test must also load a project-local adapter and prove both artifact and missing-order-dependency findings end to end
