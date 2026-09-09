@@ -5,14 +5,20 @@ Last updated: 2026-09-09
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: dotenv test readability review is complete on `088838e`; setup, execution and assertions are visible in each scenario. Go 1.27.1 and Delve 1.27.1 remain the baseline.
-- Confidence: the rewritten tests pass focused/full normal and race suites, vet, Staticcheck and Linux/Windows compilation; removing fallback through a temporary build overlay produces the expected missing-value failures.
+- State: Windows malformed-main-dotenv test correction is locally complete on `feature/feat/linked-worktree-dotenv` at `d701b60`; the diagnostic now proves source-file identity without requiring the fixture's original path spelling.
+- Confidence: reproduced the assertion failure locally before fixing it; focused/full normal and race suites, vet, Staticcheck and Windows test compilation pass. Native Windows confirmation remains a CI check.
 
 ## In Progress
 
-- None. Changes remain uncommitted for review; recovery stash `20149f1` and `/tmp/devflow-pre-rebase-20260909-bn5wphl6` remain available.
+- None. Test correction and documentation are uncommitted for review; no production changes or remote workflow runs.
 
 ## Completed
+
+- Windows dotenv diagnostic path assertion:
+  - the reported failure contained the correct parse error, but the test required its path to contain the fixture's literal spelling; retained a dot segment in the fixture filename to reproduce this false failure on every platform before changing the assertion
+  - assert the exact parse-error prefix, line number and reason, then compare the reported and fixture files through inline `os.Stat`/`os.SameFile`; preserve source-file coverage across equivalent path spellings without changing the loader
+  - passed the corrected regression, focused race coverage, `go test -count=1 ./...`, `go test -race -count=1 ./...`, `go vet ./...`, Staticcheck v0.8.1 for `pkg/project`, Windows amd64 project-test compilation and formatting/diff checks; evidence: `/tmp/devflow-windows-dotenv-path-{red,green,focused-race,full,race}.log`
+  - updated testing guidance and durable memory; native Windows runtime confirmation awaits CI
 
 - Dotenv test readability review:
   - replaced hidden multi-step Git fixtures and aggregate assertions with visible repository/worktree setup, dotenv writes, loader/engine calls and expected values; helpers only run one command, write one file or isolate Git environment

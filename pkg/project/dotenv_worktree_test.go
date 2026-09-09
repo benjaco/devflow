@@ -287,10 +287,29 @@ func TestDotEnvWorktreeReadErrorsAreReported(t *testing.T) {
 		dotenvGit(t, main, "init")
 		dotenvGit(t, main, "-c", "user.name=Devflow Test", "-c", "user.email=devflow@example.com", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "fixture")
 		dotenvGit(t, main, "worktree", "add", "--detach", linked, "HEAD")
-		path := filepath.Join(main, ".env")
+		// Git may report another spelling of the same file, including Windows long
+		// paths. A dot segment exercises that distinction on every test platform.
+		path := main + string(filepath.Separator) + "." + string(filepath.Separator) + ".env"
 		writeDotEnvFile(t, path, "invalid dotenv line\n")
-		if env, err := LoadOptionalDotEnvInWorktree(linked, ".env"); err == nil || !strings.Contains(err.Error(), path) {
-			t.Fatalf("main parse error hidden: %v %v", env, err)
+		env, err := LoadOptionalDotEnvInWorktree(linked, ".env")
+		if err == nil {
+			t.Fatalf("expected malformed main dotenv error, got env=%v", env)
+		}
+		reportedPath, hasPrefix := strings.CutPrefix(err.Error(), "parse ")
+		reportedPath, hasSuffix := strings.CutSuffix(reportedPath, ":1: missing '='")
+		if !hasPrefix || !hasSuffix {
+			t.Fatalf("expected missing '=' on line 1 of main dotenv, got %v", err)
+		}
+		reportedFile, statErr := os.Stat(reportedPath)
+		if statErr != nil {
+			t.Fatalf("cannot inspect reported dotenv path %q: %v", reportedPath, statErr)
+		}
+		fixtureFile, statErr := os.Stat(path)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		if !os.SameFile(reportedFile, fixtureFile) {
+			t.Fatalf("parse error identifies %q; want the same file as %q", reportedPath, path)
 		}
 	})
 }
