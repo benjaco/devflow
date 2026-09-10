@@ -1,18 +1,32 @@
 # Progress
 
-Last updated: 2026-09-10
+Last updated: 2026-09-11
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: automatic project-version startup and optional project upgrades are implemented and locally verified; ready for review and native CI.
-- Confidence: full normal/race suites, quality gates, compiled CLI/module-proxy regressions and actual-terminal accept/decline checks pass on macOS with Go 1.27.1; Linux/Windows amd64 cross-compilation passes.
+- State: compact attention layout implemented and locally verified.
+- Confidence: terminal resize/toggle smoke, TUI tests, full race tests, normal-suite retry, quality gates and Linux/Windows cross-builds pass. The first unrestricted normal run hit an unchanged watcher timing test; see verification below.
 
 ## In Progress
 
 - None. Local implementation and verification are complete.
 
 ## Completed
+
+- Compact attention layout:
+  - instance and state/name task list share a 4–7-row top strip above full-width, borderless logs; prioritize target/mode and hide verbose instance metadata. Keep footer action status and logs visible down to 40×10
+  - reuse panes through mode switches, reset only the instance header scroll, and clamp the task viewport so shrinking the strip does not hide the selected task while its log stays open
+  - real PTY smoke covered 40×10, 60×12, 80×24, 100×24 and 180×50, mode restoration, focus changes and paused-log position. A temporary two-failure adapter used no services/ports/DB; its daemon was stopped. Evidence: `/tmp/devflow-attention-strip-smoke.log` and `/var/folders/g6/jbsk5f6s7ll59hy734gmngwc0000gq/T/devflow-attention-strip-a91shu0o`
+  - existing TUI tests pass; `go test -race -count=1 ./...` passes (CLI 133.643s). Initial `go test -count=1 ./...` passed all packages except the unchanged 300ms watcher debounce test; that test passed 10 isolated repetitions and the full `go test -p 2 -count=1 ./...` retry passes (CLI 102.632s). Logs: `/tmp/devflow-attention-strip-*`
+  - vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, native/example builds, version JSON, formatting/diff checks and Linux/Windows amd64 TUI/CLI cross-builds pass. Exact quality commands/results: `/tmp/devflow-attention-strip-quality-analysis-results.json` and `-build-results.json`; native Windows execution remains a CI check
+  - operator, CLI, architecture, manual verification guidance and durable memory updated; local uncommitted changes only
+
+- Attention-mode log copying:
+  - `a` now stacks tasks above full-width, borderless logs, preventing log borders and adjacent task cells from entering multiline terminal selections; leaving attention restores the normal border and responsive layout
+  - retain source/follow/focus information in the footer title, including focus changes, log refreshes and load failures. Keep existing log content, follow preferences, scroll handling and attention filtering
+  - passed existing TUI tests, focused TUI race tests, `go test -count=1 ./...` (CLI 152.193s), `go test -race -count=1 ./...` (CLI 144.421s), vet, Staticcheck v0.8.1, govulncheck v1.6.0, tidy-diff, builds/examples, version JSON and formatting/diff checks. Linux/Windows amd64 TUI tests and CLI binaries compile; logs: `/tmp/devflow-attention-final-*`
+  - updated operator/CLI/architecture/testing guidance and durable memory. Terminal-native selection modifiers and actual clipboard behavior remain a manual operator check; native Windows execution remains a CI check. Local changes only, without commits, pushes or existing-service operations
 
 - Upgrade project confirmation:
   - plain terminal `upgrade` asks before installation whether to update an existing canonical project pin; only completed `y`/`yes` accepts. JSON/nonterminal defaults never prompt; `--project` explicitly updates both, `--project=false` skips project inspection, and `--worktree` selects the project
@@ -1121,6 +1135,7 @@ Last updated: 2026-09-10
 
 ## Next Steps
 
+- Review the compact attention view (`a`) in the user's terminal, including native multiline log selection on a small screen.
 - Review automatic project-version selection and the upgrade project choice, confirm them on the native CI matrix, and release a launcher containing the capability before colleagues rely on pull-and-run updates.
 - Review the automatic GitHub presentation change and prepared ordinary-command smoke workflow; validate hosted rendering when a remote run is wanted.
 - Confirm the reliability changes on the native Linux/macOS/Windows CI matrix; retest the historical readiness symptom through the real daemon/TUI only if it recurs (the engine early-exit restart regression passes).

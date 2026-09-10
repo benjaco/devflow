@@ -683,7 +683,7 @@ func TestRenderHeaderIncludesStateSummary(t *testing.T) {
 		daemon: &api.DaemonStatus{PID: 55, Alive: true},
 		urls:   map[string]string{"backend": "http://localhost:8080"},
 	}
-	lines := renderHeader(snap)
+	lines := renderHeader(snap, false)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{
 		"instance",

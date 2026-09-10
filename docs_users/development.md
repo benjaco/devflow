@@ -133,16 +133,18 @@ Useful TUI keys:
 - `o`: load an older bounded block of retained log lines
 - `l`: selected task log or daemon log
 - `d`: database/Prisma panel
-- `a`: toggle the explicit active/failure attention view
+- `a`: toggle the active/failure attention view with full-width, borderless logs for copying
 - `m`: create a migration through the project migration-create action
 - `i`: immediately invalidate and rerun the selected task scope
 - `t`: choose a target, then preview and confirm retarget scope
 
 Running logs open at the live tail as `FOLLOWING`. Page Up or upward scrolling changes the view to `PAUSED`, preserves that manual position across refreshes, and never snaps back; End or `f` resumes at the latest line. The panel reports its retained line range and truncation. `o` increases the bounded retained window without reading an unbounded file into memory. Switching log sources resets following predictably.
 
-On wide terminals (at least 120 columns and 24 rows), the task selector stays on the left and the selected log fills the workspace on the right. Narrower terminals retain the stacked task-over-log layout, and unusually short terminals prioritize task navigation before showing the optional log pane.
+In the normal view on wide terminals (at least 120 columns and 24 rows), the task selector stays on the left and the selected log fills the workspace on the right. Narrower terminals retain the stacked task-over-log layout, and unusually short terminals prioritize task navigation before showing the optional log pane.
 
-Task rows remain in stable graph order while states change. The selected task/log source and focused pane are always labeled, lifecycle badges remain distinct without color, and failed/blocked/degraded rows include a concise reason. Action status has reserved footer space and remains visible until replaced or dismissed. Rerun immediately submits the daemon-scoped invalidation without confirmation. Retarget shows the daemon's stop/execute/preserve/restart plan, and Escape cancels before any process changes.
+Attention mode puts a compact instance box beside the task list in a short strip above full-width, borderless logs. The instance box leads with target and mode, omitting paths, database details, URLs and state counts; tasks show only state and name. Logs stay visible even on short screens (minimum 40×10), and multiline terminal selections do not include borders or neighboring task cells. The log source, follow state and focus indicator move to the footer title. Press `a` again to restore the normal layout. Your terminal may require its selection modifier (such as Shift or Option) to select text while TUI mouse handling is active.
+
+Task rows remain in stable graph order while states change. The selected task/log source and focused pane are always labeled, lifecycle badges remain distinct without color, and failed/blocked/degraded rows include a concise reason in the normal view. Action status has reserved footer space and remains visible until replaced or dismissed. Rerun immediately submits the daemon-scoped invalidation without confirmation. Retarget shows the daemon's stop/execute/preserve/restart plan, and Escape cancels before any process changes.
 
 The database/Prisma panel shows managed Postgres identity, the persisted `postgres`/`postgis` flavor and configured/automatic image choice, cached Prisma migration-prefix snapshots, and schema/migration drift when Prisma metadata is available. Migration authoring is explicit; normal startup does not secretly generate migrations. When you create a migration from the TUI, Devflow sends a daemon action with kind `devflow.database.migration.create`, streams task progress in the footer immediately, surfaces any declared confirmation prompts, and then relaunches the previously detached target so services come back through the graph. The same `m` action can drive non-Prisma components such as PayloadCMS when the adapter registers a migration-create action.
 

@@ -615,12 +615,12 @@ The operator console includes:
 - the database/Prisma panel flags schema/migration drift and `m` asks for a migration name, then sends a daemon action with kind `devflow.database.migration.create` through the daemon-owned engine and relaunches the previously detached target; `F4` is a backup key
 - while the TUI creates a Prisma migration, the footer status reports target/task state and the latest task output line
 - global shortcuts are disabled while text-input popups are focused, so migration names can contain normal letters
-- stable graph/topological task order; state changes never move rows, while `a` explicitly toggles an attention-only view
+- stable graph/topological task order; state changes never move rows, while `a` toggles an attention-only view: a compact instance box and state/name task list share the top strip, leaving full-width, borderless logs below for terminal copying. Target/mode remain visible; verbose instance details are hidden. Source/follow/focus context stays in the footer title
 - distinct monochrome-readable badges for waiting, starting, running, ready, restarting, cached, done, failed, canceled, blocked, stopped, degraded, and dirty states, with concise failure/block reasons
 - `i` immediately invalidates and reruns the selected task scope without a confirmation modal; the daemon still calculates and applies the scoped lifecycle action
 - `t` opens a real target chooser, previews stop/execute/preserve/start scope, then retargets only after confirmation
 - `?` opens contextual help; Tab changes task/log focus, focused panes have distinct titles/borders, and popup/input footers advertise only valid keys
-- responsive layouts place the task selector left of the log workspace at 120+ columns with at least 24 rows, retain the stacked compact layout below that breakpoint, preserve a selectable task row before hiding the optional log pane, and show a deliberate too-small fallback below 40x10
+- normal responsive layouts place the task selector left of the log workspace at 120+ columns with at least 24 rows, retain the stacked compact layout below that breakpoint, preserve a selectable task row before hiding the optional log pane, and show a deliberate too-small fallback below 40x10. Attention mode keeps both a selectable task row and logs visible at every supported size
 - popup confirm and text prompts for interactive tasks that emit `interaction_requested` events
 - primary live refresh from the daemon event subscription, with the persisted event stream at `.devflow/state/instances/<instance-id>/events.jsonl` as fallback
 
