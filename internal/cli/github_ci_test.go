@@ -284,7 +284,7 @@ func TestGitHubCISlowReplayDoesNotBlockSiblingExecution(t *testing.T) {
 			emit := rt.EventLineEmitter()
 			for i := 0; i < 2048; i++ {
 				line := fmt.Sprintf("second-retained-%04d", i)
-				if _, err := fmt.Fprintln(file, "stdout: "+line); err != nil {
+				if _, err := fmt.Fprintln(file, line); err != nil {
 					_ = file.Close()
 					return err
 				}
@@ -655,7 +655,7 @@ func TestGitHubCIRetainedLogJSONLRemainsRaw(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			t.Fatal(err)
 		}
-		if entry["runId"] != result.RunID || entry["attemptId"] != result.Nodes[0].AttemptID || entry["task"] != "check" || (i == 0 && entry["line"] != "stdout: "+childMarker) {
+		if entry["runId"] != result.RunID || entry["attemptId"] != result.Nodes[0].AttemptID || entry["task"] != "check" || (i == 0 && entry["line"] != childMarker) {
 			t.Fatalf("presentation altered raw retained log contract: %s", line)
 		}
 	}

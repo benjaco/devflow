@@ -92,7 +92,7 @@ func TestAttemptCompletionRetainsFinalCallbackOutputAndCacheEvidence(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			if run == 0 && (!attempt.Executed || !strings.Contains(string(data), "before hook\nstdout: final callback output\n")) {
+			if run == 0 && (!attempt.Executed || !strings.Contains(string(data), "before hook\nfinal callback output\n")) {
 				t.Fatalf("completion lost last callback bytes: attempt=%+v log=%q", attempt, data)
 			}
 			if run == 1 && (attempt.Executed || attempt.State != api.StateCached || strings.Contains(string(data), "callback output") || strings.Contains(string(data), "before hook")) {

@@ -499,17 +499,18 @@ func TestRuntimePrepareProgressLogsOnceAndEmitsEvent(t *testing.T) {
 	}
 
 	emitPrepareLine(PrepareOptionsFromRuntime(rt), "stdout", "database: checking cached Prisma migration snapshots")
+	emitPrepareLine(PrepareOptionsFromRuntime(rt), "stderr", "database: retry needed")
 
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	line := "stdout: database: checking cached Prisma migration snapshots"
-	if got := strings.Count(string(data), line); got != 1 {
-		t.Fatalf("expected one progress log line, got %d in:\n%s", got, string(data))
+	line := "database: checking cached Prisma migration snapshots"
+	if want := line + "\nE: database: retry needed\n"; string(data) != want {
+		t.Fatalf("retained progress = %q, want %q", data, want)
 	}
-	if got := strings.Count(strings.Join(events, "\n"), line); got != 1 {
-		t.Fatalf("expected one progress event, got %d in %#v", got, events)
+	if len(events) != 2 || events[0] != "stdout: "+line || events[1] != "stderr: database: retry needed" {
+		t.Fatalf("progress events lost original stream/payload: %#v", events)
 	}
 }
 
@@ -554,11 +555,11 @@ func TestCommandSourcePolicyRuntimePrepareOptionsDoNotDuplicateProcessLogs(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	line := "stdout: hello"
-	if got := strings.Count(string(data), line); got != 1 {
-		t.Fatalf("expected one subprocess log line, got %d in:\n%s", got, string(data))
+	line := "hello"
+	if string(data) != line+"\n" {
+		t.Fatalf("expected one unprefixed subprocess log line, got %q", data)
 	}
-	if got := strings.Count(strings.Join(events, "\n"), line); got != 1 {
+	if got := strings.Count(strings.Join(events, "\n"), "stdout: "+line); got != 1 {
 		t.Fatalf("expected one subprocess event, got %d in %#v", got, events)
 	}
 }

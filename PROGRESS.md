@@ -5,14 +5,23 @@ Last updated: 2026-09-11
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: TUI rerun shortcut changed to `r` and locally verified.
-- Confidence: existing TUI normal/race tests, full normal suite, quality checks and CLI/example builds pass.
+- State: compact retained task logs and prefix-free TUI rendering are complete: plain stdout, `E: ` for retained stderr, and red stderr in the TUI.
+- Confidence: regressions, full normal/race suites, quality/build gates and the isolated terminal smoke pass; Linux/Windows cross-builds pass.
 
 ## In Progress
 
-- None. Local implementation and verification are complete.
+- None. Local task-log changes are ready for review.
 
 ## Completed
+
+- Readable task logs:
+  - new retained logs use plain stdout/default text and `E: ` before each stderr line, shared across runtime callbacks, subprocesses and database progress. TUI logs/excerpts hide the marker and render stderr red; escape child markup, preserve blank lines and scroll anchors, and retain original live event stream/payload fields
+  - interactive output persists partial prompts immediately, separates stream changes and closes the final partial retained line after readers finish, so subsequent producers cannot merge with it. Keep prompt answers, secret suppression and process completion ownership intact; no old-prefix readers or rewriting retained attempts
+  - reproduced producer formatting, TUI coloring, database progress and partial-line append failures before fixing them; regressions cover both stream directions, multiline/blank output and unchanged events. Evidence: `/tmp/devflow-retained-writers-*`, `/tmp/devflow-log-colors-*`, `/tmp/devflow-log-format-db-*` and `/tmp/devflow-interactive-termination-*`
+  - `go test -p 2 -count=1 ./...` and `go test -race -p 2 -count=1 ./...` pass (CLI 112.322s / 133.582s), along with focused producer/TUI normal/race and CLI/failure-excerpt checks; full logs: `/tmp/devflow-log-format-{full,race}.log`
+  - isolated real-terminal smoke verified normal/attention views at 40×10 through 180×50, literal bracketed text, red stderr followed by normal stdout, exact compact retained bytes and clean fixture shutdown. Evidence: `/tmp/devflow-log-colors-smoke.log` and `/var/folders/g6/jbsk5f6s7ll59hy734gmngwc0000gq/T/devflow-log-colors-xkvzwym1`; `NO_COLOR` remains respected
+  - vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, root/CLI/example builds, version JSON, formatting/diff checks and Linux/Windows amd64 process/TUI test and CLI cross-builds pass. Commands/results: `/tmp/devflow-log-format-quality-{analysis,build}-results.json`; native Linux/Windows execution remains a CI check
+  - updated operator, adapter, CLI, architecture, verification and durable-memory documentation; local changes only, without commits, installations or existing-service operations
 
 - TUI rerun shortcut:
   - `r` replaces `i` for immediate selected-scope invalidate/rerun; F5 remains the existing alternate. Updated help/footer, existing dispatch/popup tests and current operator/CLI/testing/memory docs

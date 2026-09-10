@@ -430,6 +430,8 @@ Use dotenv values for normal app configuration, but let CI/shell values override
 
 Inside normal engine task callbacks, `Runtime.RunID` identifies the operation and `Runtime.AttemptID` identifies the current task attempt. `BeforeRun` and `Run` share that attempt; a watch rerun or service restart receives a fresh attempt. `Runtime.LogPath` points to its append-only retained log. Use `RunCmdSpec`, `StartServiceSpec`, `EmitLogLine` and registered service handles so output and cleanup remain attached to the owning attempt; do not construct or truncate a shared per-task log path.
 
+`EmitLogLine("stdout", text)` stores plain text, while `EmitLogLine("stderr", text)` marks each retained physical line with `E: `. Pass the original text to these helpers; they add the storage marker and emit the original `stream`/`line` event fields. The TUI renders stderr in red without its marker.
+
 Finite CI runs on GitHub automatically group each completed attempt's retained
 logs; adapters need no setting or GitHub-specific task wrapper. Join finite
 output producers before returning, and make a registered service's `Wait` return

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/benjaco/devflow/internal/tasklog"
 	"github.com/benjaco/devflow/pkg/api"
 )
 
@@ -197,7 +198,7 @@ func boundedEarlyExitExcerpt(path, node string, sanitizers ...func(string) strin
 		}
 		lineNumber++
 		line = sanitizeDiagnosticLine(line, sanitizers)
-		if strings.TrimSpace(stripTaskLogPrefix(line)) != "" {
+		if strings.TrimSpace(strings.TrimPrefix(line, tasklog.ErrorPrefix)) != "" {
 			ring = append(ring, diagnosticLine{number: lineNumber, text: line})
 			ringBytes += len(line) + 1
 			for len(ring) > failureExcerptFallbackLines || ringBytes > failureExcerptMaxBytes {
@@ -353,7 +354,7 @@ func truncateDiagnosticText(value string, maxBytes int) string {
 }
 
 func classifyFailureLine(line string) string {
-	line = strings.TrimSpace(stripTaskLogPrefix(line))
+	line = strings.TrimSpace(strings.TrimPrefix(line, tasklog.ErrorPrefix))
 	lower := strings.ToLower(line)
 	switch {
 	case strings.Contains(line, "--- FAIL:"):
@@ -377,15 +378,6 @@ func classifyFailureLine(line string) string {
 	default:
 		return ""
 	}
-}
-
-func stripTaskLogPrefix(line string) string {
-	for _, prefix := range []string{"stdout: ", "stderr: "} {
-		if strings.HasPrefix(line, prefix) {
-			return strings.TrimPrefix(line, prefix)
-		}
-	}
-	return line
 }
 
 func failureReasonPriority(reason string) int {
