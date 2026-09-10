@@ -292,7 +292,11 @@ func TestPlanJSONMalformedOwnerRetainsPlanAndTypedError(t *testing.T) {
 }
 
 func TestPlanJSONEnrichmentErrorsLeaveResolvedFalse(t *testing.T) {
-	t.Setenv(envLocalExec, "1")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envLocalExec, executable)
 	for _, scenario := range []string{"ownership", "configuration"} {
 		t.Run(scenario, func(t *testing.T) {
 			p := &planningCLIProject{declared: true}
@@ -340,7 +344,11 @@ func TestPlanTextShowsConflictsAndUncheckedPrerequisites(t *testing.T) {
 }
 
 func TestPlanJSONConfigurationIdentityTracksExactAdapterSources(t *testing.T) {
-	t.Setenv(envLocalExec, "1")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envLocalExec, executable)
 	p := &planningCLIProject{}
 	project.Register(p)
 	root := t.TempDir()

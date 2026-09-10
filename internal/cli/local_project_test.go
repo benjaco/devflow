@@ -301,7 +301,7 @@ func TestBootstrapFailedCompanionBuildPreservesPreviousBinary(t *testing.T) {
 
 	cmd := exec.Command(binaryPath, "graph", "list", "--json", "--project", multiFileProjectName)
 	cmd.Dir = worktree
-	cmd.Env = withEnv(os.Environ(), envLocalExec, "1")
+	cmd.Env = withEnv(os.Environ(), envLocalExec, binaryPath)
 	directOutput, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("previous local binary is no longer runnable: %v\n%s", err, directOutput)

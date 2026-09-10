@@ -11,7 +11,9 @@ require (
 	github.com/moby/moby/client v0.6.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/rivo/tview v0.42.0
+	golang.org/x/mod v0.41.0
 	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 )
 
 require (
@@ -40,6 +42,5 @@ require (
 	go.opentelemetry.io/otel v1.46.0 // indirect
 	go.opentelemetry.io/otel/metric v1.46.0 // indirect
 	go.opentelemetry.io/otel/trace v1.46.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )

@@ -12,9 +12,12 @@ Current runtime model:
 - `devflow.project.go` is the mandatory marker and entrypoint
 - regular root-level files matching `devflow_*.go` are optional companion sources
 - every `devflow_*_test.go` file is excluded from the runtime build and remains an ordinary Go test
+- the root `go.mod` Devflow requirement selects the CLI and adapter API version before command parsing; a matching `replace` directive selects its replacement
 - `devflow` compiles the discovered adapter sources together with the core CLI into a worktree-local binary
 - `devflow` then transfers execution into that local binary
 - there is currently no built-in adapter fallback
+
+Commit the root `go.mod` and `go.sum` with the adapter so colleagues use the same Devflow code after pulling. Update the pin with `go get github.com/benjaco/devflow@<version>`; the next ordinary `devflow` invocation prepares it locally without changing the global installation or tracked module files. Without a requirement, the installed version remains the default. Versioned replacements and local source replacements are supported; relative replacement paths are rooted at the project directory, and `go.work` does not select the runtime. Explicit `DEVFLOW_BOOTSTRAP_ROOT` remains the source-development override and takes precedence over the project pin.
 
 Adapter source contract:
 

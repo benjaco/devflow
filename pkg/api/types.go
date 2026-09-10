@@ -608,21 +608,33 @@ type DoctorEnvStatus struct {
 }
 
 type VersionResult struct {
-	Version     string `json:"version"`
-	ModulePath  string `json:"modulePath"`
-	GoVersion   string `json:"goVersion"`
-	VCSRevision string `json:"vcsRevision,omitempty"`
-	VCSTime     string `json:"vcsTime,omitempty"`
-	Modified    bool   `json:"modified,omitempty"`
+	Version         string `json:"version"`
+	ModulePath      string `json:"modulePath"`
+	GoVersion       string `json:"goVersion"`
+	VCSRevision     string `json:"vcsRevision,omitempty"`
+	VCSTime         string `json:"vcsTime,omitempty"`
+	Modified        bool   `json:"modified,omitempty"`
+	LauncherVersion string `json:"launcherVersion,omitempty"`
+	ProjectVersion  string `json:"projectVersion,omitempty"`
 }
 
 type UpgradeResult struct {
-	Command       []string      `json:"command"`
-	Package       string        `json:"package"`
-	VersionTarget string        `json:"versionTarget"`
-	Success       bool          `json:"success"`
-	CacheCleared  bool          `json:"cacheCleared"`
-	DurationMs    int64         `json:"durationMs"`
-	Error         *CommandError `json:"error,omitempty"`
-	Output        string        `json:"output,omitempty"`
+	Command          []string              `json:"command"`
+	Package          string                `json:"package"`
+	VersionTarget    string                `json:"versionTarget"`
+	Success          bool                  `json:"success"`
+	Installed        bool                  `json:"installed"`
+	InstalledVersion string                `json:"installedVersion,omitempty"`
+	Project          *ProjectUpgradeResult `json:"project,omitempty"`
+	CacheCleared     bool                  `json:"cacheCleared"`
+	DurationMs       int64                 `json:"durationMs"`
+	Error            *CommandError         `json:"error,omitempty"`
+	Output           string                `json:"output,omitempty"`
+}
+
+type ProjectUpgradeResult struct {
+	Worktree        string `json:"worktree"`
+	PreviousVersion string `json:"previousVersion"`
+	Version         string `json:"version,omitempty"`
+	Updated         bool   `json:"updated"`
 }

@@ -18,13 +18,25 @@ go install github.com/benjaco/devflow/cmd/devflow@latest
 devflow docs setup
 ```
 
-Updates are intentionally Go-first:
+Upgrade the installed launcher with:
 
 ```bash
 devflow upgrade
 ```
 
-Successful upgrades clear the global task artifact cache; `upgrade --json` reports `cacheCleared`. Installation failure preserves cached artifacts, and a cleanup failure is reported even if installation succeeded. APIs and worktree state follow the installed version without migrations for older formats.
+For projects with a Devflow requirement in the root `go.mod`, ordinary commands automatically use that dependency's CLI and adapter API. Matching versioned/local replacements are honored; `go.work` is not a version selector. Commit dependency updates in `go.mod`/`go.sum`, then colleagues pull and run `devflow` normally. A first preparation can download modules; cached versions are reused without changing the global installation. Everyone needs one installed-launcher update to receive this capability. No pin means the installed version is used.
+
+`devflow version --json` reports the effective project version and launcher identity without compiling the adapter or touching a daemon. Logs, retained runs, prompts and instance inspection use the selected runtime without requiring a working adapter. An explicit `DEVFLOW_BOOTSTRAP_ROOT` selects source-development code instead of the project pin; avoid leaving this override set during ordinary project work.
+
+JSON and nonterminal upgrades never prompt and leave the project pin unchanged by default. For an authorized update of both the launcher and the project's existing pin, use:
+
+```bash
+devflow upgrade --project --json
+```
+
+`--project=false` explicitly selects only the launcher and bypasses reading project module files, including for recovery from a broken `go.mod`. `--worktree` selects the project. Interactive text upgrades ask before installation whether to update a normal existing pin; Enter, no, or EOF declines, and Ctrl+C cancels before installation. Devflow local/fork replacements require manual updates and are never removed automatically.
+
+Successful launcher upgrades clear the global task artifact cache; `upgrade --json` reports `installed` and `cacheCleared`. A requested project update then uses the exact installed version, with staged Go module resolution. Its optional `project` evidence contains `worktree`, `previousVersion`, optional `version`, and `updated`; `installedVersion` identifies the actual installed release. If project updating fails, overall `success` is false while completed installation/cache-cleanup evidence remains true. Installation failure preserves cached artifacts, and a cleanup failure is reported even if installation succeeded. Review and commit successful `go.mod`/`go.sum` changes. Ordinary startup never edits those files; APIs and worktree state follow the effective version without migrations for older formats.
 
 Because project graph definitions are Go code, Go is expected to be available on machines where agents use Devflow.
 
@@ -33,7 +45,7 @@ automatically reads the main checkout's `.env` during configuration. No manual
 copy is needed. A local file wins completely, including an empty file; task state,
 managed ports and database values remain specific to the linked worktree.
 
-`devflow docs setup` prints only the bundled setup/pipeline Markdown docs for the installed version. `devflow docs development` prints only the day-to-day CLI/TUI/operator docs. Both commands intentionally have no JSON mode. Use the scoped docs command that matches the task instead of fetching all docs or browsing the repository.
+`devflow docs setup` prints only the bundled setup/pipeline Markdown docs for the effective version. `devflow docs development` prints only the day-to-day CLI/TUI/operator docs. Both commands intentionally have no JSON mode and do not compile the adapter. Use the scoped docs command that matches the task instead of fetching all docs or browsing the repository.
 
 The intended sequencing is:
 1. CLI

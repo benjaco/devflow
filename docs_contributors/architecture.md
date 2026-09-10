@@ -23,16 +23,25 @@
 - `internal/logstream`: bounded CLI line reading/following and UTF-8 page retrieval with attempt-bound byte cursors and observed rewrite detection
 - `internal/taskexec`: shared `BeforeRun` and optional `Run` callbacks for engine and validation execution
 - `internal/adaptersource`: filename classification shared by adapter discovery and changed-file planning
+- `internal/projectversion`: project module selection and cached preparation of the selected runtime's own CLI
 
-CLI invocations discover their command's flag definitions before bootstrap so early JSON detection shares the parser's value semantics. Finite handlers hold their result as a value until the shared presentation boundary knows the outcome; failures retain that evidence alongside one typed error. Streaming handlers write JSONL directly and propagate writer failures. Installed and generated main functions use the same error/exit presentation helpers, including Windows child-result ownership.
+CLI invocations select the project-pinned runtime before parsing commands. The selected runtime discovers its command's flag definitions before adapter bootstrap so JSON detection shares that parser's value semantics. Finite handlers hold their result as a value until the shared presentation boundary knows the outcome; failures retain that evidence alongside one typed error. Streaming handlers write JSONL directly and propagate writer failures. Installed and generated main functions use the same error/exit presentation helpers, including Windows child-result ownership.
 
 ## Local Project Bootstrap
 
 Runtime project configuration is now project-local.
 
+The installed executable first reads the selected worktree's root `go.mod`. An explicit requirement for `github.com/benjaco/devflow`, together with its matching version-specific or wildcard replacement, selects the runtime. A relative local replacement is resolved from that root. Selection does not consult `go.work` or look up a newer release. Without a requirement, the installed runtime remains in use; an explicit `DEVFLOW_BOOTSTRAP_ROOT` source override takes precedence.
+
+The launcher prepares the selected module's own `cmd/devflow` at `.devflow/versions/<identity>/devflow` (`devflow.exe` on Windows), then transfers the untouched command arguments to it before command parsing and adapter generation. An older launcher therefore does not validate the selected version's commands or flags. Preparation respects project checksums and never rewrites tracked `go.mod`/`go.sum`; dependency changes invalidate the selected build. Runtime and adapter preparation remain separate, so version/docs and adapter-independent recovery commands do not require a compilable adapter. Cached runtime reuse does not need a module download. The global installed binary is unchanged.
+
+`upgrade` runs in the global launcher. An explicit `--project` or an accepted terminal prompt also updates the project's existing pin after successful installation and cache cleanup. The update uses the installed binary's recorded exact version and staged Go module resolution, preserving application dependencies and rejecting Devflow replacements rather than removing them. Normal startup never writes tracked module files. See the CLI contract for prompt and partial-failure evidence.
+
+Version inspection reports launcher and effective-runtime identity without daemon admission. Runtime selection itself does not stop or replace an active daemon: mutable commands retain their existing lifecycle and ownership rules, while inspection preserves running services.
+
 Flow:
 
-- the installed `devflow` binary, or the repo-level `devflow` launcher during source development, looks for `./devflow.project.go` in the selected project worktree
+- the selected Devflow runtime, or the repo-level `devflow` launcher during explicit source development, looks for `./devflow.project.go` in the selected project worktree when the command requires an adapter
 - if the file is missing, the command fails
 - if the file exists, the bootstrap CLI discovers it first plus lexically sorted, regular root-level `devflow_*.go` companions; `devflow_*_test.go`, unrelated Go files, nested files, and non-regular matches are excluded or rejected as appropriate
 - the bootstrap CLI compiles that ordered source set into a worktree-local full CLI binary
@@ -56,7 +65,7 @@ Current generated build location:
 Current localbuild lock location:
 - `<worktree>/.devflow/localbuild.lock`
 
-The generated build is a small Go module whose path is under `github.com/benjaco/devflow/localbuild/...`, which allows it to import Devflow's `internal/cli` package. Installed binaries require the released Devflow module version. Source-local development uses:
+The generated adapter build is a small Go module whose path is under `github.com/benjaco/devflow/localbuild/...`, which allows it to import Devflow's `internal/cli` package. It uses the selected runtime's module/replacement identity, so the CLI and adapter API agree. Explicit source-local development uses:
 
 ```go
 replace github.com/benjaco/devflow => <devflow-source-root>
