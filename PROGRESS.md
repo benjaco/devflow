@@ -5,14 +5,19 @@ Last updated: 2026-09-11
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: compact attention layout implemented and locally verified.
-- Confidence: terminal resize/toggle smoke, TUI tests, full race tests, normal-suite retry, quality gates and Linux/Windows cross-builds pass. The first unrestricted normal run hit an unchanged watcher timing test; see verification below.
+- State: TUI rerun shortcut changed to `r` and locally verified.
+- Confidence: existing TUI normal/race tests, full normal suite, quality checks and CLI/example builds pass.
 
 ## In Progress
 
 - None. Local implementation and verification are complete.
 
 ## Completed
+
+- TUI rerun shortcut:
+  - `r` replaces `i` for immediate selected-scope invalidate/rerun; F5 remains the existing alternate. Updated help/footer, existing dispatch/popup tests and current operator/CLI/testing/memory docs
+  - corrected the stale development-guide claim that this action opened a preview; execution and attention filtering remain unchanged
+  - `go test -count=1 ./pkg/tui`, `go test -race -count=1 ./pkg/tui` and `go test -p 2 ./...` pass (CLI 109.133s). Vet, Staticcheck v0.8.1, govulncheck v1.6.0, tidy-diff, CLI/example builds, version JSON and formatting/diff checks pass. Logs/command records: `/tmp/devflow-rerun-key-*`; local uncommitted changes only
 
 - Compact attention layout:
   - instance and state/name task list share a 4–7-row top strip above full-width, borderless logs; prioritize target/mode and hide verbose instance metadata. Keep footer action status and logs visible down to 40×10

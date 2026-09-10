@@ -348,7 +348,7 @@ func TestApplicationInvalidateRunsImmediatelyWithoutConfirmation(t *testing.T) {
 	go func() { done <- runTUIApplication(d.app) }()
 	screen.waitForFrame(t)
 
-	screen.postKey(t, tcell.KeyRune, 'i')
+	screen.postKey(t, tcell.KeyRune, 'r')
 	var req daemon.Request
 	select {
 	case req = <-requests:
@@ -1907,7 +1907,7 @@ func TestUpdateLogsResetsScrollWhenLogChanges(t *testing.T) {
 func TestHandleKeysPassesInputThroughWhenPopupActive(t *testing.T) {
 	d := newDashboard(t.TempDir(), "abc123")
 	d.activeInput = true
-	for _, r := range []rune{'m', 'i', 't', 'd', 'j', 'k', 'q', 'g'} {
+	for _, r := range []rune{'m', 'r', 't', 'd', 'j', 'k', 'q', 'g'} {
 		event := tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone)
 		if got := d.handleKeys(event); got != event {
 			t.Fatalf("expected rune %q to pass through while input is active", r)

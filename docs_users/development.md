@@ -135,7 +135,7 @@ Useful TUI keys:
 - `d`: database/Prisma panel
 - `a`: toggle the active/failure attention view with full-width, borderless logs for copying
 - `m`: create a migration through the project migration-create action
-- `i`: immediately invalidate and rerun the selected task scope
+- `r`: immediately invalidate and rerun the selected task scope
 - `t`: choose a target, then preview and confirm retarget scope
 
 Running logs open at the live tail as `FOLLOWING`. Page Up or upward scrolling changes the view to `PAUSED`, preserves that manual position across refreshes, and never snaps back; End or `f` resumes at the latest line. The panel reports its retained line range and truncation. `o` increases the bounded retained window without reading an unbounded file into memory. Switching log sources resets following predictably.
@@ -245,7 +245,7 @@ devflow cache gc --json
 
 `cache path` returns the supported OS-specific cache root and project namespace path. `cache key` returns an aggregate target key plus each cacheable/stamped task key, which is suitable for a CI cache key without duplicating Devflow's fingerprint logic.
 
-The TUI `i` action previews targeted invalidation/restart scope before execution. For CLI automation, use `restart --preview --json` or `stop --preview --json` before the matching lifecycle command.
+The TUI `r` action immediately invalidates and reruns the selected task scope. For CLI automation, use `restart --preview --json` or `stop --preview --json` before the matching lifecycle command.
 
 ## Runtime State
 
