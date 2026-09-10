@@ -416,8 +416,32 @@ func (d *dashboard) applyResponsiveLayout(width, height int) bool {
 		d.compactLevel = nextCompact
 		d.renderFooter()
 	}
-	// Wide terminals benefit from keeping the stable task list visible beside
-	// the selected log. Compact terminals retain the established vertical flow.
+	if d.attentionOnly {
+		if d.content.GetItem(0) != d.header {
+			// Reuse the widgets when moving panes so focus and scroll state survive.
+			d.content.Clear().AddItem(d.header, 0, 1, false).AddItem(d.tasks, 0, 1, true)
+			d.layout.Clear().AddItem(d.content, 0, 1, true).AddItem(d.logs, 0, 1, false).AddItem(d.footer, 4, 0, false)
+		}
+		d.content.SetDirection(tview.FlexColumn)
+		d.content.ResizeItem(d.header, min(40, width/3), 0)
+		// Four rows fit the task heading and one task; cap the strip so the
+		// borderless log keeps most of the space, including on short screens.
+		stripHeight := min(7, max(4, height/3))
+		d.layout.ResizeItem(d.content, stripHeight, 0)
+		d.layout.ResizeItem(d.footer, 4, 0)
+		// tview can track the table's end after a resize, hiding the selected
+		// task while its log remains open. Clamp the viewport without reselecting.
+		row, _ := d.tasks.GetSelection()
+		offset, column := d.tasks.GetOffset()
+		offset = max(0, min(offset, row-1))
+		offset = max(offset, row-(stripHeight-3))
+		d.tasks.SetOffset(offset, column)
+		return false
+	}
+	if d.content.GetItem(0) != d.tasks {
+		d.content.Clear().AddItem(d.tasks, 0, 2, true).AddItem(d.logs, 0, 3, false)
+		d.layout.Clear().AddItem(d.header, 7, 0, false).AddItem(d.content, 0, 1, true).AddItem(d.footer, 5, 0, false)
+	}
 	wideWorkspace := width >= 120 && height >= 24
 	if wideWorkspace {
 		d.content.SetDirection(tview.FlexColumn)
@@ -450,6 +474,7 @@ func (d *dashboard) applyResponsiveLayout(width, height int) bool {
 }
 
 func (d *dashboard) updateFocusTreatment() {
+	d.logs.SetBorder(!d.attentionOnly)
 	if d.focusedPane == dashboardPaneTasks {
 		d.tasks.SetBorderColor(tcell.ColorLightBlue).SetTitle(" Tasks [FOCUSED] ")
 	} else {
@@ -462,6 +487,13 @@ func (d *dashboard) updateFocusTreatment() {
 		d.logs.SetBorderColor(tcell.ColorLightBlue).SetTitle(" " + logTitle + " [FOCUSED] ")
 	} else {
 		d.logs.SetBorderColor(tcell.ColorGray).SetTitle(" " + logTitle + " ")
+	}
+	// Borderless logs hide the TextView title; keep source/follow/focus context
+	// in the footer so it stays visible without decorating copied log rows.
+	if d.attentionOnly {
+		d.footer.SetTitle(d.logs.GetTitle())
+	} else {
+		d.footer.SetTitle(" Keys ")
 	}
 }
 
@@ -657,6 +689,8 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 			return nil
 		case 'a':
 			d.attentionOnly = !d.attentionOnly
+			d.header.ScrollToBeginning()
+			d.updateFocusTreatment()
 			_ = d.refresh()
 			return nil
 		case 'l':
@@ -820,7 +854,7 @@ func (d *dashboard) refresh() error {
 	d.allNodes = append([]api.NodeStatus(nil), snap.nodes...)
 	d.currentNodes = filterAttentionNodes(snap.nodes, d.attentionOnly)
 	snap.nodes = d.currentNodes
-	d.header.SetText(strings.Join(renderHeader(snap), "\n"))
+	d.header.SetText(strings.Join(renderHeader(snap, d.attentionOnly), "\n"))
 	d.renderTasks(snap.nodes)
 	d.reconcileSelection()
 	if !d.showDaemonLog && !d.showDatabasePanel && d.selectedName != requestedSelection {
@@ -854,6 +888,9 @@ func (d *dashboard) renderTasks(nodes []api.NodeStatus) {
 	rowOffset, columnOffset := d.tasks.GetOffset()
 	d.tasks.Clear()
 	headers := []string{"STATE", "TASK", "KIND", "REASON"}
+	if d.attentionOnly {
+		headers = headers[:2]
+	}
 	for col, header := range headers {
 		d.tasks.SetCell(0, col, tview.NewTableCell(header).
 			SetSelectable(false).
@@ -872,6 +909,9 @@ func (d *dashboard) renderTasks(nodes []api.NodeStatus) {
 		d.tasks.SetCell(row+1, 1, tview.NewTableCell(node.Name).
 			SetTextColor(color).
 			SetSelectable(true).SetExpansion(1))
+		if d.attentionOnly {
+			continue
+		}
 		d.tasks.SetCell(row+1, 2, tview.NewTableCell(node.Kind).
 			SetTextColor(tcell.ColorGray).
 			SetSelectable(true))
@@ -923,6 +963,7 @@ func (d *dashboard) updateLogs() {
 	if err != nil {
 		d.logs.SetTitle(" Logs ")
 		d.logs.SetText(fmt.Sprintf("failed to load logs: %v", err))
+		d.updateFocusTreatment()
 		return
 	}
 	d.updateLogsFromSnapshot(snap)
@@ -1219,7 +1260,7 @@ func (d *dashboard) renderFooter() {
 		d.footer.SetText("Enter accept  Escape cancel  editing keys available\n" + timestamp + status)
 		return
 	}
-	if d.compactLevel >= 2 {
+	if d.attentionOnly || d.compactLevel >= 2 {
 		d.footer.SetText("? help  Tab focus  q quit  f follow  o older  a attention\n" + timestamp + status)
 		return
 	}
@@ -1770,7 +1811,19 @@ func normalizeTUIState(node api.NodeStatus, prismaDev *database.PrismaDevelopmen
 	return node
 }
 
-func renderHeader(snap snapshot) []string {
+func renderHeader(snap snapshot, attentionOnly bool) []string {
+	if attentionOnly {
+		daemonState := "stopped"
+		if snap.daemon != nil && snap.daemon.Alive {
+			daemonState = "running"
+		}
+		return []string{
+			fmt.Sprintf("[yellow]target[-]: %s", snap.state.Target),
+			fmt.Sprintf("[yellow]mode[-]: %s", snap.state.Mode),
+			fmt.Sprintf("[yellow]instance[-]: %s", snap.instance.ID),
+			fmt.Sprintf("[yellow]daemon[-]: %s", daemonState),
+		}
+	}
 	urlParts := make([]string, 0, len(snap.urls))
 	for name, url := range snap.urls {
 		urlParts = append(urlParts, fmt.Sprintf("%s=%s", name, url))

@@ -23,6 +23,8 @@ TUI tests render simulation screens at 60x24, 80x24, 100x12, 100x30, the 119/120
 
 Real Delve app-readiness tests on macOS require the normal Delve prerequisites, including enabled Developer Tools security. Check `DevToolsSecurity -status`; if it is disabled, follow Delve's installation guidance before interpreting `stub exited while waiting for connection` as a Devflow regression. Do not change machine security settings automatically from tests.
 
+For a manual attention-view copy check, press `a` in both compact and wide terminals and select several log lines using the terminal's native text selection. The compact instance box and state/name task list should share a short top strip, while logs span the width below without border or neighboring task cells. Resize down to 40×10: keep at least one selectable task, visible logs and footer action status. The log source/follow/focus context remains in the footer title. Check selection, paused-log scrolling and Tab focus across resizing and mode changes. Toggle back to restore the normal border and layout. Clipboard selection modifiers depend on the terminal, and simulation screens do not exercise the host clipboard.
+
 Tests that assert exact cache hit/miss or watch-rerun counts must isolate the OS user cache root. Set `HOME`, `XDG_CACHE_HOME`, and `LOCALAPPDATA`; Windows uses `LOCALAPPDATA` for `os.UserCacheDir()`, so `HOME` alone is not enough.
 
 Cache manifest output paths use native separators after normalization. Keep slash-form adapter declarations in fixtures, but build native expected paths with `filepath.Join`; continue verifying restored bytes. Cross-compilation alone cannot catch a Windows path assertion mismatch.
