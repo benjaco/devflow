@@ -18,7 +18,7 @@ devflow version
 devflow docs setup
 ```
 
-Make sure `$(go env GOPATH)/bin` is on `PATH`. If `devflow upgrade` succeeds but `devflow version` does not change, run `which -a devflow`; another binary or symlink earlier on `PATH` is shadowing the Go-installed binary.
+Make sure `$(go env GOPATH)/bin` is on `PATH`. `devflow version` distinguishes the installed launcher from the version selected by a project. If the launcher version does not change after an upgrade, run `which -a devflow`; another binary or symlink earlier on `PATH` may be shadowing the Go-installed binary.
 
 Update later with:
 
@@ -26,9 +26,38 @@ Update later with:
 devflow upgrade
 ```
 
-The command reports its target immediately and streams `go install` download/build output while it runs. With `--json`, that live progress stays on stderr and stdout contains only the final JSON result.
+In an interactive terminal inside a project with a normal Devflow pin, the command first asks whether to update the project too. Press Enter to keep its pin unchanged, or answer `y` to update it to the exact version installed globally. The prompt happens before installation; Ctrl+C cancels before either update begins.
+
+```bash
+devflow upgrade --project        # update the launcher and current project's pin
+devflow upgrade --project=false  # update only the launcher, without a prompt
+```
+
+JSON and nonterminal invocations never prompt and update only the launcher unless `--project` is explicit. Use `--worktree /path/to/project` to select another project. An automatic project update requires an existing pin without an active Devflow `replace` directive; manage local/fork replacements manually.
+
+After any prompt, the command streams `go install` download/build output while it runs. With `--json`, live progress stays on stderr and stdout contains only the final JSON result. A requested project update follows successful installation and cache cleanup. Review and commit the resulting `go.mod`/`go.sum` changes so colleagues receive it.
 
 For testing a freshly pushed commit before the public Go proxy catches up, use `devflow upgrade --direct`.
+
+## Keep The Team On The Project Version
+
+Declare Devflow in the project-root `go.mod`. For a project without a Go module, first run `go mod init <your-project-module-path>` in that root. Add or update the dependency with the version you intend the team to use:
+
+```bash
+go get github.com/benjaco/devflow@<version>
+```
+
+Commit `go.mod` and `go.sum` together with the adapter. After colleagues pull the change, they run the usual command:
+
+```bash
+devflow
+```
+
+The installed command automatically prepares the declared Devflow version in `.devflow/` and hands execution to it before parsing commands or compiling the adapter. The selected version supplies the CLI, adapter API and bundled docs. Different projects can select different versions while sharing one installed launcher. Startup never changes the project's `go.mod` or `go.sum`, and it never looks up `latest` implicitly.
+
+Everyone must update their installed launcher once to a release containing automatic version selection. After that, updating the project dependency controls the project's version. Use `devflow upgrade` and accept its project prompt, `devflow upgrade --project`, or the explicit `go get` command above. No extra startup flag or workflow step is needed.
+
+The first preparation needs Go and access to any uncached module downloads. A prepared version is reused locally, including offline; an adapter edit may still require Go to rebuild the adapter. Matching versioned and local `replace` directives are honored, with relative local paths resolved from the project root. Local replacements must exist on each developer's machine. Selection reads the root `go.mod`, not `go.work`; without a Devflow requirement, Devflow uses the installed version.
 
 ## Setup Mental Model
 
@@ -55,11 +84,12 @@ Keep project-specific behavior in `devflow.project.go` and optional project-root
 ## Add Devflow To A Repo
 
 1. Add `.devflow/` to `.gitignore`.
-2. Add `devflow.project.go` at the project root.
-3. Define one small target first, usually `up` or `test`.
-4. Run `devflow graph list --json`.
-5. Run `devflow run <target> --json`.
-6. Add inputs, outputs, and service readiness once the basic graph works.
+2. Pin Devflow in the project-root `go.mod` as described above.
+3. Add `devflow.project.go` at the project root.
+4. Define one small target first, usually `up` or `test`.
+5. Run `devflow graph list --json`.
+6. Run `devflow run <target> --json`.
+7. Add inputs, outputs, and service readiness once the basic graph works.
 
 Minimal `devflow.project.go`:
 
@@ -469,6 +499,7 @@ The JSON result includes `requiredEnv` entries with their set state and source. 
 Commit:
 
 - `devflow.project.go`
+- root `go.mod` and `go.sum` recording the selected Devflow dependency
 - optional root-level `devflow_*.go` adapter companions
 - ordinary `devflow_*_test.go` adapter tests when the project uses them
 - project files referenced by task inputs

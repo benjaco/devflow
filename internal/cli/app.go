@@ -23,6 +23,7 @@ import (
 	"github.com/benjaco/devflow/internal/executionstate"
 	"github.com/benjaco/devflow/internal/fsutil"
 	"github.com/benjaco/devflow/internal/logstream"
+	"github.com/benjaco/devflow/internal/projectversion"
 	"github.com/benjaco/devflow/internal/reporepair"
 	"github.com/benjaco/devflow/internal/version"
 	"github.com/benjaco/devflow/pkg/api"
@@ -55,6 +56,8 @@ type App struct {
 	githubActions           bool
 	githubCI                bool
 	githubStepSummary       string
+	launcherVersion         string
+	projectVersion          string
 }
 
 func New() *App {
@@ -2140,6 +2143,7 @@ func (a *App) versionCmd(args []string) error {
 	fs := flag.NewFlagSet("version", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
 	jsonOut := fs.Bool("json", false, "")
+	fs.String("worktree", "", "project worktree path; defaults to the current directory")
 	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -2148,17 +2152,22 @@ func (a *App) versionCmd(args []string) error {
 	}
 	info := version.Current()
 	result := api.VersionResult{
-		Version:     info.Version,
-		ModulePath:  info.ModulePath,
-		GoVersion:   info.GoVersion,
-		VCSRevision: info.VCSRevision,
-		VCSTime:     info.VCSTime,
-		Modified:    info.Modified,
+		Version:         info.Version,
+		ModulePath:      info.ModulePath,
+		GoVersion:       info.GoVersion,
+		VCSRevision:     info.VCSRevision,
+		VCSTime:         info.VCSTime,
+		Modified:        info.Modified,
+		LauncherVersion: a.launcherVersion,
+		ProjectVersion:  a.projectVersion,
 	}
 	if *jsonOut {
 		return a.writeResult(result)
 	}
 	_, _ = fmt.Fprintf(a.Stdout, "devflow %s\n", result.Version)
+	if result.ProjectVersion != "" {
+		_, _ = fmt.Fprintf(a.Stdout, "project pin %s; launcher %s\n", result.ProjectVersion, result.LauncherVersion)
+	}
 	return nil
 }
 
@@ -2168,6 +2177,8 @@ func (a *App) upgradeCmd(args []string) error {
 	jsonOut := fs.Bool("json", false, "")
 	versionTarget := fs.String("version", "latest", "")
 	direct := fs.Bool("direct", false, "")
+	projectUpdate := fs.Bool("project", false, "also update the project's Devflow dependency; false skips the interactive choice")
+	worktree := fs.String("worktree", "", "project worktree path; defaults to the current directory")
 	if err := a.parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -2178,12 +2189,29 @@ func (a *App) upgradeCmd(args []string) error {
 	if target == "" {
 		target = "latest"
 	}
+	var projectChoice *bool
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "project" {
+			projectChoice = projectUpdate
+		}
+	})
+	selection, err := a.selectUpgradeProject(*worktree, target, projectChoice, *jsonOut)
+	if err != nil {
+		return err
+	}
+	var projectResult *api.ProjectUpgradeResult
+	if selection != nil {
+		projectResult = &api.ProjectUpgradeResult{Worktree: selection.Worktree, PreviousVersion: selection.Version}
+	}
 	pkg := version.CommandPackage + "@" + target
 	command := []string{"go", "install", pkg}
 	started := time.Now()
 	cmd := process.CommandContext(a.context(), command[0], command[1:]...)
+	// The launcher must run on this host even when the caller is building an
+	// application for another platform or has workspace-specific Go flags.
+	cmd.Env = projectversion.BuildEnv(os.Environ())
 	if *direct {
-		cmd.Env = upgradeGoEnv(os.Environ())
+		cmd.Env = upgradeGoEnv(cmd.Env)
 	}
 	_, _ = fmt.Fprintf(a.Stderr, "[devflow] upgrade started target=%s command=%q\n", target, strings.Join(command, " "))
 	var output bytes.Buffer
@@ -2197,7 +2225,8 @@ func (a *App) upgradeCmd(args []string) error {
 		cmd.Stdout = a.Stdout
 		cmd.Stderr = a.Stderr
 	}
-	err := errors.Join(cmd.Run(), a.context().Err())
+	installErr := cmd.Run()
+	err = errors.Join(installErr, a.context().Err())
 	cacheCleared := false
 	if err == nil {
 		// Upgrades invalidate artifacts so cache changes need no migration path.
@@ -2207,16 +2236,39 @@ func (a *App) upgradeCmd(args []string) error {
 			cacheCleared = true
 		}
 	}
+	var installedVersion string
+	if err == nil && selection != nil {
+		installedVersion, err = installedDevflowVersion(a.context())
+		if err == nil {
+			projectResult.Version = installedVersion
+			env := os.Environ()
+			if *direct {
+				env = upgradeGoEnv(env)
+			}
+			progress := a.Stderr
+			if *jsonOut {
+				progress = io.MultiWriter(a.Stderr, &output)
+			}
+			err = projectversion.Update(a.context(), selection, installedVersion, env, progress)
+			projectResult.Updated = err == nil
+		}
+		if err != nil {
+			err = clierror.Wrap(fmt.Errorf("installed Devflow, but updating the project: %w", err), "project_update_failed", "execution")
+		}
+	}
 	duration := time.Since(started)
 	_, _ = fmt.Fprintf(a.Stderr, "[devflow] upgrade finished success=%t duration_ms=%d\n", err == nil, duration.Milliseconds())
 	result := api.UpgradeResult{
-		Command:       command,
-		Package:       version.CommandPackage,
-		VersionTarget: target,
-		Success:       err == nil,
-		CacheCleared:  cacheCleared,
-		DurationMs:    duration.Milliseconds(),
-		Output:        strings.TrimSpace(output.String()),
+		Command:          command,
+		Package:          version.CommandPackage,
+		VersionTarget:    target,
+		Success:          err == nil,
+		Installed:        installErr == nil,
+		InstalledVersion: installedVersion,
+		Project:          projectResult,
+		CacheCleared:     cacheCleared,
+		DurationMs:       duration.Milliseconds(),
+		Output:           strings.TrimSpace(output.String()),
 	}
 	if err != nil {
 		result.Error = clierror.Describe(err, "upgrade_failed", "execution")
@@ -2238,7 +2290,10 @@ func (a *App) upgradeCmd(args []string) error {
 	} else {
 		_, _ = fmt.Fprintf(a.Stdout, "upgraded devflow using %s\n", strings.Join(command, " "))
 	}
-	if warning := upgradePathWarning(command[0]); warning != "" {
+	if projectResult != nil && projectResult.Updated {
+		_, _ = fmt.Fprintf(a.Stdout, "updated project Devflow %s -> %s; commit go.mod and go.sum to share the update\n", projectResult.PreviousVersion, projectResult.Version)
+	}
+	if warning := upgradePathWarning(a.context(), command[0]); warning != "" {
 		_, _ = fmt.Fprintf(a.Stdout, "warning: %s\n", warning)
 	}
 	return nil
@@ -2263,8 +2318,8 @@ func upgradeGoEnv(env []string) []string {
 	return out
 }
 
-func upgradePathWarning(goCommand string) string {
-	installedPath, err := goInstalledDevflowPath(goCommand)
+func upgradePathWarning(ctx context.Context, goCommand string) string {
+	installedPath, err := goInstalledDevflowPath(ctx, goCommand)
 	if err != nil || installedPath == "" {
 		return ""
 	}
@@ -2278,8 +2333,10 @@ func upgradePathWarning(goCommand string) string {
 	return fmt.Sprintf("go install wrote %s, but your shell resolves devflow to %s; put %s earlier on PATH or replace the shadowing command", installedPath, pathDevflow, filepath.Dir(installedPath))
 }
 
-func goInstalledDevflowPath(goCommand string) (string, error) {
-	out, err := exec.Command(goCommand, "env", "GOBIN", "GOPATH").Output()
+func goInstalledDevflowPath(ctx context.Context, goCommand string) (string, error) {
+	cmd := process.CommandContext(ctx, goCommand, "env", "GOBIN", "GOPATH")
+	cmd.Env = projectversion.BuildEnv(os.Environ())
+	out, err := cmd.Output()
 	if err != nil {
 		return "", err
 	}
@@ -2292,7 +2349,7 @@ func goInstalledDevflowPath(goCommand string) (string, error) {
 		if len(lines) < 2 || strings.TrimSpace(lines[1]) == "" {
 			return "", fmt.Errorf("go env returned no GOPATH")
 		}
-		binDir = filepath.Join(strings.TrimSpace(lines[1]), "bin")
+		binDir = filepath.Join(filepath.SplitList(strings.TrimSpace(lines[1]))[0], "bin")
 	}
 	return filepath.Join(binDir, devflowExecutableName()), nil
 }

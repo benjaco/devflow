@@ -200,7 +200,7 @@ func runJSONContractLocal(t *testing.T, worktree string, stdout, stderr io.Write
 	defer cancel()
 	cmd := exec.CommandContext(ctx, localProjectBinaryPathForTest(worktree), args...)
 	cmd.Dir = worktree
-	cmd.Env = withEnv(os.Environ(), envLocalExec, "1")
+	cmd.Env = withEnv(os.Environ(), envLocalExec, localProjectBinaryPathForTest(worktree))
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()
 	if ctx.Err() != nil {

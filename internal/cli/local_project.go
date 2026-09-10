@@ -17,8 +17,10 @@ import (
 	"github.com/benjaco/devflow/internal/adaptersource"
 	"github.com/benjaco/devflow/internal/clierror"
 	"github.com/benjaco/devflow/internal/lock"
+	"github.com/benjaco/devflow/internal/projectversion"
 	"github.com/benjaco/devflow/internal/version"
 	"github.com/benjaco/devflow/pkg/process"
+	"golang.org/x/mod/modfile"
 )
 
 const (
@@ -30,7 +32,7 @@ const (
 )
 
 func shouldExecLocalProject(args []string, worktree string) bool {
-	if os.Getenv(envLocalExec) == "1" {
+	if runningExecutable(os.Getenv(envLocalExec)) {
 		return false
 	}
 	if len(args) > 0 && strings.HasPrefix(args[0], "__internal_") {
@@ -54,7 +56,8 @@ func (a *App) execLocalProject(args []string, worktree string) error {
 	if err != nil {
 		return err
 	}
-	env := withEnv(os.Environ(), envLocalExec, "1")
+	// Tasks inherit the environment; only this exact executable can skip loading.
+	env := withEnv(os.Environ(), envLocalExec, localBinary)
 	env = withEnv(env, envBootstrapRoot, bootstrapRoot)
 	return clierror.Wrap(execLocalBinary(a.context(), localBinary, append([]string{localBinary}, args...), env, a.Stdout, a.Stderr, a.localChildOwnsExecution), "bootstrap_failed", "bootstrap")
 }
@@ -87,7 +90,7 @@ func ensureLocalProjectBinary(ctx context.Context, bootstrapRoot, worktree strin
 		return "", err
 	}
 	if !needsBuild {
-		return target, nil
+		return checkedLocalProjectBinary(bootstrapRoot, worktree, target)
 	}
 	lockFile, err := lock.AcquireContext(ctx, localBuildLockPath(worktree))
 	if err != nil {
@@ -103,7 +106,7 @@ func ensureLocalProjectBinary(ctx context.Context, bootstrapRoot, worktree strin
 		return "", err
 	}
 	if !needsBuild {
-		return target, nil
+		return checkedLocalProjectBinary(bootstrapRoot, worktree, target)
 	}
 	if err := buildLocalProjectBinary(ctx, bootstrapRoot, worktree, projectSources, target, buildKey); err != nil {
 		return "", err
@@ -203,6 +206,16 @@ func localBuildSources(bootstrapRoot, projectPath string) ([]string, error) {
 
 func localBuildSourcesForProject(bootstrapRoot string, projectSources []string) ([]string, error) {
 	sources := append([]string(nil), projectSources...)
+	// Pulling a new pin or checksum must invalidate the adapter binary even when
+	// the adapter's own source files have not changed.
+	for _, name := range []string{"go.mod", "go.sum"} {
+		path := filepath.Join(filepath.Dir(projectSources[0]), name)
+		if _, err := os.Stat(path); err == nil {
+			sources = append(sources, path)
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
 	if bootstrapRoot == "" {
 		return sources, nil
 	}
@@ -210,7 +223,7 @@ func localBuildSourcesForProject(bootstrapRoot string, projectSources []string) 
 		filepath.Join(bootstrapRoot, "go.mod"),
 		filepath.Join(bootstrapRoot, "go.sum"),
 	)
-	for _, dir := range []string{"cmd", "internal", "pkg"} {
+	for _, dir := range []string{"cmd", "internal", "pkg", "docs_users"} {
 		root := filepath.Join(bootstrapRoot, dir)
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -219,7 +232,7 @@ func localBuildSourcesForProject(bootstrapRoot string, projectSources []string) 
 			if d.IsDir() {
 				return nil
 			}
-			if filepath.Ext(path) == ".go" {
+			if filepath.Ext(path) == ".go" || dir == "docs_users" {
 				sources = append(sources, path)
 			}
 			return nil
@@ -259,7 +272,7 @@ func localBuildKeyForBuild(bootstrapRoot, projectPath string) (string, []string,
 
 func localBuildKeyFromSources(bootstrapRoot string, sources []string) (string, error) {
 	hash := sha256.New()
-	if _, err := hash.Write([]byte(version.Current().Version)); err != nil {
+	if _, err := hash.Write([]byte(localBuildRequireVersion(bootstrapRoot))); err != nil {
 		return "", err
 	}
 	if _, err := hash.Write([]byte{0}); err != nil {
@@ -271,6 +284,10 @@ func localBuildKeyFromSources(bootstrapRoot string, sources []string) (string, e
 	if _, err := hash.Write([]byte{0}); err != nil {
 		return "", err
 	}
+	// The selected runtime identity includes module checksums and embedded source
+	// assets. Its adapter must not retain code from the previous selected runtime.
+	_, _ = hash.Write([]byte(os.Getenv(envProjectRuntime)))
+	_, _ = hash.Write([]byte{0})
 	for _, path := range sources {
 		if _, err := hash.Write([]byte(localBuildSourceLabel(bootstrapRoot, path))); err != nil {
 			return "", err
@@ -310,6 +327,10 @@ func buildLocalProjectBinary(ctx context.Context, bootstrapRoot, worktree string
 	if len(projectSources) == 0 {
 		return fmt.Errorf("cannot build local devflow binary without %s", localProjectFile)
 	}
+	selection, err := localProjectVersion(bootstrapRoot, worktree)
+	if err != nil {
+		return err
+	}
 	projectPath := projectSources[0]
 	buildDir := localBuildDir(worktree)
 	if err := os.RemoveAll(buildDir); err != nil {
@@ -326,19 +347,28 @@ func buildLocalProjectBinary(ctx context.Context, bootstrapRoot, worktree string
 	if err := os.WriteFile(filepath.Join(buildDir, "main.go"), []byte(localBuildMainSource()), 0o644); err != nil {
 		return err
 	}
-	moduleSource, err := localBuildModuleSource(buildDir, bootstrapRoot)
+	moduleSource, err := localBuildModuleSource(buildDir, bootstrapRoot, worktree)
 	if err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(buildDir, "go.mod"), []byte(moduleSource), 0o644); err != nil {
 		return err
 	}
+	sumRoot := worktree
 	if bootstrapRoot != "" {
-		if data, err := os.ReadFile(filepath.Join(bootstrapRoot, "go.sum")); err == nil {
-			if err := os.WriteFile(filepath.Join(buildDir, "go.sum"), data, 0o644); err != nil {
-				return err
-			}
-		} else if !os.IsNotExist(err) {
+		sumRoot = bootstrapRoot
+	}
+	var sumBytes []byte
+	if selection != nil {
+		sumBytes = selection.SumBytes()
+	} else {
+		sumBytes, err = os.ReadFile(filepath.Join(sumRoot, "go.sum"))
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if len(sumBytes) > 0 {
+		if err := os.WriteFile(filepath.Join(buildDir, "go.sum"), sumBytes, 0o644); err != nil {
 			return err
 		}
 	}
@@ -360,6 +390,7 @@ func buildLocalProjectBinary(ctx context.Context, bootstrapRoot, worktree string
 	}
 	cmd := process.CommandContext(ctx, "go", "build", "-mod=mod", "-o", tmpTarget, ".")
 	cmd.Dir = buildDir
+	cmd.Env = projectversion.BuildEnv(os.Environ())
 	output, err := cmd.CombinedOutput()
 	// A canceled build must never publish an artifact, even if the child exits zero.
 	if ctx.Err() != nil {
@@ -373,6 +404,19 @@ func buildLocalProjectBinary(ctx context.Context, bootstrapRoot, worktree string
 			return clierror.Wrap(fmt.Errorf("failed to build local devflow binary from %s: %w", projectPath, err), "adapter_compile_failed", "bootstrap")
 		}
 		return clierror.Wrap(fmt.Errorf("failed to build local devflow binary from %s: %w\n%s", projectPath, err, trimmed), "adapter_compile_failed", "bootstrap")
+	}
+	if selection != nil {
+		current, err := localProjectVersion(bootstrapRoot, worktree)
+		if err != nil || current == nil || current.Identity != selection.Identity {
+			_ = os.Remove(tmpTarget)
+			return clierror.Wrap(fmt.Errorf("project Devflow selection changed during adapter compilation; run devflow again"), "project_version_changed", "bootstrap")
+		}
+		// Go's module solver can raise a requirement when an adapter imports
+		// another library. Never publish a CLI containing a different Devflow.
+		if err := projectversion.VerifyAdapter(tmpTarget, selection); err != nil {
+			_ = os.Remove(tmpTarget)
+			return clierror.Wrap(err, "project_version_mismatch", "bootstrap")
+		}
 	}
 	if err := os.Rename(tmpTarget, target); err != nil {
 		_ = os.Remove(tmpTarget)
@@ -409,8 +453,16 @@ func main() {
 `
 }
 
-func localBuildModuleSource(buildDir, bootstrapRoot string) (string, error) {
+func localBuildModuleSource(buildDir, bootstrapRoot, worktree string) (string, error) {
 	modulePath := version.ModulePath + "/localbuild/" + filepath.Base(buildDir)
+	selection, err := localProjectVersion(bootstrapRoot, worktree)
+	if err != nil {
+		return "", err
+	}
+	if selection != nil {
+		data, err := selection.ModuleSource(modulePath)
+		return string(data), err
+	}
 	requireVersion := localBuildRequireVersion(bootstrapRoot)
 	if requireVersion == "" || requireVersion == "devel" {
 		return "", fmt.Errorf("cannot build local devflow project from a development binary without %s; use the repo launcher or install with go install %s@latest", envBootstrapRoot, version.CommandPackage)
@@ -420,9 +472,37 @@ func localBuildModuleSource(buildDir, bootstrapRoot string) (string, error) {
 	_, _ = fmt.Fprintln(&b, "go 1.27.1")
 	_, _ = fmt.Fprintf(&b, "\nrequire %s %s\n", version.ModulePath, requireVersion)
 	if bootstrapRoot != "" {
-		_, _ = fmt.Fprintf(&b, "\nreplace %s => %s\n", version.ModulePath, filepath.ToSlash(bootstrapRoot))
+		_, _ = fmt.Fprintf(&b, "\nreplace %s => %s\n", version.ModulePath, modfile.AutoQuote(filepath.ToSlash(bootstrapRoot)))
 	}
 	return b.String(), nil
+}
+
+func localProjectVersion(bootstrapRoot, worktree string) (*projectversion.Selection, error) {
+	selectedEntry := runningExecutable(os.Getenv(envProjectRuntime))
+	if bootstrapRoot != "" && !selectedEntry {
+		return nil, nil
+	}
+	selection, err := projectversion.Resolve(worktree)
+	if err != nil {
+		return nil, clierror.Wrap(err, "invalid_project_version", "bootstrap")
+	}
+	if selectedEntry && (selection == nil || !runningExecutable(projectversion.BinaryPath(selection))) {
+		return nil, clierror.Wrap(fmt.Errorf("project Devflow selection changed before adapter compilation; run devflow again"), "project_version_changed", "bootstrap")
+	}
+	return selection, nil
+}
+
+func checkedLocalProjectBinary(bootstrapRoot, worktree, target string) (string, error) {
+	selection, err := localProjectVersion(bootstrapRoot, worktree)
+	if err != nil {
+		return "", err
+	}
+	if selection != nil {
+		if err := projectversion.VerifyAdapter(target, selection); err != nil {
+			return "", clierror.Wrap(err, "project_version_mismatch", "bootstrap")
+		}
+	}
+	return target, nil
 }
 
 func localBuildRequireVersion(bootstrapRoot string) string {

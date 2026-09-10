@@ -71,34 +71,39 @@ func (a *App) Run(args []string) error {
 		probeErr = probe.dispatch(args)
 	}
 	call.jsonOutput = jsonRequested(args, probe.flagSet)
-	var outputOptionsErr error
-	if errors.Is(probeErr, errFlagsDiscovered) {
-		outputOptionsErr = call.configureResultOutput(probe.flagSet)
-	}
 	if probe.flagSet != nil {
 		switch probe.flagSet.Name() {
 		case "validate":
 			call.localChildOwnsExecution = true
 		case "run":
-			if ci := probe.flagSet.Lookup("ci"); ci != nil {
-				call.localChildOwnsExecution = ci.Value.String() == "true"
+			if ci, present := invocationFlag(args, probe.flagSet, "ci", false); present {
+				call.localChildOwnsExecution, _ = strconv.ParseBool(ci)
 				call.githubCI = call.githubActions && call.localChildOwnsExecution
 			}
 		}
 	}
-	worktreeFlag := ""
-	if probe.flagSet != nil {
-		if f := probe.flagSet.Lookup("worktree"); f != nil {
-			worktreeFlag = f.Value.String()
-		}
+	// The installed parser only supplies known flag arities until the project's
+	// selected CLI owns the invocation. Do not reject its newer command surface.
+	var handedOff bool
+	var handoffErr error
+	if ctx.Err() == nil {
+		handedOff, handoffErr = call.execProjectVersion(args, probe.flagSet)
+	}
+	var outputOptionsErr error
+	if errors.Is(probeErr, errFlagsDiscovered) {
+		outputOptionsErr = call.configureResultOutput(probe.flagSet)
 	}
 	var worktree string
 	var worktreeErr error
 	if !isProjectlessCommand(args) {
-		worktree, worktreeErr = resolveWorktree(worktreeFlag)
+		// Runtime selection and adapter compilation must agree, including when
+		// --instance names a different worktree from the current directory.
+		worktree, worktreeErr = invocationWorktree(args, probe.flagSet)
 	}
 	var err error
 	switch {
+	case handedOff:
+		err = handoffErr
 	case probeErr != nil && !errors.Is(probeErr, errFlagsDiscovered):
 		// Reparse for ordinary help/usage output only in the text path.
 		if !call.jsonOutput {

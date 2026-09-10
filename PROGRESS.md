@@ -1,18 +1,35 @@
 # Progress
 
-Last updated: 2026-09-09
+Last updated: 2026-09-10
 
 ## Current Status
 
 - Phase: post-bootstrap reliability and adoption hardening
-- State: PR #17's Windows ownership-test deadline correction is implemented and locally verified; native Windows confirmation awaits CI. The run at `9616a60` already passed dotenv.
-- Confidence: controlled-delay reproduction failed before the correction and passed afterward; full normal/race suites, quality gates and Linux/Windows test compilation pass. Production admission and existing assertions are unchanged.
+- State: automatic project-version startup and optional project upgrades are implemented and locally verified; ready for review and native CI.
+- Confidence: full normal/race suites, quality gates, compiled CLI/module-proxy regressions and actual-terminal accept/decline checks pass on macOS with Go 1.27.1; Linux/Windows amd64 cross-compilation passes.
 
 ## In Progress
 
-- None. The focused local correction is ready for review.
+- None. Local implementation and verification are complete.
 
 ## Completed
+
+- Upgrade project confirmation:
+  - plain terminal `upgrade` asks before installation whether to update an existing canonical project pin; only completed `y`/`yes` accepts. JSON/nonterminal defaults never prompt; `--project` explicitly updates both, `--project=false` skips project inspection, and `--worktree` selects the project
+  - install the host launcher and clear its task cache, then read the actual installed executable's version and use it for staged Go module updates. Preserve application module content through Go's solver, reject active/newly activated Devflow replacements, and retain installation/cache evidence when a requested project update fails
+  - reproduced missing CLI flags and unchanged requested module updates before implementation. Regressions cover confirmation/cancellation/bounds, global recovery, tags/pseudo-versions/latest, checksums, relative application replacements, concurrent edits, partial-failure JSON and host installation despite cross-build environment settings
+  - passed focused normal/race checks, `go test -count=1 ./...` (CLI 119.677s), `go test -race -count=1 ./...` (CLI 128.934s), vet, Staticcheck v0.8.1, govulncheck v1.6.0, tidy-diff, root/example builds, version JSON, tracked/new Go formatting and diff checks. All six Linux/Windows amd64 CLI/projectversion test and CLI binary cross-builds passed; logs: `/tmp/devflow-upgrade-final-*`
+  - real terminal smoke used ordinary `upgrade --worktree <fixture> --version v1.2.3`: `y` updated launcher/project, while `n` updated only the launcher and preserved both project files. Evidence: `/tmp/devflow-upgrade-final-pty.json` and `/var/folders/g6/jbsk5f6s7ll59hy734gmngwc0000gq/T/devflow-upgrade-pty-evidence-jksbbjrl`
+  - updated setup/operator/CLI/architecture/agent/testing docs and durable memory; see `docs_contributors/upgrade-project-verification.md`. No commits, pushes, remote workflows, user installations or existing-service operations. Test installations were isolated; native Linux/Windows execution remains a CI check
+
+- Automatic project-pinned runtime selection:
+  - read the project-root Devflow requirement and matching replacement, prepare the selected module's own CLI under `.devflow/versions/`, and hand off before command parsing or adapter generation; preserve the global launcher, project module/checksum files and explicit source-development overrides
+  - serialize preparation, cancel owned build children, verify runtime/adapter module identities before use, invalidate module/source/embedded-asset changes, and reject failed or changed selections instead of executing stale code. Shared instance routing and executable-bound bootstrap markers also preserve nested invocations into other projects
+  - report the effective linked Devflow module/version plus optional `launcherVersion`/`projectVersion`; local replacements identify development code honestly. Keep version/docs and existing recovery paths independent of adapter compilation, and keep upgrade scoped to the global launcher
+  - captured semantic failures before fixes for early parser rejection, linked version reporting, compact preparation errors, quoted source paths, instance routing, inherited markers, filesystem aliases and Go raising an adapter dependency above the pin; real local-proxy, build-process and compiled-CLI fixtures cover checksums, offline reuse, concurrent callers, cancellation and JSON/progress contracts
+  - passed `go test -count=1 ./...` (CLI 116.398s), `go test -race -count=1 ./...` (CLI 131.230s), focused normal/race regressions, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, builds/examples, version JSON, all tracked/new Go formatting and diff checks. Linux/Windows amd64 CLI/projectversion tests and CLI binaries compile; logs: `/tmp/devflow-pinned-final-*`
+  - isolated compiled demo passed version, graph, doctor, finite `run verify --ci --json --progress quiet`, and status before/after a pin update, with two cached runtimes and unchanged launcher/module files. Both demo pins use the current source replacement; real proxy tests separately verify versioned modules. Evidence: `/var/folders/g6/jbsk5f6s7ll59hy734gmngwc0000gq/T/devflow-pinned-demo-u97dtx8s`
+  - updated setup, daily-use, CLI, architecture, adapter, agent, testing and durable-memory guidance; see `docs_contributors/project-version-verification.md`. Local changes only: no commits, pushes, workflows, installations or existing-service operations. Native Linux/Windows execution remains a CI check; colleagues need one launcher update to acquire this capability
 
 - PR #17 Windows ownership-test deadline correction:
   - pulled [run `34407291406`, job `102653211221`](https://github.com/benjaco/devflow/actions/runs/34407291406/job/102653211221): `pkg/project` passed, but `TestExecutionOwnershipRejectsBeforeMutation/watch_ci` returned deadline exceeded instead of `resource_conflict`
@@ -1104,6 +1121,7 @@ Last updated: 2026-09-09
 
 ## Next Steps
 
+- Review automatic project-version selection and the upgrade project choice, confirm them on the native CI matrix, and release a launcher containing the capability before colleagues rely on pull-and-run updates.
 - Review the automatic GitHub presentation change and prepared ordinary-command smoke workflow; validate hosted rendering when a remote run is wanted.
 - Confirm the reliability changes on the native Linux/macOS/Windows CI matrix; retest the historical readiness symptom through the real daemon/TUI only if it recurs (the engine early-exit restart regression passes).
 - Confirm the Delve v1.27.1 pin on the next native Linux/macOS/Windows GitHub Actions run

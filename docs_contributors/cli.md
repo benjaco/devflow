@@ -15,6 +15,10 @@ Available command-specific evidence stays at the top level: a failed run retains
 | `invalid_arguments` | `parsing` | Unknown flag/subcommand, missing value, extra positional argument or invalid option combination |
 | `adapter_not_found`, `adapter_source_invalid` | `bootstrap` | Missing marker or invalid adapter source file |
 | `adapter_compile_failed`, `bootstrap_failed` | `bootstrap` | Go compilation failure or another local build/launch failure |
+| `invalid_project_version` | `bootstrap` on startup; `resolution` on upgrade | The project dependency selection could not be read, is malformed, or is missing for an explicit project upgrade |
+| `project_version_prepare_failed`, `project_version_changed` | `bootstrap` | Preparing the selected CLI failed, or its selection changed during handoff or adapter compilation |
+| `project_version_mismatch` | `bootstrap` | The compiled or cached adapter contains a Devflow dependency different from the project selection |
+| `project_update_failed` | `resolution` or `execution` | An explicit project upgrade has an active Devflow replacement, or reading the installed version/updating the staged module failed |
 | `unknown_project`, `ambiguous_project`, `unknown_target`, `invalid_graph`, `unknown_instance`, `invalid_worktree` | `resolution` | Project, graph, target or instance could not be resolved |
 | `unknown_run`, `run_expired` | `resolution` | The run was never issued here or its evidence was pruned |
 | `interaction_required` | `execution` | Headless fail policy stopped a task that requested input |
@@ -29,7 +33,7 @@ Available command-specific evidence stays at the top level: a failed run retains
 | `operation_cancelled`, `deadline_exceeded` | phase where interrupted | Context cancellation or deadline interrupted the operation |
 | `operation_failed` | `execution` | Unclassified operational failure; inspect the message and any result evidence |
 
-Codes are assigned from error types and source boundaries, never inferred from prose. The outer entrypoint discovers the selected command's actual flag definitions before bootstrap. `--json`/`--json=true` are recognized around malformed flags and on either side of positional arguments; a value such as `--project --json`, or a token after `--`, does not enable JSON. `--json=false` opts out. Ordinary text errors are reported once on stderr. JSON errors already presented by the local binary are not printed again by bootstrap entrypoints.
+Codes are assigned from error types and source boundaries, never inferred from prose. Project-version selection happens before command parsing; after handoff, the selected runtime discovers its command's actual flag definitions before adapter bootstrap. `--json`/`--json=true` are recognized around malformed flags and on either side of positional arguments; a value such as `--project --json`, or a token after `--`, does not enable JSON. `--json=false` opts out. Ordinary text errors are reported once on stderr. JSON errors already presented by the local binary are not printed again by bootstrap entrypoints.
 
 Line-mode logs and attached watch use JSONL: each record occupies one line, including watch start metadata, events and a terminal error when the stream fails. Watch emits no plain banner in JSON mode. Log pages return one finite JSON result. A failed output writer returns an error without attempting another document on that writer. CI progress remains independent stderr text, controlled by `run --progress`; validation keeps its existing stderr progress.
 
@@ -71,6 +75,20 @@ Implemented commands:
 
 All implemented commands support `--json` except `devflow docs setup` and `devflow docs development`, which intentionally print plain bundled user Markdown only.
 
+## Automatic Project Version
+
+The installed command reads the selected worktree's root `go.mod` before parsing commands or compiling adapters. A `github.com/benjaco/devflow` requirement selects the effective runtime; matching version-specific and wildcard `replace` directives are honored, including local paths relative to the project root. `go.work` is not consulted. Without a requirement, commands use the installed runtime. Explicit `DEVFLOW_BOOTSTRAP_ROOT` takes precedence for source development.
+
+When necessary, Devflow prepares that version's own command at `.devflow/versions/<identity>/devflow` (`devflow.exe` on Windows) and passes it the original arguments and invocation environment. Prepared versions are reused locally, including offline. Initial preparation needs Go and access to uncached dependencies; it respects project checksums without editing `go.mod` or `go.sum`. An unavailable or broken selection returns a bootstrap error rather than silently running another version.
+
+For commands with `--instance`, the recorded instance worktree takes precedence over cwd/`--worktree` for both runtime selection and adapter bootstrap. Adapter-independent recovery still requires a valid project module selection and an available selected runtime. A malformed `go.mod`, invalid pin or failed preparation returns its bootstrap error; fix that selection before retrying.
+
+The prepared runtime and generated adapter binaries are checked against the selected module and replacement. If another adapter dependency raises Devflow's requirement, the command fails instead of running that different version; update the project pin and checksums deliberately before retrying.
+
+Update the project with `go get github.com/benjaco/devflow@<version>` or `devflow upgrade --project`, then commit `go.mod`/`go.sum`. Colleagues pull and run bare `devflow` normally. Their installed launcher needs one update to acquire this capability; subsequent project updates do not require global installation changes. Interactive upgrades can offer to update the project too; normal startup never changes the pin.
+
+Version and bundled-doc inspection do not compile the adapter. Logs, retained runs, prompts and instance commands also keep their adapter-independent recovery path while using the selected runtime. Version inspection does not start, stop or replace a daemon. Ordinary execution retains daemon replacement, worktree ownership, scheduling and cancellation rules.
+
 ## Verification Planning
 
 ```bash
@@ -97,6 +115,7 @@ Prerequisite availability remains `unchecked`. Planning does not provision an in
 
 Running bare `devflow` now acts as the default operator entry path:
 - it can be the installed Go binary or the repo-local launcher script
+- the installed binary selects the project-root Devflow dependency before command parsing and adapter compilation
 - the repo-local launcher rebuilds the bootstrap binary when the content build key for the core `devflow` source tree changes
 - requires `./devflow.project.go` in the selected worktree
 - compiles a worktree-local binary into `<worktree>/.devflow/bin/devflow-local` when the project file or Devflow version/source inputs are newer
@@ -473,31 +492,43 @@ devflow migration create add_user --json
 
 If exactly one migration-create action exists, the component flag can be omitted. If several migration systems are registered, `--component` disambiguates. Migration creation is never inferred from targets such as `new-migration`; adapters must register actions.
 
-`version` prints the installed Devflow version. `version --json` returns:
+`version` prints the effective Devflow version. Use `version --worktree /path/to/project --json` to inspect another worktree's selection. Inspection may prepare the selected CLI but never compiles the adapter or starts/replaces a daemon. `version --json` retains its build-identity fields and includes optional `launcherVersion` and `projectVersion` when a project version is selected:
 
 ```json
 {
-  "version": "v0.1.0",
+  "version": "v0.2.0",
   "modulePath": "github.com/benjaco/devflow",
-  "goVersion": "go1.23.0",
-  "vcsRevision": "...",
-  "vcsTime": "..."
+  "goVersion": "go1.27.1",
+  "launcherVersion": "v0.1.0",
+  "projectVersion": "v0.2.0"
 }
 ```
 
-`upgrade` updates the installed command by running:
+`version` and `modulePath` describe the effective runtime. `projectVersion` is the original requirement in the root `go.mod`; a versioned replacement can select a different effective module/version. Local source replacements report `devel` instead of claiming the placeholder requirement is an executed release. `vcsRevision`, `vcsTime` and `modified` remain available when they describe the Devflow build, not an unrelated application's checkout.
+
+`upgrade` updates the global installed launcher by running:
 
 ```bash
 go install github.com/benjaco/devflow/cmd/devflow@latest
 ```
 
-`upgrade --version v0.1.2` installs that specific tag. `upgrade --direct` sets `GOPROXY=direct` for testing freshly pushed commits before the public Go proxy catches up. After installation succeeds, upgrade clears the global task artifact cache at `<os.UserCacheDir()>/devflow/cache` so subsequent runs rebuild artifacts with the installed code. Failed installation leaves the cache intact. Cache cleanup failure returns an error even though the binary was installed. Run upgrades between executions: this global cleanup is not coordinated with active task-cache reads or writes. Upgrade does not migrate older APIs or worktree state.
+`upgrade --version v0.1.2` installs that specific tag. `upgrade --direct` sets `GOPROXY=direct` for testing freshly pushed commits before the public Go proxy catches up. Upgrade never hands execution to the project runtime. After installation succeeds, it clears the global task artifact cache at `<os.UserCacheDir()>/devflow/cache` so subsequent runs rebuild artifacts using their effective runtime. Failed installation leaves the cache intact. Cache cleanup failure returns an error even though the binary was installed. Run upgrades between executions: this global cleanup is not coordinated with active task-cache reads or writes. Upgrade does not migrate older APIs or worktree state.
 
-Upgrade emits immediate start/finish progress and streams the underlying `go install` stdout/stderr instead of buffering it until exit. In text mode the child keeps its stdout/stderr destinations. With `upgrade --json`, live progress and combined child output go to stderr while stdout remains one final JSON document containing the command, package, version target, success flag, `cacheCleared`, duration, and captured `output`. It exits non-zero when installation or cache cleanup fails. In text mode, `upgrade` warns when `go install` writes a binary somewhere other than the `devflow` command currently found on `PATH`.
+In text mode, with terminal stdin and stderr and an existing canonical project pin, upgrade asks before installation:
 
-`docs setup` prints the setup/pipeline user docs bundle. `docs development` prints the day-to-day CLI/TUI/operator user docs bundle.
+```text
+Also update project "/path/to/project" from Devflow v0.1.0 to latest? [y/N]
+```
 
-Bare `docs` is intentionally a usage error so agents and users do not accidentally pull both context lanes into one prompt. The docs commands are projectless, have no flags, have no JSON mode, and do not print contributor docs.
+Only `y`/`yes` accepts. Empty input, no, unrecognized answers and EOF decline; Ctrl+C cancels before installation. Default JSON and nonterminal invocations do not prompt or update project files. Explicit `--project` requests both updates in every mode and preflights a valid existing pin. Explicit `--project=false` disables prompting and project-module reads, preserving global recovery when `go.mod` is broken. `--worktree` selects the root. Active Devflow local/fork replacements are not eligible for automatic updates; they require manual module changes.
+
+A requested project update runs only after installation and cache cleanup succeed. Devflow reads the actual installed binary's build information and passes that exact version to staged `go get`, preserving application dependencies. It does not look up `latest` a second time or remove replacement directives. If an inactive replacement becomes active at the new version, or the resolved version differs, the project update fails before publication. Commit the resulting `go.mod`/`go.sum` changes so other developers receive the new pin.
+
+After any prompt, upgrade emits start/finish progress and streams the underlying `go install` stdout/stderr instead of buffering it until exit. In text mode the child keeps its stdout/stderr destinations. With `upgrade --json`, live progress and combined child output go to stderr while stdout remains one final JSON document containing the command, package, version target, success flag, `installed`, `cacheCleared`, duration, and captured `output`. `installedVersion` is present when the installed release was identified for a requested project update. The optional `project` object has `worktree`, `previousVersion`, optional `version`, and `updated`; it is omitted when no project update was requested. `project.version` is the exact attempted target when known; `updated` confirms that the module update completed. Failure of a requested project update returns nonzero with `success: false` while preserving `installed: true` and `cacheCleared: true` for the completed phases. Installation and cleanup failures also return nonzero. In text mode, `upgrade` warns when `go install` writes a binary somewhere other than the `devflow` command currently found on `PATH`.
+
+`docs setup` prints the effective runtime's setup/pipeline user docs bundle. `docs development` prints its day-to-day CLI/TUI/operator user docs bundle.
+
+Bare `docs` is intentionally a usage error so agents and users do not accidentally pull both context lanes into one prompt. The docs commands do not require or compile an adapter, have no flags, have no JSON mode, and do not print contributor docs. Inside a pinned project, they use its selected runtime's bundle.
 
 `restart` connects to the daemon. A service restart is handled by the active engine that owns the service handle: it stops only the planned service set, preserves unrelated services, assigns a new process generation, waits through the task readiness probe, and reports success only after a different ready identity exists. Repeated requests are serialized. A failed or stopped service can be started again while its daemon watch loop remains active. `restart --preview` returns the same `LifecyclePlan` without changing execution state. Non-service restart slices retain their finite attached execution behavior.
 

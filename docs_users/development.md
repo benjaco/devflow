@@ -10,6 +10,10 @@ devflow docs setup
 
 ## Daily Workflow
 
+Pull the project and run `devflow` as usual. When the root `go.mod` declares a Devflow dependency, the installed launcher automatically prepares and uses that version for commands, adapters and bundled docs. The first preparation may download Go modules; subsequent launches reuse the worktree-local binary. `devflow version --json` reports the effective version and launcher identity without compiling the adapter or starting a daemon.
+
+Team members need one launcher upgrade to receive this capability. Afterward, project version updates arrive through committed `go.mod`/`go.sum` changes. In an interactive terminal, `devflow upgrade` asks before installation whether to update the project too; Enter keeps its pin unchanged. Use `devflow upgrade --project` for both updates, or `--project=false` for only the launcher. JSON and nonterminal invocations never prompt or update the project without explicit `--project`. Review and commit intentional module updates. Projects without a pin use the installed version; see `devflow docs setup` for dependency updates and local replacements.
+
 Typical human workflow:
 
 ```bash

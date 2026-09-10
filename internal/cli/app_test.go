@@ -1086,7 +1086,7 @@ func TestUpgradePathWarningWhenPathShadowsGoInstall(t *testing.T) {
 	t.Setenv("DEVFLOW_TEST_GOPATH", goPath)
 	t.Setenv("PATH", shadowDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	warning := upgradePathWarning(fakeGo)
+	warning := upgradePathWarning(context.Background(), fakeGo)
 	if !strings.Contains(warning, "go install wrote") || !strings.Contains(warning, installedDir) || !strings.Contains(warning, shadowDir) {
 		t.Fatalf("expected shadow warning, got %q", warning)
 	}
@@ -1106,7 +1106,7 @@ func TestUpgradePathWarningSkipsWhenInstalledBinaryIsOnPath(t *testing.T) {
 	t.Setenv("DEVFLOW_TEST_GOPATH", goPath)
 	t.Setenv("PATH", installedDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	if warning := upgradePathWarning(fakeGo); warning != "" {
+	if warning := upgradePathWarning(context.Background(), fakeGo); warning != "" {
 		t.Fatalf("did not expect warning when installed devflow is on PATH, got %q", warning)
 	}
 }
@@ -2126,7 +2126,7 @@ func TestBootstrapWritesWorktreeLocalBuildModuleWithSourceReplace(t *testing.T) 
 func TestLocalBuildModuleSourceInstalledModeUsesVersionWithoutReplace(t *testing.T) {
 	t.Setenv(envBootstrapModuleVersion, "v1.2.3")
 	buildDir := filepath.Join(t.TempDir(), ".devflow", "localbuild", "abc123")
-	data, err := localBuildModuleSource(buildDir, "")
+	data, err := localBuildModuleSource(buildDir, "", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2273,7 +2273,7 @@ func TestBootstrapFailedRebuildKeepsPreviousBinary(t *testing.T) {
 
 	cmd := exec.Command(binaryPath, "graph", "list", "--json", "--project", projectName)
 	cmd.Dir = worktree
-	cmd.Env = withEnv(os.Environ(), envLocalExec, "1")
+	cmd.Env = withEnv(os.Environ(), envLocalExec, binaryPath)
 	directOut, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("expected previous local binary to remain runnable: %v\n%s", err, string(directOut))
