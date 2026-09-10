@@ -702,7 +702,7 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 		case 'm':
 			d.openPrismaMigrationPrompt()
 			return nil
-		case 'i':
+		case 'r':
 			d.triggerInvalidateSelected()
 			return nil
 		case 't':
@@ -777,7 +777,7 @@ func (d *dashboard) openHelp() {
 		SetText(strings.Join([]string{
 			"[yellow]Navigation[-]  Tab changes pane; j/k or arrows move in the focused pane.",
 			"[yellow]Logs[-]        running logs open at the tail; Page Up/up pauses; End/f resumes; o loads older retained lines.",
-			"[yellow]Actions[-]     i reruns the selected scope immediately; t previews retarget scope; m creates a migration.",
+			"[yellow]Actions[-]     r reruns the selected scope immediately; t previews retarget scope; m creates a migration.",
 			"[yellow]Views[-]       l switches task/daemon log; d opens database details.",
 			"[yellow]Quit[-]        q or Escape closes the UI; a pre-existing detached run remains active.",
 			"",
@@ -1265,7 +1265,7 @@ func (d *dashboard) renderFooter() {
 		return
 	}
 	d.footer.SetText("? help  Tab focus  q quit  j/k/arrows move  Home/End contextual  f follow  o older\n" +
-		"l task/daemon log  d db  a attention  m migration  i rerun  t retarget\n" + timestamp + status)
+		"l task/daemon log  d db  a attention  m migration  r rerun  t retarget\n" + timestamp + status)
 }
 
 func (d *dashboard) openPrismaMigrationPrompt() {
