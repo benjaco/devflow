@@ -17,6 +17,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
+	"github.com/benjaco/devflow/internal/tasklog"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/daemon"
 	"github.com/benjaco/devflow/pkg/database"
@@ -2082,7 +2083,9 @@ func renderLogPanel(snap snapshot, selectedName string) []string {
 		}
 		for _, excerpt := range node.FailureExcerpts {
 			lines = append(lines, fmt.Sprintf("failure context (%s lines %d-%d):", excerpt.Reason, excerpt.StartLine, excerpt.EndLine))
-			lines = append(lines, excerpt.Lines...)
+			for _, line := range excerpt.Lines {
+				lines = append(lines, renderTaskLogLine(line))
+			}
 		}
 	}
 	if snap.logEndLine > 0 {
@@ -2097,8 +2100,23 @@ func renderLogPanel(snap snapshot, selectedName string) []string {
 		lines = append(lines, "no log lines yet")
 		return lines
 	}
-	lines = append(lines, snap.logLines...)
+	for _, line := range snap.logLines {
+		if snap.logTitle == daemonLogTitle {
+			lines = append(lines, tview.Escape(line))
+		} else {
+			lines = append(lines, renderTaskLogLine(line))
+		}
+	}
 	return lines
+}
+
+func renderTaskLogLine(line string) string {
+	// Keep the error marker in retained evidence, but use color in the log pane.
+	// Escape child markup so it cannot change the chosen color or later lines.
+	if text, ok := strings.CutPrefix(line, tasklog.ErrorPrefix); ok {
+		return "[red]" + tview.Escape(text) + "[-]"
+	}
+	return "[-]" + tview.Escape(line)
 }
 
 func renderDatabasePanel(snap snapshot) []string {

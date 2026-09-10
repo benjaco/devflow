@@ -2321,7 +2321,7 @@ func (genericEarlyExitProject) Tasks() []project.Task {
 			return ctx.Err()
 		},
 		Run: func(_ context.Context, rt *project.Runtime) error {
-			line := "stderr: broken_service: synthetic early exit before readiness do-not-expose postgresql://user:db-secret@db.example/app\n"
+			line := "E: broken_service: synthetic early exit before readiness do-not-expose postgresql://user:db-secret@db.example/app\n"
 			if err := os.WriteFile(rt.LogPath, []byte(line), 0o600); err != nil {
 				return err
 			}

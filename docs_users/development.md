@@ -138,6 +138,8 @@ Useful TUI keys:
 - `r`: immediately invalidate and rerun the selected task scope
 - `t`: choose a target, then preview and confirm retarget scope
 
+Task logs show stdout as plain text and stderr in red, without repeating stream prefixes. Retained task logs use plain stdout lines and `E: ` before stderr lines; `devflow logs` returns that compact text. The TUI hides the error marker and uses red instead. This text format reserves a leading `E: ` as the error marker; live JSON events keep their separate `stream` and `line` fields.
+
 Running logs open at the live tail as `FOLLOWING`. Page Up or upward scrolling changes the view to `PAUSED`, preserves that manual position across refreshes, and never snaps back; End or `f` resumes at the latest line. The panel reports its retained line range and truncation. `o` increases the bounded retained window without reading an unbounded file into memory. Switching log sources resets following predictably.
 
 In the normal view on wide terminals (at least 120 columns and 24 rows), the task selector stays on the left and the selected log fills the workspace on the right. Narrower terminals retain the stacked task-over-log layout, and unusually short terminals prioritize task navigation before showing the optional log pane.

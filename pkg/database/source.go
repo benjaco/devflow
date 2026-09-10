@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/benjaco/devflow/internal/tasklog"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/process"
 )
@@ -278,7 +279,7 @@ func emitPrepareLine(opts PrepareOptions, stream, line string) {
 		file, err := os.OpenFile(opts.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err == nil {
 			_ = file.Chmod(0o600)
-			_, _ = fmt.Fprintf(file, "%s: %s\n", stream, line)
+			_, _ = fmt.Fprintln(file, tasklog.FormatLine(stream, line))
 			_ = file.Close()
 		}
 	}

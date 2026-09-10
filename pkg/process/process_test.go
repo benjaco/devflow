@@ -1,6 +1,7 @@
 package process
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -24,7 +26,7 @@ func TestRunCapturesStdoutAndStderr(t *testing.T) {
 	testcmd := testutil.BuildTestCommand(t)
 	_, err := Run(context.Background(), CommandSpec{
 		Name:    testcmd,
-		Args:    []string{"emit", "out", "err"},
+		Args:    []string{"emit", "\n  out\n", "  err\n\nlast"},
 		LogPath: logPath,
 		OnLine: func(stream, line string) {
 			mu.Lock()
@@ -35,11 +37,68 @@ func TestRunCapturesStdoutAndStderr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lines["stdout"]) != 1 || lines["stdout"][0] != "out" {
+	if !slices.Equal(lines["stdout"], []string{"", "  out", ""}) {
 		t.Fatalf("stdout lines = %v", lines["stdout"])
 	}
-	if len(lines["stderr"]) != 1 || lines["stderr"][0] != "err" {
+	if !slices.Equal(lines["stderr"], []string{"  err", "", "last"}) {
 		t.Fatalf("stderr lines = %v", lines["stderr"])
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	slices.Sort(retained)
+	want := []string{"", "", "  out", "E: ", "E:   err", "E: last"}
+	if !slices.Equal(retained, want) {
+		t.Fatalf("retained output = %q, want %q", retained, want)
+	}
+}
+
+func TestInteractiveReaderRetainsStreamPrefixesAcrossChunks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "interactive.log")
+	writer, closeWriter, err := logWriter(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWriter()
+	var input bytes.Buffer
+	var events []string
+	reader := &interactiveReader{
+		stdin: &input, writer: writer,
+		prompts: []PromptSpec{{Pattern: "Continue? ", Kind: PromptConfirm}},
+		onPrompt: func(req PromptRequest) (PromptResponse, error) {
+			if req.Prompt != "Continue? " {
+				t.Fatalf("prompt changed: %+v", req)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := string(data), "E: Warning\nE: \nE: Continue? "; got != want {
+				t.Fatalf("partial prompt was not retained immediately: got %q, want %q", got, want)
+			}
+			return PromptResponse{Value: "yes"}, nil
+		},
+		onLine: func(stream, line string) { events = append(events, stream+"="+line) },
+	}
+	reader.consumeChunk("stderr", "Warn")
+	reader.consumeChunk("stderr", "ing\n\nContinue")
+	reader.consumeChunk("stderr", "? ")
+	reader.consumeChunk("stdout", "done\n")
+	reader.consumeChunk("stderr", "accepted\n")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "E: Warning\nE: \nE: Continue? \ndone\nE: accepted\n"; got != want {
+		t.Fatalf("retained chunks = %q, want %q", got, want)
+	}
+	if got := input.String(); got != "yes\n" {
+		t.Fatalf("prompt answer = %q", got)
+	}
+	if want := []string{"stderr=Warning", "stderr=", "stdout=done", "stderr=Continue? accepted"}; !slices.Equal(events, want) {
+		t.Fatalf("original stream events = %q, want %q", events, want)
 	}
 }
 
@@ -165,6 +224,90 @@ func TestInteractivePromptFailureStopsOwnedProcess(t *testing.T) {
 	}
 }
 
+func TestRunInteractiveRetainsStandardErrorAfterPartialPrompt(t *testing.T) {
+	bin := buildPromptCLI(t)
+	path := filepath.Join(t.TempDir(), "declined.log")
+	var events []string
+	result, err := Run(context.Background(), CommandSpec{
+		Name: bin, Interactive: true, LogPath: path,
+		Prompts: []PromptSpec{{Pattern: "Continue? [y/N]: ", Kind: PromptConfirm}},
+		OnPrompt: func(PromptRequest) (PromptResponse, error) {
+			return PromptResponse{Value: "no"}, nil
+		},
+		OnLine: func(stream, line string) { events = append(events, stream+"="+line) },
+	})
+	if err == nil || result.ExitCode != 2 {
+		t.Fatalf("declined process result = %+v, error = %v", result, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "Continue? [y/N]: \nE: cancelled\n"; got != want {
+		t.Fatalf("retained prompt/error = %q, want %q", got, want)
+	}
+	if want := []string{"stderr=cancelled"}; !slices.Equal(events, want) {
+		t.Fatalf("error events = %q, want %q", events, want)
+	}
+}
+
+func TestInteractiveExitSeparatesNextAttemptProducer(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := testutil.BuildTestCommand(t)
+	for _, tc := range []struct {
+		stream string
+		args   []string
+		want   string
+	}{
+		{"stderr", []string{"emit", "complete"}, "E: warning\ncomplete\n"},
+		{"stdout", []string{"emit", "", "warning"}, "complete\nE: warning\n"},
+	} {
+		t.Run(tc.stream, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			path := filepath.Join(t.TempDir(), "attempt.log")
+			var events []string
+			_, err := Run(ctx, CommandSpec{
+				Name: executable, Args: []string{"-test.run=^TestPartialOutputProcessHelper$"},
+				Env:         map[string]string{"DEVFLOW_PROCESS_PARTIAL_STREAM": tc.stream},
+				Interactive: true, LogPath: path,
+				OnLine: func(stream, line string) { events = append(events, stream+"="+line) },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 0 {
+				t.Fatalf("closing a partial retained line emitted new live events: %q", events)
+			}
+			if _, err := Run(ctx, CommandSpec{Name: command, Args: tc.args, LogPath: path, AppendLog: true}); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(data); got != tc.want {
+				t.Fatalf("sequential producer output = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPartialOutputProcessHelper(t *testing.T) {
+	switch os.Getenv("DEVFLOW_PROCESS_PARTIAL_STREAM") {
+	case "stdout":
+		fmt.Fprint(os.Stdout, "complete")
+	case "stderr":
+		fmt.Fprint(os.Stderr, "warning")
+	default:
+		return
+	}
+	os.Exit(0)
+}
+
 func TestSecretPromptResponseHidesSubprocessOutput(t *testing.T) {
 	bin := buildPromptCLI(t)
 	root := t.TempDir()
@@ -202,6 +345,9 @@ func TestSecretPromptResponseHidesSubprocessOutput(t *testing.T) {
 		if !strings.Contains(output, "[output hidden after secret response]") {
 			t.Errorf("missing explanation for hidden output: %q", output)
 		}
+	}
+	if !strings.Contains(string(data), "\nE: [output hidden after secret response]\n") {
+		t.Fatalf("suppression marker lost its retained stderr prefix: %q", data)
 	}
 }
 
@@ -282,7 +428,7 @@ func TestRunTruncatesLogPerAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(string(data)); got != "stdout: second" {
+	if got := strings.TrimSpace(string(data)); got != "second" {
 		t.Fatalf("expected truncated current-run log, got %q", got)
 	}
 }
@@ -290,7 +436,7 @@ func TestRunTruncatesLogPerAttempt(t *testing.T) {
 func TestRunAppendLogKeepsExistingAttemptLines(t *testing.T) {
 	root := t.TempDir()
 	logPath := filepath.Join(root, "task.log")
-	if err := os.WriteFile(logPath, []byte("stdout: before\n"), 0o644); err != nil {
+	if err := os.WriteFile(logPath, []byte("before\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	testcmd := testutil.BuildTestCommand(t)
@@ -307,7 +453,7 @@ func TestRunAppendLogKeepsExistingAttemptLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.TrimSpace(string(data))
-	if got != "stdout: before\nstdout: after" {
+	if got != "before\nafter" {
 		t.Fatalf("expected appended log, got %q", got)
 	}
 }

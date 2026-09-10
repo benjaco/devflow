@@ -17,17 +17,17 @@ func TestBoundedFailureExcerptsFindEarlyGoTestFailure(t *testing.T) {
 	for line := 1; line <= 360; line++ {
 		switch line {
 		case 118:
-			log.WriteString("stdout: --- FAIL: TestExample (0.01s)\n")
+			log.WriteString("--- FAIL: TestExample (0.01s)\n")
 		case 121:
-			log.WriteString("stdout: expected: 215\n")
+			log.WriteString("expected: 215\n")
 		case 122:
-			log.WriteString("stdout: actual: 229.09458\n")
+			log.WriteString("actual: 229.09458\n")
 		case 125:
-			log.WriteString("stderr: Error: values differ\n")
+			log.WriteString("E: Error: values differ\n")
 		case 359:
-			log.WriteString("stdout: FAIL\n")
+			log.WriteString("FAIL\n")
 		default:
-			fmt.Fprintf(&log, "stdout: cleanup or passing package line %03d\n", line)
+			fmt.Fprintf(&log, "cleanup or passing package line %03d\n", line)
 		}
 	}
 	if err := os.WriteFile(path, []byte(log.String()), 0o600); err != nil {
@@ -150,7 +150,7 @@ func TestClassifyFailureLineDistinguishesGoTestAndCompilerDiagnostics(t *testing
 		want string
 	}{
 		{name: "test assertion", line: "pkg/service_test.go:128: expected 215, got 229", want: "go-test-failure"},
-		{name: "prefixed test assertion", line: "stderr: pkg/service_test.go:128: assertion values differ", want: "go-test-failure"},
+		{name: "prefixed test assertion", line: "E: pkg/service_test.go:128: assertion values differ", want: "go-test-failure"},
 		{name: "compiler location", line: "pkg/service.go:128:9: invalid operation", want: "compiler-error"},
 		{name: "compiler keyword without column", line: "pkg/service.go:128: undefined: missingName", want: "compiler-error"},
 		{name: "test source compiler error", line: "pkg/service_test.go:128:9: undefined: missingName", want: "compiler-error"},
@@ -215,10 +215,10 @@ func TestBoundedEarlyExitExcerptUsesRedactedMeaningfulTail(t *testing.T) {
 	const secret = "fallback-secret"
 	var log strings.Builder
 	for line := 1; line <= 400; line++ {
-		fmt.Fprintf(&log, "stdout: routine output %03d\n", line)
+		fmt.Fprintf(&log, "routine output %03d\n", line)
 	}
 	log.WriteString("\n")
-	log.WriteString("stderr: broken_service: synthetic early exit before readiness " + secret + " postgresql://user:db-pass@db.example/app\n")
+	log.WriteString("E: broken_service: synthetic early exit before readiness " + secret + " postgresql://user:db-pass@db.example/app\n")
 	if err := os.WriteFile(path, []byte(log.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}

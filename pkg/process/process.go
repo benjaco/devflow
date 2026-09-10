@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/benjaco/devflow/internal/tasklog"
 )
 
 type PromptKind string
@@ -288,7 +290,7 @@ func scanStream(input io.Reader, stream string, writer io.Writer, onLine func(st
 			onLine(stream, line)
 		}
 		if writer != nil {
-			_, _ = io.WriteString(writer, stream+": "+line+"\n")
+			_, _ = io.WriteString(writer, tasklog.FormatLine(stream, line)+"\n")
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -372,6 +374,11 @@ func startInteractive(ctx context.Context, spec CommandSpec) (*Handle, error) {
 	}
 	go func() {
 		readWG.Wait()
+		// Another command or callback may append to this attempt next. Close
+		// the retained line only after both readers finish, without a live event.
+		if reader.logPartial {
+			reader.writeLogChunk(reader.logStream, "\n")
+		}
 		err := cmd.Wait()
 		_ = stdin.Close()
 		_ = closeWriter()
@@ -406,7 +413,9 @@ type interactiveReader struct {
 	promptIndex      int
 	failed           chan struct{}
 	outputSuppressed bool
-	lineBuf          string
+	lineBuffers      [2]string
+	logStream        string
+	logPartial       bool
 	recentBuf        string
 	mu               sync.Mutex
 	errMu            sync.Mutex
@@ -438,23 +447,52 @@ func (r *interactiveReader) consumeChunk(stream, chunk string) {
 		r.recentBuf = r.recentBuf[len(r.recentBuf)-4096:]
 	}
 	if !r.outputSuppressed {
-		if r.writer != nil {
-			_, _ = io.WriteString(r.writer, chunk)
+		r.writeLogChunk(stream, chunk)
+		// A partial stdout prompt must not become part of a later stderr event.
+		streamIndex := 0
+		if stream == "stderr" {
+			streamIndex = 1
 		}
-		r.lineBuf += chunk
+		lineBuf := &r.lineBuffers[streamIndex]
+		*lineBuf += chunk
 		for {
-			idx := indexNewline(r.lineBuf)
+			idx := indexNewline(*lineBuf)
 			if idx < 0 {
 				break
 			}
-			line := trimLineEnding(r.lineBuf[:idx])
+			line := trimLineEnding((*lineBuf)[:idx])
 			if r.onLine != nil {
 				r.onLine(stream, line)
 			}
-			r.lineBuf = r.lineBuf[idx+1:]
+			*lineBuf = (*lineBuf)[idx+1:]
 		}
 	}
 	r.maybePrompt()
+}
+
+func (r *interactiveReader) writeLogChunk(stream, chunk string) {
+	if r.writer == nil || chunk == "" {
+		return
+	}
+	if r.logPartial && r.logStream != stream {
+		// Keep partial prompts visible immediately, but separate another stream
+		// onto its own retained line so the E: marker still identifies stderr.
+		_, _ = io.WriteString(r.writer, "\n")
+		r.logPartial = false
+	}
+	r.logStream = stream
+	for chunk != "" {
+		line, rest, newline := strings.Cut(chunk, "\n")
+		if !r.logPartial {
+			line = tasklog.FormatLine(stream, line)
+		}
+		if newline {
+			line += "\n"
+		}
+		_, _ = io.WriteString(r.writer, line)
+		r.logPartial = !newline
+		chunk = rest
+	}
 }
 
 func (r *interactiveReader) maybePrompt() {
@@ -484,11 +522,12 @@ func (r *interactiveReader) maybePrompt() {
 		// A child can transform or split an echoed answer. Suppress subsequent
 		// output before writing the secret, while still detecting later prompts.
 		r.outputSuppressed = true
-		r.lineBuf = ""
+		r.lineBuffers = [2]string{}
 		const marker = "[output hidden after secret response]"
-		if r.writer != nil {
-			_, _ = io.WriteString(r.writer, "\n"+marker+"\n")
+		if r.logPartial {
+			r.writeLogChunk(r.logStream, "\n")
 		}
+		r.writeLogChunk("stderr", marker+"\n")
 		if r.onLine != nil {
 			r.onLine("stderr", marker)
 		}

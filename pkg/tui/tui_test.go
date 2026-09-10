@@ -775,6 +775,68 @@ func TestRenderLogPanelIncludesSelection(t *testing.T) {
 	}
 }
 
+func TestTaskLogPresentationUsesRedStderrWithoutPrefixes(t *testing.T) {
+	d := newDashboard(t.TempDir(), "abc123")
+	d.selectedName = "build"
+	snap := snapshot{
+		nodes: []api.NodeStatus{{Name: "build", State: api.StateFailed, FailureExcerpts: []api.FailureExcerpt{{
+			Reason: "process-failure", StartLine: 1, EndLine: 1, Lines: []string{"E: excerpt diagnostic"},
+		}}}},
+		logTitle: "build log",
+		logLines: []string{"normal output", "E:   [blue]error detail[-]", "", "normal again"},
+	}
+	d.updateLogsFromSnapshot(snap)
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer screen.Fini()
+	screen.SetSize(80, 20)
+	d.logs.SetRect(0, 0, 80, 20)
+	d.logs.Draw(screen)
+	rendered := strings.Split(simulationScreenText(screen, 80, 20), "\n")
+	for _, want := range []struct {
+		text string
+		red  bool
+	}{
+		{"normal output", false},
+		{"  [blue]error detail[-]", true},
+		{"normal again", false},
+		{"excerpt diagnostic", true},
+	} {
+		found := false
+		for y, row := range rendered {
+			x := strings.Index(row, want.text)
+			if x < 0 {
+				continue
+			}
+			found = true
+			if strings.Contains(row, "E: ") {
+				t.Fatalf("stream prefix remains visible: %q", row)
+			}
+			// Columns before the content are Unicode borders, so count cells.
+			x = len([]rune(row[:x]))
+			for column := x; column < x+len(want.text); column++ {
+				_, style, _ := screen.Get(column, y)
+				foreground, _, _ := style.Decompose()
+				if (foreground == tcell.ColorRed) != want.red {
+					t.Fatalf("wrong stream color for %q at column %d: %v", want.text, column, foreground)
+				}
+			}
+			if want.text == "normal again" && strings.Trim(rendered[y-1], " │║") != "" {
+				t.Fatalf("blank output line disappeared: %q", rendered[y-1])
+			}
+			break
+		}
+		if !found {
+			t.Fatalf("missing log text %q:\n%s", want.text, strings.Join(rendered, "\n"))
+		}
+	}
+	if snap.logLines[1] != "E:   [blue]error detail[-]" || snap.nodes[0].FailureExcerpts[0].Lines[0] != "E: excerpt diagnostic" {
+		t.Fatal("rendering changed retained evidence")
+	}
+}
+
 func TestRenderDatabasePanelIncludesPrismaSnapshots(t *testing.T) {
 	snap := snapshot{
 		instance: &api.Instance{
@@ -1336,7 +1398,7 @@ func writeNumberedLogRange(t *testing.T, path string, first, last int, appendFil
 		t.Fatal(err)
 	}
 	for line := first; line <= last; line++ {
-		if _, err := fmt.Fprintf(file, "stdout: logical line %03d\n", line); err != nil {
+		if _, err := fmt.Fprintf(file, "logical line %03d\n", line); err != nil {
 			_ = file.Close()
 			t.Fatal(err)
 		}
@@ -1395,7 +1457,7 @@ func assertPausedLogicalTop(t *testing.T, fixture runningLogDashboardFixture, wa
 	if state.following || !strings.Contains(state.title, "PAUSED") || state.top != want {
 		t.Fatalf("paused log state changed: following=%v title=%q logicalTop=%d want=%d", state.following, state.title, state.top, want)
 	}
-	wantLine := fmt.Sprintf("stdout: logical line %03d", want)
+	wantLine := fmt.Sprintf("logical line %03d", want)
 	if rendered := simulationScreenText(fixture.screen, 100, 30); !strings.Contains(rendered, wantLine) {
 		t.Fatalf("anchored logical line %q is not visible in the paused viewport:\n%s", wantLine, rendered)
 	}
@@ -1415,7 +1477,7 @@ func assertFollowingAtTail(t *testing.T, fixture runningLogDashboardFixture, las
 	if !state.following || !strings.Contains(state.title, "FOLLOWING") {
 		t.Fatalf("explicit resume did not enable following: following=%v title=%q", state.following, state.title)
 	}
-	want := fmt.Sprintf("stdout: logical line %03d", lastLine)
+	want := fmt.Sprintf("logical line %03d", lastLine)
 	if rendered := simulationScreenText(fixture.screen, 100, 30); !strings.Contains(rendered, want) {
 		t.Fatalf("explicit resume did not move to tail %q:\n%s", want, rendered)
 	}
@@ -1519,7 +1581,7 @@ func TestLoadOlderLogContentPreservesPausedLogicalPosition(t *testing.T) {
 	}
 	var content strings.Builder
 	for line := 1; line <= 500; line++ {
-		_, _ = fmt.Fprintf(&content, "stdout: logical line %03d\n", line)
+		_, _ = fmt.Fprintf(&content, "logical line %03d\n", line)
 	}
 	if err := os.WriteFile(logPath, []byte(content.String()), 0o600); err != nil {
 		t.Fatal(err)
@@ -1557,7 +1619,7 @@ func TestLoadOlderLogContentPreservesPausedLogicalPosition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := file.WriteString("stdout: logical line 501\n"); err != nil {
+	if _, err := file.WriteString("logical line 501\n"); err != nil {
 		_ = file.Close()
 		t.Fatal(err)
 	}
@@ -1761,7 +1823,7 @@ func TestUpdateLogsKeepsPreviousLinesDuringTransientEmptyRead(t *testing.T) {
 	d.updateLogsFromSnapshot(snapshot{
 		logTitle: "task log",
 		logPath:  logPath,
-		logLines: []string{"stdout: first line"},
+		logLines: []string{"first line"},
 		nodes:    []api.NodeStatus{{Name: "task", State: api.StateRunning}},
 	})
 	d.updateLogsFromSnapshot(snapshot{
@@ -1770,7 +1832,7 @@ func TestUpdateLogsKeepsPreviousLinesDuringTransientEmptyRead(t *testing.T) {
 		nodes:    []api.NodeStatus{{Name: "task", State: api.StateRunning}},
 	})
 	text := d.logs.GetText(false)
-	if !strings.Contains(text, "stdout: first line") {
+	if !strings.Contains(text, "first line") {
 		t.Fatalf("expected previous log content to remain visible, got %q", text)
 	}
 }
@@ -1780,7 +1842,7 @@ func TestUpdateLogsPreservesScrollForSameLogReload(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "task.log")
 	lines := make([]string, 40)
 	for i := range lines {
-		lines[i] = fmt.Sprintf("stdout: line %02d", i)
+		lines[i] = fmt.Sprintf("line %02d", i)
 	}
 	d.selectedName = "task"
 	d.updateLogsFromSnapshot(snapshot{
@@ -1792,7 +1854,7 @@ func TestUpdateLogsPreservesScrollForSameLogReload(t *testing.T) {
 	d.scrollLogs(12)
 	before := d.logSourceState(d.renderedLogSource)
 
-	lines = append(lines, "stdout: new line")
+	lines = append(lines, "new line")
 	d.updateLogsFromSnapshot(snapshot{
 		logTitle: "task log",
 		logPath:  logPath,
@@ -1811,7 +1873,7 @@ func TestUpdateLogsRestoresDesiredScrollAfterTemporaryShortReload(t *testing.T) 
 	logPath := filepath.Join(t.TempDir(), "task.log")
 	lines := make([]string, 40)
 	for i := range lines {
-		lines[i] = fmt.Sprintf("stdout: line %02d", i)
+		lines[i] = fmt.Sprintf("line %02d", i)
 	}
 	d.selectedName = "task"
 	snap := snapshot{
@@ -1831,7 +1893,7 @@ func TestUpdateLogsRestoresDesiredScrollAfterTemporaryShortReload(t *testing.T) 
 	defer screen.Fini()
 	d.logs.SetRect(0, 0, 80, 8)
 
-	snap.logLines = []string{"stdout: restarting"}
+	snap.logLines = []string{"restarting"}
 	d.updateLogsFromSnapshot(snap)
 	d.logs.Draw(screen)
 	if row, _ := d.logs.GetScrollOffset(); row != 0 {
@@ -1853,7 +1915,7 @@ func TestLogMouseCaptureForwardsNativeScrollAndRecordsDesiredOffset(t *testing.T
 	d.updateLogsFromSnapshot(snapshot{
 		logTitle: "task log",
 		logPath:  logPath,
-		logLines: []string{"stdout: first", "stdout: second"},
+		logLines: []string{"first", "second"},
 		nodes:    []api.NodeStatus{{Name: "task", State: api.StateRunning}},
 	})
 
@@ -1878,7 +1940,7 @@ func TestUpdateLogsResetsScrollWhenLogChanges(t *testing.T) {
 	d.updateLogsFromSnapshot(snapshot{
 		logTitle: "first log",
 		logPath:  firstLog,
-		logLines: []string{"stdout: first"},
+		logLines: []string{"first"},
 		nodes:    []api.NodeStatus{{Name: "first", State: api.StateRunning}},
 	})
 	d.logs.ScrollTo(9, 0)
@@ -1887,7 +1949,7 @@ func TestUpdateLogsResetsScrollWhenLogChanges(t *testing.T) {
 	d.updateLogsFromSnapshot(snapshot{
 		logTitle: "second log",
 		logPath:  secondLog,
-		logLines: []string{"stdout: second"},
+		logLines: []string{"second"},
 		nodes:    []api.NodeStatus{{Name: "second", State: api.StateRunning}},
 	})
 	screen := tcell.NewSimulationScreen("UTF-8")
