@@ -188,41 +188,47 @@ go test ./internal/cli -run 'TestBootstrapJSON|TestCompiled.*JSON|TestLogs|TestL
 go test -race ./internal/logstream ./internal/clierror ./internal/reporepair ./pkg/process -count=1
 ```
 
-## Windows cache-restore reproduction
+## Cache restoration with an open output
 
-The tests-only Windows investigation uses actual `CreateFile` handles with
-`FILE_SHARE_READ | FILE_SHARE_WRITE` and no `FILE_SHARE_DELETE`. The handle stays
-open until the restore returns; no timer determines whether the path is locked.
-The fixture owns every handle, uses temporary paths containing spaces, and does
-not launch services or touch an application's cache.
+Keep this scenario portable: open the existing output with ordinary `os.Open`,
+keep the reader open throughout restoration, then close it explicitly and restore
+again. The cache and engine tests run on every OS, without build tags, OS checks,
+platform APIs, sleeps, or simulated filesystem errors. Setup and assertions stay
+visible in each test.
 
-```powershell
-go test -count=3 -v ./pkg/cache -run '^TestRestoreWindowsDenyDeleteHandlePreservesOutputsAndCache$'
-go test -count=3 -v ./pkg/engine -run '^TestWindowsCacheRestoreFailureRetainsNativeCauseInTaskLog$'
+```sh
+go test -count=3 -v ./pkg/cache -run '^TestRestoreWithOpenOutputPreservesReaderAndCache$'
+go test -count=3 -v ./pkg/engine -run '^TestCacheRestoreWithOpenOutputRetainsEvidence$'
 ```
 
-The cache controls expect a native backup-rename error while the handle is held,
-unchanged original/cache bytes, and a successful cache restore after it closes.
-The engine regression also requires no generator execution or false cache hit,
-retained failed-run/attempt evidence, and a successful unlocked control. Its last
-assertion requires the retained task log to contain the observed native error
-and output path. That assertion is intentionally red against the current engine,
-which retains copy counters but omits the restore error from the task log.
+Successful restoration must publish the exact cached content and report a cache
+hit. If the filesystem refuses the output backup rename, restoration must
+preserve the original, report failure without a cache hit, and retain the actual
+cause and affected path in the task log. Both outcomes must leave the existing
+reader's content and shared cache unchanged. Closing the reader must allow the
+same cache to restore, without rerunning the generator. Fixtures use isolated
+temporary paths containing spaces and do not start services.
 
-Use the existing Windows CI matrix to confirm the exact failure before changing
-production code. A compile error or unrelated failing test is not reproduction.
-These tests establish the lock mechanism and missing diagnostic; they do not
-identify the original application's lock holder or prove a transient retry fix.
-A transient-lock regression still needs coordination with an observed failed
+In Go 1.27.1, Windows `os.Open` omits delete sharing, so this ordinary
+reader can prevent renaming the file or its containing directory. Unix normally
+allows replacement while the reader retains the old file. These are real
+filesystem outcomes under one data-preservation/evidence contract, not reasons
+to skip the scenario on either platform. The current engine omits restoration
+errors from retained task logs; the shared regression should therefore be red
+when the filesystem rejects that rename, including native Windows.
+
+[PR #22](https://github.com/benjaco/devflow/pull/22) records native CI results.
+Earlier Windows-only fixtures confirmed the rename error and missing diagnostic
+in [the first run](https://github.com/benjaco/devflow/actions/runs/34640269145/job/103397958096)
+and [the repeat](https://github.com/benjaco/devflow/actions/runs/34640917637/job/103400051740).
+The shared tests replace those fixtures so Linux/macOS exercise successful
+publication and Windows exercises the actual refusal under the same scenario.
+A compile error or unrelated red check is not reproduction.
+
+These tests do not identify the original application's reader or prove a
+transient retry fix. The reader stays open until restoration returns. A
+transient-lock regression still needs coordination with an observed failed
 rename; releasing a handle after an arbitrary sleep cannot establish that.
-
-[Windows CI at `ec01938`](https://github.com/benjaco/devflow/actions/runs/34640269145/job/103397958096)
-confirmed the expected failure: backup rename returned `Access is denied`, the
-attempt remained unexecuted, and the unlocked control restored cached content
-without rerunning the generator. The only failed assertion was the missing
-native cause/path in a retained log containing just
-`E: cache restore: files=2 bytes=13`. The native cache controls and all other
-hosted jobs passed; no production fix is included in this evidence phase.
 
 ## Example/Smoke Coverage
 

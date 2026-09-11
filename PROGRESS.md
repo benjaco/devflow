@@ -4,18 +4,23 @@ Last updated: 2026-09-11
 
 ## Current Status
 
-- Phase: native Windows cache-restore reproduction, tests only
-- State: tests-only draft PR #22 reproduces the native lock failure and missing retained diagnostic; implementation remains parked for user review.
-- Confidence: the Windows CI job fails at the intended diagnostic assertion after verifying the native failure and unlocked cache-hit control. All other hosted jobs and local normal/race/quality/build gates pass.
+- Phase: portable open-output cache-restore reproduction, tests only
+- State: draft PR #22 now uses ordinary open-reader scenarios on every platform; implementation remains parked for user review.
+- Confidence: shared fixtures pass repeated macOS runs, the full normal suite and quality/build gates; Windows test binaries compile and vet passes. Current race/native CI results and failure excerpts are recorded in [PR #22](https://github.com/benjaco/devflow/pull/22).
 
 ## In Progress
 
-- Confirm the unchanged regression on a second CI run, then review the native evidence with the user before choosing a fix. Do not apply a fix in this phase.
+- User review of the portable tests and native CI evidence before choosing a fix. The reader stays open until restoration returns; transient retry behavior needs a separate regression. Do not apply a production fix in this phase.
 - All prior cache-rename implementation/tests/docs are preserved in stash commit `c6d3378b3acc64d1f6a91b885913061ef46b6320` (`Windows cache rename implementation parked pending native failing tests`). Leave that stash intact.
 
 ## Completed
 
-- Windows cache-restore tests-only preparation:
+- Portable open-output cache-restore regression:
+  - replaced both Windows-only fixtures with ordinary `os.Open` readers; no build tags, OS branches, platform APIs, skips or timed release. File/directory scenarios run everywhere and require exact publication or preserved originals with actionable failure evidence, unchanged open-reader/cache content and a cache hit after closing
+  - macOS cache repetitions (10), engine repetitions (3), full normal tests, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, CLI/example builds, version JSON and formatting/diff checks pass. Windows cache/engine test binaries and vet pass; logs: `/tmp/devflow-open-output-*`. Race and hosted results are linked in PR #22
+  - production and workflows remain unchanged; the missing-error assertion remains intentional while these tests are reviewed. Updated verification guidance and durable memory to prefer shared filesystem scenarios across platforms
+
+- Initial Windows-only fixture evidence (superseded by the portable tests above):
   - real deny-delete-sharing handles reproduce file/directory backup-move failures, verify original/shared-cache preservation, then close before the same cache restores successfully; paths contain spaces, with no services or timed release
   - engine regression verifies an unexecuted failed attempt and an unlocked cache hit before requiring the actual native error/path in the retained task log. The diagnostic assertion is intentionally red on the current engine; these tests do not establish transient retry behavior or the application's original lock holder
   - no production/workflow changes. Focused/full normal tests, full race tests, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, CLI/example builds, version JSON and formatting/diff checks pass locally. Windows cache/engine test binaries cross-compile and Windows vet passes. Logs: `/tmp/devflow-windows-repro-*`; native CI review must precede implementation
