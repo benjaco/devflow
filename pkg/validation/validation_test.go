@@ -848,9 +848,17 @@ func TestValidationCancellationInterruptsSnapshotAndPartialArtifactTransfer(t *t
 		}
 		budget := newValidationBudget(root, Request{MaxFiles: -1, MaxBytes: -1, MaxTemporaryBytes: -1})
 		task := project.Task{Outputs: project.Outputs{Dirs: []string{"a", "b"}}}
-		_, err := transferDeclaredOutputs(&errAfterContext{failAt: 6}, source, destination, task, budget, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		transferCtx := &cancelWhenPathAppearsContext{
+			Context: ctx, cancel: cancel, path: filepath.Join(destination, "a", "file.txt"),
+		}
+		_, err := transferDeclaredOutputs(transferCtx, source, destination, task, budget, nil)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("artifact-transfer cancellation error = %v", err)
+		}
+		if ctx.Err() != context.Canceled {
+			t.Fatalf("first transfer did not cancel the real context: %v", ctx.Err())
 		}
 		if _, err := os.Stat(filepath.Join(destination, "a", "file.txt")); err != nil {
 			t.Fatalf("expected first read-only artifact to be transferred before cancellation: %v", err)
@@ -870,6 +878,20 @@ func TestValidationCancellationInterruptsSnapshotAndPartialArtifactTransfer(t *t
 type errAfterContext struct {
 	calls  int
 	failAt int
+}
+
+type cancelWhenPathAppearsContext struct {
+	context.Context
+	path   string
+	cancel context.CancelFunc
+}
+
+func (c *cancelWhenPathAppearsContext) Err() error {
+	// Observe the completed transfer instead of counting internal context checks.
+	if _, err := os.Stat(c.path); err == nil {
+		c.cancel()
+	}
+	return c.Context.Err()
 }
 
 func allocatedTreeBytes(t *testing.T, root string) int64 {

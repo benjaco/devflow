@@ -213,9 +213,10 @@ In Go 1.27.1, Windows `os.Open` omits delete sharing, so this ordinary
 reader can prevent renaming the file or its containing directory. Unix normally
 allows replacement while the reader retains the old file. These are real
 filesystem outcomes under one data-preservation/evidence contract, not reasons
-to skip the scenario on either platform. The current engine omits restoration
-errors from retained task logs; the shared regression should therefore be red
-when the filesystem rejects that rename, including native Windows.
+to skip the scenario on either platform. Before the fix, the engine omitted
+restoration errors from retained task logs: the shared regression failed on
+Windows at that missing-evidence assertion. The fix retains the actual failure
+without changing task-state classification.
 
 [PR #22](https://github.com/benjaco/devflow/pull/22) records native CI results.
 Earlier Windows-only fixtures confirmed the rename error and missing diagnostic
@@ -225,10 +226,28 @@ The shared tests replace those fixtures so Linux/macOS exercise successful
 publication and Windows exercises the actual refusal under the same scenario.
 A compile error or unrelated red check is not reproduction.
 
-These tests do not identify the original application's reader or prove a
-transient retry fix. The reader stays open until restoration returns. A
-transient-lock regression still needs coordination with an observed failed
-rename; releasing a handle after an arbitrary sleep cannot establish that.
+`TestMoveWithOpenReaderRetriesAfterReaderCloses` adds a coordinated transient
+case for both files and directories. Its one-shot `os.Rename` control establishes
+the native behavior, then a thin callback closes the reader only after observing
+an actual rename refusal. A subsequent rename must succeed through the retry
+loop. Unix runs the same scenario and normally succeeds on the first attempt;
+no timer determines when the reader is released.
+
+Policy tests use virtual time for backoff, cancellation and deadlines. Transaction
+tests cancel during a later installation after an earlier output was published,
+then require recovery with an uncanceled context. Every affected output must get
+a recovery attempt even if an earlier rollback move fails. Native causes and
+quoted paths remain observable through standard error wrapping; no public cache
+error type or global task-state exception is needed.
+
+```sh
+go test -count=1 -v ./internal/fsutil -run 'TestMoveWithOpenReader|TestRename|TestMoveRetry|TestCanceledMove'
+go test -count=1 ./pkg/cache ./pkg/engine ./pkg/validation
+```
+
+These fixtures identify their own reader only; they do not identify the original
+application's lock holder or prove it will release within the two-second retry
+window. See [scope decisions and verification](cache-restore-verification.md).
 
 ## Example/Smoke Coverage
 

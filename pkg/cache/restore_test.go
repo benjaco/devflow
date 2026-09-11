@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -110,6 +111,9 @@ func TestRestoreRollsBackEarlierOutputsOnCommitFailure(t *testing.T) {
 	})
 	if ok || err == nil {
 		t.Fatalf("failed commit = %v, %v; want error", ok, err)
+	}
+	if !strings.Contains(err.Error(), "cache restore install") || !strings.Contains(err.Error(), strconv.Quote(filepath.Join(worktree, "second.txt"))) {
+		t.Fatalf("restore failure omitted publication stage/destination: %v", err)
 	}
 	assertCurrentOutputs(t, worktree, task)
 	if ok, err := store.Restore(worktree, task.Name, "key"); !ok || err != nil {

@@ -621,7 +621,7 @@ func transferDeclaredOutputs(ctx context.Context, sourceRoot, destinationRoot st
 			return nil, err
 		}
 		destination := filepath.Join(destinationRoot, filepath.FromSlash(spec.path))
-		if err := fsutil.MovePathWritable(source, destination); err != nil {
+		if err := fsutil.MovePathWritable(ctx, source, destination); err != nil {
 			return nil, err
 		}
 	}

@@ -113,8 +113,8 @@ type outputArtifact struct {
 	directory bool
 }
 
-// Keep the original manifest indexes when normalizing older entries with
-// redundant declarations. Directory snapshots already include their children.
+// Keep manifest indexes when normalizing redundant declarations. Directory
+// snapshots already include their children.
 func outputArtifacts(outputs Outputs, entryDir string, normalize bool) []outputArtifact {
 	artifacts := make([]outputArtifact, 0, len(outputs.Files)+len(outputs.Dirs))
 	seen := make(map[string]bool)
@@ -156,7 +156,7 @@ func validateArtifact(path string, directory bool) error {
 	return nil
 }
 
-func restoreOutputs(ctx context.Context, worktree, entryDir string, outputs Outputs, onProgress func(fsutil.CopyProgress)) (bool, error) {
+func restoreOutputs(ctx context.Context, worktree, entryDir string, outputs Outputs, onProgress func(fsutil.CopyProgress), move func(context.Context, string, string) error) (bool, error) {
 	artifacts := outputArtifacts(outputs, entryDir, true)
 	for _, artifact := range artifacts {
 		if err := validateParents(worktree, filepath.Join(worktree, artifact.rel)); err != nil {
@@ -219,18 +219,33 @@ func restoreOutputs(ctx context.Context, worktree, entryDir string, outputs Outp
 	backedUp := make([]bool, len(artifacts))
 	installed := make([]bool, len(artifacts))
 	rollback := func(cause error) (bool, error) {
+		// Cancellation stops publication, not recovery. Each rename has its
+		// own retry bound; attempt every backup even if an earlier move fails.
+		recoveryCtx := context.WithoutCancel(ctx)
+		var recoveryErrors []error
 		for i := len(artifacts) - 1; i >= 0; i-- {
 			destination := filepath.Join(worktree, artifacts[i].rel)
+			backup := filepath.Join(staging, "old", strconv.Itoa(i))
 			var err error
 			if backedUp[i] {
-				err = fsutil.MovePathWritable(filepath.Join(staging, "old", strconv.Itoa(i)), destination)
+				err = move(recoveryCtx, backup, destination)
 			} else if installed[i] {
 				err = fsutil.RemoveAllWritable(destination)
 			}
 			if err != nil {
-				cleanup = false
-				cause = errors.Join(cause, fmt.Errorf("restore rollback failed; original outputs retained under %q: %w", staging, err))
+				if backedUp[i] {
+					err = fmt.Errorf("cache restore rollback %q to %q: %w", backup, destination, err)
+				} else {
+					err = fmt.Errorf("cache restore rollback remove %q: %w", destination, err)
+				}
+				recoveryErrors = append(recoveryErrors, err)
 			}
+		}
+		if len(recoveryErrors) > 0 {
+			cleanup = false
+			// Keep the recovery directory first so bounded CLI diagnostics do
+			// not hide it behind a long original failure or many rollback errors.
+			cause = fmt.Errorf("cache restore recovery incomplete; recovery files retained at %q: %w", staging, errors.Join(append([]error{cause}, recoveryErrors...)...))
 		}
 		return false, cause
 	}
@@ -243,15 +258,17 @@ func restoreOutputs(ctx context.Context, worktree, entryDir string, outputs Outp
 			return rollback(err)
 		}
 		if _, err := os.Lstat(destination); err == nil {
-			if err := fsutil.MovePathWritable(destination, filepath.Join(staging, "old", strconv.Itoa(i))); err != nil {
-				return rollback(err)
+			backup := filepath.Join(staging, "old", strconv.Itoa(i))
+			if err := move(ctx, destination, backup); err != nil {
+				return rollback(fmt.Errorf("cache restore backup %q to %q: %w", destination, backup, err))
 			}
 			backedUp[i] = true
 		} else if !os.IsNotExist(err) {
 			return rollback(err)
 		}
-		if err := fsutil.MovePathWritable(filepath.Join(staging, "new", strconv.Itoa(i)), destination); err != nil {
-			return rollback(err)
+		staged := filepath.Join(staging, "new", strconv.Itoa(i))
+		if err := move(ctx, staged, destination); err != nil {
+			return rollback(fmt.Errorf("cache restore install %q to %q: %w", staged, destination, err))
 		}
 		installed[i] = true
 	}

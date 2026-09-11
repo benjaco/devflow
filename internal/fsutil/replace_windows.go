@@ -3,35 +3,24 @@
 package fsutil
 
 import (
+	"context"
 	"errors"
 	"os"
-	"time"
 
 	"golang.org/x/sys/windows"
 )
 
-const (
-	windowsReplaceRetryLimit = 2 * time.Second
-	windowsReplaceMaxDelay   = 50 * time.Millisecond
-)
-
 func replaceFile(oldPath, newPath string) error {
-	deadline := time.Now().Add(windowsReplaceRetryLimit)
-	delay := time.Millisecond
-	for {
-		err := os.Rename(oldPath, newPath)
-		if err == nil || !transientWindowsReplaceError(err) {
-			return err
-		}
-		if time.Now().Add(delay).After(deadline) {
-			return err
-		}
-		time.Sleep(delay)
-		delay = min(delay*2, windowsReplaceMaxDelay)
+	err := renameWithRetry(context.Background(), oldPath, newPath, os.Rename, transientRenameError)
+	var native *os.LinkError
+	if errors.As(err, &native) {
+		// State-file callers use os.Is* helpers, which expect native path errors.
+		return native
 	}
+	return err
 }
 
-func transientWindowsReplaceError(err error) bool {
+func transientRenameError(err error) bool {
 	return errors.Is(err, windows.ERROR_ACCESS_DENIED) ||
 		errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
 		errors.Is(err, windows.ERROR_LOCK_VIOLATION)
