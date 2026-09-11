@@ -5,12 +5,12 @@ Last updated: 2026-09-11
 ## Current Status
 
 - Phase: native Windows cache-restore reproduction, tests only
-- State: implementation parked at the user's request; preparing native handle-lock controls and an intentionally failing retained-error regression before choosing a fix.
-- Confidence: full normal and focused cache/engine suites pass on macOS; Windows cache/engine test binaries and vet pass. Native execution and the local full race suite are pending.
+- State: tests-only draft PR #22 reproduces the native lock failure and missing retained diagnostic; implementation remains parked for user review.
+- Confidence: the Windows CI job fails at the intended diagnostic assertion after verifying the native failure and unlocked cache-hit control. All other hosted jobs and local normal/race/quality/build gates pass.
 
 ## In Progress
 
-- Add deterministic native Windows tests against unchanged production code, publish a draft PR, and inspect its Windows failure before user review. Do not apply a fix in this phase.
+- Confirm the unchanged regression on a second CI run, then review the native evidence with the user before choosing a fix. Do not apply a fix in this phase.
 - All prior cache-rename implementation/tests/docs are preserved in stash commit `c6d3378b3acc64d1f6a91b885913061ef46b6320` (`Windows cache rename implementation parked pending native failing tests`). Leave that stash intact.
 
 ## Completed
@@ -18,7 +18,8 @@ Last updated: 2026-09-11
 - Windows cache-restore tests-only preparation:
   - real deny-delete-sharing handles reproduce file/directory backup-move failures, verify original/shared-cache preservation, then close before the same cache restores successfully; paths contain spaces, with no services or timed release
   - engine regression verifies an unexecuted failed attempt and an unlocked cache hit before requiring the actual native error/path in the retained task log. The diagnostic assertion is intentionally red on the current engine; these tests do not establish transient retry behavior or the application's original lock holder
-  - no production/workflow changes. Focused/full normal tests, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, CLI/example builds, version JSON and formatting/diff checks pass locally. Windows cache/engine test binaries cross-compile and Windows vet passes. Logs: `/tmp/devflow-windows-repro-*`; native CI review must precede implementation
+  - no production/workflow changes. Focused/full normal tests, full race tests, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, CLI/example builds, version JSON and formatting/diff checks pass locally. Windows cache/engine test binaries cross-compile and Windows vet passes. Logs: `/tmp/devflow-windows-repro-*`; native CI review must precede implementation
+  - [draft PR #22](https://github.com/benjaco/devflow/pull/22), test commit `ec01938`: [Windows job `103397958096`](https://github.com/benjaco/devflow/actions/runs/34640269145/job/103397958096) reproduces `Access is denied` on directory backup, `executed=false`, and unlocked restoration with `cacheHits=[generate]` / one total generator execution. The sole failing test is `TestWindowsCacheRestoreFailureRetainsNativeCauseInTaskLog`: its retained log is only `E: cache restore: files=2 bytes=13`. Native cache controls pass; every other hosted job passes. Saved log: `/tmp/devflow-windows-repro-ci-first.log`
 
 - Readable task logs:
   - new retained logs use plain stdout/default text and `E: ` before each stderr line, shared across runtime callbacks, subprocesses and database progress. TUI logs/excerpts hide the marker and render stderr red; escape child markup, preserve blank lines and scroll anchors, and retain original live event stream/payload fields

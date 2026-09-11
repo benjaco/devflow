@@ -216,6 +216,14 @@ identify the original application's lock holder or prove a transient retry fix.
 A transient-lock regression still needs coordination with an observed failed
 rename; releasing a handle after an arbitrary sleep cannot establish that.
 
+[Windows CI at `ec01938`](https://github.com/benjaco/devflow/actions/runs/34640269145/job/103397958096)
+confirmed the expected failure: backup rename returned `Access is denied`, the
+attempt remained unexecuted, and the unlocked control restored cached content
+without rerunning the generator. The only failed assertion was the missing
+native cause/path in a retained log containing just
+`E: cache restore: files=2 bytes=13`. The native cache controls and all other
+hosted jobs passed; no production fix is included in this evidence phase.
+
 ## Example/Smoke Coverage
 
 TUI exit-diagnostic regressions run the real application loop with a simulation screen: distinguish Escape, q, library-handled Ctrl+C, and a return without an observed exit key; first consume Escape inside help to prove it is not misreported. Delve failure/restart engine tests do not exercise the native Windows console shared with a live TUI. An unexpected Windows UI exit during restart still requires native reproduction with the terminal/IDE and debugger attachment state recorded.
