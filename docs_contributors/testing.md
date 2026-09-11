@@ -188,6 +188,34 @@ go test ./internal/cli -run 'TestBootstrapJSON|TestCompiled.*JSON|TestLogs|TestL
 go test -race ./internal/logstream ./internal/clierror ./internal/reporepair ./pkg/process -count=1
 ```
 
+## Windows cache-restore reproduction
+
+The tests-only Windows investigation uses actual `CreateFile` handles with
+`FILE_SHARE_READ | FILE_SHARE_WRITE` and no `FILE_SHARE_DELETE`. The handle stays
+open until the restore returns; no timer determines whether the path is locked.
+The fixture owns every handle, uses temporary paths containing spaces, and does
+not launch services or touch an application's cache.
+
+```powershell
+go test -count=3 -v ./pkg/cache -run '^TestRestoreWindowsDenyDeleteHandlePreservesOutputsAndCache$'
+go test -count=3 -v ./pkg/engine -run '^TestWindowsCacheRestoreFailureRetainsNativeCauseInTaskLog$'
+```
+
+The cache controls expect a native backup-rename error while the handle is held,
+unchanged original/cache bytes, and a successful cache restore after it closes.
+The engine regression also requires no generator execution or false cache hit,
+retained failed-run/attempt evidence, and a successful unlocked control. Its last
+assertion requires the retained task log to contain the observed native error
+and output path. That assertion is intentionally red against the current engine,
+which retains copy counters but omits the restore error from the task log.
+
+Use the existing Windows CI matrix to confirm the exact failure before changing
+production code. A compile error or unrelated failing test is not reproduction.
+These tests establish the lock mechanism and missing diagnostic; they do not
+identify the original application's lock holder or prove a transient retry fix.
+A transient-lock regression still needs coordination with an observed failed
+rename; releasing a handle after an arbitrary sleep cannot establish that.
+
 ## Example/Smoke Coverage
 
 TUI exit-diagnostic regressions run the real application loop with a simulation screen: distinguish Escape, q, library-handled Ctrl+C, and a return without an observed exit key; first consume Escape inside help to prove it is not misreported. Delve failure/restart engine tests do not exercise the native Windows console shared with a live TUI. An unexpected Windows UI exit during restart still requires native reproduction with the terminal/IDE and debugger attachment state recorded.

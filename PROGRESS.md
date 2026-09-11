@@ -4,15 +4,21 @@ Last updated: 2026-09-11
 
 ## Current Status
 
-- Phase: post-bootstrap reliability and adoption hardening
-- State: compact retained task logs and prefix-free TUI rendering are complete: plain stdout, `E: ` for retained stderr, and red stderr in the TUI.
-- Confidence: regressions, full normal/race suites, quality/build gates and the isolated terminal smoke pass; Linux/Windows cross-builds pass.
+- Phase: native Windows cache-restore reproduction, tests only
+- State: implementation parked at the user's request; preparing native handle-lock controls and an intentionally failing retained-error regression before choosing a fix.
+- Confidence: full normal and focused cache/engine suites pass on macOS; Windows cache/engine test binaries and vet pass. Native execution and the local full race suite are pending.
 
 ## In Progress
 
-- None. Local task-log changes are ready for review.
+- Add deterministic native Windows tests against unchanged production code, publish a draft PR, and inspect its Windows failure before user review. Do not apply a fix in this phase.
+- All prior cache-rename implementation/tests/docs are preserved in stash commit `c6d3378b3acc64d1f6a91b885913061ef46b6320` (`Windows cache rename implementation parked pending native failing tests`). Leave that stash intact.
 
 ## Completed
+
+- Windows cache-restore tests-only preparation:
+  - real deny-delete-sharing handles reproduce file/directory backup-move failures, verify original/shared-cache preservation, then close before the same cache restores successfully; paths contain spaces, with no services or timed release
+  - engine regression verifies an unexecuted failed attempt and an unlocked cache hit before requiring the actual native error/path in the retained task log. The diagnostic assertion is intentionally red on the current engine; these tests do not establish transient retry behavior or the application's original lock holder
+  - no production/workflow changes. Focused/full normal tests, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, CLI/example builds, version JSON and formatting/diff checks pass locally. Windows cache/engine test binaries cross-compile and Windows vet passes. Logs: `/tmp/devflow-windows-repro-*`; native CI review must precede implementation
 
 - Readable task logs:
   - new retained logs use plain stdout/default text and `E: ` before each stderr line, shared across runtime callbacks, subprocesses and database progress. TUI logs/excerpts hide the marker and render stderr red; escape child markup, preserve blank lines and scroll anchors, and retain original live event stream/payload fields
