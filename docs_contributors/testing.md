@@ -188,6 +188,67 @@ go test ./internal/cli -run 'TestBootstrapJSON|TestCompiled.*JSON|TestLogs|TestL
 go test -race ./internal/logstream ./internal/clierror ./internal/reporepair ./pkg/process -count=1
 ```
 
+## Cache restoration with an open output
+
+Keep this scenario portable: open the existing output with ordinary `os.Open`,
+keep the reader open throughout restoration, then close it explicitly and restore
+again. The cache and engine tests run on every OS, without build tags, OS checks,
+platform APIs, sleeps, or simulated filesystem errors. Setup and assertions stay
+visible in each test.
+
+```sh
+go test -count=3 -v ./pkg/cache -run '^TestRestoreWithOpenOutputPreservesReaderAndCache$'
+go test -count=3 -v ./pkg/engine -run '^TestCacheRestoreWithOpenOutputRetainsEvidence$'
+```
+
+Successful restoration must publish the exact cached content and report a cache
+hit. If the filesystem refuses the output backup rename, restoration must
+preserve the original, report failure without a cache hit, and retain the actual
+cause and affected path in the task log. Both outcomes must leave the existing
+reader's content and shared cache unchanged. Closing the reader must allow the
+same cache to restore, without rerunning the generator. Fixtures use isolated
+temporary paths containing spaces and do not start services.
+
+In Go 1.27.1, Windows `os.Open` omits delete sharing, so this ordinary
+reader can prevent renaming the file or its containing directory. Unix normally
+allows replacement while the reader retains the old file. These are real
+filesystem outcomes under one data-preservation/evidence contract, not reasons
+to skip the scenario on either platform. Before the fix, the engine omitted
+restoration errors from retained task logs: the shared regression failed on
+Windows at that missing-evidence assertion. The fix retains the actual failure
+without changing task-state classification.
+
+[PR #22](https://github.com/benjaco/devflow/pull/22) records native CI results.
+Earlier Windows-only fixtures confirmed the rename error and missing diagnostic
+in [the first run](https://github.com/benjaco/devflow/actions/runs/34640269145/job/103397958096)
+and [the repeat](https://github.com/benjaco/devflow/actions/runs/34640917637/job/103400051740).
+The shared tests replace those fixtures so Linux/macOS exercise successful
+publication and Windows exercises the actual refusal under the same scenario.
+A compile error or unrelated red check is not reproduction.
+
+`TestMoveWithOpenReaderRetriesAfterReaderCloses` adds a coordinated transient
+case for both files and directories. Its one-shot `os.Rename` control establishes
+the native behavior, then a thin callback closes the reader only after observing
+an actual rename refusal. A subsequent rename must succeed through the retry
+loop. Unix runs the same scenario and normally succeeds on the first attempt;
+no timer determines when the reader is released.
+
+Policy tests use virtual time for backoff, cancellation and deadlines. Transaction
+tests cancel during a later installation after an earlier output was published,
+then require recovery with an uncanceled context. Every affected output must get
+a recovery attempt even if an earlier rollback move fails. Native causes and
+quoted paths remain observable through standard error wrapping; no public cache
+error type or global task-state exception is needed.
+
+```sh
+go test -count=1 -v ./internal/fsutil -run 'TestMoveWithOpenReader|TestRename|TestMoveRetry|TestCanceledMove'
+go test -count=1 ./pkg/cache ./pkg/engine ./pkg/validation
+```
+
+These fixtures identify their own reader only; they do not identify the original
+application's lock holder or prove it will release within the two-second retry
+window. See [scope decisions and verification](cache-restore-verification.md).
+
 ## Example/Smoke Coverage
 
 TUI exit-diagnostic regressions run the real application loop with a simulation screen: distinguish Escape, q, library-handled Ctrl+C, and a return without an observed exit key; first consume Escape inside help to prove it is not misreported. Delve failure/restart engine tests do not exercise the native Windows console shared with a live TUI. An unexpected Windows UI exit during restart still requires native reproduction with the terminal/IDE and debugger attachment state recorded.

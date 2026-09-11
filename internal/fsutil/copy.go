@@ -350,8 +350,16 @@ func prepareDestinationParent(destination string) (func() error, error) {
 // restrictive source and destination parents owner-writable. Source and
 // destination must be on the same filesystem. Validation uses this to transfer
 // ownership of disposable projected artifacts without allocating a second
-// expanded tree.
-func MovePathWritable(source, destination string) error {
+// expanded tree. Transient Windows rename conflicts are retried within the
+// context and a bounded retry window; preparation is never repeated.
+func MovePathWritable(ctx context.Context, source, destination string) error {
+	return movePathWritable(ctx, source, destination, os.Rename, transientRenameError)
+}
+
+func movePathWritable(ctx context.Context, source, destination string, rename func(string, string) error, retryable func(error) bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	sourceInfo, err := os.Lstat(source)
 	if err != nil {
 		return err
@@ -389,11 +397,16 @@ func MovePathWritable(source, destination string) error {
 		return err
 	}
 	defer func() { _ = restoreDestination() }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := RemoveAllWritable(destination); err != nil {
 		return err
 	}
-	if err := os.Rename(source, destination); err != nil {
-		return fmt.Errorf("move %q to %q: %w", source, destination, err)
+	// Preparation can remove a destination and change permissions. Retry only
+	// the rename so a transient lock never repeats those mutations.
+	if err := renameWithRetry(ctx, source, destination, rename, retryable); err != nil {
+		return err
 	}
 	moved = true
 	return nil

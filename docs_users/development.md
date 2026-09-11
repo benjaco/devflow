@@ -247,6 +247,8 @@ devflow cache gc --json
 
 `cache path` returns the supported OS-specific cache root and project namespace path. `cache key` returns an aggregate target key plus each cacheable/stamped task key, which is suitable for a CI cache key without duplicating Devflow's fingerprint logic.
 
+On Windows, cache restoration retries brief rename conflicts for up to two seconds per move. If a path remains locked or inaccessible, the task fails with the actual restore error in its retained log; copied-file counters do not mean restoration succeeded. Original outputs and the shared cache are preserved when recovery succeeds. If rollback cannot finish, the error gives the recovery directory containing backups. Inspect the reported path and known reader before retrying; Devflow does not stop unrelated processes to release file handles.
+
 The TUI `r` action immediately invalidates and reruns the selected task scope. For CLI automation, use `restart --preview --json` or `stop --preview --json` before the matching lifecycle command.
 
 ## Runtime State

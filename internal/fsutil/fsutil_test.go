@@ -97,7 +97,7 @@ func TestMovePathWritableMovesReadOnlyDirectoryAndRestoresMode(t *testing.T) {
 	if err := os.Chmod(source, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	if err := MovePathWritable(source, destination); err != nil {
+	if err := MovePathWritable(context.Background(), source, destination); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(source); !os.IsNotExist(err) {

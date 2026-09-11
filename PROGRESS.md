@@ -4,15 +4,35 @@ Last updated: 2026-09-11
 
 ## Current Status
 
-- Phase: post-bootstrap reliability and adoption hardening
-- State: compact retained task logs and prefix-free TUI rendering are complete: plain stdout, `E: ` for retained stderr, and red stderr in the TUI.
-- Confidence: regressions, full normal/race suites, quality/build gates and the isolated terminal smoke pass; Linux/Windows cross-builds pass.
+- Phase: cache-restore retry and recovery implementation
+- State: lean implementation and local validation complete; native Windows verification and review are tracked in [PR #22](https://github.com/benjaco/devflow/pull/22).
+- Confidence: native red at `cdc6ad5` established the missing retained cause. Existing output preservation and completed-attempt retention already work; the fix preserves those rules and adds coordinated retry coverage.
 
 ## In Progress
 
-- None. Local task-log changes are ready for review.
+- Review the lean implementation and native CI results in PR #22 before merging. The application's original lock holder remains unidentified; persistent locks still fail, and replacing a running project-local executable remains a separate issue.
 
 ## Completed
+
+- Focused cache-restore fix after scope reassessment:
+  - retry only Windows rename conflicts within the existing two-second policy; preserve native/cancellation causes and perform preparation once. Cache/validation moves accept cancellation; rollback uses an independent context and tries every affected output with the per-move bound
+  - retain bounded, redacted restore errors before attempt completion; annotate backup/install/rollback stages and put retained recovery locations first. Preserve successful-publication boundaries, task-state classification and service ordering
+  - removed the proposed public error types, special cache-failure classification, ten-second total recovery cutoff and rollback after completed installation. Production diff is +129/-35 (net94 lines), versus the stash's +216/-47 (net169); the original stash `c6d3378b3acc64d1f6a91b885913061ef46b6320` remains intact
+  - original portable regressions remain unchanged. Added real open-reader release after observed rename refusal, virtual-time retry/cancellation checks, one-time preparation, staged-publication/rollback preservation and retained-log identity/redaction coverage; see `docs_contributors/cache-restore-verification.md`
+  - `go test ./...`, `go test -race ./...` and `go vet ./...` pass. The first normal suite exceeded an unchanged service-restart fixture's two-second setup deadline while normal/race ran together; five isolated repetitions and the subsequent normal suite passed without source changes. Logs: `/tmp/devflow-cache-lean-{full,full-recheck,race,vet,lifecycle-recheck}.log`
+  - formatting, tidy-diff, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), CLI/example builds, version JSON, Windows fsutil/cache/engine test compilation and affected Windows vet pass. Exact commands/results: `/tmp/devflow-cache-fix-quality/{analysis,build}-results.json`; native CI outcomes belong in PR #22, not inferred from cross-compilation
+  - isolated compiled CLI smoke in a fresh linked worktree/private cache passed strict doctor and two finite JSON runs: miss/executed then hit/unexecuted, modified files restored and stale output removed, complete bounded logs and no daemon/service/staging left. Evidence: `/tmp/devflow-cache-restore-focused-smoke-50bg91dp/{summary,history}.json`. Existing application services and shared user cache were untouched
+
+- Portable open-output cache-restore regression (tests-only baseline at `cdc6ad5`):
+  - replaced both Windows-only fixtures with ordinary `os.Open` readers; no build tags, OS branches, platform APIs, skips or timed release. File/directory scenarios run everywhere and require exact publication or preserved originals with actionable failure evidence, unchanged open-reader/cache content and a cache hit after closing
+  - macOS cache repetitions (10), engine repetitions (3), full normal tests, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, CLI/example builds, version JSON and formatting/diff checks pass. Windows cache/engine test binaries and vet pass; logs: `/tmp/devflow-open-output-*`. Race and hosted results are linked in PR #22
+  - production and workflows were unchanged in this baseline; native Windows failed only the intended missing-error assertion. Updated verification guidance and durable memory to prefer shared filesystem scenarios across platforms
+
+- Initial Windows-only fixture evidence (superseded by the portable tests above):
+  - real deny-delete-sharing handles reproduce file/directory backup-move failures, verify original/shared-cache preservation, then close before the same cache restores successfully; paths contain spaces, with no services or timed release
+  - engine regression verifies an unexecuted failed attempt and an unlocked cache hit before requiring the actual native error/path in the retained task log. The diagnostic assertion is intentionally red on the current engine; these tests do not establish transient retry behavior or the application's original lock holder
+  - no production/workflow changes. Focused/full normal tests, full race tests, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, CLI/example builds, version JSON and formatting/diff checks pass locally. Windows cache/engine test binaries cross-compile and Windows vet passes. Logs: `/tmp/devflow-windows-repro-*`; native CI review must precede implementation
+  - [draft PR #22](https://github.com/benjaco/devflow/pull/22), test commit `ec01938`: [Windows job `103397958096`](https://github.com/benjaco/devflow/actions/runs/34640269145/job/103397958096) reproduces `Access is denied` on directory backup, `executed=false`, and unlocked restoration with `cacheHits=[generate]` / one total generator execution. The sole failing test is `TestWindowsCacheRestoreFailureRetainsNativeCauseInTaskLog`: its retained log is only `E: cache restore: files=2 bytes=13`. Native cache controls pass; every other hosted job passes. Saved log: `/tmp/devflow-windows-repro-ci-first.log`
 
 - Readable task logs:
   - new retained logs use plain stdout/default text and `E: ` before each stderr line, shared across runtime callbacks, subprocesses and database progress. TUI logs/excerpts hide the marker and render stderr red; escape child markup, preserve blank lines and scroll anchors, and retain original live event stream/payload fields

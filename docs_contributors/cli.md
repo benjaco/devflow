@@ -175,6 +175,8 @@ The final `RunResult` includes `runId`, structured `error`, failed-node name and
 
 Engine configuration failures, including cached tasks without output declarations, also produce one failed `RunResult` for `run --ci --json`. They return before instance configuration or task execution; `nodes` is empty, and `repositoryChanges` is present only when repository repair was requested.
 
+An operational cache-restore failure retains a bounded, redacted stderr line in that attempt's log and log events, even when `executed` is false. Move failures identify the backup/install/rollback stage, paths, native error, retries and elapsed time; incomplete recovery identifies retained backups. Windows rename retries are bounded to two seconds per move and honor forward cancellation. Copy counters alone are not cache-hit evidence, and a failed restore does not fall through to task execution. The existing JSON error fields and task-state rules remain unchanged.
+
 ### Compact results and progress
 
 `run`, `status` and `flush` accept `--details summary|issues|full`. The default is

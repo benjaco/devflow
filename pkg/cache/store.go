@@ -298,7 +298,7 @@ func (s *Store) RestoreContext(ctx context.Context, worktree string, taskName, k
 	}
 	entryDir := s.EntryDir(taskName, key)
 
-	return restoreOutputs(ctx, worktree, entryDir, manifest.Outputs, onProgress)
+	return restoreOutputs(ctx, worktree, entryDir, manifest.Outputs, onProgress, fsutil.MovePathWritable)
 }
 
 func (s *Store) List() ([]EntrySummary, error) {

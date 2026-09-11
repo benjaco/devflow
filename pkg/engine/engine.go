@@ -774,6 +774,13 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 		ok, restoreErr := e.cache.RestoreContext(ctx, rt.Worktree, task.Name, key, cacheCopyProgress(rt, "restore"))
 		readDuration := elapsedMilliseconds(restoreStarted)
 		if restoreErr != nil {
+			diagnostic := "cache restore failed: " + restoreErr.Error()
+			if state.redactDiagnostic != nil {
+				diagnostic = state.redactDiagnostic(diagnostic)
+			}
+			// Copy progress is not evidence that publication succeeded. Retain the
+			// failed step before completion, even when no task callback ran.
+			rt.EmitLogLine("stderr", truncateDiagnosticText(diagnostic, 4*1024))
 			state.setErrorState(task.Name, ctx, key, restoreErr, 0)
 			return taskResult{name: task.Name, key: key, err: restoreErr}
 		}
