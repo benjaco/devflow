@@ -137,6 +137,8 @@ type dashboard struct {
 	focusedPane       dashboardPane
 	compactLevel      int
 	diagnostics       *tuiDiagnostics
+	inputCause        uint64
+	terminalObserved  bool
 }
 
 type dashboardPane uint8
@@ -169,11 +171,11 @@ var callDaemonForTUI = func(ctx context.Context, root string, req daemon.Request
 	return client.Call(ctx, req, onEvent)
 }
 
-var stopDaemonForTUI = func(ctx context.Context, client *daemon.Client) error {
+var stopDaemonForTUI = func(ctx context.Context, client *daemon.Client, req daemon.Request) error {
 	if client == nil {
 		return nil
 	}
-	_, err := client.Call(ctx, daemon.Request{Action: daemon.ActionStop, All: true})
+	_, err := client.Call(ctx, req)
 	return err
 }
 
@@ -194,14 +196,16 @@ func Run(opts Options) (runErr error) {
 		if recovered := recover(); recovered != nil {
 			runErr = diagnostics.recordRecoveredPanic(recovered)
 		}
-		_ = maybeStopDaemonForTUI(client, stopDaemonOnExit)
+		// Preserve an initiating error before cancellation or owned cleanup.
+		if runErr != nil {
+			runErr = diagnostics.recordError(runErr)
+		}
+		_ = maybeStopDaemonForTUI(client, stopDaemonOnExit, diagnostics)
 		if client != nil && !stopDaemonOnExit {
 			writeDetachedQuitMessage(opts.Output, root, id)
 		}
 		if recorded := diagnostics.recordedFailure(); recorded != nil {
 			runErr = recorded
-		} else if runErr != nil {
-			runErr = diagnostics.recordError(runErr)
 		}
 		diagnostics.close(runErr)
 	}()
@@ -231,7 +235,10 @@ func runTUIApplicationWithDiagnostics(app *tview.Application, diagnostics *tuiDi
 			runErr = diagnostics.recordRecoveredPanic(recovered)
 		}
 	}()
-	return runTUIApplication(app)
+	runErr = runTUIApplication(app)
+	_, terminalError := runErr.(*tcell.EventError)
+	diagnostics.recordEvent("event=application_loop_returned terminal_error=%t error=%t error_type=%T", terminalError, runErr != nil, runErr)
+	return runErr
 }
 
 func runTUIApplication(app *tview.Application) (err error) {
@@ -258,13 +265,18 @@ func writeDetachedQuitMessage(output io.Writer, root, instanceID string) {
 	_, _ = fmt.Fprintf(output, "DevFlow run %s (%s) remains active. Inspect: devflow status --worktree %q --json  Stop: devflow stop --worktree %q --all\n", inst.LastRun.Target, instanceID, root, root)
 }
 
-func maybeStopDaemonForTUI(client *daemon.Client, enabled bool) error {
+func maybeStopDaemonForTUI(client *daemon.Client, enabled bool, diagnostics *tuiDiagnostics) error {
 	if !enabled {
+		diagnostics.recordEvent("event=daemon_cleanup_skipped owned=false")
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return stopDaemonForTUI(ctx, client)
+	req := daemon.Request{ID: fmt.Sprintf("tui-stop-%d-%d", os.Getpid(), time.Now().UnixNano()), Action: daemon.ActionStop, All: true}
+	diagnostics.recordEvent("event=daemon_cleanup_started request_id=%s owned=true", req.ID)
+	err := stopDaemonForTUI(ctx, client, req)
+	diagnostics.recordEvent("event=daemon_cleanup_completed request_id=%s error=%t error_type=%T cancelled=%t deadline=%t", req.ID, err != nil, err, errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded))
+	return err
 }
 
 func newDashboard(root, instanceID string) *dashboard {
@@ -388,6 +400,11 @@ func newDashboard(root, instanceID string) *dashboard {
 	d.app.SetInputCapture(d.captureKeys)
 	d.app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
 		width, height := screen.Size()
+		if d.diagnostics != nil && !d.terminalObserved {
+			d.terminalObserved = true
+			tty, hasTty := screen.Tty()
+			d.diagnostics.recordEvent("event=terminal_initialized tty=%T has_tty=%t width=%d height=%d raw_input=unavailable", tty, hasTty, width, height)
+		}
 		if d.applyResponsiveLayout(width, height) {
 			d.tooSmall.SetRect(0, 0, width, height)
 			d.tooSmall.Draw(screen)
@@ -564,11 +581,16 @@ func (d *dashboard) daemonEventLoop(ctx context.Context, client *daemon.Client) 
 }
 
 func (d *dashboard) captureKeys(event *tcell.EventKey) *tcell.EventKey {
+	d.inputCause = d.observeControl(event)
+	defer func() { d.inputCause = 0 }()
 	forwarded := d.handleKeys(event)
 	// tview itself stops on an unchanged Ctrl+C event. Observe only events
 	// actually forwarded so a modal consuming a key is not reported as an exit.
 	if forwarded == event && event.Key() == tcell.KeyCtrlC {
-		d.diagnostics.recordExitRequest("key_ctrl_c")
+		d.diagnostics.recordExitRequest("decoded_ctrl_c", d.inputCause, "tview.Application.Run.forwardedCtrlC")
+	}
+	if d.inputCause != 0 {
+		d.diagnostics.recordEvent("event=input_routed input=%d forwarded=%t handler=dashboard.captureKeys", d.inputCause, forwarded != nil)
 	}
 	return forwarded
 }
@@ -590,7 +612,7 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 	logsFocused := d.focusedPane == dashboardPaneLogs
 	switch event.Key() {
 	case tcell.KeyEsc:
-		d.diagnostics.recordExitRequest("key_escape")
+		d.diagnostics.recordExitRequest("decoded_escape", d.inputCause, "dashboard.handleKeys")
 		d.app.Stop()
 		return nil
 	case tcell.KeyTAB, tcell.KeyBacktab:
@@ -646,7 +668,7 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 			d.openHelp()
 			return nil
 		case 'q':
-			d.diagnostics.recordExitRequest("key_q")
+			d.diagnostics.recordExitRequest("quit_binding", 0, "dashboard.handleKeys")
 			d.app.Stop()
 			return nil
 		case 'j':

@@ -1,18 +1,27 @@
 # Progress
 
-Last updated: 2026-09-11
+Last updated: 2026-09-14
 
 ## Current Status
 
-- Phase: cache-restore retry and recovery implementation
-- State: lean implementation and local validation complete; native Windows verification and review are tracked in [PR #22](https://github.com/benjaco/devflow/pull/22).
-- Confidence: native red at `cdc6ad5` established the missing retained cause. Existing output preservation and completed-attempt retention already work; the fix preserves those rules and adds coordinated retry coverage.
+- Phase: focused unexpected-exit diagnostics
+- State: PR #23 reduced to existing TUI/daemon logs and Windows bootstrap child-exit observations. Stock tcell/tview remain responsible for terminal input and decoding.
+- Confidence: decoded Escape proves a handler received an event, not physical input or user intent. Diagnostic coverage does not establish the cause of an unreproduced exit.
 
 ## In Progress
 
-- Review the lean implementation and native CI results in PR #22 before merging. The application's original lock holder remains unidentified; persistent locks still fail, and replacing a running project-local executable remains a separate issue.
+- Native platform results and review are tracked in PR #23. No copied terminal reader, custom decoder, diagnostic session store, report command, or additional workflow step.
+- Raw native input provenance, parser internals, automatic incomplete-session inference and crash-dump discovery remain deferred. Any deeper terminal observation should use an upstream-supported hook.
 
 ## Completed
+
+- Focused unexpected-exit observations:
+  - distinguish decoded controls, modal routing, stop decisions, application return and owned cleanup in the existing TUI log; preserve the initiating failure and unknown input origin/intent, excluding printable input
+  - record Windows bootstrap child status in decimal/hex, parent cancellation and termination scope; join TUI/daemon stop evidence through the existing request ID and reported caller PID, before blocking cleanup
+  - 197 added production lines; upstream terminal libraries, dependencies, workflows, execution ownership and JSONL inspection remain unchanged. No claim that the intermittent exit is reproduced or fixed
+  - baseline TUI/daemon regressions failed before implementation; focused and full normal/race tests, vet, tracked-source formatting, tidy-diff, Staticcheck v0.8.1, govulncheck v1.6.0, CLI/example builds and version JSON pass. Windows CLI/TUI/daemon tests cross-compile; native execution remains a CI check
+  - real macOS PTY smoke passed modal Escape, q exit 0, correlated owned-daemon shutdown and unchanged JSONL log inspection. See `docs_contributors/exit-diagnostics-verification.md` for commands and deliberately unavailable native-input/termination evidence
+  - native Windows caught a fixture exiting on CTRL_BREAK before its forced-kill assertion. The fixture now subscribes to the signal before readiness and stays alive afterward; production correctly recorded the original control exit and needs no change
 
 - Focused cache-restore fix after scope reassessment:
   - retry only Windows rename conflicts within the existing two-second policy; preserve native/cancellation causes and perform preparation once. Cache/validation moves accept cancellation; rollback uses an independent context and tries every affected output with the per-move bound

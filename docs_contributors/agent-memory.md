@@ -39,6 +39,8 @@ Use this memory together with the subsystem docs. When a change affects one of t
 
 ## Working Mindset
 
+- Keep contributor documentation generic: omit personal filesystem paths, private consumer-project details and copied incident identifiers. Use disposable fixtures and Devflow-owned tests or CI evidence.
+- Keep exit diagnostics close to existing TUI/daemon logs and bootstrap supervision. Use upstream tcell/tview APIs; do not copy their terminal reader or decoder into Devflow. Missing raw-input boundaries should be explicit and addressed through an upstream-supported hook if needed.
 - Keep Devflow current-only: remove retired APIs, command/JSON aliases, old state readers and migration shims instead of preserving earlier releases. Update current callers, examples and docs together; an older adapter may need source fixes after upgrade. Add short comments for non-obvious ownership and safety decisions. See `AGENTS.md`.
 - Keep the core generic. Project-specific behavior belongs in adapters, examples, or project-local `devflow.project.go` plus explicitly named `devflow_*.go` companion files.
 - Keep documentation split into contributor docs and scoped user docs. User docs are further split into setup/pipeline context and day-to-day development/operator context so agents do not have to ingest both.

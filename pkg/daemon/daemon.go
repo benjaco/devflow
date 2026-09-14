@@ -50,6 +50,7 @@ const (
 
 type Request struct {
 	ID           string             `json:"id,omitempty"`
+	CallerPID    int                `json:"callerPid,omitempty"`
 	Action       Action             `json:"action"`
 	Project      string             `json:"project,omitempty"`
 	Target       string             `json:"target,omitempty"`
@@ -245,11 +246,12 @@ func Serve(ctx context.Context, opts Options) error {
 		subscribers: map[chan api.Event]bool{},
 		shutdown:    make(chan struct{}),
 	}
-	s.writeDaemonLog("daemon started pid=%d worktree=%s project=%s socket=%s", os.Getpid(), root, s.projectName, socketPath)
+	s.writeDaemonLog("daemon started pid=%d ppid=%d instance=%s worktree=%s project=%s socket=%s", os.Getpid(), os.Getppid(), id, root, s.projectName, socketPath)
 
 	go func() {
 		select {
 		case <-ctx.Done():
+			s.writeDaemonLog("event=daemon_context_cancelled pid=%d error=%q", os.Getpid(), ctx.Err())
 		case <-s.shutdown:
 		}
 		_ = listener.Close()
@@ -369,6 +371,7 @@ func (c *Client) Call(ctx context.Context, req Request, onEvent ...func(api.Even
 	if req.ID == "" {
 		req.ID = requestID()
 	}
+	req.CallerPID = os.Getpid()
 	dialer := net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "unix", c.socketPath)
 	if err != nil {
@@ -685,7 +688,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	// A stop-all preview is read-only. Only the executed action may tear down
 	// the daemon after its response has been delivered.
 	if req.Action == ActionStop && req.All && !req.Preview && resp.OK {
-		s.requestShutdown()
+		s.requestShutdown(req)
 	}
 }
 
@@ -768,7 +771,15 @@ func (s *Server) handleRequest(ctx context.Context, req Request) Response {
 			}
 			return resp
 		}
+		// Record the request before cleanup can block; caller identity is reported, not authenticated.
+		s.writeDaemonLog("event=daemon_stop_requested request_id=%.128q caller_pid=%d caller_source=request pid=%d all=%t", req.ID, req.CallerPID, os.Getpid(), req.All)
 		result, err := s.stopWork(ctx, req.All, req.Task)
+		if err != nil {
+			detail := clierror.Describe(err, "task_failed", "execution")
+			s.writeDaemonLog("event=daemon_stop_completed request_id=%.128q caller_pid=%d status=failed error_code=%q error_phase=%q", req.ID, req.CallerPID, detail.Code, detail.Phase)
+		} else {
+			s.writeDaemonLog("event=daemon_stop_completed request_id=%.128q caller_pid=%d status=ok", req.ID, req.CallerPID)
+		}
 		if result != nil {
 			resp.Stop = result
 			resp.Lifecycle = result.Lifecycle
@@ -921,25 +932,34 @@ func (s *Server) persistEvent(evt api.Event) {
 	_ = json.NewEncoder(file).Encode(evt)
 }
 
-func (s *Server) writeDaemonLog(format string, args ...any) {
+func (s *Server) writeDaemonLog(format string, args ...any) (err error) {
+	defer func() {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "devflow: daemon diagnostic write failed: %v\n", err)
+		}
+	}()
 	if s.logPath == "" {
-		return
+		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(s.logPath), 0o755); err != nil {
-		return
+		return err
 	}
 	file, err := os.OpenFile(s.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return
+		return err
 	}
-	defer file.Close()
+	defer func() { err = errors.Join(err, file.Close()) }()
 	_ = file.Chmod(0o600)
-	_, _ = fmt.Fprintf(file, "%s %s\n", time.Now().UTC().Format(time.RFC3339), fmt.Sprintf(format, args...))
+	if _, err = fmt.Fprintf(file, "%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), fmt.Sprintf(format, args...)); err != nil {
+		return err
+	}
+	// Exit evidence must reach disk before entering potentially blocking cleanup.
+	return file.Sync()
 }
 
-func (s *Server) requestShutdown() {
+func (s *Server) requestShutdown(req Request) {
 	s.shutdownMu.Do(func() {
-		s.writeDaemonLog("daemon shutdown requested")
+		s.writeDaemonLog("event=daemon_shutdown_requested request_id=%.128q caller_pid=%d pid=%d", req.ID, req.CallerPID, os.Getpid())
 		close(s.shutdown)
 	})
 }

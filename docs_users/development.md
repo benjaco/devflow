@@ -123,6 +123,14 @@ Each TUI session appends start/stop diagnostics to the owner-only per-instance `
 devflow logs tui --tail 200
 ```
 
+For an unexpected exit, also inspect `devflow logs daemon --tail 200 --json`.
+Decoded control input, the handler's decision, application return and owned
+cleanup are separate observations; an Escape event does not prove a physical
+keypress or user intent. On Windows, the bootstrap parent records the child's
+actual native exit status in `tui.log`. A stop request ID connects TUI cleanup to
+the daemon's caller/outcome records. These diagnostics use the existing terminal
+libraries; raw console input and parser internals may remain unavailable.
+
 Useful TUI keys:
 - `?`: contextual help for the current view
 - `Tab`: switch task-table/log-pane focus
