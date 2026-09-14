@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ func TestWindowsLocalChildPreservesExitCodeAndResult(t *testing.T) {
 	env := withEnv(os.Environ(), "DEVFLOW_WINDOWS_CHILD_HELPER", "error")
 	var stdout, stderr bytes.Buffer
 	err = execLocalBinary(context.Background(), executable,
-		[]string{executable, "-test.run=^TestWindowsLocalChildHelper$"}, env, &stdout, &stderr, true)
+		[]string{executable, "-test.run=^TestWindowsLocalChildHelper$"}, env, &stdout, &stderr, true, "")
 	if ExitCode(err) != 7 {
 		t.Fatalf("child exit code = %d, want 7; error=%v", ExitCode(err), err)
 	}
@@ -43,6 +44,7 @@ func TestWindowsLocalChildCancellationDoesNotDuplicateResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	ready := filepath.Join(t.TempDir(), "ready")
+	logPath := filepath.Join(t.TempDir(), "tui.log")
 	env := withEnv(os.Environ(), "DEVFLOW_WINDOWS_CHILD_HELPER", "wait")
 	env = withEnv(env, "DEVFLOW_WINDOWS_CHILD_READY", ready)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -51,7 +53,7 @@ func TestWindowsLocalChildCancellationDoesNotDuplicateResult(t *testing.T) {
 	finished := make(chan error, 1)
 	go func() {
 		finished <- execLocalBinary(ctx, executable,
-			[]string{executable, "-test.run=^TestWindowsLocalChildHelper$"}, env, &stdout, &stderr, true)
+			[]string{executable, "-test.run=^TestWindowsLocalChildHelper$"}, env, &stdout, &stderr, true, logPath)
 	}()
 	waitForBootstrapReady(t, ready, finished)
 	cancel()
@@ -71,6 +73,41 @@ func TestWindowsLocalChildCancellationDoesNotDuplicateResult(t *testing.T) {
 	if stdout.String() != "{\"success\":false}\n" || stderr.Len() != 0 {
 		t.Fatalf("cancellation duplicated child result: stdout=%s stderr=%s", &stdout, &stderr)
 	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, observed := range []string{"event=bootstrap_parent_canceled", "control=CTRL_BREAK_EVENT", "event=bootstrap_child_exit_observed", "parent_canceled=true"} {
+		if !strings.Contains(string(data), observed) {
+			t.Fatalf("cancellation lost %q: %s", observed, data)
+		}
+	}
+}
+
+func TestWindowsBootstrapRetainsNativeExitCode(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	logPath := tuiBootstrapLogPath(root, nil)
+	env := withEnv(os.Environ(), "DEVFLOW_WINDOWS_CHILD_HELPER", "native-exit")
+	var stdout, stderr bytes.Buffer
+	err = execLocalBinary(context.Background(), executable,
+		[]string{executable, "-test.run=^TestWindowsLocalChildHelper$"}, env, &stdout, &stderr, false, logPath)
+	if uint32(ExitCode(err)) != uint32(0xC0000409) || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("native result changed: %v stdout=%s stderr=%s", err, &stdout, &stderr)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, observed := range []string{"event=bootstrap_child_started", "child_pid=", "native_exit=3221226505", "native_hex=0xC0000409", "parent_canceled=false termination_scope=none"} {
+		if !strings.Contains(string(data), observed) {
+			t.Fatalf("native parent observation lost %q: %s", observed, data)
+		}
+	}
+	t.Logf("native parent evidence:\n%s", data)
 }
 
 func TestWindowsLocalChildHelper(t *testing.T) {
@@ -78,12 +115,19 @@ func TestWindowsLocalChildHelper(t *testing.T) {
 	if mode == "" {
 		return
 	}
+	if mode == "native-exit" {
+		os.Exit(int(0xC0000409))
+	}
 	if mode == "daemon" {
 		time.Sleep(10 * time.Second)
 		os.Exit(0)
 	}
 	if mode == "observer" {
-		signal.Ignore(os.Interrupt)
+		// Windows leaves CTRL_BREAK to its default handler when no Go signal
+		// notification is registered. Consume it so this fixture requires a kill.
+		interrupt := make(chan os.Signal, 1)
+		signal.Notify(interrupt, os.Interrupt)
+		defer signal.Stop(interrupt)
 		child := exec.Command(os.Args[0], "-test.run=^TestWindowsLocalChildHelper$")
 		child.Env = withEnv(os.Environ(), "DEVFLOW_WINDOWS_CHILD_HELPER", "daemon")
 		child.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
@@ -96,6 +140,10 @@ func TestWindowsLocalChildHelper(t *testing.T) {
 		}
 		if err := os.Rename(ready+".tmp", ready); err != nil {
 			t.Fatal(err)
+		}
+		select {
+		case <-interrupt:
+		case <-time.After(5 * time.Second):
 		}
 		time.Sleep(10 * time.Second)
 		os.Exit(0)
@@ -130,6 +178,7 @@ func TestWindowsLocalChildForcedCancellationPreservesDaemonDescendant(t *testing
 		t.Fatal(err)
 	}
 	ready := filepath.Join(t.TempDir(), "daemon-pid")
+	logPath := filepath.Join(t.TempDir(), "tui.log")
 	env := withEnv(os.Environ(), "DEVFLOW_WINDOWS_CHILD_HELPER", "observer")
 	env = withEnv(env, "DEVFLOW_WINDOWS_CHILD_READY", ready)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -138,7 +187,7 @@ func TestWindowsLocalChildForcedCancellationPreservesDaemonDescendant(t *testing
 	finished := make(chan error, 1)
 	go func() {
 		finished <- execLocalBinary(ctx, executable,
-			[]string{executable, "-test.run=^TestWindowsLocalChildHelper$"}, env, &stdout, &stderr, false)
+			[]string{executable, "-test.run=^TestWindowsLocalChildHelper$"}, env, &stdout, &stderr, false, logPath)
 	}()
 	waitForBootstrapReady(t, ready, finished)
 	data, err := os.ReadFile(ready)
@@ -166,6 +215,10 @@ func TestWindowsLocalChildForcedCancellationPreservesDaemonDescendant(t *testing
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("observer cancellation = %v", err)
+	}
+	log, readErr := os.ReadFile(logPath)
+	if readErr != nil || !strings.Contains(string(log), "scope=child_only") || !strings.Contains(string(log), "termination_scope=child_only") {
+		t.Fatalf("forced cancellation scope missing: %v\n%s", readErr, log)
 	}
 	state, err := windows.WaitForSingleObject(daemon, 0)
 	if err != nil || state != uint32(windows.WAIT_TIMEOUT) {

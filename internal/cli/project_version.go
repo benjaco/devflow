@@ -124,7 +124,7 @@ func (a *App) execProjectVersion(args []string, known *flag.FlagSet) (bool, erro
 	// Source replacements belong to the pin's module, not the caller's explicit
 	// development override. Inheriting a managed override would bypass later pins.
 	env = withEnv(env, envBootstrapRoot, "")
-	return true, clierror.Wrap(execLocalBinary(a.context(), binary, append([]string{binary}, args...), env, a.Stdout, a.Stderr, a.localChildOwnsExecution), "bootstrap_failed", "bootstrap")
+	return true, clierror.Wrap(execLocalBinary(a.context(), binary, append([]string{binary}, args...), env, a.Stdout, a.Stderr, a.localChildOwnsExecution, tuiBootstrapLogPath(root, args)), "bootstrap_failed", "bootstrap")
 }
 
 type projectVersionProgress struct{ out io.Writer }

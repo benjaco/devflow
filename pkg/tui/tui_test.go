@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -442,9 +443,9 @@ func TestApplicationExitDiagnosticsDistinguishKeysFromReturn(t *testing.T) {
 		key  tcell.Key
 		r    rune
 	}{
-		{"key_escape", tcell.KeyEsc, 0},
-		{"key_q", tcell.KeyRune, 'q'},
-		{"key_ctrl_c", tcell.KeyCtrlC, 0},
+		{"decoded_escape", tcell.KeyEsc, 0},
+		{"quit_binding", tcell.KeyRune, 'q'},
+		{"decoded_ctrl_c", tcell.KeyCtrlC, 0},
 		{"application_returned", 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -488,7 +489,7 @@ func TestApplicationExitDiagnosticsDistinguishKeysFromReturn(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(string(data), "event=tui_stopped status=ok reason="+tc.name) {
+			if !strings.Contains(string(data), "event=tui_stopped status=returned reason="+tc.name) {
 				t.Fatalf("missing exit reason: %s", data)
 			}
 			wantRequests := 1
@@ -498,7 +499,93 @@ func TestApplicationExitDiagnosticsDistinguishKeysFromReturn(t *testing.T) {
 			if strings.Count(string(data), "event=tui_exit_requested") != wantRequests {
 				t.Fatalf("incorrect exit requests: %s", data)
 			}
+			text := string(data)
+			if strings.Count(text, "event=terminal_initialized") != 1 || !strings.Contains(text, "raw_input=unavailable") {
+				t.Fatalf("missing stock terminal boundary: %s", text)
+			}
+			inputID := ""
+			for _, line := range strings.Split(text, "\n") {
+				if strings.Contains(line, "event=input_observed control=escape modifiers=0 modal=help") {
+					_, inputID, _ = strings.Cut(line, " sequence=")
+				}
+			}
+			if inputID == "" || !strings.Contains(text, "event=input_routed input="+inputID+" forwarded=false") {
+				t.Fatalf("help Escape observation or routing missing: %s", text)
+			}
+			if !strings.Contains(text, "user_intent=unknown") || !strings.Contains(text, "input_origin=unknown") {
+				t.Fatalf("decoded input was not distinguished from physical intent: %s", text)
+			}
+			returned := strings.Index(text, "event=application_loop_returned")
+			if returned < 0 || returned > strings.Index(text, "event=tui_stopped") {
+				t.Fatalf("loop return was not recorded before final cleanup: %s", text)
+			}
 		})
+	}
+}
+
+func TestTUIInputDiagnosticsExcludePromptText(t *testing.T) {
+	d := prepareRunningDashboard(t)
+	diagnostics, err := startTUIDiagnostics(t.TempDir(), "input-privacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer diagnostics.close(nil)
+	d.diagnostics = diagnostics
+	d.activeInput = true
+	for _, r := range "private-q-prompt-answer" {
+		event := tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone)
+		if d.captureKeys(event) != event {
+			t.Fatalf("typing %q was not forwarded to the input", r)
+		}
+	}
+	escape := tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModAlt)
+	if d.captureKeys(escape) != escape {
+		t.Fatal("input modal Escape was not forwarded to its existing handler")
+	}
+	data, err := os.ReadFile(diagnostics.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "private") || strings.Contains(text, "prompt-answer") || strings.Contains(text, "quit_binding") || strings.Contains(text, "event=tui_exit_requested") {
+		t.Fatalf("prompt content or a false exit was logged: %s", text)
+	}
+	if strings.Count(text, "event=input_observed") != 1 || !strings.Contains(text, "modal=input") || !strings.Contains(text, "forwarded=true") {
+		t.Fatalf("input Escape routing was not observed: %s", text)
+	}
+}
+
+func TestApplicationReportsReturnedTerminalError(t *testing.T) {
+	d := prepareRunningDashboard(t)
+	screen := newObservedSimulationScreen(80, 24)
+	d.app.SetScreen(screen)
+	diagnostics, err := startTUIDiagnostics(t.TempDir(), "terminal-error")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { diagnostics.close(diagnostics.recordedFailure()) }()
+	d.diagnostics = diagnostics
+	done := make(chan error, 1)
+	go func() { done <- runTUIApplicationWithDiagnostics(d.app, diagnostics) }()
+	screen.waitForFrame(t)
+	want := tcell.NewEventError(errors.New("synthetic terminal failure"))
+	d.app.QueueEvent(want)
+	select {
+	case err := <-done:
+		if err != want {
+			t.Fatalf("terminal error was replaced: got %v, want %v", err, want)
+		}
+		diagnostics.recordError(err)
+	case <-time.After(3 * time.Second):
+		d.app.Stop()
+		t.Fatal("application did not return after terminal error")
+	}
+	data, err := os.ReadFile(diagnostics.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "event=application_loop_returned terminal_error=true error=true error_type=*tcell.EventError") || strings.Contains(string(data), "event=tui_exit_requested") {
+		t.Fatalf("terminal error was confused with an input exit: %s", data)
 	}
 }
 
@@ -1996,8 +2083,11 @@ func TestHandleKeysUsesLetterShortcutsWhenNoInputActive(t *testing.T) {
 func TestMaybeStopDaemonForTUIOnlyStopsOwnedDaemon(t *testing.T) {
 	previousStop := stopDaemonForTUI
 	calls := 0
-	stopDaemonForTUI = func(ctx context.Context, client *daemon.Client) error {
+	stopDaemonForTUI = func(ctx context.Context, client *daemon.Client, req daemon.Request) error {
 		_ = client
+		if req.ID == "" || req.Action != daemon.ActionStop || !req.All {
+			t.Fatalf("missing correlated owned stop: %+v", req)
+		}
 		if _, ok := ctx.Deadline(); !ok {
 			t.Fatal("expected shutdown call to have a deadline")
 		}
@@ -2006,17 +2096,56 @@ func TestMaybeStopDaemonForTUIOnlyStopsOwnedDaemon(t *testing.T) {
 	}
 	t.Cleanup(func() { stopDaemonForTUI = previousStop })
 
-	if err := maybeStopDaemonForTUI(nil, false); err != nil {
+	if err := maybeStopDaemonForTUI(nil, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 0 {
 		t.Fatalf("expected unowned daemon to be left running, got %d stop calls", calls)
 	}
-	if err := maybeStopDaemonForTUI(nil, true); err != nil {
+	if err := maybeStopDaemonForTUI(nil, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
 		t.Fatalf("expected owned daemon to be stopped once, got %d stop calls", calls)
+	}
+}
+
+func TestTUICleanupRecordsRequestAndPreservesFailure(t *testing.T) {
+	diagnostics, err := startTUIDiagnostics(t.TempDir(), "cleanup-failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := diagnostics.recordError(errors.New("initiating TUI failure"))
+	previousStop := stopDaemonForTUI
+	requestID := ""
+	stopDaemonForTUI = func(_ context.Context, _ *daemon.Client, req daemon.Request) error {
+		requestID = req.ID
+		data, err := os.ReadFile(diagnostics.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if req.ID == "" || !strings.Contains(string(data), "event=daemon_cleanup_started request_id="+req.ID) {
+			t.Fatalf("request was sent before its cause was retained: %s", data)
+		}
+		return context.Canceled
+	}
+	t.Cleanup(func() { stopDaemonForTUI = previousStop })
+	if err := maybeStopDaemonForTUI(nil, true, diagnostics); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cleanup result changed: %v", err)
+	}
+	if diagnostics.recordedFailure() != original {
+		t.Fatal("cleanup overwrote the initiating failure")
+	}
+	diagnostics.close(original)
+	data, err := os.ReadFile(diagnostics.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	start := strings.Index(text, "event=daemon_cleanup_started request_id="+requestID)
+	end := strings.Index(text, "event=daemon_cleanup_completed request_id="+requestID+" error=true")
+	if start < 0 || end <= start || !strings.Contains(text[:start], "initiating TUI failure") || !strings.Contains(text[end:], "cancelled=true") || !strings.Contains(text[end:], "event=tui_stopped status=error reason=error") {
+		t.Fatalf("cleanup outcomes or initiating failure were lost: %s", text)
 	}
 }
 

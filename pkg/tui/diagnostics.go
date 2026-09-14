@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gdamore/tcell/v2"
+
 	"github.com/benjaco/devflow/pkg/instance"
 )
 
@@ -20,6 +22,7 @@ type tuiDiagnostics struct {
 	mu         sync.Mutex
 	failure    error
 	exitReason string
+	sequence   uint64
 }
 
 func startTUIDiagnostics(worktree, instanceID string) (*tuiDiagnostics, error) {
@@ -40,7 +43,7 @@ func startTUIDiagnostics(worktree, instanceID string) (*tuiDiagnostics, error) {
 	if err := file.Chmod(0o600); err != nil {
 		return nil, fmt.Errorf("secure TUI diagnostic log %s: %w", diagnostics.path, err)
 	}
-	if _, err := fmt.Fprintf(file, "%s level=info event=tui_started pid=%d\n", tuiDiagnosticTimestamp(), os.Getpid()); err != nil {
+	if _, err := fmt.Fprintf(file, "%s level=info event=tui_started pid=%d ppid=%d instance=%q\n", tuiDiagnosticTimestamp(), os.Getpid(), os.Getppid(), instanceID); err != nil {
 		return nil, fmt.Errorf("initialize TUI diagnostic log %s: %w", diagnostics.path, err)
 	}
 	// Fatal runtime failures and panics in dependency-owned goroutines cannot be
@@ -115,25 +118,35 @@ func (d *tuiDiagnostics) recordedFailure() error {
 	return d.failure
 }
 
-func (d *tuiDiagnostics) recordExitRequest(reason string) {
+func (d *tuiDiagnostics) recordEvent(format string, args ...any) uint64 {
+	if d == nil {
+		return 0
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.sequence++
+	_ = appendTUIDiagnostic(d.path, fmt.Sprintf("%s level=info %s pid=%d sequence=%d\n", tuiDiagnosticTimestamp(), fmt.Sprintf(format, args...), os.Getpid(), d.sequence))
+	return d.sequence
+}
+
+func (d *tuiDiagnostics) recordExitRequest(reason string, input uint64, handler string) {
 	if d == nil {
 		return
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.exitReason != "" {
-		return
+	if d.exitReason == "" {
+		d.exitReason = reason
 	}
-	d.exitReason = reason
 	// Record before daemon cleanup, which can block after the UI has stopped.
-	_ = appendTUIDiagnostic(d.path, fmt.Sprintf("%s level=info event=tui_exit_requested reason=%s\n", tuiDiagnosticTimestamp(), reason))
+	_ = appendTUIDiagnostic(d.path, fmt.Sprintf("%s level=info event=tui_exit_requested reason=%s input=%d handler=%s user_intent=unknown pid=%d\n", tuiDiagnosticTimestamp(), reason, input, handler, os.Getpid()))
 }
 
 func (d *tuiDiagnostics) close(runErr error) {
 	_ = debug.SetCrashOutput(nil, debug.CrashOptions{})
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	status := "ok"
+	status := "returned"
 	reason := d.exitReason
 	if reason == "" {
 		reason = "application_returned"
@@ -145,14 +158,20 @@ func (d *tuiDiagnostics) close(runErr error) {
 		}
 	}
 	_ = appendTUIDiagnostic(d.path, fmt.Sprintf(
-		"%s level=info event=tui_stopped status=%s reason=%s\n",
+		"%s level=info event=tui_stopped status=%s reason=%s user_intent=unknown pid=%d\n",
 		tuiDiagnosticTimestamp(),
 		status,
 		reason,
+		os.Getpid(),
 	))
 }
 
-func appendTUIDiagnostic(path, entry string) error {
+func appendTUIDiagnostic(path, entry string) (err error) {
+	defer func() {
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "devflow: write TUI diagnostic %s: %v\n", path, err)
+		}
+	}()
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -161,8 +180,32 @@ func appendTUIDiagnostic(path, entry string) error {
 	if err := file.Chmod(0o600); err != nil {
 		return err
 	}
-	_, err = file.WriteString(entry)
-	return err
+	if _, err = file.WriteString(entry); err != nil {
+		return err
+	}
+	return file.Sync()
+}
+
+func (d *dashboard) observeControl(event *tcell.EventKey) uint64 {
+	control := ""
+	switch event.Key() {
+	case tcell.KeyEsc:
+		control = "escape"
+	case tcell.KeyCtrlC:
+		control = "ctrl_c"
+	default:
+		return 0 // Printable keys may be prompt answers, including q.
+	}
+	modal := "none"
+	switch {
+	case d.helpOpen:
+		modal = "help"
+	case d.lifecycleOverlay != lifecycleOverlayNone:
+		modal = "lifecycle"
+	case d.activeInput:
+		modal = "input"
+	}
+	return d.diagnostics.recordEvent("event=input_observed control=%s modifiers=%d modal=%s focus=%d decoded_at=%s input_origin=unknown user_intent=unknown handler=dashboard.captureKeys", control, event.Modifiers(), modal, d.focusedPane, event.When().UTC().Format(time.RFC3339Nano))
 }
 
 func boundedDiagnosticText(value string) string {

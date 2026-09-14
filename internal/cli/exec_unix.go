@@ -8,7 +8,7 @@ import (
 	"syscall"
 )
 
-func execLocalBinary(ctx context.Context, path string, argv, env []string, _, _ io.Writer, _ bool) error {
+func execLocalBinary(ctx context.Context, path string, argv, env []string, _, _ io.Writer, _ bool, _ string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

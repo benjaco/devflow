@@ -59,7 +59,7 @@ func (a *App) execLocalProject(args []string, worktree string) error {
 	// Tasks inherit the environment; only this exact executable can skip loading.
 	env := withEnv(os.Environ(), envLocalExec, localBinary)
 	env = withEnv(env, envBootstrapRoot, bootstrapRoot)
-	return clierror.Wrap(execLocalBinary(a.context(), localBinary, append([]string{localBinary}, args...), env, a.Stdout, a.Stderr, a.localChildOwnsExecution), "bootstrap_failed", "bootstrap")
+	return clierror.Wrap(execLocalBinary(a.context(), localBinary, append([]string{localBinary}, args...), env, a.Stdout, a.Stderr, a.localChildOwnsExecution, tuiBootstrapLogPath(worktree, args)), "bootstrap_failed", "bootstrap")
 }
 
 func bootstrapRoot() string {

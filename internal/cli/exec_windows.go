@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -15,7 +16,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func execLocalBinary(ctx context.Context, path string, argv, env []string, stdout, stderr io.Writer, ownsExecution bool) error {
+func execLocalBinary(ctx context.Context, path string, argv, env []string, stdout, stderr io.Writer, ownsExecution bool, logPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -33,8 +34,19 @@ func execLocalBinary(ctx context.Context, path string, argv, env []string, stdou
 	cmd.Stdout = output
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
+		writeBootstrapLog(logPath, stderr, "bootstrap_child_start_failed", fmt.Sprintf("error=%q", err))
 		return err
 	}
+	writeBootstrapLog(logPath, stderr, "bootstrap_child_started", fmt.Sprintf("child_pid=%d executable=%q", cmd.Process.Pid, path))
+	parentCanceled, terminationScope := false, "none"
+	defer func() {
+		if cmd.ProcessState == nil {
+			writeBootstrapLog(logPath, stderr, "bootstrap_child_exit_observed", fmt.Sprintf("child_pid=%d native_exit=unavailable", cmd.Process.Pid))
+			return
+		}
+		code := uint32(cmd.ProcessState.ExitCode())
+		writeBootstrapLog(logPath, stderr, "bootstrap_child_exit_observed", fmt.Sprintf("child_pid=%d native_exit=%d native_hex=0x%08X parent_canceled=%t termination_scope=%s", cmd.Process.Pid, code, code, parentCanceled, terminationScope))
+	}()
 	finished := make(chan error, 1)
 	go func() { finished <- cmd.Wait() }()
 	var err, cancellation error
@@ -42,7 +54,11 @@ func execLocalBinary(ctx context.Context, path string, argv, env []string, stdou
 	case err = <-finished:
 	case <-ctx.Done():
 		cancellation = ctx.Err()
-		if windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(cmd.Process.Pid)) == nil {
+		parentCanceled = true
+		writeBootstrapLog(logPath, stderr, "bootstrap_parent_canceled", fmt.Sprintf("child_pid=%d cause=%q", cmd.Process.Pid, cancellation))
+		controlErr := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(cmd.Process.Pid))
+		writeBootstrapLog(logPath, stderr, "bootstrap_child_interrupt", fmt.Sprintf("child_pid=%d control=CTRL_BREAK_EVENT sent=%t error=%q", cmd.Process.Pid, controlErr == nil, fmt.Sprint(controlErr)))
+		if controlErr == nil {
 			timer := time.NewTimer(2 * time.Second)
 			select {
 			case err = <-finished:
@@ -51,12 +67,21 @@ func execLocalBinary(ctx context.Context, path string, argv, env []string, stdou
 			case <-timer.C:
 			}
 		}
+		var killErr error
+		terminationScope = "child_only"
 		if ownsExecution {
-			_ = cmd.Cancel()
+			terminationScope = "owned_process_tree"
+		}
+		writeBootstrapLog(logPath, stderr, "bootstrap_child_termination_requested", fmt.Sprintf("child_pid=%d scope=%s", cmd.Process.Pid, terminationScope))
+		if ownsExecution {
+			killErr = cmd.Cancel()
 		} else {
 			// An attached CLI can have started the independently owned daemon.
 			// Tree termination would stop that work after its client disconnects.
-			_ = cmd.Process.Kill()
+			killErr = cmd.Process.Kill()
+		}
+		if killErr != nil {
+			writeBootstrapLog(logPath, stderr, "bootstrap_child_termination_failed", fmt.Sprintf("child_pid=%d error=%q", cmd.Process.Pid, killErr))
 		}
 		err = <-finished
 	}
