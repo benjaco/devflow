@@ -4,15 +4,21 @@ Last updated: 2026-09-15
 
 ## Current Status
 
-- Phase: selected-task migration authoring
-- State: implemented selected-task migration action resolution and a prompt-bound action ID; local verification complete and ready for review.
-- Scope: reuse action task/invalidates metadata and the existing daemon action ID; keep migration execution and relaunch ownership unchanged.
+- Phase: PR #24 daemon fixture cleanup
+- State: fixture shutdown ordering corrected; full normal/race suites and quality gates pass locally. Native CI rerun pending.
+- Scope: reproduce and fix fixture shutdown ordering; keep migration routing and production daemon behavior unchanged.
 
 ## In Progress
 
-- None. Migration changes are local and uncommitted.
+- None. The focused test/documentation fix is local and uncommitted.
 
 ## Completed
+
+- PR #24 daemon fixture cleanup:
+  - [Windows](https://github.com/benjaco/devflow/actions/runs/35001175796/job/104489647099) and [Linux race](https://github.com/benjaco/devflow/actions/runs/35001175796/job/104489647072) fail the same missing-daemon-log fixture during `TempDir` removal; migration tests pass in both jobs
+  - the unmodified macOS suite and 1,000 focused repetitions pass. A portable teardown assertion then fails 10/10 times because the final cancellation diagnostic is absent when cleanup begins; both direct-`Serve` startup fixtures now cancel and join their daemon, and report server errors. Production behavior is unchanged
+  - both fixtures pass 100 race repetitions each; `go test -p 1 -count=1 ./...`, `go test -race -count=1 ./...`, vet, Staticcheck v0.8.1, govulncheck v1.6.0, tidy-diff, formatting, CLI/example builds, version JSON and Windows daemon test cross-compilation pass. Evidence: `/tmp/devflow-pr24-{cleanup-boundary-red,cleanup-green,full-recheck,race}.log`
+  - the first post-fix normal suite hits the unchanged `TestInteractivePromptFailureStopsOwnedProcess`; five isolated repetitions, the full race suite and the final serial normal suite pass without changes to it. Initial failure/recheck logs: `/tmp/devflow-pr24-{full,process-recheck}.log`
 
 - Selected-task TUI migration authoring:
   - `m`/`F4` uses exact action task/invalidates declarations, shows the chosen action label/ID and keeps that ID fixed while the prompt is open. Single-action projects still work from any selection; ambiguous or unrelated multi-action selections fail before prompting
@@ -1184,6 +1190,7 @@ Last updated: 2026-09-15
 
 ## Next Steps
 
+- Confirm the PR #24 daemon fixture cleanup on the next native Windows/Linux CI run.
 - Review the compact attention view (`a`) in the user's terminal, including native multiline log selection on a small screen.
 - Review automatic project-version selection and the upgrade project choice, confirm them on the native CI matrix, and release a launcher containing the capability before colleagues rely on pull-and-run updates.
 - Review the automatic GitHub presentation change and prepared ordinary-command smoke workflow; validate hosted rendering when a remote run is wanted.

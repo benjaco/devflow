@@ -10,6 +10,12 @@ Cross-platform tests should avoid Unix-only assumptions unless the test is guard
 
 Daemon-backed CLI fixtures must wait for disconnection before removing their temporary worktree; use the existing `stopJSONContractDaemon` cleanup helper. A stop response arrives before the daemon writes its final shutdown log, so immediate `TempDir` cleanup can race directory recreation. PID checks cannot join the CLI harness's in-process daemon. See [the PR #15 reproduction](github-presentation-verification.md#pr-15-fixture-cleanup).
 
+Fixtures that call `daemon.Serve` directly must cancel and join that goroutine
+before `TempDir` cleanup. Cancellation alone can leave the final diagnostic
+recreating the log directory during removal. The missing-log regression checks
+that the cancellation diagnostic exists before temporary-worktree cleanup; it
+runs on every platform.
+
 Execution ownership regressions must prove rejection before configuration/callbacks and byte-for-byte preservation of the active execution's task status, logs, env and outputs. Cover CI/CI and CI/watch contention, canonical aliases and distinct worktrees, real child-process leases, stop timeouts, incomplete cleanup, owner death/recovery, daemon control separation, and action completion racing newer intent. Use channel barriers for engine transitions and subprocess handshakes for OS locking. Failed `Stop` or `Alive()==true` must prevent replacement, and terminal events must include cleanup failures. See [recorded red/green ownership cases](execution-ownership-verification.md).
 
 The ownership contender's timeout is an external test watchdog. Keep its
