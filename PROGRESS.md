@@ -1,19 +1,25 @@
 # Progress
 
-Last updated: 2026-09-14
+Last updated: 2026-09-15
 
 ## Current Status
 
-- Phase: focused unexpected-exit diagnostics
-- State: PR #23 reduced to existing TUI/daemon logs and Windows bootstrap child-exit observations. Stock tcell/tview remain responsible for terminal input and decoding.
-- Confidence: decoded Escape proves a handler received an event, not physical input or user intent. Diagnostic coverage does not establish the cause of an unreproduced exit.
+- Phase: selected-task migration authoring
+- State: implemented selected-task migration action resolution and a prompt-bound action ID; local verification complete and ready for review.
+- Scope: reuse action task/invalidates metadata and the existing daemon action ID; keep migration execution and relaunch ownership unchanged.
 
 ## In Progress
 
-- Native platform results and review are tracked in PR #23. No copied terminal reader, custom decoder, diagnostic session store, report command, or additional workflow step.
-- Raw native input provenance, parser internals, automatic incomplete-session inference and crash-dump discovery remain deferred. Any deeper terminal observation should use an upstream-supported hook.
+- None. Migration changes are local and uncommitted.
 
 ## Completed
+
+- Selected-task TUI migration authoring:
+  - `m`/`F4` uses exact action task/invalidates declarations, shows the chosen action label/ID and keeps that ID fixed while the prompt is open. Single-action projects still work from any selection; ambiguous or unrelated multi-action selections fail before prompting
+  - reproduced kind-only ambiguity for both Prisma and PayloadCMS in a portable TUI event-loop regression, then verified selected action IDs through the daemon's existing resolver. Cover prompt labels, selection changes, cancellation, empty names and explicit metadata matching without provider-name heuristics
+  - 33 net production lines in the TUI; generic prompt/helper names replace Prisma-specific ones. Daemon requests, action execution, relaunch policies and JSON contracts use existing APIs
+  - `go test -count=1 ./...`, `go test -race -p 1 -count=1 ./...`, focused/full TUI race tests, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, formatting, CLI/example builds, version JSON and Windows TUI test cross-compilation pass. Native Windows execution remains a CI check
+  - first full race run timed out in bootstrap watcher startup and Delve readiness; the two-package rerun hit daemon deadline and sleep-based parallelism assertions. All four unchanged cases pass three isolated race repetitions, and the final full serial race suite passes without source changes. Logs: `/tmp/devflow-selected-migration-{race,race-recheck,race-serial,daemon-recheck,delve-recheck,timing-recheck}.log`
 
 - Focused unexpected-exit observations:
   - distinguish decoded controls, modal routing, stop decisions, application return and owned cleanup in the existing TUI log; preserve the initiating failure and unknown input origin/intent, excluding printable input

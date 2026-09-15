@@ -142,7 +142,7 @@ Useful TUI keys:
 - `l`: selected task log or daemon log
 - `d`: database/Prisma panel
 - `a`: toggle the active/failure attention view with full-width, borderless logs for copying
-- `m`: create a migration through the project migration-create action
+- `m` / `F4`: create a migration for the selected task
 - `r`: immediately invalidate and rerun the selected task scope
 - `t`: choose a target, then preview and confirm retarget scope
 
@@ -157,6 +157,8 @@ Attention mode puts a compact instance box beside the task list in a short strip
 Task rows remain in stable graph order while states change. The selected task/log source and focused pane are always labeled, lifecycle badges remain distinct without color, and failed/blocked/degraded rows include a concise reason in the normal view. Action status has reserved footer space and remains visible until replaced or dismissed. Rerun immediately submits the daemon-scoped invalidation without confirmation. Retarget shows the daemon's stop/execute/preserve/restart plan, and Escape cancels before any process changes.
 
 The database/Prisma panel shows managed Postgres identity, the persisted `postgres`/`postgis` flavor and configured/automatic image choice, cached Prisma migration-prefix snapshots, and schema/migration drift when Prisma metadata is available. Migration authoring is explicit; normal startup does not secretly generate migrations. When you create a migration from the TUI, Devflow sends a daemon action with kind `devflow.database.migration.create`, streams task progress in the footer immediately, surfaces any declared confirmation prompts, and then relaunches the previously detached target so services come back through the graph. The same `m` action can drive non-Prisma components such as PayloadCMS when the adapter registers a migration-create action.
+
+With several migration systems, select the relevant task (for example, `payload_migrations` or `prisma_migrations`) before pressing `m`. The prompt shows the matching action's label and ID and keeps that action selected until submission or cancellation. Tasks match the action's executable task or declared invalidation list; built-in Prisma and PayloadCMS components supply these declarations. If only one migration action exists, it remains available from any selected task. Unrelated or ambiguous selections never pick an arbitrary migration system.
 
 The same action is available from the CLI:
 

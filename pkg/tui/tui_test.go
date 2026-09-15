@@ -1010,7 +1010,7 @@ func TestRenderDatabasePanelFlagsPrismaMigrationDrift(t *testing.T) {
 	for _, want := range []string{
 		"migration folder/state: needs new migration",
 		"reason=schema_changed",
-		"press m to create a Prisma migration (F4 also works)",
+		"press m to create a migration for the selected task (F4 also works)",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected database panel to contain %q, got:\n%s", want, joined)
@@ -1062,12 +1062,8 @@ func TestLoadPrismaSnapshotSummariesSortsAndSkipsNonPrismaSnapshots(t *testing.T
 	}
 }
 
-func TestGeneratePrismaMigrationFromTUIRunsProjectTargetAndRelaunches(t *testing.T) {
+func TestGenerateMigrationFromTUIRequestsActionAndStreamsRelaunchProgress(t *testing.T) {
 	worktree := t.TempDir()
-	inst, err := instance.Resolve(worktree, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
 	var gotRoot string
 	var gotReq daemon.Request
 	previousCall := callDaemonForTUI
@@ -1088,7 +1084,7 @@ func TestGeneratePrismaMigrationFromTUIRunsProjectTargetAndRelaunches(t *testing
 	t.Cleanup(func() { callDaemonForTUI = previousCall })
 
 	var progress []string
-	if err := generatePrismaMigrationFromTUI(worktree, inst.ID, "add-age", func(message string) {
+	if err := generateMigrationFromTUI(worktree, "prisma.migration.create", "add-age", func(message string) {
 		progress = append(progress, message)
 	}); err != nil {
 		t.Fatal(err)
@@ -1096,7 +1092,7 @@ func TestGeneratePrismaMigrationFromTUIRunsProjectTargetAndRelaunches(t *testing
 	if gotRoot != worktree {
 		t.Fatalf("unexpected daemon root: got %q want %q", gotRoot, worktree)
 	}
-	if gotReq.Action != daemon.ActionRunAction || gotReq.ActionKind != database.ActionMigrationCreate || !gotReq.StreamEvents || gotReq.Inputs["name"] != "add-age" {
+	if gotReq.Action != daemon.ActionRunAction || gotReq.ActionKind != database.ActionMigrationCreate || gotReq.ActionID != "prisma.migration.create" || !gotReq.StreamEvents || gotReq.Inputs["name"] != "add-age" {
 		t.Fatalf("unexpected daemon request: %+v", gotReq)
 	}
 	for _, want := range []string{
