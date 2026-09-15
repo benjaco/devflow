@@ -492,6 +492,8 @@ b.Action("custom.migration.create").
 
 Users can then run `devflow action run custom.migration.create --name add_status` or, for migration-create actions, `devflow migration create add_status --component custom`.
 
+For TUI selection in a project with several migration actions, declare the affected task references with `.Invalidates(...)`. The `m`/`F4` shortcut matches the highlighted task against the action's executable task and invalidation list. Built-in Prisma and PayloadCMS migration actions already declare these relationships; task-name prefixes and shared database dependencies do not select an action.
+
 ## Watch Restart Policies
 
 Watch mode maps changed files to task inputs and then cascades through the selected target's task graph.

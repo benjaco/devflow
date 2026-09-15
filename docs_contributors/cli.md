@@ -494,6 +494,8 @@ devflow migration create add_user --json
 
 If exactly one migration-create action exists, the component flag can be omitted. If several migration systems are registered, `--component` disambiguates. Migration creation is never inferred from targets such as `new-migration`; adapters must register actions.
 
+In the TUI, `m`/`F4` resolves the highlighted task against migration actions' `task` and `effects.invalidates` declarations, then sends the selected action ID through the existing daemon request. The prompt displays that action's label/ID and keeps it fixed across task-selection changes. A single registered migration action remains available from any task; multiple unmatched or overlapping actions produce a selection error before prompting or dispatching work.
+
 `version` prints the effective Devflow version. Use `version --worktree /path/to/project --json` to inspect another worktree's selection. Inspection may prepare the selected CLI but never compiles the adapter or starts/replaces a daemon. `version --json` retains its build-identity fields and includes optional `launcherVersion` and `projectVersion` when a project version is selected:
 
 ```json
@@ -617,8 +619,8 @@ The operator console includes:
 - a bounded live tail of the selected task log; running logs open at the tail in `FOLLOWING`, upward/Page Up scrolling switches to `PAUSED`, End or `f` resumes, and `o` loads older retained lines up to a fixed bound
 - toggle to the daemon log
 - `d` toggles a database/Prisma panel with managed Postgres identity, persisted flavor (`postgres` or `postgis`), the selected PostgreSQL major when configured, configured/automatic image selection, and recent cached Prisma migration-prefix snapshots; `F2` is a backup key
-- the database/Prisma panel flags schema/migration drift and `m` asks for a migration name, then sends a daemon action with kind `devflow.database.migration.create` through the daemon-owned engine and relaunches the previously detached target; `F4` is a backup key
-- while the TUI creates a Prisma migration, the footer status reports target/task state and the latest task output line
+- the database/Prisma panel flags schema/migration drift and `m` selects the highlighted task's migration action before asking for a name, then sends its ID and kind `devflow.database.migration.create` through the daemon-owned engine and relaunches the previously detached target; `F4` is a backup key
+- while the TUI creates a migration, the footer status reports target/task state and the latest task output line
 - global shortcuts are disabled while text-input popups are focused, so migration names can contain normal letters
 - stable graph/topological task order; state changes never move rows, while `a` toggles an attention-only view: a compact instance box and state/name task list share the top strip, leaving full-width, borderless logs below for terminal copying. Target/mode remain visible; verbose instance details are hidden. Source/follow/focus context stays in the footer title
 - distinct monochrome-readable badges for waiting, starting, running, ready, restarting, cached, done, failed, canceled, blocked, stopped, degraded, and dirty states, with concise failure/block reasons

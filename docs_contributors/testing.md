@@ -10,6 +10,12 @@ Cross-platform tests should avoid Unix-only assumptions unless the test is guard
 
 Daemon-backed CLI fixtures must wait for disconnection before removing their temporary worktree; use the existing `stopJSONContractDaemon` cleanup helper. A stop response arrives before the daemon writes its final shutdown log, so immediate `TempDir` cleanup can race directory recreation. PID checks cannot join the CLI harness's in-process daemon. See [the PR #15 reproduction](github-presentation-verification.md#pr-15-fixture-cleanup).
 
+Fixtures that call `daemon.Serve` directly must cancel and join that goroutine
+before `TempDir` cleanup. Cancellation alone can leave the final diagnostic
+recreating the log directory during removal. The missing-log regression checks
+that the cancellation diagnostic exists before temporary-worktree cleanup; it
+runs on every platform.
+
 Execution ownership regressions must prove rejection before configuration/callbacks and byte-for-byte preservation of the active execution's task status, logs, env and outputs. Cover CI/CI and CI/watch contention, canonical aliases and distinct worktrees, real child-process leases, stop timeouts, incomplete cleanup, owner death/recovery, daemon control separation, and action completion racing newer intent. Use channel barriers for engine transitions and subprocess handshakes for OS locking. Failed `Stop` or `Alive()==true` must prevent replacement, and terminal events must include cleanup failures. See [recorded red/green ownership cases](execution-ownership-verification.md).
 
 The ownership contender's timeout is an external test watchdog. Keep its
@@ -112,6 +118,7 @@ run, and persisted/process/managed environment precedence.
 - required CLI detection, target-scoped required CLI selection, project/task required-env selection, doctor source reporting/strict failure, and platform-script install coverage in `pkg/project` and `internal/cli`
 - engine-level interactive prompt event plus answer-file integration coverage
 - TUI database/Prisma panel rendering, drift warning, Prisma snapshot-summary loading, daemon-backed migration-create action, detached-target relaunch, selected-task invalidate/rerun forced relaunch behavior, real-event-loop proof that `r` dispatches exactly once without opening a confirmation overlay, log scroll preservation across same-log reloads, default startup waiting for a matching non-empty status snapshot instead of stale blank state, and progress/footer status coverage
+- TUI migration selection with Prisma and PayloadCMS together: exact task/invalidates matching, provider-specific prompt labels, a captured action ID across selection changes, Escape/empty-name handling, single-action availability and rejection of unmatched or overlapping actions without provider-name heuristics
 - TUI daemon ownership coverage proving a daemon created for the TUI session is stopped on exit while an already-running daemon is left alone
 - sequential engine execution with cache hits/misses, per-node duration/cache timings including completed zero-tick measurements on coarse platform clocks, bounded failure log tails/excerpts, planned target-cache keys that match execution keys, and cache-key manifest creation/reuse/rejection including local/generated-input changes and one total semantic-callback invocation
 - distinct canceled-vs-failed task-state behavior when sibling task failure cancels in-flight work, plus explicit `migration_needed` task-state classification for database migration authoring guards

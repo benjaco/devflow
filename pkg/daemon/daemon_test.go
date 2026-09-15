@@ -217,18 +217,27 @@ func TestFlushStartsWatchAfterCompletedDetachedRun(t *testing.T) {
 func TestEnsureSerializesDaemonStartup(t *testing.T) {
 	worktree := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	var daemons sync.WaitGroup
+	defer func() {
+		cancel()
+		// Cancellation can still write logs; join before TempDir removes the worktree.
+		daemons.Wait()
+	}()
 	var starts atomic.Int32
 	restore := SetStartDaemonFuncForTest(func(worktree, instanceID, projectName string) error {
 		if starts.Add(1) > 1 {
 			return nil
 		}
+		daemons.Add(1)
 		go func() {
-			_ = Serve(ctx, Options{
+			defer daemons.Done()
+			if err := Serve(ctx, Options{
 				Worktree: worktree,
 				Project:  projectName,
 				LogPath:  filepath.Join(worktree, ".devflow", "logs", instanceID, "daemon.log"),
-			})
+			}); err != nil {
+				t.Errorf("daemon stopped with an error: %v", err)
+			}
 		}()
 		return nil
 	})
@@ -265,16 +274,25 @@ func TestEnsureSerializesDaemonStartup(t *testing.T) {
 func TestEnsureCreatesMissingDaemonLogForLiveDaemon(t *testing.T) {
 	worktree := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	var daemons sync.WaitGroup
+	defer func() {
+		cancel()
+		// Cancellation can still write logs; join before TempDir removes the worktree.
+		daemons.Wait()
+	}()
 	var starts atomic.Int32
 	restore := SetStartDaemonFuncForTest(func(worktree, instanceID, projectName string) error {
 		starts.Add(1)
+		daemons.Add(1)
 		go func() {
-			_ = Serve(ctx, Options{
+			defer daemons.Done()
+			if err := Serve(ctx, Options{
 				Worktree: worktree,
 				Project:  projectName,
 				LogPath:  filepath.Join(worktree, ".devflow", "logs", instanceID, "daemon.log"),
-			})
+			}); err != nil {
+				t.Errorf("daemon stopped with an error: %v", err)
+			}
 		}()
 		return nil
 	})
@@ -294,6 +312,15 @@ func TestEnsureCreatesMissingDaemonLogForLiveDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(realWorktree, ".devflow", "logs", id, "daemon.log")
+	t.Cleanup(func() {
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), "event=daemon_context_cancelled") {
+			t.Error("temporary worktree cleanup started before daemon cancellation was logged")
+		}
+	})
 	if err := os.Remove(logPath); err != nil {
 		t.Fatal(err)
 	}

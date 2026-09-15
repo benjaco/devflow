@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -654,7 +655,7 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 		d.toggleDaemonLog()
 		return nil
 	case tcell.KeyF4:
-		d.openPrismaMigrationPrompt()
+		d.openMigrationPrompt()
 		return nil
 	case tcell.KeyF5:
 		d.triggerInvalidateSelected()
@@ -723,7 +724,7 @@ func (d *dashboard) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 			d.toggleDatabasePanel()
 			return nil
 		case 'm':
-			d.openPrismaMigrationPrompt()
+			d.openMigrationPrompt()
 			return nil
 		case 'r':
 			d.triggerInvalidateSelected()
@@ -800,7 +801,7 @@ func (d *dashboard) openHelp() {
 		SetText(strings.Join([]string{
 			"[yellow]Navigation[-]  Tab changes pane; j/k or arrows move in the focused pane.",
 			"[yellow]Logs[-]        running logs open at the tail; Page Up/up pauses; End/f resumes; o loads older retained lines.",
-			"[yellow]Actions[-]     r reruns the selected scope immediately; t previews retarget scope; m creates a migration.",
+			"[yellow]Actions[-]     r reruns the selected scope immediately; t previews retarget scope; m creates a migration for the selected task.",
 			"[yellow]Views[-]       l switches task/daemon log; d opens database details.",
 			"[yellow]Quit[-]        q or Escape closes the UI; a pre-existing detached run remains active.",
 			"",
@@ -1291,7 +1292,35 @@ func (d *dashboard) renderFooter() {
 		"l task/daemon log  d db  a attention  m migration  r rerun  t retarget\n" + timestamp + status)
 }
 
-func (d *dashboard) openPrismaMigrationPrompt() {
+func migrationActionForTask(p project.Project, task string) (project.Action, error) {
+	var actions, matches []project.Action
+	for _, action := range project.Actions(p) {
+		if action.Kind != database.ActionMigrationCreate {
+			continue
+		}
+		actions = append(actions, action)
+		// Match declared relationships, not component names or shared database dependencies.
+		if task != "" && (action.Task == task || slices.Contains(action.Effects.Invalidates, task)) {
+			matches = append(matches, action)
+		}
+	}
+	if len(matches) > 0 {
+		actions = matches
+	}
+	if len(actions) == 1 {
+		return actions[0], nil
+	}
+	if len(actions) == 0 {
+		return project.Action{}, fmt.Errorf("no migration-create action is registered")
+	}
+	ids := make([]string, 0, len(actions))
+	for _, action := range actions {
+		ids = append(ids, action.ID)
+	}
+	return project.Action{}, fmt.Errorf("ambiguous migration action for task %q; select a task associated with one of: %s", task, strings.Join(ids, ", "))
+}
+
+func (d *dashboard) openMigrationPrompt() {
 	if d.busy {
 		d.setStatus("[yellow]action already running")
 		return
@@ -1301,16 +1330,19 @@ func (d *dashboard) openPrismaMigrationPrompt() {
 		d.setStatus(fmt.Sprintf("[red]failed to load instance: %v", err))
 		return
 	}
-	cfg, err := resolvePrismaConfig(d.root, inst)
+	_, p, err := resolveRelaunchProject(d.root, inst)
 	if err != nil {
-		d.setStatus(fmt.Sprintf("[red]failed to resolve prisma config: %v", err))
+		d.setStatus(fmt.Sprintf("[red]failed to resolve project: %v", err))
 		return
 	}
-	title := "Create Migration"
-	detail := "devflow.database.migration.create action"
-	if cfg.Available {
-		title = "Create Prisma Migration"
-		detail = fmt.Sprintf("%s -> %s", cfg.SchemaPath, cfg.MigrationsDir)
+	action, err := migrationActionForTask(p, d.selectedName)
+	if err != nil {
+		d.setStatus("[red]" + tview.Escape(err.Error()))
+		return
+	}
+	title := action.Label
+	if title == "" {
+		title = "Create Migration"
 	}
 	var input *tview.InputField
 	input = tview.NewInputField().
@@ -1319,7 +1351,7 @@ func (d *dashboard) openPrismaMigrationPrompt() {
 		SetDoneFunc(func(key tcell.Key) {
 			switch key {
 			case tcell.KeyEscape:
-				d.closePrismaMigrationPrompt()
+				d.closeMigrationPrompt()
 				return
 			case tcell.KeyEnter:
 			default:
@@ -1330,29 +1362,30 @@ func (d *dashboard) openPrismaMigrationPrompt() {
 				d.setStatus("[red]migration name is required")
 				return
 			}
-			d.closePrismaMigrationPrompt()
-			d.triggerGeneratePrismaMigration(name)
+			d.closeMigrationPrompt()
+			// Keep the action shown by this prompt even if a refresh changes selection.
+			d.triggerGenerateMigration(action.ID, name)
 		})
 	frame := tview.NewFrame(input).
 		SetBorders(1, 1, 1, 1, 1, 1).
-		AddText(title, true, tview.AlignCenter, tcell.ColorWhite).
+		AddText(tview.Escape(title), true, tview.AlignCenter, tcell.ColorWhite).
 		AddText("Enter creates the migration. Escape cancels.", false, tview.AlignCenter, tcell.ColorGray).
-		AddText(detail, false, tview.AlignCenter, tcell.ColorGray)
+		AddText(tview.Escape(action.ID), false, tview.AlignCenter, tcell.ColorGray)
 	d.activeInput = true
-	d.pages.AddPage("prisma_migration", centered(frame, 84, 8), true, true)
+	d.pages.AddPage("migration", centered(frame, 84, 8), true, true)
 	d.app.SetFocus(input)
 	d.renderFooter()
 }
 
-func (d *dashboard) closePrismaMigrationPrompt() {
+func (d *dashboard) closeMigrationPrompt() {
 	d.activeInput = false
-	d.pages.RemovePage("prisma_migration")
+	d.pages.RemovePage("migration")
 	d.app.SetFocus(d.logs)
 	d.updateFocusTreatment()
 	d.renderFooter()
 }
 
-func (d *dashboard) triggerGeneratePrismaMigration(name string) {
+func (d *dashboard) triggerGenerateMigration(actionID, name string) {
 	if d.busy {
 		d.setStatus("[yellow]action already running")
 		return
@@ -1375,7 +1408,7 @@ func (d *dashboard) triggerGeneratePrismaMigration(name string) {
 				}
 			})
 		}
-		err := generatePrismaMigrationFromTUI(d.root, d.instanceID, name, progress)
+		err := generateMigrationFromTUI(d.root, actionID, name, progress)
 		d.app.QueueUpdateDraw(func() {
 			d.busy = false
 			d.showDatabasePanel = true
@@ -2182,7 +2215,7 @@ func renderDatabasePanel(snap snapshot) []string {
 			if snap.prismaDev.Message != "" {
 				lines = append(lines, snap.prismaDev.Message)
 			}
-			lines = append(lines, "press m to create a Prisma migration (F4 also works)")
+			lines = append(lines, "press m to create a migration for the selected task (F4 also works)")
 		} else if snap.prismaDev != nil {
 			lines = append(lines, formatPrismaDevelopmentStatus(snap.prismaDev))
 		}
@@ -2329,13 +2362,12 @@ func normalizePrismaConfig(cfg project.PrismaConfig) project.PrismaConfig {
 	return cfg
 }
 
-func generatePrismaMigrationFromTUI(root, instanceID, name string, progressFns ...func(string)) error {
+func generateMigrationFromTUI(root, actionID, name string, progressFns ...func(string)) error {
 	progress := firstTUIProgress(progressFns)
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("migration name is required")
 	}
-	_ = instanceID
 	reportTUIProgress(progress, "connecting to daemon...")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -2344,6 +2376,7 @@ func generatePrismaMigrationFromTUI(root, instanceID, name string, progressFns .
 		Headless:     api.HeadlessWait,
 		TimeoutMs:    (10 * time.Minute).Milliseconds(),
 		ActionKind:   database.ActionMigrationCreate,
+		ActionID:     actionID,
 		StreamEvents: true,
 		Inputs: map[string]string{
 			"name": name,

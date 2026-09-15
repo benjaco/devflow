@@ -917,7 +917,7 @@ The first usable TUI slice is now implemented as a local terminal console connec
 - task log tail
 - daemon log toggle
 - database/Prisma panel showing managed Postgres identity and recent Prisma migration-prefix snapshots
-- explicit migration generation from inside the TUI by asking for a migration name, sending a daemon migration-create action through the daemon-owned engine, surfacing declared prompts, and relaunching the previously detached target after success
+- explicit migration generation from inside the TUI: resolve the selected task through action task/invalidates declarations, capture the action ID in the name prompt, then use the daemon-owned engine, declared prompts and existing detached-target relaunch policy. Component names and shared database dependencies are not action-selection heuristics
 - instance/worktree/runtime header
 - stable terminal rendering via a real TUI library instead of manual ANSI frame painting
 - task-log producers share `internal/tasklog`: stdout/default stream text is unprefixed and each physical stderr line starts with the reserved `E: ` marker. Interactive prompts persist partial chunks immediately; stream switches within a partial retained line insert a log-only newline to keep the next stream identifiable. Live event payloads and stream fields remain separate; retained CLI/GitHub readers replay the compact text, and failure matching ignores its error marker
