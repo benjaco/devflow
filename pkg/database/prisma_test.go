@@ -1496,6 +1496,9 @@ func TestPrismaCommandBuilders(t *testing.T) {
 		t.Fatalf("unexpected deploy command: %+v", deploy)
 	}
 	dev := PrismaMigrateDevCommand("prisma/schema.prisma", "add-user", true)
+	if deploy.Terminal || !dev.Terminal || len(dev.Prompts) != 1 {
+		t.Fatalf("only authoring should require terminal confirmation: deploy=%+v dev=%+v", deploy, dev)
+	}
 	if dev.Name != "npx" || strings.Join(dev.Args, " ") != "prisma migrate dev --name add-user --schema prisma/schema.prisma --create-only" {
 		t.Fatalf("unexpected migrate dev command: %+v", dev)
 	}

@@ -9,7 +9,17 @@ import (
 	"testing"
 
 	"github.com/benjaco/devflow/pkg/api"
+	"github.com/benjaco/devflow/pkg/process"
 )
+
+func TestCommandSignatureDistinguishesTerminalExecution(t *testing.T) {
+	command := process.CommandSpec{Name: "tool", Args: []string{"generate"}}
+	pipeSignature := commandSignature(command, "", nil)
+	command.Terminal = true
+	if commandSignature(command, "", nil) == pipeSignature {
+		t.Fatal("terminal execution reused the piped command cache identity")
+	}
+}
 
 func TestBuilderDefinesProjectWithCachedOutputTask(t *testing.T) {
 	p := Define(func(ctx context.Context, b *Builder) error {

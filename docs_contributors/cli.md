@@ -496,6 +496,14 @@ If exactly one migration-create action exists, the component flag can be omitted
 
 In the TUI, `m`/`F4` resolves the highlighted task against migration actions' `task` and `effects.invalidates` declarations, then sends the selected action ID through the existing daemon request. The prompt displays that action's label/ID and keeps it fixed across task-selection changes. A single registered migration action remains available from any task; multiple unmatched or overlapping actions produce a selection error before prompting or dispatching work.
 
+Prisma's standard authoring helper runs in a separate child terminal so warning
+confirmations reach the existing prompt popup. Warnings are never accepted
+automatically. The TUI displays task logs during authoring and leaves them visible
+after failure; successful completion returns to the database panel. Custom command
+wrappers must declare their terminal/prompt requirements in the adapter. Terminal
+output is merged; retained log identities, JSON contracts and headless policy stay
+unchanged.
+
 `version` prints the effective Devflow version. Use `version --worktree /path/to/project --json` to inspect another worktree's selection. Inspection may prepare the selected CLI but never compiles the adapter or starts/replaces a daemon. `version --json` retains its build-identity fields and includes optional `launcherVersion` and `projectVersion` when a project version is selected:
 
 ```json

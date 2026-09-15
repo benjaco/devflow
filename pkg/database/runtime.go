@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 
+	"github.com/benjaco/devflow/pkg/process"
 	"github.com/benjaco/devflow/pkg/project"
 )
 
@@ -84,6 +85,11 @@ func PreparePrismaMigrationAuthoringDatabaseForRuntime(ctx context.Context, rt *
 
 func GeneratePrismaMigrationForRuntime(ctx context.Context, rt *project.Runtime, opts PrismaMigrationGenerateOptions) error {
 	if rt != nil {
+		if opts.Command.OnPrompt == nil && rt.OnPrompt != nil {
+			opts.Command.OnPrompt = func(req process.PromptRequest) (process.PromptResponse, error) {
+				return rt.OnPrompt(rt.TaskName, req)
+			}
+		}
 		if opts.Worktree == "" {
 			opts.Worktree = rt.Worktree
 		}

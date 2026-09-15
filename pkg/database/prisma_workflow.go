@@ -458,7 +458,15 @@ func PrismaMigrateDevCommand(schemaPath, name string, createOnly bool) process.C
 	if createOnly {
 		args = append(args, "--create-only")
 	}
-	return process.CommandSpec{Name: "npx", Args: args}
+	return process.CommandSpec{Name: "npx", Args: args, Terminal: true, Prompts: prismaMigrationPrompts()}
+}
+
+func prismaMigrationPrompts() []process.PromptSpec {
+	return []process.PromptSpec{{
+		Patterns: []string{"Are you sure you want to create this migration?", "Are you sure you want to create and apply this migration?"},
+		Prompt:   "Proceed with the Prisma migration despite the warnings in the task log?",
+		Kind:     process.PromptConfirm,
+	}}
 }
 
 func PrismaMigrateDeployPrefixApplier() PrismaMigrationApplyFunc {
@@ -506,12 +514,18 @@ func GeneratePrismaMigration(ctx context.Context, opts PrismaMigrationGenerateOp
 	}
 	cmd := opts.Command
 	if cmd.Name == "" {
-		cmd = PrismaMigrateDevCommand(opts.SchemaPath, opts.Name, opts.CreateOnly)
+		defaults := PrismaMigrateDevCommand(opts.SchemaPath, opts.Name, opts.CreateOnly)
+		// Keep the runtime's prompt callback when filling in the default executable.
+		cmd.Name, cmd.Args = defaults.Name, defaults.Args
 	}
 	if cmd.Dir == "" {
 		cmd.Dir = opts.Worktree
 	}
 	cmd.Env = mergeStringMaps(opts.Env, cmd.Env)
+	cmd.Terminal = true
+	if len(cmd.Prompts) == 0 {
+		cmd.Prompts = prismaMigrationPrompts()
+	}
 	cmd.LogPath = opts.LogPath
 	cmd.AppendLog = true
 	cmd.OnLine = opts.OnLine

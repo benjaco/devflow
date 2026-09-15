@@ -1395,6 +1395,9 @@ func (d *dashboard) triggerGenerateMigration(actionID, name string) {
 		return
 	}
 	d.busy = true
+	d.showDatabasePanel = false
+	d.showDaemonLog = false
+	d.updateLogs()
 	d.setStatus(fmt.Sprintf("[yellow]creating migration %q...", name))
 	d.startBackground(func() {
 		progress := func(message string) {
@@ -1411,7 +1414,7 @@ func (d *dashboard) triggerGenerateMigration(actionID, name string) {
 		err := generateMigrationFromTUI(d.root, actionID, name, progress)
 		d.app.QueueUpdateDraw(func() {
 			d.busy = false
-			d.showDatabasePanel = true
+			d.showDatabasePanel = err == nil
 			d.showDaemonLog = false
 			if err != nil {
 				d.setStatus(fmt.Sprintf("[red]migration failed: %v", err))

@@ -53,8 +53,10 @@ type CommandSpec struct {
 	Grace       time.Duration
 	ReadyWait   time.Duration
 	Interactive bool
-	Prompts     []PromptSpec
-	OnPrompt    func(PromptRequest) (PromptResponse, error)
+	// Terminal gives a prompting child its own terminal; output streams are merged.
+	Terminal bool
+	Prompts  []PromptSpec
+	OnPrompt func(PromptRequest) (PromptResponse, error)
 }
 
 type Result struct {
@@ -80,7 +82,7 @@ func NowRFC3339Nano() string {
 }
 
 func Run(ctx context.Context, spec CommandSpec) (Result, error) {
-	if spec.Interactive {
+	if spec.Interactive || spec.Terminal {
 		return runInteractive(ctx, spec)
 	}
 	cmd := CommandContext(ctx, spec.Name, spec.Args...)
@@ -136,7 +138,7 @@ func Run(ctx context.Context, spec CommandSpec) (Result, error) {
 }
 
 func Start(ctx context.Context, spec CommandSpec) (*Handle, error) {
-	if spec.Interactive {
+	if spec.Interactive || spec.Terminal {
 		return startInteractive(ctx, spec)
 	}
 	cmd := exec.Command(spec.Name, spec.Args...)
@@ -312,7 +314,8 @@ func runInteractive(ctx context.Context, spec CommandSpec) (Result, error) {
 		if ctx.Err() != nil {
 			return Result{ExitCode: -1}, ctx.Err()
 		}
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
 			return Result{ExitCode: exitErr.ExitCode()}, fmt.Errorf("%s exited with code %d", spec.Name, exitErr.ExitCode())
 		}
 		return Result{}, err
@@ -321,6 +324,9 @@ func runInteractive(ctx context.Context, spec CommandSpec) (Result, error) {
 }
 
 func startInteractive(ctx context.Context, spec CommandSpec) (*Handle, error) {
+	if spec.Terminal {
+		return startTerminal(ctx, spec)
+	}
 	cmd := exec.Command(spec.Name, spec.Args...)
 	prepareCmd(cmd)
 	cmd.Dir = spec.Dir
