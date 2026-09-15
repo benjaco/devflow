@@ -4,15 +4,30 @@ Last updated: 2026-09-15
 
 ## Current Status
 
-- Phase: PR #24 daemon fixture cleanup
-- State: fixture shutdown ordering corrected; full normal/race suites and quality gates pass locally. Native CI rerun pending.
-- Scope: reproduce and fix fixture shutdown ordering; keep migration routing and production daemon behavior unchanged.
+- Phase: interactive migration authoring
+- State: native Windows failures reproduced locally and corrected; focused/full normal/race tests and quality gates pass. Native Windows rerun remains pending.
+- Scope: preserve explicit user confirmation, retained logs and owned-process cleanup; use maintained terminal support rather than copying platform implementations.
 
 ## In Progress
 
-- None. The focused test/documentation fix is local and uncommitted.
+- Await review and native Windows execution of the focused correction. Application adapter/database policy remains separate.
 
 ## Completed
+
+- PR #25 Windows prompt teardown correction:
+  - retrieved the [Windows job](https://github.com/benjaco/devflow/actions/runs/35016655194/job/104541700144): failed callbacks repeat during ConPTY teardown, and the secret fixture never matches because its trailing space is encoded as cursor movement. Its diagnostic did not establish a secret leak
+  - portable regressions fail before correction: three callbacks after failure, no secret prompt response for captured rendering, and cancellation incorrectly returning success for both pipe and terminal runs. Keep final output draining, stop callbacks after failure, preserve cancellation after normalized process cleanup, and match stable fixture text without changing literal pattern semantics
+  - focused tests pass three race repetitions; `go test -p 1 -count=1 ./...`, `go test -race -p 1 -count=1 ./...`, vet, Staticcheck v0.8.1, govulncheck v1.6.0, tidy-diff, CLI/example builds, version JSON, tracked-source formatting and diff checks pass. Process/database tests cross-compile for Windows; native ConPTY execution still needs the next CI run
+  - no dependencies, terminal implementations or workflows changed. Evidence: `/tmp/devflow-windows-prompts-{ci,baseline,red,green,normal,race}.log` and `/tmp/devflow-windows-prompts-quality/results.json`
+
+- Prisma authoring terminal/prompt correction:
+  - reproduced the non-interactive failure with a real terminal-detection fixture and unmodified Prisma 6.19.0. A separate regression caught default command construction discarding the runtime prompt callback
+  - add opt-in child terminals using maintained xpty; Prisma authoring helpers enable them and route warning confirmations through the existing engine/TUI policy, including custom commands. Retain output and exit status, drain writers, suppress secret echoes and preserve owned-process cancellation
+  - TUI shows task logs during authoring and retains them on failure; successful authoring returns to database status. Public command signatures include terminal mode
+  - default npx and custom node/pnpm smoke pass against disposable SQLite data: decline preserves exit 130 without a new migration, accept creates migration SQL, and create-only leaves the original row intact. See `docs_contributors/prisma-confirmation-verification.md`
+  - `go test -p 1 -count=1 ./...`, `go test -race -p 1 -count=1 ./...`, vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, CLI/example builds and version JSON pass. Process/database tests cross-compile for Windows; native ConPTY execution remains untested locally
+  - the first normal suite hit the unchanged daemon deadline fixture; three isolated race repetitions and both final full suites pass without changing it. Evidence: `/tmp/devflow-prisma-{full,full-final,full-race}.log` and `/tmp/devflow-prisma-final-quality/results.json`
+  - tracked/new Go files and diff checks are clean. Broad `gofmt -l .` also finds one pre-existing ignored evidence fixture under `tmp/`, left untouched
 
 - PR #24 daemon fixture cleanup:
   - [Windows](https://github.com/benjaco/devflow/actions/runs/35001175796/job/104489647099) and [Linux race](https://github.com/benjaco/devflow/actions/runs/35001175796/job/104489647072) fail the same missing-daemon-log fixture during `TempDir` removal; migration tests pass in both jobs
@@ -1190,7 +1205,7 @@ Last updated: 2026-09-15
 
 ## Next Steps
 
-- Confirm the PR #24 daemon fixture cleanup on the next native Windows/Linux CI run.
+- Confirm the PR #25 prompt teardown correction on the next native Windows CI run; the prior daemon fixture cleanup passes in that PR's initial Windows job.
 - Review the compact attention view (`a`) in the user's terminal, including native multiline log selection on a small screen.
 - Review automatic project-version selection and the upgrade project choice, confirm them on the native CI matrix, and release a launcher containing the capability before colleagues rely on pull-and-run updates.
 - Review the automatic GitHub presentation change and prepared ordinary-command smoke workflow; validate hosted rendering when a remote run is wanted.

@@ -3,6 +3,7 @@ module github.com/benjaco/devflow
 go 1.27.1
 
 require (
+	github.com/charmbracelet/x/xpty v0.1.4
 	github.com/containerd/errdefs v1.0.0
 	github.com/distribution/reference v0.6.0
 	github.com/docker/cli v29.8.0+incompatible
@@ -20,7 +21,11 @@ require (
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/charmbracelet/x/conpty v0.2.0 // indirect
+	github.com/charmbracelet/x/term v0.2.2 // indirect
+	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
+	github.com/creack/pty v1.1.24 // indirect
 	github.com/docker/docker-credential-helpers v0.9.9 // indirect
 	github.com/docker/go-connections v0.8.1 // indirect
 	github.com/docker/go-units v0.5.0 // indirect

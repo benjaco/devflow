@@ -579,6 +579,19 @@ Prisma database preparation emits progress lines before snapshot planning, runti
 
 Migration authoring prep intentionally differs from normal DB prep: it restores/rebuilds the managed database to the best compatible prefix, reapplies any missing or edited tail migrations, and does not snapshot the schema-drift state it prepares for Prisma. That lets `prisma migrate dev --create-only` compare the current schema against a compatible database without hitting Prisma's "migration was modified after it was applied" reset prompt after a developer edits the latest migration.
 
+Prisma authoring requires terminal stdin when data-loss warnings need confirmation.
+`process.CommandSpec.Terminal` uses maintained `xpty` terminal creation, the existing
+interactive reader/prompt policy and process-tree stop ownership. It never reads
+the TUI's console. Unix slave closure and a duplicated Windows output-pipe handle
+allow final output to drain before log completion. Terminal streams are merged;
+ordinary pipe execution retains separate stdout/stderr. A fresh child terminal
+defaults to `TERM=xterm-256color` unless explicitly overridden; CI variables and
+headless policy remain unchanged. Command signatures include terminal mode.
+Prompt errors prevent further callbacks while the reader drains teardown output.
+Canceled interactive runs return cancellation even when owned-process cleanup
+normalizes the child exit. Prompt patterns match literal output; terminal layout
+whitespace can be encoded as cursor movement, so use stable text in declarations.
+
 Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`. `Migrate` is an all-at-once command and only snapshots the final state; `MigrateEach` preserves the exhaustive per-prefix cache contract.
 
 `PostgresDumpSourcePolicy` must fail when `pg_dump` fails. In its default host-client strategy it writes through an owner-only temporary dump file instead of an unchecked shell pipeline so `psql` cannot mask a failed clone with an empty successful restore. It invokes `pg_dump` and `psql` as separate commands without a Unix shell. Passwords are supplied through a temporary owner-only `PGPASSFILE`; command arguments and inherited PostgreSQL URL variables are sanitized, and `PGPASSWORD` is cleared. PostgreSQL `password` query parameters are percent-decoded into the pgpass secret and removed from every reconstructed URL; when both userinfo and query credentials exist, the query value wins, matching libpq. All repeated `password` parameters are removed while ordinary connection options remain. Credential-bearing query channels that Devflow cannot transport safely (`sslpassword`, `oauth_client_secret`, and `passfile`) are rejected with credential-redacted errors.

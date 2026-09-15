@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -76,11 +77,17 @@ func TestMigrationShortcutUsesSelectedTaskWithPrismaAndPayload(t *testing.T) {
 		task, other, actionID, label string
 		key                          tcell.Key
 		char                         rune
+		fail                         bool
 	}{
-		{"accounts_migrations", "catalog_migrations", "accounts.migration.create", "Create Prisma migration", tcell.KeyRune, 'm'},
-		{"catalog_migrations", "accounts_migrations", "catalog.migration.create", "Create PayloadCMS migration", tcell.KeyF4, 0},
+		{"accounts_migrations", "catalog_migrations", "accounts.migration.create", "Create Prisma migration", tcell.KeyRune, 'm', false},
+		{"catalog_migrations", "accounts_migrations", "catalog.migration.create", "Create PayloadCMS migration", tcell.KeyF4, 0, false},
+		{"accounts_migrations", "catalog_migrations", "accounts.migration.create", "Create Prisma migration", tcell.KeyRune, 'm', true},
 	} {
-		t.Run(tc.task, func(t *testing.T) {
+		name := tc.task
+		if tc.fail {
+			name += "/failed_action"
+		}
+		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			inst, err := instance.Resolve(root, "migration-test")
 			if err != nil {
@@ -96,6 +103,9 @@ func TestMigrationShortcutUsesSelectedTaskWithPrismaAndPayload(t *testing.T) {
 				requests <- req
 				// Exercise the daemon's real action selector, without running tools or databases.
 				_, err := project.ResolveAction(p, req.ActionID, req.ActionKind, req.Component)
+				if err == nil && tc.fail {
+					err = errors.New("migration command failed")
+				}
 				return daemon.Response{OK: err == nil}, err
 			}
 			t.Cleanup(func() { callDaemonForTUI = previousCall })
@@ -142,8 +152,15 @@ func TestMigrationShortcutUsesSelectedTaskWithPrismaAndPayload(t *testing.T) {
 				time.Sleep(time.Millisecond)
 			}
 			status := dashboardState(t, d, func() string { return d.statusMessage })
-			if req.ActionID != tc.actionID || req.Inputs["name"] != "add-field" || !strings.Contains(status, "created migration") {
+			wantStatus := "created migration"
+			if tc.fail {
+				wantStatus = "migration failed"
+			}
+			if req.ActionID != tc.actionID || req.Inputs["name"] != "add-field" || !strings.Contains(status, wantStatus) {
 				t.Fatalf("selected task %s submitted action %q, want %q; status=%s", tc.task, req.ActionID, tc.actionID, status)
+			}
+			if dashboardState(t, d, func() bool { return d.showDatabasePanel }) == tc.fail {
+				t.Fatal("failed migration must keep task logs visible; success should show database state")
 			}
 		})
 	}

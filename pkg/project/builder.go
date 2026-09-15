@@ -885,15 +885,17 @@ func refName(ref any) string {
 
 func commandSignature(spec process.CommandSpec, dir string, env map[string]envValue) string {
 	payload := struct {
-		Name string   `json:"name"`
-		Args []string `json:"args"`
-		Dir  string   `json:"dir,omitempty"`
-		Env  []string `json:"env,omitempty"`
+		Name     string   `json:"name"`
+		Args     []string `json:"args"`
+		Dir      string   `json:"dir,omitempty"`
+		Env      []string `json:"env,omitempty"`
+		Terminal bool     `json:"terminal,omitempty"`
 	}{
-		Name: spec.Name,
-		Args: append([]string(nil), spec.Args...),
-		Dir:  firstNonEmpty(dir, spec.Dir),
-		Env:  envValuePairs(env),
+		Name:     spec.Name,
+		Args:     append([]string(nil), spec.Args...),
+		Dir:      firstNonEmpty(dir, spec.Dir),
+		Env:      envValuePairs(env),
+		Terminal: spec.Terminal,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

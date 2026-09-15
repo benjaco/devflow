@@ -726,6 +726,8 @@ return rt.RunCmdSpec(ctx, process.CommandSpec{
 
 Semantics:
 - Devflow watches subprocess output for the declared prompt patterns
+- set `Terminal: true` for tools that require terminal stdin, such as Prisma migration authoring. This creates a separate child terminal and implies interactive prompt handling; declare the tool's confirmation patterns as usual. Terminal stdout/stderr are merged, and retained output can contain terminal escape sequences
+- patterns match literal output. For terminal commands, use stable prompt text such as `Secret:` rather than `Secret: `: Windows ConPTY can encode trailing spaces as cursor movements
 - normal CLI and engine execution defaults to headless `fail`; a prompt returns `interaction_required`, stops the owned subprocess, and leaves a closed diagnostic
 - intentional `--headless wait` and TUI execution publish `interaction_requested` events and persist pending metadata for inspection/reconnection
 - `--timeout` bounds the operation; each prompt also has a five-minute maximum or the earlier operation deadline
@@ -742,6 +744,16 @@ This path should still be the exception, not the default adapter style.
 ### Prisma Guidance
 
 Treat Prisma authoring and reset flows separately from normal startup.
+
+`PrismaMigrateDevCommand` and `GeneratePrismaMigrationForRuntime` provide a child
+terminal and recognize Prisma's migration-warning confirmation. The runtime
+helper forwards confirmations to the engine/TUI prompt policy; it does not accept
+warnings automatically. A declined confirmation preserves Prisma's nonzero exit.
+Commands supplied to `GeneratePrismaMigrationForRuntime`, including custom pnpm
+wrappers, receive these settings automatically. When running a custom command
+directly through `rt.RunCmdSpec`, declare `Terminal: true` and its prompt patterns.
+Setting `Interactive: true` alone provides pipes, which does not satisfy Prisma's
+terminal detection. Ordinary migration deployment remains non-interactive.
 
 Recommended split:
 - normal DB prep:
