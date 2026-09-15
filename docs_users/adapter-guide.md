@@ -727,6 +727,7 @@ return rt.RunCmdSpec(ctx, process.CommandSpec{
 Semantics:
 - Devflow watches subprocess output for the declared prompt patterns
 - set `Terminal: true` for tools that require terminal stdin, such as Prisma migration authoring. This creates a separate child terminal and implies interactive prompt handling; declare the tool's confirmation patterns as usual. Terminal stdout/stderr are merged, and retained output can contain terminal escape sequences
+- patterns match literal output. For terminal commands, use stable prompt text such as `Secret:` rather than `Secret: `: Windows ConPTY can encode trailing spaces as cursor movements
 - normal CLI and engine execution defaults to headless `fail`; a prompt returns `interaction_required`, stops the owned subprocess, and leaves a closed diagnostic
 - intentional `--headless wait` and TUI execution publish `interaction_requested` events and persist pending metadata for inspection/reconnection
 - `--timeout` bounds the operation; each prompt also has a five-minute maximum or the earlier operation deadline

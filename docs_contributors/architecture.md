@@ -587,6 +587,10 @@ allow final output to drain before log completion. Terminal streams are merged;
 ordinary pipe execution retains separate stdout/stderr. A fresh child terminal
 defaults to `TERM=xterm-256color` unless explicitly overridden; CI variables and
 headless policy remain unchanged. Command signatures include terminal mode.
+Prompt errors prevent further callbacks while the reader drains teardown output.
+Canceled interactive runs return cancellation even when owned-process cleanup
+normalizes the child exit. Prompt patterns match literal output; terminal layout
+whitespace can be encoded as cursor movement, so use stable text in declarations.
 
 Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`. `Migrate` is an all-at-once command and only snapshots the final state; `MigrateEach` preserves the exhaustive per-prefix cache contract.
 

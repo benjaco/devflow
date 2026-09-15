@@ -2,6 +2,7 @@ package process
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,47 @@ import (
 	"golang.org/x/term"
 )
 
+// ConPTY may encode trailing spaces as cursor movements; match stable literal text.
+const terminalSecretPromptPattern = "Secret:"
+
+func TestTerminalSecretPromptMatchesConPTYOutput(t *testing.T) {
+	var input, log bytes.Buffer
+	var events []string
+	prompts := 0
+	reader := &interactiveReader{
+		stdin: &input, writer: &log,
+		prompts: []PromptSpec{{Pattern: terminalSecretPromptPattern, Kind: PromptText, Secret: true}},
+		onPrompt: func(req PromptRequest) (PromptResponse, error) {
+			prompts++
+			if !req.Secret {
+				t.Error("secret flag missing")
+			}
+			return PromptResponse{Value: "fixture-secret-value"}, nil
+		},
+		onLine: func(_, line string) { events = append(events, line) },
+	}
+	// Replay the captured rendering across split reads, then simulate child echo.
+	// The final space is a cursor movement, followed by title/visibility controls.
+	for _, chunk := range []string{
+		"\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[HSec",
+		"ret:", "\x1b[", "1C", "\x1b]0;fixture\a\x1b[?25h",
+		"fixture-", "secret-value\r\n",
+	} {
+		reader.consumeChunk("stdout", chunk)
+	}
+	if prompts != 1 || input.String() != "fixture-secret-value\n" {
+		t.Fatalf("terminal prompt was not answered once: prompts=%d input=%q", prompts, input.String())
+	}
+	for _, output := range []string{log.String(), strings.Join(events, "\n")} {
+		if strings.Contains(output, "fixture-secret-value") {
+			t.Fatalf("terminal echo exposed a secret: %q", output)
+		}
+		if !strings.Contains(output, "[output hidden after secret response]") {
+			t.Fatalf("secret suppression marker missing: %q", output)
+		}
+	}
+}
+
 func TestTerminalRetainsOutputAndExitStatus(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
@@ -25,12 +67,14 @@ func TestTerminalRetainsOutputAndExitStatus(t *testing.T) {
 			logPath := filepath.Join(t.TempDir(), "terminal.log")
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
+			prompts := 0
 			result, err := Run(ctx, CommandSpec{
 				Name: executable, Args: []string{"-test.run=^TestTerminalProcessHelper$"},
 				Env:      map[string]string{"DEVFLOW_TERMINAL_HELPER": mode},
 				Terminal: true, LogPath: logPath,
-				Prompts: []PromptSpec{{Pattern: "Secret: ", Kind: PromptText, Secret: true}},
+				Prompts: []PromptSpec{{Pattern: terminalSecretPromptPattern, Kind: PromptText, Secret: true}},
 				OnPrompt: func(PromptRequest) (PromptResponse, error) {
+					prompts++
 					return PromptResponse{Value: "fixture-secret-value"}, nil
 				},
 			})
@@ -47,7 +91,10 @@ func TestTerminalRetainsOutputAndExitStatus(t *testing.T) {
 			}
 			text := string(data)
 			if mode == "secret" {
-				if strings.Contains(text, "fixture-secret-value") || !strings.Contains(text, "[output hidden after secret response]") {
+				if prompts != 1 || !strings.Contains(text, "[output hidden after secret response]") {
+					t.Fatalf("secret prompt did not complete once: prompts=%d log=%q", prompts, text)
+				}
+				if strings.Contains(text, "fixture-secret-value") {
 					t.Fatalf("terminal echo exposed a secret: %q", text)
 				}
 				return
@@ -60,6 +107,56 @@ func TestTerminalRetainsOutputAndExitStatus(t *testing.T) {
 			}
 			if !strings.Contains(text, "stderr diagnostic") || !strings.Contains(text, "final partial line") {
 				t.Fatal("terminal completion lost its final output")
+			}
+		})
+	}
+}
+
+func TestRunInteractiveCancellationReportsError(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, terminal := range []bool{false, true} {
+		t.Run(fmt.Sprintf("terminal=%t", terminal), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			ready, done := make(chan struct{}, 1), make(chan struct{})
+			var result Result
+			var runErr error
+			go func() {
+				defer close(done)
+				result, runErr = Run(ctx, CommandSpec{
+					Name: executable, Args: []string{"-test.run=^TestTerminalProcessHelper$"},
+					Interactive: true, Terminal: terminal,
+					Env: map[string]string{"DEVFLOW_TERMINAL_HELPER": "wait"},
+					OnLine: func(_, line string) {
+						if strings.Contains(line, "waiting for input") {
+							select {
+							case ready <- struct{}{}:
+							default:
+							}
+						}
+					},
+				})
+			}()
+			defer func() { cancel(); <-done }()
+			watchdog := time.NewTimer(10 * time.Second)
+			defer watchdog.Stop()
+			select {
+			case <-ready:
+			case <-done:
+				t.Fatalf("child exited before waiting for input: %v", runErr)
+			case <-watchdog.C:
+				t.Fatal("child did not start")
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-watchdog.C:
+				t.Fatal("canceled interactive command did not stop")
+			}
+			if !errors.Is(runErr, context.Canceled) || result.ExitCode != -1 {
+				t.Fatalf("canceled command reported result=%+v err=%v", result, runErr)
 			}
 		})
 	}
@@ -133,6 +230,11 @@ func TestTerminalProcessHelper(t *testing.T) {
 			os.Exit(8)
 		}
 		time.Sleep(time.Minute)
+		os.Exit(0)
+	}
+	if mode == "wait" {
+		fmt.Println("waiting for input")
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 		os.Exit(0)
 	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {

@@ -310,10 +310,11 @@ func runInteractive(ctx context.Context, spec CommandSpec) (Result, error) {
 		return Result{}, err
 	}
 	err = handle.Wait()
+	// Stopping the owned process can normalize its exit; cancellation still failed the run.
+	if ctx.Err() != nil {
+		return Result{ExitCode: -1}, ctx.Err()
+	}
 	if err != nil {
-		if ctx.Err() != nil {
-			return Result{ExitCode: -1}, ctx.Err()
-		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			return Result{ExitCode: exitErr.ExitCode()}, fmt.Errorf("%s exited with code %d", spec.Name, exitErr.ExitCode())
@@ -502,7 +503,8 @@ func (r *interactiveReader) writeLogChunk(stream, chunk string) {
 }
 
 func (r *interactiveReader) maybePrompt() {
-	if r.promptIndex >= len(r.prompts) {
+	// Retain teardown output without reopening an interaction that already failed.
+	if r.err() != nil || r.promptIndex >= len(r.prompts) {
 		return
 	}
 	spec := r.prompts[r.promptIndex]

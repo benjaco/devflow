@@ -102,6 +102,50 @@ func TestInteractiveReaderRetainsStreamPrefixesAcrossChunks(t *testing.T) {
 	}
 }
 
+func TestInteractiveReaderDoesNotPromptAgainAfterFailure(t *testing.T) {
+	rejected := errors.New("interaction required")
+	for _, tc := range []struct {
+		name   string
+		cause  error
+		repeat bool
+	}{
+		{"headless", rejected, false},
+		{"canceled", context.Canceled, false},
+		{"repeated prompt rejected", rejected, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var input, log bytes.Buffer
+			prompts := 0
+			reader := &interactiveReader{
+				stdin: &input, writer: &log, failed: make(chan struct{}),
+				prompts: []PromptSpec{{Pattern: "Continue?", Kind: PromptConfirm, Repeat: tc.repeat}},
+				onPrompt: func(PromptRequest) (PromptResponse, error) {
+					prompts++
+					return PromptResponse{}, tc.cause
+				},
+			}
+			reader.consumeChunk("stdout", "Warning\nContinue?")
+			// ConPTY teardown can arrive after the prompt callback already failed.
+			reader.consumeChunk("stdout", "\x1b[?9001l\x1b[?1004l\n")
+			reader.consumeChunk("stderr", "cleanup diagnostic\n")
+			if prompts != 1 || input.Len() != 0 {
+				t.Fatalf("failed prompt was invoked again: prompts=%d input=%q", prompts, input.String())
+			}
+			if !errors.Is(reader.err(), tc.cause) {
+				t.Fatalf("initial failure lost: %v", reader.err())
+			}
+			select {
+			case <-reader.failed:
+			default:
+				t.Fatal("prompt failure did not request process cleanup")
+			}
+			if !strings.Contains(log.String(), "cleanup diagnostic") {
+				t.Fatal("reader stopped retaining output after prompt failure")
+			}
+		})
+	}
+}
+
 func TestRunCapturesLongOutputLineAndUsesPrivateLogPermissions(t *testing.T) {
 	root := t.TempDir()
 	logPath := filepath.Join(root, "long-line.log")

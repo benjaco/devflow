@@ -45,3 +45,27 @@ command also requested confirmation once and created its migration successfully.
 These checks establish the terminal/prompt path; they do not verify native
 Windows execution or any application's database preparation policy.
 No force/auto-accept flags or Prisma implementation patches are involved.
+
+## Windows prompt teardown follow-up
+
+[Native Windows testing at `7d05173`](https://github.com/benjaco/devflow/actions/runs/35016655194/job/104541700144) exposed two cases that passed on macOS:
+headless/canceled prompts were invoked twice when ConPTY emitted teardown output,
+and the secret fixture waited for a literal space where ConPTY emitted `ESC[1C`.
+The missing suppression marker meant the prompt never matched; the captured log
+did not contain the secret. Its timeout also exposed interactive cancellation
+being normalized into success after process cleanup.
+
+Portable regressions reproduced all three locally before correction: three
+callbacks after failure, zero secret callbacks for the captured rendering, and
+nil errors/exit zero for canceled pipe and terminal commands. The reader now
+disables callbacks after failure while retaining final output, cancellation is
+returned independently of stop normalization, and the fixture matches `Secret:`.
+Literal matching remains unchanged; no terminal parser or dependency was added.
+
+```sh
+go test -race -count=3 ./pkg/process ./pkg/database -run 'TestInteractiveReaderDoesNotPromptAgainAfterFailure|TestTerminalSecretPromptMatchesConPTYOutput|TestRunInteractiveCancellationReportsError|TestTerminalRetainsOutputAndExitStatus|TestPrismaMigrationConfirmationRequiresTerminal'
+```
+
+The focused tests pass on macOS. Captured-output replay verifies the matching and
+callback boundary; the existing native Windows matrix must still verify the
+actual ConPTY execution after this correction.
