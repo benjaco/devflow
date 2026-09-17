@@ -4,15 +4,20 @@ Last updated: 2026-09-17
 
 ## Current Status
 
-- Phase: post-merge Delve startup and shutdown correction
-- State: implementation and local verification complete; full normal/race suites and final affected-package race checks pass with real Delve available.
-- Scope: require debugger initialization and halt/kill-detach the debuggee within the existing process grace budget before releasing ownership.
+- Phase: repository repair diagnostics
+- State: dirty-worktree preflight now prints changed paths; focused/full tests, focused race tests and quality gates pass.
+- Scope: preserve clean-worktree enforcement, bounded path evidence and stdout-only final JSON.
 
 ## In Progress
 
-- Native Linux/Windows execution of this correction awaits CI; affected tests cross-compile for both systems. No machine security settings changed.
+- Native Linux/Windows execution of the Delve startup/shutdown correction awaits CI; affected tests cross-compile for both systems. No machine security settings changed.
 
 ## Completed
+
+- Repository repair dirty-preflight diagnostics:
+  - print the existing bounded, sorted changed-path sample to stderr with quoted filenames before rejecting the run; omitted paths produce displayed/total counts and `git status --short --untracked-files=all` guidance. Compact JSON filtering and Git mutation rules stay unchanged
+  - reproduced missing paths in plain/GitHub presentation with full/issues JSON details, then verified staged/unstaged/untracked paths, bounded progress and unchanged index/HEAD/worktree. Updated CLI and verification docs
+  - `go test ./...`, repository-repair package/CLI race tests, `go vet ./...`, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, `go build ./...`, version JSON, formatting and diff checks pass. Native hosted execution remains a CI check
 
 - Post-merge Delve startup/shutdown correction:
   - [original Linux stable job 105236341289](https://github.com/benjaco/devflow/actions/runs/35231462228/job/105236341289) ran Go 1.27.1 and failed only the immediate Delve CI probe; its rerun passed. The unchanged local probe passed 15 repetitions. The same main run passed Windows and the real Payload engine/TUI workflows on Linux amd64/arm64
@@ -1240,6 +1245,7 @@ Last updated: 2026-09-17
 
 ## Next Steps
 
+- Confirm the repository repair path diagnostics on the next native CI matrix run.
 - Confirm the PR #25 prompt teardown correction on the next native Windows CI run; the prior daemon fixture cleanup passes in that PR's initial Windows job.
 - Review the compact attention view (`a`) in the user's terminal, including native multiline log selection on a small screen.
 - Review automatic project-version selection and the upgrade project choice, confirm them on the native CI matrix, and release a launcher containing the capability before colleagues rely on pull-and-run updates.

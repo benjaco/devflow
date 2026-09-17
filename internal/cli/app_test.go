@@ -1537,30 +1537,79 @@ func TestRunRepositoryRepairFailAfterCommitReturnsDeliberateFailure(t *testing.T
 }
 
 func TestRunRepositoryRepairRequiresCleanWorktreeBeforeDAG(t *testing.T) {
+	for _, github := range []bool{false, true} {
+		for _, details := range []string{"full", "issues"} {
+			t.Run(fmt.Sprintf("github=%t/details=%s", github, details), func(t *testing.T) {
+				t.Setenv("GITHUB_ACTIONS", fmt.Sprint(github))
+				t.Setenv("GITHUB_STEP_SUMMARY", "")
+				worktree := initRepositoryRepairGitWorktree(t)
+				paths := []string{"outside.txt", "staged notes.txt", "untracked 100% [draft].txt"}
+				for _, path := range paths {
+					if err := os.WriteFile(filepath.Join(worktree, path), []byte("dirty before run\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				repairGit(t, worktree, "add", "--", "staged notes.txt")
+				beforeStatus := repairGit(t, worktree, "status", "--porcelain=v1", "-z")
+				beforeHead := repairGitText(t, worktree, "rev-parse", "HEAD")
+				beforeAllowed, err := os.ReadFile(filepath.Join(worktree, "frontend", "app.txt"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, _, stderr, runErr := runRepositoryRepair(t, worktree, "repair-changes", "--details", details)
+				if runErr == nil {
+					t.Fatal("expected dirty-worktree precondition failure")
+				}
+				if result.Success || result.RepositoryChanges == nil || result.RepositoryChanges.Status != api.RepositoryChangeStatusPreconditionFailed {
+					t.Fatalf("dirty precondition was not structured: %+v", result)
+				}
+				repository := result.RepositoryChanges
+				if repository.ChangedPathCount != len(paths) || len(result.Nodes) != 0 || repository.CommitCreated || repository.PushAttempted {
+					t.Fatalf("unexpected dirty precondition result: %+v", result)
+				}
+				if details == "full" {
+					if strings.Join(repository.ChangedPaths, ",") != strings.Join(paths, ",") || repository.ChangedPathsTruncated {
+						t.Fatalf("dirty path detail missing: %+v", repository)
+					}
+				} else if len(repository.ChangedPaths) != 0 || !repository.ChangedPathsTruncated {
+					t.Fatalf("issues view no longer omits changed paths: %+v", repository)
+				}
+				var expected strings.Builder
+				for _, path := range paths {
+					fmt.Fprintf(&expected, "[devflow] repository repair preflight: changed path %q\n", path)
+				}
+				if !strings.Contains(stderr, expected.String()) {
+					t.Fatalf("console omitted sorted dirty paths: %s", stderr)
+				}
+				afterAllowed, err := os.ReadFile(filepath.Join(worktree, "frontend", "app.txt"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(afterAllowed, beforeAllowed) || repairGit(t, worktree, "status", "--porcelain=v1", "-z") != beforeStatus || repairGitText(t, worktree, "rev-parse", "HEAD") != beforeHead {
+					t.Fatal("DAG or Git mutation occurred despite dirty precondition")
+				}
+			})
+		}
+	}
+}
+
+func TestRunRepositoryRepairDirtyPathProgressIsBounded(t *testing.T) {
 	worktree := initRepositoryRepairGitWorktree(t)
-	if err := os.WriteFile(filepath.Join(worktree, "outside.txt"), []byte("dirty before run\n"), 0o644); err != nil {
-		t.Fatal(err)
+	for index := 0; index < 205; index++ {
+		path := filepath.Join(worktree, fmt.Sprintf("dirty-%03d.txt", index))
+		if err := os.WriteFile(path, []byte("untracked\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	beforeAllowed, err := os.ReadFile(filepath.Join(worktree, "frontend", "app.txt"))
-	if err != nil {
-		t.Fatal(err)
+	result, _, stderr, runErr := runRepositoryRepair(t, worktree, "repair-changes", "--details", "issues")
+	if runErr == nil || result.RepositoryChanges == nil || result.RepositoryChanges.ChangedPathCount != 205 {
+		t.Fatalf("unexpected dirty precondition result: err=%v result=%+v", runErr, result)
 	}
-	result, _, _, runErr := runRepositoryRepair(t, worktree, "repair-changes")
-	if runErr == nil {
-		t.Fatal("expected dirty-worktree precondition failure")
+	if strings.Count(stderr, "repository repair preflight: changed path ") != 200 || !strings.Contains(stderr, `changed path "dirty-000.txt"`) || !strings.Contains(stderr, `changed path "dirty-199.txt"`) || strings.Contains(stderr, "dirty-200.txt") {
+		t.Fatalf("console path sample is not bounded and sorted: %s", stderr)
 	}
-	if result.Success || result.RepositoryChanges == nil || result.RepositoryChanges.Status != api.RepositoryChangeStatusPreconditionFailed {
-		t.Fatalf("dirty precondition was not structured: %+v", result)
-	}
-	if result.RepositoryChanges.ChangedPathCount != 1 || strings.Join(result.RepositoryChanges.ChangedPaths, ",") != "outside.txt" {
-		t.Fatalf("dirty path detail missing: %+v", result.RepositoryChanges)
-	}
-	afterAllowed, err := os.ReadFile(filepath.Join(worktree, "frontend", "app.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(afterAllowed, beforeAllowed) {
-		t.Fatalf("DAG executed despite dirty precondition: before=%q after=%q", beforeAllowed, afterAllowed)
+	if !strings.Contains(stderr, "showing 200 of 205 changed paths; run git status --short --untracked-files=all for the full list") {
+		t.Fatalf("console omitted truncation diagnostic: %s", stderr)
 	}
 }
 
