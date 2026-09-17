@@ -10,18 +10,33 @@ import (
 )
 
 var payloadTerminalControl = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+var payloadQuestionStart = regexp.MustCompile(`(?m)^(?:Is .+ created or renamed from another .+\?|\? )`)
 var payloadChoiceLine = regexp.MustCompile(`^(?:❯\s*)?([+~]\s+.+?\s+(?:create|rename|move|rename/move) (?:column|table|enum|schema|sequence|role|policy|view))`)
 var payloadConfirm = regexp.MustCompile(`(?s)^\?\s+(.+?)\s+[›»]\s+\([yYnN]/[yYnN]\)`)
 
 // Payload 3 uses Hanji menus for Drizzle conflicts and prompts for confirmations.
-// Each new question hides the cursor; answer redraws do not. Requiring that
-// boundary prevents arrow-key redraws from becoming duplicate public questions.
+// ConPTY can coalesce show/hide controls between questions and render new rows
+// with cursor positioning. Recognize the latest question's text, not a fresh hide.
 func parsePayloadPrompt(output string) *process.PromptMatch {
-	start := strings.LastIndex(output, "\x1b[?25l")
-	if start < 0 || strings.LastIndex(output, "\x1b[?25h") > start {
+	if end := strings.LastIndex(output, "\x1b[?25h"); end >= 0 {
+		output = output[end+len("\x1b[?25h"):]
+	}
+	text := payloadTerminalControl.ReplaceAllStringFunc(output, func(control string) string {
+		switch control[len(control)-1] {
+		case 'H', 'f', 'E':
+			return "\n" // Positioned rows separate question/choice text.
+		case 'C':
+			return " " // ConPTY may encode label padding as cursor movement.
+		default:
+			return ""
+		}
+	})
+	text = strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+	starts := payloadQuestionStart.FindAllStringIndex(text, -1)
+	if len(starts) == 0 {
 		return nil
 	}
-	text := strings.TrimSpace(payloadTerminalControl.ReplaceAllString(output[start:], ""))
+	text = strings.TrimSpace(text[starts[len(starts)-1][0]:])
 	if match := payloadConfirm.FindStringSubmatch(text); match != nil {
 		return &process.PromptMatch{
 			Request: process.PromptRequest{Kind: process.PromptConfirm, Prompt: match[1]},
@@ -36,8 +51,13 @@ func parsePayloadPrompt(output string) *process.PromptMatch {
 			},
 		}
 	}
-	lines := strings.Split(strings.ReplaceAll(text, "\r", ""), "\n")
+	lines := strings.Split(text, "\n")
 	if len(lines) < 3 || !strings.HasPrefix(lines[0], "Is ") || !strings.Contains(lines[0], " created or renamed from another ") || !strings.HasSuffix(lines[0], "?") {
+		return nil
+	}
+	// Every new Hanji menu starts on create. Our input sends only Down and Return,
+	// so a redraw with a later selection is still the question we already answered.
+	if !strings.HasPrefix(strings.TrimSpace(lines[1]), "❯") {
 		return nil
 	}
 	var choices []string

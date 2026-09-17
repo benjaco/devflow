@@ -16,10 +16,13 @@ previous helper installed no interaction handling. Both paths now use an owned
 terminal and translate rendered questions into generic Devflow select/confirm
 prompts. Payload recognition and input encoding remain in the database adapter.
 
-Fresh Hanji questions hide the cursor; selection redraws do not. The parser uses
-that boundary and waits for output to settle before reading the menu, avoiding
-duplicate questions from arrow-key redraws. It tolerates asynchronous application
-logs appended to the final option. Confirmation messages preserve warning text.
+The parser waits for output to settle and recognizes the latest question text.
+ConPTY can coalesce cursor visibility between questions, position rows with cursor
+controls and compress spaces into forward movements, so a fresh cursor-hide
+sequence is not required. Completed output and redraws with a later option
+selected do not reopen questions: a fresh Hanji menu starts on create and the
+adapter sends only Down/Return. It tolerates asynchronous application logs
+appended to the final option. Confirmation messages preserve warning text.
 The `prompts` library accepts `y` immediately, so sending another Return would
 risk accepting a following question. A decline stops the process as a failure:
 Payload can otherwise exit zero without writing a migration and trigger the
@@ -130,8 +133,10 @@ go test ./pkg/process -run TerminalRetains
 ```
 
 Portable helper processes test real terminal input, split ANSI/UTF-8 output,
-repeated menus, exact choice encoding, decline without retries, rejected/missing
-handlers and cancellation. Store/CLI cases cover choice zero, invalid types and
+repeated menus with and without fresh cursor controls, exact choice encoding,
+decline without retries, rejected/missing handlers and cancellation. Rendering
+regressions cover positioned rows, compressed spacing and selection redraws.
+Store/CLI cases cover choice zero, invalid types and
 indexes, stale/duplicate responses, reconnect and value-free acknowledgments.
 Compact views preserve the entire choices list or omit it with a truncation
 indication. Dashboard tests drive a real tview event loop with Down/Enter/Escape.
@@ -163,3 +168,45 @@ metadata and builder-order correction also has focused normal/race coverage.
 Session evidence is retained in `/tmp/devflow-payload-e2e-watch.log`,
 `/tmp/devflow-payload-full.log`, `/tmp/devflow-payload-full-without-delve.log`,
 `/tmp/devflow-payload-race.log` and `/tmp/devflow-payload-quality/`.
+
+## PR #26 Windows follow-up
+
+The [Windows job at the PR head](https://github.com/benjaco/devflow/actions/runs/35213350923/job/105175918452)
+failed the deleted-field migration confirmation and the terminal rename/create/
+decline cases with context deadlines. Headless, cancel and missing-handler cases
+passed, as did both native Linux Docker workflows. The Windows job did not retain
+the child terminal bytes; its diagnostics alone cannot identify the exact render.
+
+The unchanged failing tests pass on macOS. Portable synthetic terminal frames
+then reproduce two unsupported ConPTY behaviors before correction: confirmation
+matching requires a literal trailing space, and subsequent menus/confirmations
+require a new cursor-hide sequence. The latter is not preserved by
+[ConPTY's frame renderer](https://github.com/microsoft/terminal/blob/a8582978afa50ece88edc7eda9e182ced64876e2/src/renderer/vt/XtermEngine.cpp#L95).
+The synthetic frames are not claimed as captures from this Windows job.
+
+The correction stays in the Payload adapter. Literal patterns end at the colon;
+structured parsing locates the latest question and handles positioned rows and
+forward spacing, while rejecting completed/selected redraws. Real-terminal
+helpers exercise two consecutive menus followed by a warning, exact answers,
+decline, headless failure and cancellation under both renderings. Failures now
+report the prompt sequence and escaped child output for native diagnosis.
+
+```sh
+go test -race -count=3 ./pkg/database -run 'TestPayloadPrompt|TestPayloadLiteralConfirmation|TestPayloadAuthoring'
+```
+
+Local reproduction and focused validation logs: `/tmp/devflow-pr26-baseline.log`,
+`/tmp/devflow-pr26-red.log`, `/tmp/devflow-pr26-green.log` and
+`/tmp/devflow-pr26-focused-race.log`. Native Windows verification still requires
+the corrected branch's CI run.
+
+Both real Payload workflows pass together (`/tmp/devflow-pr26-payload-e2e.log`),
+along with the full normal suite, vet, Staticcheck, govulncheck, tidy-diff,
+CLI/example builds, version JSON and affected Windows test cross-compilation.
+Local suites use the existing Delve skip because Developer Tools security is
+disabled, as described above. The initial parallel race suite hit the unchanged
+500 ms daemon deadline fixture (`TestRunRequestDeadlineCancelsExecution/attached`);
+three isolated race repetitions and the full `go test -race -p 1 -count=1 ./...`
+recheck pass without changing that fixture. Logs: `/tmp/devflow-pr26-full.log`,
+`/tmp/devflow-pr26-race.log`, `/tmp/devflow-pr26-daemon-recheck.log` and
+`/tmp/devflow-pr26-race-serial.log`.

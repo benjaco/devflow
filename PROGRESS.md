@@ -4,16 +4,23 @@ Last updated: 2026-09-17
 
 ## Current Status
 
-- Phase: Payload workflow through the real TUI
-- State: real-terminal end-to-end regression implemented and passing locally; both Payload workflows are included in the Docker CI gate.
-- Scope: real project loading, daemon/watch, rendered TUI prompt, accepted database change and preserved data; existing engine-level workflow coverage remains.
+- Phase: PR #26 Windows Payload prompt correction
+- State: focused correction implemented and verified locally, including portable regressions, both real Payload workflows, the normal suite and the full serial race suite.
+- Scope: deleted-field migration confirmation and terminal rename/create/decline scenarios; keep the correction focused on the observed Windows failures.
 
 ## In Progress
 
-- Next verification: native Windows terminal execution (including the prior Prisma/ConPTY correction) and the new native Linux amd64/arm64 Payload workflow CI step.
+- Next verification: native Windows execution in the corrected branch's CI run. Both native Linux Payload workflow jobs passed on the original PR head.
 - Local real Delve checks remain blocked by disabled macOS Developer Tools security; no machine security settings changed.
 
 ## Completed
+
+- PR #26 Windows Payload prompt correction:
+  - retrieved [Windows job 105175918452](https://github.com/benjaco/devflow/actions/runs/35213350923/job/105175918452); its merge tree matches the prepared checkout. Deleted-field confirmation and terminal rename/create/decline timed out; the unchanged tests pass on macOS
+  - synthetic terminal regressions fail before correction for coalesced cursor controls, positioned rows and compressed spacing. Payload now recognizes the latest question and initial Hanji selection, rejects completed/selected redraws, and matches literal confirmations through the colon without requiring trailing spaces
+  - real-terminal tests cover repeated questions, exact answers, declines and cancellation under both renderings, with escaped output on failure. Three focused race repetitions and both real Payload/Next/Postgres engine/TUI workflows pass
+  - full normal suite, vet, Staticcheck v0.8.1, govulncheck v1.6.0, tidy-diff, CLI/example builds, version JSON and affected Windows test cross-compilation pass. Delve is excluded from the local test PATH because macOS Developer Tools security is disabled
+  - initial parallel race suite hit the unchanged daemon deadline fixture; three isolated race repetitions and the full serial race recheck pass without changing it. Formatting and diff checks pass. Evidence and native verification limits: [Payload workflow verification](docs_contributors/payload-workflow-verification.md)
 
 - Real Next/Payload bootstrap and TUI end-to-end test:
   - build the public CLI, materialize a fresh pinned Next/Payload project without installed dependencies, and launch bare `devflow` in a controlling terminal; normal adapter compilation, daemon/watch, `npm ci` and Payload table creation all run

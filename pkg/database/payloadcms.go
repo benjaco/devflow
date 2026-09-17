@@ -498,10 +498,11 @@ func defaultPayloadPrompts() []process.PromptSpec {
 	return []process.PromptSpec{
 		{
 			Patterns: []string{
-				"Accept warnings and create migration? [y/N]: ",
-				"Accept warnings and push schema to database? [y/N]: ",
-				"Continue? [y/N]: ",
-				"Are you sure you want to continue? [y/N]: ",
+				// Terminal rendering can replace trailing spaces with cursor moves.
+				"Accept warnings and create migration? [y/N]:",
+				"Accept warnings and push schema to database? [y/N]:",
+				"Continue? [y/N]:",
+				"Are you sure you want to continue? [y/N]:",
 			},
 			Prompt: "Accept PayloadCMS migration warning?",
 			Kind:   process.PromptConfirm,
