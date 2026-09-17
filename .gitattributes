@@ -1,0 +1,6 @@
+# Go tools emit LF; keep native Windows formatting and tidy checks meaningful.
+*.go text eol=lf
+/go.mod text eol=lf
+/go.sum text eol=lf
+# The source launcher must also work from a Unix-compatible shell.
+/devflow text eol=lf

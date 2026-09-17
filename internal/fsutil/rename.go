@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"syscall"
 	"time"
 )
@@ -12,6 +13,12 @@ const (
 	renameRetryLimit = 2 * time.Second
 	renameMaxDelay   = 50 * time.Millisecond
 )
+
+// Rename publishes an already prepared path, retrying only transient Windows
+// sharing failures, without preparatory removals or permission changes.
+func Rename(ctx context.Context, source, destination string) error {
+	return renameWithRetry(ctx, source, destination, os.Rename, transientRenameError)
+}
 
 func renameWithRetry(ctx context.Context, source, destination string, rename func(string, string) error, retryable func(error) bool) error {
 	started := time.Now()

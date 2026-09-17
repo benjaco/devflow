@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/benjaco/devflow/internal/testutil"
 )
 
 func TestDotEnvWorktreeFallback(t *testing.T) {
@@ -382,9 +384,6 @@ func TestDotEnvWorktreePathsPreserveNewlinesAndTrailingSpaces(t *testing.T) {
 }
 
 func TestDotEnvWorktreeSymlinks(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation may require elevated Windows privileges")
-	}
 	t.Run("worktree_alias_loads_main_dotenv", func(t *testing.T) {
 		isolateDotEnvGitEnvironment(t)
 		mainBase := t.TempDir()
@@ -398,9 +397,7 @@ func TestDotEnvWorktreeSymlinks(t *testing.T) {
 		dotenvGit(t, main, "worktree", "add", "--detach", linked, "HEAD")
 		writeDotEnvFile(t, filepath.Join(main, ".env"), "SOURCE=main\n")
 		alias := filepath.Join(t.TempDir(), "linked-alias")
-		if err := os.Symlink(linked, alias); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Symlink(t, linked, alias)
 		env, err := LoadOptionalDotEnvInWorktree(alias, ".env")
 		if err != nil || env["SOURCE"] != "main" {
 			t.Fatalf("dotenv through worktree symlink: %v %v", env, err)
@@ -418,9 +415,7 @@ func TestDotEnvWorktreeSymlinks(t *testing.T) {
 		dotenvGit(t, main, "-c", "user.name=Devflow Test", "-c", "user.email=devflow@example.com", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "fixture")
 		dotenvGit(t, main, "worktree", "add", "--detach", linked, "HEAD")
 		writeDotEnvFile(t, filepath.Join(main, ".env"), "SOURCE=main\n")
-		if err := os.Symlink(filepath.Join(linked, "absent.env"), filepath.Join(linked, ".env")); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Symlink(t, filepath.Join(linked, "absent.env"), filepath.Join(linked, ".env"))
 		if env, err := LoadOptionalDotEnvInWorktree(linked, ".env"); err == nil {
 			t.Fatalf("broken explicit symlink silently borrowed main dotenv: %v", env)
 		}

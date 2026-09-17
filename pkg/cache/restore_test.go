@@ -13,6 +13,7 @@ import (
 
 	"github.com/benjaco/devflow/internal/fsutil"
 	"github.com/benjaco/devflow/internal/jsonutil"
+	"github.com/benjaco/devflow/internal/testutil"
 	"github.com/benjaco/devflow/pkg/project"
 )
 
@@ -237,17 +238,12 @@ func TestSnapshotNormalizesRedundantOutputs(t *testing.T) {
 }
 
 func TestCacheRejectsSymlinkAncestors(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink fixture requires developer-mode symlink support")
-	}
 	worktree := t.TempDir()
 	external := t.TempDir()
 	if err := os.WriteFile(filepath.Join(external, "out"), []byte("outside"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(external, filepath.Join(worktree, "linked")); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Symlink(t, external, filepath.Join(worktree, "linked"))
 	store := New(t.TempDir())
 	task := project.Task{Name: "build", Outputs: project.Outputs{Files: []string{"linked/out"}}}
 	if _, err := store.Snapshot(worktree, task, "key"); err == nil || !strings.Contains(err.Error(), "symlink") {
@@ -286,9 +282,6 @@ func TestRestoreRedundantOutputsRetainsManifestIndexes(t *testing.T) {
 }
 
 func TestRestoreCorruptNestedSymlinkPreservesOutputs(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink fixture requires developer-mode symlink support")
-	}
 	worktree := t.TempDir()
 	store := New(t.TempDir())
 	dir := filepath.Join(worktree, "dist")
@@ -309,9 +302,7 @@ func TestRestoreCorruptNestedSymlinkPreservesOutputs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(entry, "dirs", "outside"), []byte("outside"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("../outside", filepath.Join(entry, "dirs", "0", "bad-link")); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Symlink(t, "../outside", filepath.Join(entry, "dirs", "0", "bad-link"))
 	if ok, err := store.Restore(worktree, task.Name, "key"); ok || err != nil {
 		t.Fatalf("corrupt linked artifact restore = %v, %v; want miss", ok, err)
 	}

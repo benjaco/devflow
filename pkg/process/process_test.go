@@ -182,12 +182,42 @@ func TestRunCapturesLongOutputLineAndUsesPrivateLogPermissions(t *testing.T) {
 
 func TestRunPropagatesOversizedOutputScannerErrorWithoutStalling(t *testing.T) {
 	testcmd := testutil.BuildTestCommand(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_, err := Run(ctx, CommandSpec{
-		Name: testcmd,
-		Args: []string{"long-line", fmt.Sprint(MaxOutputLineBytes + 1024)},
-	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ready := make(chan struct{})
+	finished := make(chan error, 1)
+	go func() {
+		_, err := Run(ctx, CommandSpec{
+			Name: testcmd,
+			Args: []string{"long-line-ready", fmt.Sprint(MaxOutputLineBytes + 1024)},
+			OnLine: func(stream, line string) {
+				if stream == "stdout" && line == "ready" {
+					close(ready)
+				}
+			},
+		})
+		finished <- err
+		close(finished)
+	}()
+	t.Cleanup(func() { cancel(); <-finished })
+	var err error
+	select {
+	case <-ready:
+		// Measure drainage after the child starts, independently of cold
+		// Windows executable startup. Keep the original ten-second bound.
+		select {
+		case err = <-finished:
+		case <-time.After(10 * time.Second):
+			t.Fatal("oversized output stalled after child readiness")
+		}
+	case err = <-finished:
+		select {
+		case <-ready:
+		default:
+			t.Fatalf("output helper exited before readiness: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("output helper did not become ready")
+	}
 	if err == nil || !strings.Contains(err.Error(), "scan stdout output") || !strings.Contains(err.Error(), "token too long") {
 		t.Fatalf("expected propagated scanner error, got %v", err)
 	}

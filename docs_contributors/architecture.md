@@ -596,6 +596,11 @@ whitespace can be encoded as cursor movement, so use stable text in declarations
 
 Adapters may override Prisma migration execution with `Migrate` or `MigrateEach`. `Migrate` is an all-at-once command and only snapshots the final state; `MigrateEach` preserves the exhaustive per-prefix cache contract.
 
+Postgres clone restores and SQL-file migrations pass all `psql` options explicitly,
+including `-d` for the sanitized URL. Windows clients do not permute options past
+a positional database operand. Both use `-X -w` so ambient startup scripts and
+password prompts cannot affect an unattended execution.
+
 `PostgresDumpSourcePolicy` must fail when `pg_dump` fails. In its default host-client strategy it writes through an owner-only temporary dump file instead of an unchecked shell pipeline so `psql` cannot mask a failed clone with an empty successful restore. It invokes `pg_dump` and `psql` as separate commands without a Unix shell. Passwords are supplied through a temporary owner-only `PGPASSFILE`; command arguments and inherited PostgreSQL URL variables are sanitized, and `PGPASSWORD` is cleared. PostgreSQL `password` query parameters are percent-decoded into the pgpass secret and removed from every reconstructed URL; when both userinfo and query credentials exist, the query value wins, matching libpq. All repeated `password` parameters are removed while ordinary connection options remain. Credential-bearing query channels that Devflow cannot transport safely (`sslpassword`, `oauth_client_secret`, and `passfile`) are rejected with credential-redacted errors.
 
 The opt-in `PostgresClientContainer` strategy runs the clients already bundled in the managed Postgres image. `PrismaComponent.CloneFromEnvContainerized(...)` selects it and removes host `pg_dump`/`psql` requirements, making a reachable Docker Engine sufficient for most remote-clone workflows. The Docker exec command and env contain only password-free URLs; the two pgpass records are sent through exec stdin into owner-only temporary files that are trapped for cleanup. A remote URL using host-local `localhost` is not automatically reachable from inside the managed container and must use a container-reachable hostname. The client major follows the selected managed image and must be compatible with the remote server; adapters that need another client major should select a compatible managed image or retain the host-client strategy.
@@ -909,6 +914,16 @@ Mutable ownership is implemented by one daemon per worktree. CLI and TUI operati
 Daemon startup is serialized by a per-instance file lock under worktree state so concurrent CLI/TUI commands cannot start competing daemons for the same worktree.
 
 TUI daemon ownership is explicit. If bare `devflow` or `devflow tui` creates the daemon for that TUI session, TUI exit sends the normal all-work stop request so active services, managed databases, and the daemon shut down together. If the TUI connects to a daemon that already existed, TUI exit only disconnects the UI.
+
+An action that resumes the previous detached target preserves that live target's
+headless prompt policy. The foreground action's policy, deadline, cancellation
+and run identity do not replace it. If no live prior target supplies a policy,
+relaunch defaults to headless failure. This keeps Payload development prompts
+available after migration authoring without making unattended watches interactive.
+
+Run allocation stages complete metadata before publishing the directory. That
+last rename uses the shared two-second Windows transient-sharing retry with the
+run-store context; it never removes a destination or changes permissions.
 
 The TUI process owns a separate per-instance diagnostic boundary at `.devflow/logs/<instance-id>/tui.log`. It records session boundaries and returned application errors. Panics on the application goroutine and Devflow-owned background workers are recovered, persisted with a stack, and converted to an error after stopping the screen. A Go runtime crash-output duplicate covers fatal failures and dependency-owned goroutines that cannot be recovered locally. The crash-output file descriptor is installed only for the TUI session and disabled during normal teardown. This surface is intentionally separate from the daemon log because the daemon may remain healthy when only the interactive client fails.
 

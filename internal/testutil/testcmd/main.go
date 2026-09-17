@@ -36,6 +36,17 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "write-env":
+		if len(os.Args) < 4 {
+			os.Exit(2)
+		}
+		values := make([]string, 0, len(os.Args)-3)
+		for _, key := range os.Args[3:] {
+			values = append(values, os.Getenv(key))
+		}
+		if err := os.WriteFile(os.Args[2], []byte(strings.Join(values, "|")), 0o600); err != nil {
+			panic(err)
+		}
 	case "emit":
 		if len(os.Args) > 2 && os.Args[2] != "" {
 			fmt.Fprintln(os.Stdout, os.Args[2])
@@ -43,7 +54,7 @@ func main() {
 		if len(os.Args) > 3 && os.Args[3] != "" {
 			fmt.Fprintln(os.Stderr, os.Args[3])
 		}
-	case "long-line":
+	case "long-line", "long-line-ready":
 		if len(os.Args) != 3 {
 			fmt.Fprintln(os.Stderr, "usage: testcmd long-line <bytes>")
 			os.Exit(2)
@@ -52,6 +63,9 @@ func main() {
 		if err != nil || size < 0 {
 			fmt.Fprintln(os.Stderr, "invalid long-line size")
 			os.Exit(2)
+		}
+		if os.Args[1] == "long-line-ready" {
+			fmt.Fprintln(os.Stdout, "ready")
 		}
 		_, _ = fmt.Fprintln(os.Stdout, strings.Repeat("x", size))
 	case "write":
@@ -185,10 +199,24 @@ func runFakePSQL() {
 		}
 	}
 	dumpPath := ""
+	// Windows psql stops parsing options at the first positional argument.
+	// Enforce that contract on every host instead of accepting GNU permutation.
 	for index := 1; index < len(os.Args); index++ {
-		if os.Args[index] == "-f" && index+1 < len(os.Args) {
-			dumpPath = os.Args[index+1]
-			break
+		switch os.Args[index] {
+		case "-X", "-w":
+		case "-f", "-v", "-d":
+			if index+1 >= len(os.Args) {
+				os.Exit(2)
+			}
+			if os.Args[index] == "-f" {
+				dumpPath = os.Args[index+1]
+			}
+			index++
+		default:
+			if index != len(os.Args)-1 {
+				fmt.Fprintln(os.Stderr, "psql options must precede the database operand")
+				os.Exit(2)
+			}
 		}
 	}
 	output := os.Getenv("OUT_FILE")

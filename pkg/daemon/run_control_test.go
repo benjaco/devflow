@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/benjaco/devflow/pkg/api"
@@ -19,37 +20,96 @@ import (
 func TestRunRequestDeadlineCancelsExecution(t *testing.T) {
 	for _, detached := range []bool{false, true} {
 		t.Run(map[bool]string{false: "attached", true: "detached"}[detached], func(t *testing.T) {
-			started := make(chan struct{})
-			canceled := make(chan struct{})
-			s := runControlServer(t, "daemon-request-deadline-"+t.Name(), func(ctx context.Context, _ *project.Runtime) error {
-				close(started)
-				<-ctx.Done()
-				close(canceled)
-				return ctx.Err()
-			})
-			done := make(chan Response, 1)
-			go func() {
-				done <- s.handleRequest(context.Background(), Request{Action: ActionRun, Target: "check", Mode: api.ModeCI, Detach: detached, TimeoutMs: 500})
-			}()
-			select {
-			case <-started:
-			case <-time.After(3 * time.Second):
-				t.Fatal("task did not start")
-			}
-			select {
-			case <-canceled:
-			case <-time.After(2 * time.Second):
-				t.Error("operation deadline did not reach the task context")
-				s.stopActive(3 * time.Second)
-			}
-			select {
-			case response := <-done:
-				if !detached && (response.Error == nil || response.Error.Code != "deadline_exceeded") {
-					t.Errorf("deadline response = %+v", response)
+			// Real filesystem setup can outlast a 500ms request on a busy host.
+			// Advance the deadline only after startup has reached its barrier.
+			synctest.Test(t, func(t *testing.T) {
+				started := make(chan context.Context, 1)
+				canceled := make(chan error, 1)
+				s := runControlServer(t, "daemon-request-deadline-"+t.Name(), func(ctx context.Context, _ *project.Runtime) error {
+					started <- ctx
+					<-ctx.Done()
+					canceled <- ctx.Err()
+					return ctx.Err()
+				})
+				ctx, cancel := context.WithCancel(context.Background())
+				done := make(chan struct{})
+				var response Response
+				deadline := time.Now().Add(500 * time.Millisecond)
+				go func() {
+					defer close(done)
+					response = s.handleRequest(ctx, Request{Action: ActionRun, Target: "check", Mode: api.ModeCI, Detach: detached, TimeoutMs: 500})
+				}()
+				t.Cleanup(func() {
+					cancel()
+					if !s.stopActive(3 * time.Second) {
+						t.Error("deadline fixture did not stop")
+					}
+					select {
+					case <-done:
+					case <-time.After(3 * time.Second):
+						t.Error("deadline request did not finish during cleanup")
+					}
+				})
+				select {
+				case taskCtx := <-started:
+					if got, ok := taskCtx.Deadline(); !ok || !got.Equal(deadline) {
+						t.Fatalf("task deadline = %v (set=%t), want %v", got, ok, deadline)
+					}
+				case <-time.After(3 * time.Second):
+					synctest.Wait()
+					t.Fatalf("task did not start: %+v", response)
 				}
-			case <-time.After(3 * time.Second):
-				t.Fatal("operation did not finish after cancellation")
-			}
+				s.mu.Lock()
+				active := s.active
+				s.mu.Unlock()
+				if active == nil {
+					t.Fatal("execution finished before its deadline")
+				}
+				time.Sleep(time.Until(deadline) - time.Nanosecond)
+				synctest.Wait()
+				select {
+				case err := <-canceled:
+					t.Fatalf("task canceled before its deadline: %v", err)
+				default:
+				}
+				time.Sleep(time.Nanosecond)
+				synctest.Wait()
+				select {
+				case err := <-canceled:
+					if !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatalf("task cancellation cause = %v", err)
+					}
+				default:
+					t.Fatal("operation deadline did not reach the task context")
+				}
+				// Detached admission returns before execution ends. Join the owner
+				// and allow bounded final evidence writes before inspecting its record.
+				select {
+				case <-active.done:
+				case <-time.After(3 * time.Second):
+					t.Fatal("execution did not finish after cancellation")
+				}
+				select {
+				case <-done:
+					if detached {
+						if !response.OK || response.Started == nil || response.Started.RunID == "" {
+							t.Fatalf("detached admission response = %+v", response)
+						}
+					} else if response.Error == nil || response.Error.Code != "deadline_exceeded" {
+						t.Errorf("deadline response = %+v", response)
+					}
+				case <-time.After(3 * time.Second):
+					t.Fatal("operation did not finish after cancellation")
+				}
+				records, err := instance.ListRuns(s.worktree, s.instanceID)
+				if err != nil || len(records) != 1 {
+					t.Fatalf("deadline run records = %+v, error = %v", records, err)
+				}
+				record := records[0]
+				if !record.Deadline.Equal(deadline) || record.State != api.RunCanceled || record.Result == nil || record.Result.Error == nil || record.Result.Error.Code != "deadline_exceeded" {
+					t.Fatalf("deadline evidence = %+v", record)
+				}
+			})
 		})
 	}
 }

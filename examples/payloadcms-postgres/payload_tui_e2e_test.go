@@ -111,8 +111,10 @@ func TestPayloadTUIWorkflowE2E(t *testing.T) {
 				}
 			}
 		}
-		if _, err := process.Run(cleanup, process.CommandSpec{Name: binary, Args: []string{"stop", "--all", "--json"}, Dir: root, Env: env}); err != nil {
-			t.Errorf("stop fixture: %v", err)
+		stopLog := filepath.Join(filepath.Dir(terminalLog), "stop.log")
+		if _, err := process.Run(cleanup, process.CommandSpec{Name: binary, Args: []string{"stop", "--all", "--json"}, Dir: root, Env: env, LogPath: stopLog}); err != nil {
+			data, _ := os.ReadFile(stopLog)
+			t.Errorf("stop fixture: %v\n%s", err, data)
 		}
 		tui.stop(t)
 		// A stop acknowledgment can precede the daemon's final log write.
@@ -149,6 +151,12 @@ func TestPayloadTUIWorkflowE2E(t *testing.T) {
 	}
 	servicePIDs := []int{before.PID}
 
+	t.Log("create the initial migration with the TUI m shortcut and resume watch")
+	initialMark := startPayloadTUIMigration(t, ctx, tui, terminalLog, "initial")
+	before = waitPayloadTUIMigrationReady(t, ctx, tui, terminalLog, initialMark, root, id, "initial", before.AttemptID)
+	servicePIDs = append(servicePIDs, before.PID)
+	assertPayloadMigration(t, root, "initial", `CREATE TABLE "posts"`)
+
 	t.Log("rename Posts.title, wait for the rendered TUI menu, choose rename with Down/Enter")
 	source, err := os.ReadFile(filepath.Join(root, "collections", "Posts.mjs"))
 	if err != nil {
@@ -157,7 +165,7 @@ func TestPayloadTUIWorkflowE2E(t *testing.T) {
 	renamed := strings.Replace(string(source), "name: 'title'", "name: 'headline'", 1)
 	mark := payloadTUILogSize(t, terminalLog)
 	writePayloadFile(t, root, "collections/Posts.mjs", renamed)
-	prompt := waitPayloadTUIPrompt(t, ctx, tui, terminalLog, root, id, "select")
+	prompt := waitPayloadTUIPrompt(t, ctx, tui, terminalLog, root, id, "app", "select", "")
 	if len(prompt.Choices) != 2 || !strings.Contains(prompt.Choices[1], "title › headline rename column") {
 		t.Fatalf("unexpected rename choices: %+v", prompt)
 	}
@@ -173,10 +181,39 @@ func TestPayloadTUIWorkflowE2E(t *testing.T) {
 	assertPayloadSQL(t, ctx, mgr, db, `SELECT headline,legacy FROM posts;`, "preserve this title", "remove this legacy value")
 	assertPayloadSQL(t, ctx, mgr, db, `SELECT CASE WHEN EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='posts' AND column_name='title') THEN 'old column remains' ELSE 'old column removed' END;`, "old column removed")
 
+	t.Log("author the rename migration with m and answer both UP and DOWN menus through the TUI")
+	authorMark := startPayloadTUIMigration(t, ctx, tui, terminalLog, "rename")
+	var previousPrompt api.Prompt
+	for _, column := range []string{"headline", "title"} {
+		prompt := waitPayloadTUIPrompt(t, ctx, tui, terminalLog, root, id, "payload_new_migration", "select", previousPrompt.ID)
+		if !strings.Contains(prompt.Message, "Is "+column+" column") || len(prompt.Choices) != 2 || !strings.Contains(prompt.Choices[1], "rename column") {
+			t.Fatalf("unexpected authoring question: %+v", prompt)
+		}
+		if previousPrompt.ID != "" && (prompt.RunID != previousPrompt.RunID || prompt.AttemptID != previousPrompt.AttemptID) {
+			t.Fatalf("UP/DOWN prompts changed authoring identity: %+v -> %+v", previousPrompt, prompt)
+		}
+		waitPayloadTUI(t, ctx, tui, terminalLog, "visible authoring rename menu", time.Minute, func() bool {
+			return payloadTUIContains(terminalLog, authorMark, "Choose an option", "Is "+column+" column", "rename column")
+		})
+		if err := tui.WriteString("\x1b[B\r"); err != nil {
+			t.Fatal(err)
+		}
+		previousPrompt = prompt
+	}
+	afterRename = waitPayloadTUIMigrationReady(t, ctx, tui, terminalLog, authorMark, root, id, "rename", afterRename.AttemptID)
+	servicePIDs = append(servicePIDs, afterRename.PID)
+	assertPayloadMigration(t, root, "rename", `RENAME COLUMN "title" TO "headline"`, `RENAME COLUMN "headline" TO "title"`)
+	assertPayloadSQL(t, ctx, mgr, db, `SELECT headline,legacy FROM posts;`, "preserve this title", "remove this legacy value")
+
 	t.Log("remove populated Posts.legacy and accept the rendered warning with Left/Enter")
 	mark = payloadTUILogSize(t, terminalLog)
-	writePayloadFile(t, root, "collections/Posts.mjs", strings.Replace(renamed, "    { name: 'legacy', type: 'text' },\n", "", 1))
-	prompt = waitPayloadTUIPrompt(t, ctx, tui, terminalLog, root, id, "confirm")
+	// Match the declaration independently of Git's LF/CRLF checkout setting.
+	dropped := strings.Replace(renamed, "    { name: 'legacy', type: 'text' },", "", 1)
+	if dropped == renamed {
+		t.Fatal("legacy field declaration was not removed from the fixture")
+	}
+	writePayloadFile(t, root, "collections/Posts.mjs", dropped)
+	prompt = waitPayloadTUIPrompt(t, ctx, tui, terminalLog, root, id, "app", "confirm", "")
 	if !strings.Contains(prompt.Message, "legacy") || !strings.Contains(prompt.Message, "DATA LOSS") {
 		t.Fatalf("warning lost context: %+v", prompt)
 	}
@@ -234,20 +271,58 @@ func waitPayloadTUI(t *testing.T, ctx context.Context, tui *payloadTUITerminal, 
 	}
 }
 
-func waitPayloadTUIPrompt(t *testing.T, ctx context.Context, tui *payloadTUITerminal, log, root, id, kind string) api.Prompt {
+func startPayloadTUIMigration(t *testing.T, ctx context.Context, tui *payloadTUITerminal, log, name string) int {
+	t.Helper()
+	mark := payloadTUILogSize(t, log)
+	if err := tui.WriteString("m"); err != nil {
+		t.Fatal(err)
+	}
+	waitPayloadTUI(t, ctx, tui, log, "migration name input", time.Minute, func() bool {
+		return payloadTUIContains(log, mark, "Migration name", "payload.migration.create")
+	})
+	if err := tui.WriteString(name + "\r"); err != nil {
+		t.Fatal(err)
+	}
+	return mark
+}
+
+func waitPayloadTUIMigrationReady(t *testing.T, ctx context.Context, tui *payloadTUITerminal, log string, mark int, root, id, name, previous string) api.NodeStatus {
+	t.Helper()
+	var node api.NodeStatus
+	waitPayloadTUI(t, ctx, tui, log, "migration file and resumed watch", 2*time.Minute, func() bool {
+		files, err := filepath.Glob(filepath.Join(root, "migrations", "*_"+name+".ts"))
+		if err != nil || len(files) != 1 || !payloadTUIContains(log, mark, "created migration", name) {
+			return false
+		}
+		state, err := instance.LoadStatus(root, id)
+		if err != nil {
+			return false
+		}
+		node = state.Nodes["app"]
+		_, err = os.Stat(instance.FlushWatchReadyPath(root, id))
+		return err == nil && node.Ready && node.State == api.StateRunning && node.AttemptID != previous
+	})
+	return node
+}
+
+func waitPayloadTUIPrompt(t *testing.T, ctx context.Context, tui *payloadTUITerminal, log, root, id, task, kind, previous string) api.Prompt {
 	t.Helper()
 	var found api.Prompt
 	waitPayloadTUI(t, ctx, tui, log, "pending "+kind+" prompt", time.Minute, func() bool {
 		state, err := instance.LoadStatus(root, id)
-		if err != nil || state.Nodes["app"].RunID == "" {
+		if err != nil || state.Nodes[task].RunID == "" {
 			return false
 		}
-		prompts, err := instance.ListPrompts(ctx, root, id, state.Nodes["app"].RunID)
+		if node := state.Nodes[task]; node.State == api.StateFailed {
+			data, _ := os.ReadFile(node.LogPath)
+			t.Fatalf("task %s failed before its %s prompt: %s\n%s", task, kind, node.LastError, data)
+		}
+		prompts, err := instance.ListPrompts(ctx, root, id, state.Nodes[task].RunID)
 		if err != nil {
 			return false
 		}
 		for _, prompt := range prompts {
-			if prompt.Task == "app" && prompt.Kind == kind && prompt.State == api.PromptPending {
+			if prompt.Task == task && prompt.Kind == kind && prompt.State == api.PromptPending && prompt.ID != previous {
 				found = prompt
 				return true
 			}

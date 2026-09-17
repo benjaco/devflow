@@ -15,7 +15,9 @@ func init() {
 		b.Env("NEXT_TELEMETRY_DISABLED", "1").Env("NODE_OPTIONS", "--no-deprecation")
 		install := b.Task("install").Command("npm", "ci", "--no-audit", "--no-fund").
 			Inputs("package.json", "package-lock.json").Outputs("node_modules").Stamp()
-		payload := database.PayloadCMS("payload").Config("payload.config.mjs").SchemaInputs("collections")
+		payload := database.PayloadCMS("payload").Config("payload.config.mjs").SchemaInputs("collections").
+			MigrationDir("migrations").Command("node", "node_modules/payload/bin.js")
+		payload.NewMigration(b).DependsOn(install)
 		app := b.Service("app").DependsOn(install).
 			Command("node", "node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1").
 			Env("PORT", b.Port("app")).ReadyHTTP("app", "/health", 200).

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/benjaco/devflow/internal/fsutil"
 	"github.com/benjaco/devflow/internal/jsonutil"
 	"github.com/benjaco/devflow/internal/lock"
 	"github.com/benjaco/devflow/pkg/api"
@@ -93,7 +94,7 @@ func CreateRun(worktree, instanceID string, record *api.RunRecord) error {
 		}
 		// Publish a complete directory so interrupted allocation never leaves a
 		// visible run whose metadata cannot be read.
-		if err := os.Rename(staged, path); err != nil {
+		if err := fsutil.Rename(ctx, staged, path); err != nil {
 			return err
 		}
 		*record = next
