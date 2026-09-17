@@ -129,6 +129,8 @@ func TestProjectPreparationProgressCannotIssueWorkflowCommands(t *testing.T) {
 }
 
 func TestProjectVersionPreparationErrorKeepsCompactJSON(t *testing.T) {
+	t.Setenv("GITHUB_ACTIONS", "true")
+	t.Setenv("RUNNER_DEBUG", "1")
 	t.Setenv(envBootstrapRoot, "")
 	t.Setenv(envLocalExec, "")
 	worktree := t.TempDir()

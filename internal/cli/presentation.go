@@ -57,6 +57,9 @@ func (a *App) Run(args []string) error {
 	// Capture presentation from the invocation before adapter execution applies
 	// its runtime environment. Bootstrap forwards the same invocation environment.
 	call.githubActions = os.Getenv("GITHUB_ACTIONS") == "true"
+	// RUNNER_DEBUG reflects the runner's resolved step-debug setting, including
+	// debug reruns and secret/variable precedence; ACTIONS_* are runner inputs.
+	call.githubDebug = call.githubActions && os.Getenv("RUNNER_DEBUG") == "1"
 	call.githubStepSummary = os.Getenv("GITHUB_STEP_SUMMARY")
 	ctx, stop := signal.NotifyContext(a.context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -246,6 +246,35 @@ environment declarations do not select this presentation.
 devflow run verify --ci --json
 ```
 
+GitHub step debugging also enables verbose Devflow diagnostics for this finite
+CI path. Enable `ACTIONS_STEP_DEBUG=true` as a repository secret/variable, or
+select **Enable debug logging** when rerunning a job. GitHub resolves those
+settings and exposes `RUNNER_DEBUG=1` to the process; Devflow requires that exact
+value alongside `GITHUB_ACTIONS=true`. It reads the invocation environment before
+adapter configuration, including through runtime/adapter bootstrap. Unset,
+empty, `0`, `false`, `true` and other `RUNNER_DEBUG` values leave verbosity unchanged.
+`ACTIONS_RUNNER_DEBUG` controls the runner's diagnostic archive independently;
+Devflow does not read either raw `ACTIONS_*_DEBUG` input or override GitHub's
+secret/variable precedence. See GitHub's [debug logging guide](https://docs.github.com/en/actions/how-tos/monitor-workflows/enable-debug-logging)
+and [default environment variables](https://docs.github.com/en/actions/reference/workflows-and-actions/variables#default-environment-variables).
+
+Debug diagnostics use deliberate `::debug::` commands on stderr. They include
+bootstrap preparation, Devflow/Go/platform identity, execution settings,
+timestamped events and state transitions, run/instance/attempt IDs, cache keys,
+retained-log paths and completion, final node/process/readiness status, and
+cache/manifest timings. Completed-attempt metadata and final node diagnostics
+also come from retained evidence, so a busy live-output queue cannot lose them.
+Live transitions can still be deferred under backpressure. Each debug message is
+bounded to 2 KiB of text before command escaping; final diagnostics cover every
+node while the ordinary summary retains its row limit.
+
+Explicit `--progress states` still omits task-log replay; `--progress quiet`
+suppresses debug diagnostics too. `--details` and decoded JSON stay unchanged.
+Diagnostics select metadata rather than dumping environment values, command
+arguments or prompt payloads; existing log redaction remains in effect. Debugging
+does not enable verbose flags in child tools, change execution, or add markers to
+machine log/watch streams.
+
 Task starts and other lifecycle messages appear live on stderr. After an attempt's
 callbacks and registered output writers finish, its retained log is streamed inside one
 ordinary `::group::` / `::endgroup::` pair. Titles contain the task, textual final

@@ -16,6 +16,7 @@ const githubProgressCapacity = 128
 
 type githubProgress struct {
 	line    string
+	debug   bool
 	runID   string
 	attempt *api.TaskAttempt
 }
@@ -28,20 +29,23 @@ type githubPresenter struct {
 	out         io.Writer
 	progress    string
 	summaryPath string
+	debug       bool
 	pending     chan githubProgress
 	done        chan struct{}
 	deferred    atomic.Uint64
 	shown       map[githubAttemptKey]bool // Owned only by the renderer, then finish.
 }
 
-func newGitHubPresenter(out io.Writer, progress, summaryPath string) *githubPresenter {
-	p := &githubPresenter{out: out, progress: progress, summaryPath: summaryPath,
+func newGitHubPresenter(out io.Writer, progress, summaryPath string, debug bool) *githubPresenter {
+	p := &githubPresenter{out: out, progress: progress, summaryPath: summaryPath, debug: debug,
 		pending: make(chan githubProgress, githubProgressCapacity), done: make(chan struct{}), shown: map[githubAttemptKey]bool{}}
 	go func() {
 		defer close(p.done)
 		for item := range p.pending {
 			if item.attempt != nil {
 				p.renderAttempt(item.runID, *item.attempt)
+			} else if item.debug {
+				p.debugLine("%s", item.line)
 			} else {
 				p.line(item.line)
 			}
@@ -65,12 +69,17 @@ func (p *githubPresenter) observe(evt api.Event) {
 	if p.progress == "quiet" {
 		return
 	}
+	p.observeDebug(evt)
 	switch evt.Type {
 	case api.EventTaskAttemptFinished:
 		if evt.Attempt != nil && evt.Attempt.LogsComplete {
 			attempt := *evt.Attempt
 			attempt.FailureExcerpts = nil
-			attempt.CacheKey = ""
+			if p.debug {
+				attempt.CacheKey = strings.Clone(githubBoundedText(attempt.CacheKey, 256))
+			} else {
+				attempt.CacheKey = ""
+			}
 			attempt.LastError = strings.Clone(githubBoundedText(attempt.LastError, 2048))
 			p.enqueue(githubProgress{runID: evt.RunID, attempt: &attempt})
 		}
@@ -154,6 +163,8 @@ func (p *githubPresenter) renderAttempt(runID string, attempt api.TaskAttempt) {
 		return
 	}
 	p.shown[key] = true
+	p.debugLine("attempt run=%s task=%q attempt=%s state=%s cache_outcome=%s cache_key=%s logs_complete=%t", runID, attempt.Task, attempt.AttemptID, attempt.State, attempt.CacheOutcome, attempt.CacheKey, attempt.LogsComplete)
+	p.debugLine("attempt_output attempt=%s started_at=%s finished_at=%s log=%q", attempt.AttemptID, githubDebugTime(attempt.StartedAt), githubDebugTime(attempt.FinishedAt), attempt.LogPath)
 	if p.progress != "states" {
 		// Cancellation belongs to execution; its retained output must still drain.
 		p.diagnostic(githubWriteAttemptGroup(context.Background(), p.out, attempt))
@@ -182,6 +193,7 @@ func (p *githubPresenter) finish(record api.RunRecord, result api.RunResult) {
 			}
 			p.renderAttempt(result.RunID, attempt)
 		}
+		p.debugResult(record, result)
 		p.line(fmt.Sprintf("run %s finished success=%t", result.Target, result.Success))
 		p.diagnostic(githubWriteSummary(p.out, record, result))
 	}

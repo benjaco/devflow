@@ -210,6 +210,17 @@ bounded progress text and attempt references. Overflow defers live updates to
 final retained-record reconciliation; identities deduplicate by run/task/attempt,
 not task name. Memory scales with identities and existing evidence, not log volume.
 
+The invocation's literal `RUNNER_DEBUG=1` enables extra diagnostics within this
+GitHub CI presentation. The resolved runner signal is authoritative; raw
+`ACTIONS_STEP_DEBUG`/`ACTIONS_RUNNER_DEBUG` settings are not process-level fallbacks.
+`github_debug.go` selects bounded event metadata without copying prompt payloads,
+environment maps or command arguments. Debug messages share the renderer queue
+and output ownership; attempt metadata and exhaustive final node/cache details
+are reconciled from existing evidence after cleanup. Runtime/adapter bootstrap
+emits its own debug preparation messages before handoff. All debug commands
+sanitize embedded workflow markers, respect quiet progress, and leave JSON,
+scheduling and retained evidence unchanged.
+
 Grouped completion titles replace standalone `done` and cache-miss progress;
 states-only output retains both. Attempts persist `cacheOutcome` from the node's
 recorded cache decision so live completion and final reconciliation use the same

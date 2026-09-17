@@ -4,15 +4,21 @@ Last updated: 2026-09-17
 
 ## Current Status
 
-- Phase: repository repair diagnostics
-- State: dirty-worktree preflight now prints changed paths; focused/full tests, focused race tests and quality gates pass.
-- Scope: preserve clean-worktree enforcement, bounded path evidence and stdout-only final JSON.
+- Phase: GitHub Actions debug logging
+- State: automatic finite CI debug diagnostics implemented; full normal/race suites and quality gates pass.
+- Scope: automatic verbose diagnostics from the invocation environment; preserve JSON contracts, redaction and execution ownership.
 
 ## In Progress
 
 - Native Linux/Windows execution of the Delve startup/shutdown correction awaits CI; affected tests cross-compile for both systems. No machine security settings changed.
 
 ## Completed
+
+- GitHub Actions step-debug diagnostics:
+  - select literal invocation `GITHUB_ACTIONS=true` plus `RUNNER_DEBUG=1`, following GitHub's resolved step-debug/rerun signal rather than raw runner configuration inputs; preserve explicit progress/detail controls and finite JSON/stream contracts
+  - add bounded `::debug::` stderr metadata for runtime/adapter bootstrap, execution settings, timestamped transitions, run/attempt identity, retained logs, final process/readiness state and cache keys/timings. Share the serialized renderer and reconcile completed metadata after overflow; exclude environment maps, command arguments and prompt payloads
+  - reproduced absent diagnostics before implementation. Cover exact signal/adapter precedence, real cache miss/hit evidence, output controls, prompt secrecy, command escaping, UTF-8 bounds, compiled bootstrap, parallel/slow-output/overflow behavior, cleanup and machine streams. Updated CLI, architecture, verification, user/example docs and durable memory
+  - `go test ./...`, `go test -race ./...`, `go vet ./...`, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, CLI/example builds, version JSON, formatting and diff checks pass. Logs: `/tmp/devflow-github-debug-*.log`; native hosted rendering remains a CI check
 
 - Repository repair dirty-preflight diagnostics:
   - print the existing bounded, sorted changed-path sample to stderr with quoted filenames before rejecting the run; omitted paths produce displayed/total counts and `git status --short --untracked-files=all` guidance. Compact JSON filtering and Git mutation rules stay unchanged
@@ -1249,7 +1255,7 @@ Last updated: 2026-09-17
 - Confirm the PR #25 prompt teardown correction on the next native Windows CI run; the prior daemon fixture cleanup passes in that PR's initial Windows job.
 - Review the compact attention view (`a`) in the user's terminal, including native multiline log selection on a small screen.
 - Review automatic project-version selection and the upgrade project choice, confirm them on the native CI matrix, and release a launcher containing the capability before colleagues rely on pull-and-run updates.
-- Review the automatic GitHub presentation change and prepared ordinary-command smoke workflow; validate hosted rendering when a remote run is wanted.
+- Review the automatic GitHub presentation and step-debug diagnostics with the prepared ordinary-command smoke workflow; validate hosted rendering when a remote run is wanted.
 - Confirm the reliability changes on the native Linux/macOS/Windows CI matrix; retest the historical readiness symptom through the real daemon/TUI only if it recurs (the engine early-exit restart regression passes).
 - Confirm the Delve v1.27.1 pin on the next native Linux/macOS/Windows GitHub Actions run
 - Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`

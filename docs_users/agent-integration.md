@@ -117,6 +117,14 @@ full retained output as one contiguous log group on stderr. Tasks still run in p
 shared dependencies still execute once. `GITHUB_ACTIONS` must be exactly `true`;
 this environment detection does not select `--ci` or alter `--max-parallel`.
 
+With GitHub step debugging enabled (`ACTIONS_STEP_DEBUG=true` or a debug rerun),
+the runner also supplies `RUNNER_DEBUG=1`. Devflow then emits extra bootstrap,
+event, attempt, cache and process diagnostics as `::debug::` lines on stderr.
+Explicit `--progress`/`--details` choices and JSON contracts remain unchanged;
+`--progress quiet` suppresses these diagnostics. `ACTIONS_RUNNER_DEBUG` alone
+controls the runner's separate diagnostic archive. See the
+[debugging example](../examples/github-actions/README.md).
+
 Group titles use textual status and recorded execution duration. A cache miss
 adds a `CACHE MISS` tag, for example `build | SUCCESS | 1.8s | CACHE MISS`.
 These headers replace separate `done` and cache-miss progress lines. Service

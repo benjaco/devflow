@@ -21,6 +21,7 @@ import (
 func TestMain(m *testing.M) {
 	_ = os.Unsetenv("GITHUB_ACTIONS")
 	_ = os.Unsetenv("GITHUB_STEP_SUMMARY")
+	_ = os.Unsetenv("RUNNER_DEBUG")
 	os.Exit(m.Run())
 }
 
@@ -31,7 +32,7 @@ func TestGitHubPresenterReconcilesOverflowAndDuplicateAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := &githubBlockedWriter{entered: make(chan struct{}), release: make(chan struct{})}
-	p := newGitHubPresenter(w, "logs", "")
+	p := newGitHubPresenter(w, "logs", "", true)
 	if cap(p.pending) != githubProgressCapacity {
 		t.Fatal("progress queue must have a fixed capacity")
 	}
@@ -39,7 +40,7 @@ func TestGitHubPresenterReconcilesOverflowAndDuplicateAttempts(t *testing.T) {
 	record := api.RunRecord{RunID: "run", State: api.RunSucceeded}
 	result := api.RunResult{RunID: "run", Success: true, Target: "verify"}
 	for i := 0; i < githubProgressCapacity*3; i++ {
-		attempt := api.TaskAttempt{Task: "same-task", AttemptID: fmt.Sprintf("attempt-%d", i), LogPath: path, State: api.StateDone, StartedAt: start, FinishedAt: start.Add(time.Second), LogsComplete: true}
+		attempt := api.TaskAttempt{Task: "same-task", AttemptID: fmt.Sprintf("attempt-%d", i), CacheKey: fmt.Sprintf("cache-key-%d", i), LogPath: path, State: api.StateDone, StartedAt: start, FinishedAt: start.Add(time.Second), LogsComplete: true}
 		if i%2 == 0 {
 			attempt.CacheOutcome = "miss"
 		}
@@ -70,6 +71,11 @@ func TestGitHubPresenterReconcilesOverflowAndDuplicateAttempts(t *testing.T) {
 	close(w.release)
 	p.finish(record, result)
 	output := w.output.String()
+	for _, attempt := range record.Attempts {
+		if strings.Count(output, "attempt="+attempt.AttemptID+" state=") != 1 || strings.Count(output, "cache_key="+attempt.CacheKey+" ") != 1 {
+			t.Fatalf("debug metadata lost or duplicated after overflow for %s", attempt.AttemptID)
+		}
+	}
 	if got := strings.Count(output, " | CACHE MISS"); got != len(record.Attempts)/2 {
 		t.Errorf("cache-miss tags lost or leaked across attempts: got %d want %d", got, len(record.Attempts)/2)
 	}
@@ -111,7 +117,7 @@ func TestGitHubCIStampReusePreservesRecordedOutcome(t *testing.T) {
 
 func TestGitHubPresenterPreservesUnownedProgress(t *testing.T) {
 	var output bytes.Buffer
-	p := newGitHubPresenter(&output, "logs", "")
+	p := newGitHubPresenter(&output, "logs", "", false)
 	p.observe(api.Event{Type: api.EventLogLine, Task: "setup", Line: "configuring"})
 	_, _ = p.Write([]byte("[devflow] repository repair: prepared\n"))
 	p.finish(api.RunRecord{}, api.RunResult{})
@@ -126,6 +132,7 @@ func TestGitHubPresenterPreservesUnownedProgress(t *testing.T) {
 }
 
 func TestGitHubFinalOutputKeepsHistoricalCommandsInert(t *testing.T) {
+	t.Setenv("RUNNER_DEBUG", "1")
 	for _, jsonOut := range []bool{true, false} {
 		t.Run(fmt.Sprint(jsonOut), func(t *testing.T) {
 			t.Setenv("GITHUB_ACTIONS", "true")

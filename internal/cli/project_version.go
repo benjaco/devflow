@@ -107,7 +107,12 @@ func (a *App) execProjectVersion(args []string, known *flag.FlagSet) (bool, erro
 	progress := a.Stderr
 	if level, _ := invocationFlag(args, known, "progress", true); level == "quiet" {
 		progress = io.Discard
-	} else if a.githubActions {
+	}
+	if a.githubCI && a.githubDebug {
+		// Write the intentional debug command outside the compiler-output filter.
+		githubWriteDebug(progress, "bootstrap preparing project runtime version=%s worktree=%q", selection.Version, root)
+	}
+	if a.githubActions {
 		// Compiler output is progress, not permission to issue workflow commands.
 		progress = projectVersionProgress{out: progress}
 	}

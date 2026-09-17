@@ -58,6 +58,13 @@ After `stop --all`, `status --json` may still include a `db` object. That object
 
 For finite check/test targets that depend on services such as Postgres or a local app, generally use `devflow run <target> --ci --json` so Devflow starts the services as readiness probes and stops them before returning.
 
+On GitHub Actions, enable the repository secret/variable `ACTIONS_STEP_DEBUG=true`
+or choose **Enable debug logging** for a rerun to get additional Devflow
+diagnostics. The runner's `RUNNER_DEBUG=1` automatically enables bootstrap,
+state-transition, attempt, cache and process details on stderr for `run --ci`.
+JSON output and explicit output controls are preserved; `--progress quiet` also
+suppresses debug messages. See the [GitHub Actions example](../examples/github-actions/README.md).
+
 For AI-assisted development, prefer `watch --detach` plus `flush` over an attached service `run`. Attached runs are useful for a human terminal, but they are not a clean "start and return when ready" automation interface.
 
 ## CI Repository Repair

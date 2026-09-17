@@ -76,6 +76,11 @@ cross-compilation does not replace the required native Windows CI rerun.
 
 ## Permanent coverage
 
+- `TestGitHubDebug*` reproduces the absent debug diagnostics before the change,
+  then verifies the runner's resolved signal, conflicting adapter/raw settings,
+  real retained miss/hit keys, output controls, safe bounded metadata and secret
+  prompt exclusion. Existing compiled bootstrap, queue-overflow, slow-output,
+  parallel and machine-stream fixtures also exercise `RUNNER_DEBUG=1`.
 - Invocation true/false/empty/unset selection, text/JSON, quiet/states/logs,
   project-local executable bootstrap, adapter runtime env independence, unchanged
   non-CI mode and raw log/watch JSONL contracts.
