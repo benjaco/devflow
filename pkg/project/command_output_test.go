@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -307,16 +306,11 @@ func TestCommandOutputTaskletRejectsFileCleanupTarget(t *testing.T) {
 }
 
 func TestCommandOutputTaskletRejectsSymlinkCleanupTarget(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("creating symlinks requires privileges on many Windows hosts")
-	}
 	worktree := t.TempDir()
 	external := t.TempDir()
 	sentinel := filepath.Join(external, "keep.txt")
 	writeCommandOutputTestFile(t, sentinel, "keep")
-	if err := os.Symlink(external, filepath.Join(worktree, "generated")); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Symlink(t, external, filepath.Join(worktree, "generated"))
 	tasklet := CommandOutputTasklet{
 		Command:         process.CommandSpec{Name: testutil.BuildTestCommand(t), Args: []string{"emit", "", ""}},
 		RequiredFiles:   []string{"generated/result.txt"},
@@ -335,18 +329,13 @@ func TestCommandOutputTaskletRejectsSymlinkCleanupTarget(t *testing.T) {
 }
 
 func TestCommandOutputTaskletRejectsSymlinkedHashFileParent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("creating symlinks requires privileges on many Windows hosts")
-	}
 	worktree := t.TempDir()
 	external := t.TempDir()
 	externalHash := filepath.Join(external, "generated.hash")
 	writeCommandOutputTestFile(t, externalHash, "keep")
 	outputSentinel := filepath.Join(worktree, "generated", "keep.txt")
 	writeCommandOutputTestFile(t, outputSentinel, "keep")
-	if err := os.Symlink(external, filepath.Join(worktree, "hashes")); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Symlink(t, external, filepath.Join(worktree, "hashes"))
 	tasklet := CommandOutputTasklet{
 		Command:         process.CommandSpec{Name: testutil.BuildTestCommand(t), Args: []string{"emit", "", ""}},
 		RequiredFiles:   []string{"generated/result.txt"},

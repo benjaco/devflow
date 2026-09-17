@@ -576,7 +576,16 @@ func waitForPayloadWatchReady(t *testing.T, worktree string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForPayload(t, 8*time.Second, func() bool {
+	defer func() {
+		if t.Failed() {
+			state, err := instance.LoadStatus(realWorktree, instanceID)
+			t.Logf("watch startup status: %+v, %v", state, err)
+			record, _ := os.ReadFile(filepath.Join(realWorktree, ".devflow", "fake-npm-record.txt"))
+			t.Logf("npm startup record:\n%s", record)
+		}
+	}()
+	// Cold helper startup on Windows can exceed the edit-response watchdog.
+	waitForPayload(t, 30*time.Second, func() bool {
 		_, err := os.Stat(instance.FlushWatchReadyPath(realWorktree, instanceID))
 		return err == nil
 	})

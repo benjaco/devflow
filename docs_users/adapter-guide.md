@@ -565,6 +565,10 @@ Semantics:
 - if `DEV_DATABASE_URL` is set, it clones that remote database into the local runtime
 - then Devflow replays only the remaining migrations and snapshots the result
 
+Built-in clone restores and SQL-file migrations run `psql` with `-X -w`: they
+ignore local `psqlrc` files and fail instead of prompting for missing credentials.
+Provide connection settings explicitly through the database/source configuration.
+
 For lower-level custom flows, use a `database.SourcePolicy`. For Postgres databases that can be cloned through host `pg_dump`/`psql`, use the built-in remote source policy:
 
 ```go

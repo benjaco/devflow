@@ -137,7 +137,9 @@ func (p PostgresDumpSourcePolicy) PrepareBase(ctx context.Context, db api.DBInst
 	if err := withPostgresCommandCredentials(db.URL, db, baseEnv, func(env map[string]string, sanitizedURL string) error {
 		restoreSpec := common
 		restoreSpec.Name = "psql"
-		restoreSpec.Args = []string{sanitizedURL, "-v", "ON_ERROR_STOP=1", "-f", dumpPath}
+		// Windows libpq clients stop option parsing at a positional database.
+		// Explicit options also prevent ambient psqlrc or password prompts.
+		restoreSpec.Args = []string{"-X", "-w", "-v", "ON_ERROR_STOP=1", "-f", dumpPath, "-d", sanitizedURL}
 		restoreSpec.Env = env
 		_, err := process.Run(ctx, restoreSpec)
 		return err
@@ -181,7 +183,7 @@ trap cleanup EXIT HUP INT TERM
 cat >"$passfile"
 export PGPASSFILE="$passfile"
 pg_dump --no-owner --no-privileges -f "$dumpfile" "$DEVFLOW_REMOTE_DATABASE_URL"
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$dumpfile"`
+psql -X -w -v ON_ERROR_STOP=1 -f "$dumpfile" -d "$DATABASE_URL"`
 	emitPrepareLine(opts, "stdout", "database: cloning with PostgreSQL clients from the managed container")
 	output, err := manager.execContainerSpec(ctx, dockerDataTimeout, db.ContainerName, dockerExecSpec{
 		Command: []string{"sh", "-c", script},

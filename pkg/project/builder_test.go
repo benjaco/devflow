@@ -4,10 +4,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/benjaco/devflow/internal/testutil"
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/process"
 )
@@ -248,15 +248,12 @@ func TestGoDebugServiceHelperDefinesRawTask(t *testing.T) {
 }
 
 func TestBuilderCommandEnvCanUsePortRef(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses sh")
-	}
 	worktree := t.TempDir()
+	command := testutil.BuildTestCommand(t)
 	p := Define(func(ctx context.Context, b *Builder) error {
 		b.Name("demo")
-		b.RequiredCLIs("sh")
 		task := b.Task("write_port").
-			Command("sh", "-c", "printf %s \"$PORT\" > port.txt").
+			Command(command, "write-env", "port.txt", "PORT").
 			Env("PORT", b.Port("app")).
 			Outputs("port.txt")
 		b.Target("test", task)

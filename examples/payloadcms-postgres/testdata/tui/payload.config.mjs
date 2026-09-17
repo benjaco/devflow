@@ -1,6 +1,7 @@
 import { buildConfig } from 'payload'
 import { postgresAdapter } from '@payloadcms/db-postgres'
 import { Posts } from './collections/Posts.mjs'
+import path from 'node:path'
 
 export default buildConfig({
   secret: 'devflow-disposable-tui-fixture',
@@ -8,6 +9,7 @@ export default buildConfig({
   db: postgresAdapter({
     pool: { connectionString: process.env.DATABASE_URL },
     push: process.env.PAYLOAD_SCHEMA_PUSH === 'true',
+    migrationDir: path.resolve('migrations'),
   }),
   collections: [Posts],
 })

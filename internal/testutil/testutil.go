@@ -1,12 +1,25 @@
 package testutil
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 )
+
+// Symlink skips only the missing Windows privilege, not filesystem/test errors.
+func Symlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314)) {
+			t.Skipf("symlink creation requires Developer Mode or symlink privilege: %v", err)
+		}
+		t.Fatal(err)
+	}
+}
 
 func TempWorktree(t *testing.T) string {
 	t.Helper()

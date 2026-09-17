@@ -4,15 +4,28 @@ Last updated: 2026-09-17
 
 ## Current Status
 
-- Phase: repository repair diagnostics
-- State: dirty-worktree preflight now prints changed paths; focused/full tests, focused race tests and quality gates pass.
-- Scope: preserve clean-worktree enforcement, bounded path evidence and stdout-only final JSON.
+- Phase: native Windows validation and Payload migration/TUI follow-up
+- State: native audit complete. All 32 test packages have passing normal and race verification after corrected-package reruns; real Payload engine/TUI workflows and Docker integrations pass.
+- Scope: fix failing tests first, verify Payload workflows through ConPTY and the TUI, remove avoidable Windows skips, and document native evidence and remaining platform limits.
 
 ## In Progress
 
-- Native Linux/Windows execution of the Delve startup/shutdown correction awaits CI; affected tests cross-compile for both systems. No machine security settings changed.
+- None. Native terminal-host clipboard/rendering and the historical unexplained IDE exit remain manual follow-ups.
 
 ## Completed
+
+- Rebased the Windows audit work onto `origin/main` (`c772a61`), preserving the upstream repository-repair diagnostics and all forty changed/new audit files. Only this ledger needed manual conflict resolution. Full repository-repair race tests, CLI repository-repair/upgrade-streaming race tests, affected-package vet, CLI/example builds, version JSON and formatting/diff checks pass; the native source binary is rebuilt. Follow-up evidence: `local/windows-audit/rebase-*` and the Windows verification document.
+
+- Native Windows audit and Payload migration/TUI corrections:
+  - repaired an incomplete downloaded Go 1.27.1 toolchain locally; bounded build concurrency avoids Windows commit-memory exhaustion. A verified portable LLVM-MinGW compiler enables native race checks without machine-wide configuration changes
+  - real ConPTY coverage now authors initial and rename migrations with `m`, answers both UP/DOWN menus, checks SQL/data, resumes watch and handles a later destructive warning. Fixed action relaunch dropping the previous watcher's prompt policy; retained fresh run identity and independent cancellation/deadline
+  - fixed native host `psql` option parsing for clone and SQL-file migration, disabled ambient startup files/password prompts, and retried transient staged run-directory publication failures using the existing bounded policy
+  - removed twelve unconditional Windows skips; symlinks are capability-tested, shell fixtures use Go helpers, and six actual Unix filesystem-semantic exclusions remain. Explicit Docker opt-in now fails when prerequisites are missing
+  - fixed CRLF-sensitive TUI edits, replaced upgrade streaming sleeps with a release handshake, and made helper startup watchdogs tolerate loaded Windows execution while retaining behavioral timing assertions. Repository attributes keep Go/module/shell files LF
+  - completed normal/race full-suite runs with `DEVFLOW_E2E_PAYLOAD=1` and `DEVFLOW_E2E_DOCKER=1`, then corrected-package reruns: full CLI normal, full process race and full engine normal/race pass. Startup/scanner regressions pass three repetitions; bootstrap cancellation/readable-marker cases pass five race repetitions. Both Payload workflows and every Docker E2E pass in normal/race runs, with six justified Windows skips and no reported races
+  - late verification also fixed success-only fake-debugger watch cleanup leaking its execution lease, a transient sharing failure reopening a bootstrap PID marker, and startup budgets for native Delve CI probes. Cancellation/drain/restart/owned-PID assertions remain; production debugger timeout policy is unchanged. Initial failures and exact rerun results remain in the audit logs
+  - vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), Go 1.27.1 formatting, tidy-diff, CLI/example builds and version JSON pass. A native source binary is built at `.devflow/bin/devflow.exe`
+  - evidence and exact environment: `docs_contributors/windows-verification.md`, ignored `local/windows-audit/`. Native terminal-host clipboard/rendering and the historical unexplained IDE exit remain manual checks
 
 - Repository repair dirty-preflight diagnostics:
   - print the existing bounded, sorted changed-path sample to stderr with quoted filenames before rejecting the run; omitted paths produce displayed/total counts and `git status --short --untracked-files=all` guidance. Compact JSON filtering and Git mutation rules stay unchanged
@@ -1252,7 +1265,6 @@ Last updated: 2026-09-17
 - Review the automatic GitHub presentation change and prepared ordinary-command smoke workflow; validate hosted rendering when a remote run is wanted.
 - Confirm the reliability changes on the native Linux/macOS/Windows CI matrix; retest the historical readiness symptom through the real daemon/TUI only if it recurs (the engine early-exit restart regression passes).
 - Confirm the Delve v1.27.1 pin on the next native Linux/macOS/Windows GitHub Actions run
-- Run `DEVFLOW_E2E_DOCKER=1 go test ./pkg/database -run TestDockerPostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPortE2E -v` with Docker running and Postgres 16-compatible host clients on `PATH`
 - Convert bundled example adapters to the builder/component API so source examples match the new user-facing shape
 - Expand user docs/examples for script-to-Devflow convergence and fixed-port service guidance
 - Revisit the pinned Go patch as Go 1.27 security releases ship; keep the pinned Delve line compatible with both minimum and rolling stable CI lanes

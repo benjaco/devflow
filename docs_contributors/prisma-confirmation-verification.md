@@ -66,6 +66,8 @@ Literal matching remains unchanged; no terminal parser or dependency was added.
 go test -race -count=3 ./pkg/process ./pkg/database -run 'TestInteractiveReaderDoesNotPromptAgainAfterFailure|TestTerminalSecretPromptMatchesConPTYOutput|TestRunInteractiveCancellationReportsError|TestTerminalRetainsOutputAndExitStatus|TestPrismaMigrationConfirmationRequiresTerminal'
 ```
 
-The focused tests pass on macOS. Captured-output replay verifies the matching and
-callback boundary; the existing native Windows matrix must still verify the
-actual ConPTY execution after this correction.
+The focused tests originally passed on macOS, with captured-output replay checking
+the matching and callback boundary. These fixtures now also pass through native
+Windows ConPTY; see the [Windows audit](windows-verification.md). That fixture
+coverage is separate from the real Prisma CLI smoke above and manual terminal-host
+behavior.

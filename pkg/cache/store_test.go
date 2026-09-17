@@ -9,13 +9,11 @@ import (
 	"testing"
 
 	"github.com/benjaco/devflow/internal/fsutil"
+	"github.com/benjaco/devflow/internal/testutil"
 	"github.com/benjaco/devflow/pkg/project"
 )
 
 func TestSnapshotRestorePreservesReadOnlyPNPMDirectorySymlinks(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink fixture requires developer-mode symlink support")
-	}
 	worktree := t.TempDir()
 	t.Cleanup(func() { _ = fsutil.RemoveAllWritable(filepath.Join(worktree, "node_modules")) })
 	modules := filepath.Join(worktree, "node_modules")
@@ -26,9 +24,7 @@ func TestSnapshotRestorePreservesReadOnlyPNPMDirectorySymlinks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(pkg, "index.js"), []byte("module.exports = 1\n"), 0o444); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(".pnpm", "pkg@1.0.0", "node_modules", "pkg"), filepath.Join(modules, "pkg")); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Symlink(t, filepath.Join(".pnpm", "pkg@1.0.0", "node_modules", "pkg"), filepath.Join(modules, "pkg"))
 	if err := os.Chmod(pkg, 0o555); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +60,7 @@ func TestSnapshotRestorePreservesReadOnlyPNPMDirectorySymlinks(t *testing.T) {
 	}
 	if info, err := os.Stat(filepath.Join(modules, ".pnpm", "pkg@1.0.0", "node_modules", "pkg")); err != nil {
 		t.Fatal(err)
-	} else if got := info.Mode().Perm(); got != 0o555 {
+	} else if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o555 {
 		t.Fatalf("restored read-only package mode = %03o, want 555", got)
 	}
 }

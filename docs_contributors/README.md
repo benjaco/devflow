@@ -22,6 +22,11 @@ Read these first:
 
 Devflow is a Go 1.27.1 project. Use Go 1.27.1 or newer.
 
+For native PowerShell setup, both integration-test opt-ins, race-detector tooling
+and reviewed Windows test exclusions, see [Native Windows verification](windows-verification.md).
+Git attributes preserve LF for Go sources, module metadata and the shell launcher,
+so Windows checkouts have meaningful formatting and tidy checks.
+
 ```bash
 go install github.com/go-delve/delve/cmd/dlv@v1.27.1
 go test ./...

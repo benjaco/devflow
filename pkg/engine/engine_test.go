@@ -2925,7 +2925,7 @@ func TestGoDebugServiceWatchBuildsDelveAndRestarts(t *testing.T) {
 			Inputs("cmd/api").
 			DependsOn(generate).
 			Args("--config", ".devflow/dev.yaml").
-			ReadyTimeout(2 * time.Second)
+			ReadyTimeout(30 * time.Second)
 		b.Target("debug", debug)
 		return nil
 	})
@@ -2938,8 +2938,17 @@ func TestGoDebugServiceWatchBuildsDelveAndRestarts(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- eng.Watch(ctx, Request{Target: "debug", Worktree: worktree, Mode: api.ModeWatch})
+		close(done)
 	}()
-	instanceID := waitForEngineWatchReady(t, worktree)
+	// Startup failures must still release processes and the execution lease
+	// before test environment restoration and temporary-worktree removal.
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("debug watch cleanup: %v", err)
+		}
+	})
+	instanceID := waitForEngineWatchReadyWithin(t, worktree, 30*time.Second)
 	if !waitForBool(6*time.Second, func() bool {
 		return countDebugStarts(recordPath) >= 1 && nodeRunningWithDebugPort(t, worktree, instanceID, "api_debug")
 	}) {
@@ -2999,7 +3008,7 @@ func main() {
 			Package("./cmd/api").
 			DebugPort("debug_api").
 			Inputs("go.mod", "cmd/api").
-			ReadyTimeout(10 * time.Second)
+			ReadyTimeout(time.Minute)
 		b.Target("debug", debug)
 		return nil
 	})
@@ -3064,8 +3073,10 @@ func main() {
 	}
 	p := project.Define(func(ctx context.Context, b *project.Builder) error {
 		b.Name("real-delve-cleanup")
+		// This probes debugger cleanup; cold native debugger startup is not
+		// a latency assertion, especially while the Windows suite is building.
 		debug := b.GoDebugService("debug").Package(".").DebugPort("debug").
-			ReadyFile("debuggee.pid").ReadyTimeout(20 * time.Second)
+			ReadyFile("debuggee.pid").ReadyTimeout(time.Minute)
 		b.Target("debug", debug)
 		return nil
 	})

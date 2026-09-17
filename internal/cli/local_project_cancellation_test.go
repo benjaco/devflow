@@ -79,21 +79,24 @@ func TestLocalProjectBuildLockWaitHonorsCancellation(t *testing.T) {
 	}
 }
 
-func waitForBootstrapReady(t *testing.T, path string, finished <-chan error) {
+func waitForBootstrapReady(t *testing.T, path string, finished <-chan error) []byte {
 	t.Helper()
-	deadline := time.NewTimer(10 * time.Second)
+	deadline := time.NewTimer(30 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if _, err := os.Stat(path); err == nil {
-			return
+		// Existence does not guarantee a readable marker on Windows. Retain
+		// the successful read so callers need not reopen it across that race.
+		data, readErr := os.ReadFile(path)
+		if readErr == nil && len(data) > 0 {
+			return data
 		}
 		select {
 		case err := <-finished:
 			t.Fatal(fmt.Errorf("bootstrap exited before startup marker: %w", err))
 		case <-deadline.C:
-			t.Fatal("bootstrap did not write startup marker")
+			t.Fatalf("bootstrap did not publish a readable startup marker: %v", readErr)
 		case <-ticker.C:
 		}
 	}

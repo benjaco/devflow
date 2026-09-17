@@ -1,5 +1,11 @@
 # Payload workflow verification
 
+Native Windows validation now includes the real engine workflow and an expanded
+compiled-CLI TUI workflow with migration authoring. See the
+[Windows audit](windows-verification.md) for failures, corrections, opt-ins and
+platform limits. Earlier macOS/CI-only statements below describe their original
+verification runs.
+
 The reported version is Payload 3.88.0. The reproduction installs unmodified
 `payload` and `@payloadcms/db-postgres` 3.88.0 with Next 15.4.11 and React 19.1.2
 from a committed npm lockfile. It runs against disposable Postgres databases
@@ -96,10 +102,15 @@ The test then:
 
 1. Waits for initial Payload database initialization and watch readiness, then
    inserts a row into the real `posts` table.
+   Uses `m` to name and create the initial migration, requires the generated
+   table SQL, and waits for the previous watch target to resume.
 2. Edits `collections/Posts.mjs` to rename `title` to `headline`, waits for both
    the pending question and the painted TUI selection dialog, and sends Down and
    Enter through the terminal. It verifies the answered prompt belongs to the
    new ready attempt, the renamed column retains its value, and `title` is gone.
+   Uses `m` again to author the rename, answers both UP and DOWN selection
+   questions through the terminal, checks both SQL directions and their shared
+   run/attempt identity, then verifies watch resumes and development data survives.
 3. Removes populated `legacy` from that collection module, waits for the painted
    warning and Yes/No buttons, and sends Left and Enter to move from the default
    No to Yes. It verifies `legacy` still exists before the answer, disappears
@@ -121,6 +132,15 @@ The Docker CI gate now
 selects both tests with `-run 'TestPayload(TUI)?WorkflowE2E' -timeout 25m` on native
 Linux amd64 and arm64. Hosted outcomes and native Windows execution remain CI or
 platform-specific evidence, not inferred from a local pass.
+
+The expanded authoring workflow passes natively on Windows amd64. It reproduced
+two additional issues: CRLF checkout line endings prevented the deleted-field
+fixture edit, and authoring discarded the previous watcher's headless wait policy.
+The declaration edit is now line-ending independent. Action relaunch preserves
+the previous policy without inheriting the completed action's deadline or
+cancellation. Portable daemon tests separately cover preservation of both wait
+and fail policies. The terminal test never submits answers through prompt files
+or APIs.
 
 ## Portable coverage and limits
 

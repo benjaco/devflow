@@ -27,7 +27,6 @@ func TestRepositoryGitCancellationPreservesCauseAndStopsDescendants(t *testing.T
 			t.Setenv("DEVFLOW_REPAIR_CANCEL_READY", ready)
 			runner := &Runner{root: root, gitPath: executable}
 			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
 			finished := make(chan error, 1)
 			go func() {
 				var err error
@@ -37,8 +36,12 @@ func TestRepositoryGitCancellationPreservesCauseAndStopsDescendants(t *testing.T
 					_, err = runner.git(ctx, nil, nil, "-test.run=^TestRepositoryGitCancellationHelper$")
 				}
 				finished <- err
+				close(finished)
 			}()
-			deadline := time.NewTimer(10 * time.Second)
+			t.Cleanup(func() { cancel(); <-finished })
+			// Startup is not the behavior under test; cold Windows helpers can
+			// take longer under load. Keep the cancellation bound below strict.
+			deadline := time.NewTimer(30 * time.Second)
 			defer deadline.Stop()
 			ticker := time.NewTicker(10 * time.Millisecond)
 			defer ticker.Stop()

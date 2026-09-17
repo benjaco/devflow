@@ -1512,15 +1512,21 @@ func TestGeneratePrismaMigrationRequiresName(t *testing.T) {
 }
 
 func TestGeneratePrismaMigrationRunsDefaultCommand(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-based test is unix-only")
-	}
 	worktree := t.TempDir()
 	binDir := filepath.Join(worktree, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	mustWriteExecutable(t, filepath.Join(binDir, "npx"), "#!/bin/sh\nprintf '%s' \"$*\" > \"$OUT_FILE\"\n")
+	source := filepath.Join(binDir, "main.go")
+	mustWrite(t, source, `package main
+import ("os"; "strings")
+func main() {
+ if err := os.WriteFile(os.Getenv("OUT_FILE"), []byte(strings.Join(os.Args[1:], " ")), 0600); err != nil { panic(err) }
+}
+`)
+	if out, err := exec.Command("go", "build", "-o", filepath.Join(binDir, "npx"+databaseTestExeSuffix()), source).CombinedOutput(); err != nil {
+		t.Fatalf("build npx: %v\n%s", err, out)
+	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	output := filepath.Join(worktree, "prisma-generate.txt")
 	err := GeneratePrismaMigration(context.Background(), PrismaMigrationGenerateOptions{
