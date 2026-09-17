@@ -300,6 +300,8 @@ Instance env is persisted under `.devflow/state` so daemon execution, status, an
 
 The engine supervises `project.ServiceHandle`, not only child processes. A handle reports liveness, waits for termination, stops idempotently, and may expose a host PID. `Runtime.OnServiceHandle` is the single registration callback for both command processes and PID-less resources. `process.Handle` implements that contract for command-backed services. Concurrent calls to its `Stop` method join the same bounded terminate/kill operation; a context watcher cannot make engine cleanup return before the child has been reaped. Engine-managed resources can return PID `0`; the engine retains their in-memory handle for readiness, flush health, watch restarts, CI cleanup, and attached-run shutdown without persisting a false OS-process reference.
 
+`process.CommandSpec.GracefulStop` lets an adapter supply a protocol shutdown request instead of the initial OS termination signal. It must honor its context; the request and subsequent exit/output drainage share the configured grace period. Failure or expiry escalates to the existing OS kill and bounded reap wait. The process layer stays protocol-agnostic, and unsuccessful cleanup still retains engine ownership.
+
 Database adapters use `database.Manager.StartRuntimeService` for this path. It ensures the container, follows stdout/stderr through the Docker Engine log API, waits for container termination through the Engine API, and stops the container through the Engine API. Adapters register the returned handle with `Runtime.RegisterServiceHandle` and route its log callback through `Runtime.LineEmitter`. A wrapper process running `docker logs -f` is neither required nor permitted by the managed-database portability contract.
 
 ## Watch Cascades
@@ -749,7 +751,7 @@ The implemented round-one model:
 - start Delve with `dlv exec <binary> --headless --api-version=2 --listen=127.0.0.1:<debug-port> --accept-multiclient --continue -- <app-args>`
 - allocate the debug endpoint as a stable named localhost port
 - expose editor attach metadata through `NodeStatus.Debug` in `status --json`
-- require debugger readiness by probing the debug TCP port
+- require a nonblocking Delve JSON-RPC state response identifying a running or paused live debuggee; an open TCP listener alone is insufficient
 - compose app readiness through the existing service readiness model when the adapter calls `ReadyHTTP`, `ReadyTCP`, `ReadyFile`, or `Ready`
 - on watch changes, stop the old supervised Delve process tree, rebuild, and relaunch on the same named port
 
@@ -758,6 +760,8 @@ The builder API is `b.GoDebugService(...)`. Raw-task adapters should use `projec
 This is different from normal service supervision because Delve owns a launched debuggee process and editor attachment is stateful. Devflow should still be the outer owner through the per-worktree daemon. Round one should avoid attach-to-existing-process workflows and editor-driven Delve restart orchestration.
 
 Cross-platform cleanup is part of the architecture, not a test afterthought. Unix starts supervised processes in a process group and escalates from graceful signal to process-group kill. Windows currently uses process-tree termination through `taskkill /T /F`. Future hardening can replace that with Job Objects, but debug service tests must keep proving that watch restart and stop paths do not leave orphaned Delve/debuggee processes or locked debug binaries.
+
+Delve opens its listener before initializing the debuggee and installing its signal handler. The debuggee can belong to a separate Unix process group, so signaling Delve during that window can leave a child holding the task's output pipes. The built-in debug service supplies a bounded JSON-RPC shutdown: halt the target, then detach with `Kill: true`, allowing Delve to reap its debuggee. Halt is required because a running target holds the lock needed by detach. While detach is pending, repeat halt on a separate connection to cover startup `--continue` or an editor resuming between the two requests. Cancellation closes stalled RPC connections; explicit stop and context cancellation share the same process-handle shutdown operation and OS escalation fallback.
 
 ## Event Stream
 

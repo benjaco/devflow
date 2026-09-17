@@ -71,6 +71,11 @@ type CommandSpec struct {
 	Prompts     []PromptSpec
 	OnPrompt    func(PromptRequest) (PromptResponse, error)
 	ParsePrompt PromptParser
+
+	// GracefulStop replaces the initial termination signal with a protocol-specific
+	// shutdown request. It must honor its context; request and exit share Grace.
+	// Failure or expiry still escalates to an OS process-tree kill.
+	GracefulStop func(context.Context) error
 }
 
 type Result struct {
@@ -89,6 +94,7 @@ type Handle struct {
 
 	stopOnce      sync.Once
 	stopRequested bool
+	gracefulStop  func(context.Context) error
 }
 
 func NowRFC3339Nano() string {
@@ -190,9 +196,10 @@ func Start(ctx context.Context, spec CommandSpec) (*Handle, error) {
 	}()
 
 	handle := &Handle{
-		cmd:   cmd,
-		done:  make(chan struct{}),
-		grace: defaultGrace(spec.Grace),
+		cmd:          cmd,
+		done:         make(chan struct{}),
+		grace:        defaultGrace(spec.Grace),
+		gracefulStop: spec.GracefulStop,
 	}
 	go func() {
 		wg.Wait()
@@ -208,8 +215,11 @@ func Start(ctx context.Context, spec CommandSpec) (*Handle, error) {
 		handle.setWaitError(err)
 	}()
 	go func() {
-		<-ctx.Done()
-		_ = handle.Stop()
+		select {
+		case <-ctx.Done():
+			_ = handle.Stop()
+		case <-handle.done:
+		}
 	}()
 
 	return handle, nil
@@ -253,16 +263,26 @@ func (h *Handle) Stop() error {
 	// completed the bounded terminate/kill wait, so engine shutdown cannot
 	// report completion while another goroutine is still reaping the service.
 	h.stopOnce.Do(func() {
+		if !h.Alive() {
+			return
+		}
 		h.mu.Lock()
 		h.stopRequested = true
 		h.mu.Unlock()
-		if err := terminateCmd(h.cmd); err != nil {
-			_ = killCmd(h.cmd)
-			h.waitForStop(500 * time.Millisecond)
-			return
+		ctx, cancel := context.WithTimeout(context.Background(), h.grace)
+		defer cancel()
+		var err error
+		if h.gracefulStop != nil {
+			err = h.gracefulStop(ctx)
+		} else {
+			err = terminateCmd(h.cmd)
 		}
-		if h.waitForStop(h.grace) {
-			return
+		if err == nil {
+			select {
+			case <-h.done:
+				return
+			case <-ctx.Done():
+			}
 		}
 		_ = killCmd(h.cmd)
 		h.waitForStop(500 * time.Millisecond)
@@ -389,10 +409,11 @@ func startInteractive(ctx context.Context, spec CommandSpec) (*Handle, error) {
 	}()
 
 	handle := &Handle{
-		cmd:   cmd,
-		stdin: stdin,
-		done:  make(chan struct{}),
-		grace: defaultGrace(spec.Grace),
+		cmd:          cmd,
+		stdin:        stdin,
+		done:         make(chan struct{}),
+		grace:        defaultGrace(spec.Grace),
+		gracefulStop: spec.GracefulStop,
 	}
 	go func() {
 		readWG.Wait()

@@ -4,17 +4,22 @@ Last updated: 2026-09-17
 
 ## Current Status
 
-- Phase: PR #26 Windows terminal-title prompt correction
-- State: captured failure reproduced before correction; fix, full normal suite and three focused race repetitions pass locally.
-- Scope: a terminal-title (OSC) control inserted inside a question word prevents recognition; retain exact choice text and prompt cancellation behavior.
+- Phase: post-merge Delve startup and shutdown correction
+- State: implementation and local verification complete; full normal/race suites and final affected-package race checks pass with real Delve available.
+- Scope: require debugger initialization and halt/kill-detach the debuggee within the existing process grace budget before releasing ownership.
 
 ## In Progress
 
-- Next verification: native Windows CI with the OSC correction.
-- Real Payload workflow rerun is blocked before project startup by the unavailable local Docker daemon; opening Docker Desktop did not restore its socket.
-- Local real Delve checks remain blocked by disabled macOS Developer Tools security; no machine security settings changed.
+- Native Linux/Windows execution of this correction awaits CI; affected tests cross-compile for both systems. No machine security settings changed.
 
 ## Completed
+
+- Post-merge Delve startup/shutdown correction:
+  - [original Linux stable job 105236341289](https://github.com/benjaco/devflow/actions/runs/35231462228/job/105236341289) ran Go 1.27.1 and failed only the immediate Delve CI probe; its rerun passed. The unchanged local probe passed 15 repetitions. The same main run passed Windows and the real Payload engine/TUI workflows on Linux amd64/arm64
+  - source inspection identifies the early listener, late signal handler and separate debuggee process group. Portable regressions fail before correction for premature readiness and missing protocol shutdown; a second regression catches a resume between halt and detach
+  - debugger readiness now requires a nonblocking RPC state response. Generic `CommandSpec.GracefulStop` shares the process grace budget with exit/output drainage; Delve halts then kill/detaches, repeating halt on a separate connection if startup/editor resume blocks detach. Preserve concurrent-stop joining, OS escalation and failed-cleanup ownership
+  - portable startup/cancel/concurrent/resume/stalled regressions pass three race repetitions. Both real Delve CI probes pass three repetitions, including a running debuggee whose PID must be gone after cleanup. Existing watch-start counts still count starts only
+  - full normal and race suites pass with real Delve installed; final affected process/project/engine/example race checks pass after the resume correction. Vet, Staticcheck v0.8.1, CLI/example builds, tidy-diff, version JSON, Linux/Windows affected-test cross-compilation and formatting/diff checks pass. Local logs: `/tmp/devflow-delve-stop-*.log`
 
 - PR #26 captured Windows terminal-title correction:
   - [Windows job 105225702804](https://github.com/benjaco/devflow/actions/runs/35228380375/job/105225702804) passes the earlier cases but captures an OSC title inside the word "renamed" during cancellation; zero callbacks precede the deadline

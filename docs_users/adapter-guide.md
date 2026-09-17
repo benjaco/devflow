@@ -541,6 +541,8 @@ The build step is intentionally external to Delve: Devflow runs `go build -gcfla
 
 Debug services are service-like for lifecycle purposes: they are supervised, never globally cached, can depend on normal build/codegen/database tasks, participate in watch restarts, and are checked by `flush` like other services. Use `ReadyHTTP` or another app readiness hook when the debuggee also needs to prove the application is usable after Delve starts.
 
+Default debugger readiness requires Delve to answer a nonblocking state request for a live target. Stop and cancellation ask Delve to halt and kill/detach the debuggee before exiting; `StopGrace` bounds this request and exit wait, after which normal OS termination escalates. Low-level command adapters can supply a context-aware `process.CommandSpec.GracefulStop` callback for their own shutdown protocol; it replaces the initial termination signal and shares the command's grace budget.
+
 Low-level adapters that still return raw `[]project.Task` should use `project.GoDebugService(...)` with `project.GoDebugServiceOptions` instead of hand-writing `go build` and `dlv exec` calls. `EnvPorts` maps runtime env vars such as `PORT` to named Devflow ports, while normal instance env such as `DATABASE_URL` is inherited automatically. Raw adapters must still include `go` and `dlv` in their project `RequiredCLIs()` catalog so target-scoped `doctor` can resolve those task requirements.
 
 ## DB Source Policies

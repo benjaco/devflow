@@ -889,7 +889,7 @@ func countDebugStarts(recordPath string) int {
 	if err != nil {
 		return 0
 	}
-	return strings.Count(string(data), "fake-dlv ")
+	return strings.Count(string(data), "fake-dlv pid=")
 }
 
 func nodeRunningWithDebugPort(t *testing.T, worktree, instanceID, task string) bool {
@@ -3032,6 +3032,69 @@ func main() {
 	}
 	if node.PID != 0 {
 		t.Fatalf("expected stopped debug service PID to be cleared, got %d", node.PID)
+	}
+}
+
+func TestGoDebugServiceCICleansUpRunningDebuggee(t *testing.T) {
+	if _, err := exec.LookPath("dlv"); err != nil {
+		t.Skip("dlv not installed")
+	}
+	isolateEngineUserCache(t)
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "go.mod"), []byte("module debug-cleanup\n\ngo 1.23\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "main.go"), []byte(`package main
+import (
+	"os"
+	"strconv"
+	"time"
+)
+func main() {
+	if err := os.WriteFile("debuggee.pid.tmp", []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		panic(err)
+	}
+	if err := os.Rename("debuggee.pid.tmp", "debuggee.pid"); err != nil {
+		panic(err)
+	}
+	for { time.Sleep(time.Second) }
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := project.Define(func(ctx context.Context, b *project.Builder) error {
+		b.Name("real-delve-cleanup")
+		debug := b.GoDebugService("debug").Package(".").DebugPort("debug").
+			ReadyFile("debuggee.pid").ReadyTimeout(20 * time.Second)
+		b.Target("debug", debug)
+		return nil
+	})
+	eng, err := New(p, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, runErr := eng.Run(context.Background(), Request{Target: "debug", Worktree: worktree, Mode: api.ModeCI})
+	var pid int
+	data, readErr := os.ReadFile(filepath.Join(worktree, "debuggee.pid"))
+	_, pidErr := fmt.Sscan(string(data), &pid)
+	if pid > 0 && instance.ProcessAlive(pid) {
+		// This PID came from the disposable debuggee itself; contain a failed
+		// regression without leaving the test's process running on the host.
+		if child, err := os.FindProcess(pid); err == nil {
+			_ = child.Kill()
+			_ = child.Release()
+		}
+		t.Errorf("debuggee %d survived CI cleanup", pid)
+	}
+	if runErr != nil {
+		logPath := ""
+		if out != nil && len(out.Result.Nodes) > 0 {
+			logPath = out.Result.Nodes[0].LogPath
+		}
+		t.Fatalf("real dlv cleanup failed: %v\nlog:\n%s", runErr, readFileForFailure(logPath))
+	}
+	if readErr != nil || pidErr != nil || pid <= 0 {
+		t.Fatalf("debuggee did not publish its PID: data=%q read=%v parse=%v", data, readErr, pidErr)
 	}
 }
 
