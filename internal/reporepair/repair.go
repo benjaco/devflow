@@ -88,6 +88,12 @@ func (r *Runner) Preflight(ctx context.Context) (api.RepositoryChangeResult, err
 	}
 	if len(dirty) > 0 {
 		r.setChangedPaths(&result, statusPaths(dirty))
+		for _, path := range result.ChangedPaths {
+			r.progressf("repository repair preflight: changed path %q", path)
+		}
+		if result.ChangedPathsTruncated {
+			r.progressf("repository repair preflight: showing %d of %d changed paths; run git status --short --untracked-files=all for the full list", len(result.ChangedPaths), result.ChangedPathCount)
+		}
 		return r.fail(result, fmt.Errorf("repository repair requires a clean Git worktree; found %d changed path(s)", result.ChangedPathCount))
 	}
 	// Ask Git to parse every pathspec before the DAG starts. This preserves all
