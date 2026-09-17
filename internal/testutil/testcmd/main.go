@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -267,10 +269,15 @@ func runFakeGo() {
 
 func runFakeDlv() {
 	listen := ""
+	var running atomic.Bool
+	var resumeAfterHalt atomic.Bool
+	resumeAfterHalt.Store(os.Getenv("DEVFLOW_FAKE_DEBUG_RESUME_AFTER_HALT") == "1")
 	for _, arg := range os.Args[1:] {
 		if strings.HasPrefix(arg, "--listen=") {
 			listen = strings.TrimPrefix(arg, "--listen=")
-			break
+		}
+		if arg == "--continue" {
+			running.Store(true)
 		}
 	}
 	if listen == "" {
@@ -285,13 +292,72 @@ func runFakeDlv() {
 	defer ln.Close()
 	appendRecord(fmt.Sprintf("fake-dlv pid=%d listen=%s args=%s", os.Getpid(), listen, strings.Join(os.Args[1:], " ")))
 	fmt.Printf("API server listening at: %s\n", listen)
+	// Delve binds its listener before initializing the debugger and accepting RPCs.
+	if gate := os.Getenv("DEVFLOW_FAKE_DEBUG_INIT_FILE"); gate != "" {
+		for {
+			if _, err := os.Stat(gate); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 	for {
 		conn, err := ln.Accept()
 		if err == nil {
-			_ = conn.Close()
+			go serveFakeDlv(conn, &running, &resumeAfterHalt)
 			continue
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func serveFakeDlv(conn net.Conn, running, resumeAfterHalt *atomic.Bool) {
+	defer conn.Close()
+	decoder := json.NewDecoder(conn)
+	for {
+		var request struct {
+			ID     int
+			Method string
+			Params []struct {
+				Kill        bool
+				NonBlocking bool
+				Name        string
+			}
+		}
+		if err := decoder.Decode(&request); err != nil {
+			return
+		}
+		result := any(struct{}{})
+		switch request.Method {
+		case "RPCServer.State":
+			if len(request.Params) != 1 || !request.Params[0].NonBlocking {
+				return
+			}
+			result = map[string]any{"State": map[string]any{"Running": running.Load(), "Pid": os.Getpid()}}
+		case "RPCServer.Command":
+			if len(request.Params) != 1 || request.Params[0].Name != "halt" {
+				return
+			}
+			running.Store(false)
+			appendRecord("fake-dlv halt")
+			if resumeAfterHalt.CompareAndSwap(true, false) {
+				running.Store(true)
+			}
+		case "RPCServer.Detach":
+			if len(request.Params) != 1 || !request.Params[0].Kill {
+				return
+			}
+			for running.Load() {
+				time.Sleep(10 * time.Millisecond)
+			}
+			appendRecord("fake-dlv detach kill=true")
+		default:
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(map[string]any{"id": request.ID, "result": result, "error": nil})
+		if request.Method == "RPCServer.Detach" {
+			os.Exit(0)
+		}
 	}
 }
 

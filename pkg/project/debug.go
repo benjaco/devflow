@@ -3,6 +3,8 @@ package project
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/rpc/jsonrpc"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -390,7 +392,31 @@ func (s *goDebugServiceSpec) applyDefaults() {
 }
 
 func (s goDebugServiceSpec) readyFunc() ReadyFunc {
-	debugReady := ReadyTCPPort(s.debugPortName)
+	debugReady := func(ctx context.Context, rt *Runtime) error {
+		port := rt.Instance.Ports[s.debugPortName]
+		if port == 0 {
+			return fmt.Errorf("named debug port %q not configured", s.debugPortName)
+		}
+		address := net.JoinHostPort(s.debugHost, strconv.Itoa(port))
+		return pollUntil(ctx, func() error {
+			// Delve listens before it launches the debuggee. A TCP handshake
+			// alone can make CI stop it while the debugger is still starting.
+			var reply struct {
+				State *struct {
+					Pid     int
+					Running bool
+					Exited  bool
+				}
+			}
+			if err := callDelve(ctx, address, "State", struct{ NonBlocking bool }{true}, &reply); err != nil {
+				return err
+			}
+			if reply.State == nil || reply.State.Exited || (!reply.State.Running && reply.State.Pid <= 0) {
+				return fmt.Errorf("delve has no live debuggee")
+			}
+			return nil
+		})
+	}
 	if s.appReady == nil {
 		return debugReady
 	}
@@ -479,7 +505,58 @@ func (s goDebugServiceSpec) run(ctx context.Context, rt *Runtime) error {
 		Dir:   local.Worktree,
 		Env:   local.Env,
 		Grace: s.stopGrace,
+		GracefulStop: func(ctx context.Context) error {
+			// The debuggee can own a different process group. Let Delve kill
+			// and reap it before stopping the debugger, including during launch.
+			return pollUntil(ctx, func() error {
+				// Detach waits for Delve's target lock, which a running debuggee
+				// holds. Halt releases it before the kill/detach request.
+				if err := callDelve(ctx, listen, "Command", struct{ Name string }{"halt"}, &struct{}{}); err != nil {
+					return err
+				}
+				return detachDelve(ctx, listen)
+			})
+		},
 	})
+	return err
+}
+
+func detachDelve(ctx context.Context, address string) error {
+	done := make(chan error, 1)
+	go func() { done <- callDelve(ctx, address, "Detach", struct{ Kill bool }{true}, &struct{}{}) }()
+	ticker := time.NewTicker(DefaultReadyPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-ctx.Done():
+			// callDelve closes its connection on cancellation; join its reader.
+			return <-done
+		case <-ticker.C:
+			// Delve's startup --continue (or an editor) can resume between halt
+			// and detach. Halt on another connection to release the target lock
+			// while the detach request waits; both share the same grace budget.
+			_ = callDelve(ctx, address, "Command", struct{ Name string }{"halt"}, &struct{}{})
+		}
+	}
+}
+
+func callDelve(ctx context.Context, address, method string, args, reply any) error {
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
+	if err != nil {
+		return err
+	}
+	client := jsonrpc.NewClient(conn)
+	defer client.Close()
+	// A listener may exist before Delve starts accepting requests. Closing the
+	// connection on cancellation bounds both that wait and a stalled response.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	err = client.Call("RPCServer."+method, args, reply)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	return err
 }
 

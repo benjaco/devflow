@@ -53,7 +53,7 @@ func startTerminal(ctx context.Context, spec CommandSpec) (*Handle, error) {
 		onPrompt: spec.OnPrompt, prompts: spec.Prompts, failed: make(chan struct{}),
 		parsePrompt: spec.ParsePrompt,
 	}
-	handle := &Handle{cmd: cmd, stdin: input, done: make(chan struct{}), grace: defaultGrace(spec.Grace)}
+	handle := &Handle{cmd: cmd, stdin: input, done: make(chan struct{}), grace: defaultGrace(spec.Grace), gracefulStop: spec.GracefulStop}
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
