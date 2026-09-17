@@ -37,6 +37,16 @@ execution context cancelable without a short deadline: run-record I/O can exceed
 150 ms on a busy runner before ownership admission is checked. On watchdog
 failure, cancel and join the contender before releasing the owner's barrier.
 
+Daemon request-deadline propagation uses `testing/synctest` so native filesystem
+setup does not spend a short wall-clock execution budget before the callback
+starts. Check the task's exact deadline, absence of early cancellation, the
+`context.DeadlineExceeded` cause at expiry, and the persisted canceled result for
+attached and detached runs. Join detached execution beyond its admission response
+and allow bounded final evidence writes. Queued expiry remains separate coverage. Initial
+watch readiness is setup; keep its watchdog separate from flush deadlines and
+exact rebuild/restart counts, and include the last marker error and task status
+when readiness fails.
+
 Repository-repair tests use the real Git executable through argument-vector subprocesses on every supported OS. Test repositories isolate system/global Git configuration, use Git environment identity only for the baseline commit, then clear it to prove HEAD-derived attribution. Line-ending coverage writes exact LF/CRLF bytes through Go, including a DAG-prestaged path, and must prove default exclusion from both permitted and unexpected sets, mixed-commit membership, substantive-content preservation, and `--pedantic` opt-in. Use native temporary paths and Git pathspec magic directly; do not replace the coverage with shell scripts or a fake Git parser.
 
 Dirty-preflight coverage checks quoted, sorted console paths for staged, unstaged and untracked files in plain and GitHub presentation with full and issues JSON details. Keep stdout as one JSON result, preserve the Git index/HEAD and worktree, and verify that a bounded console sample reports exact displayed/total counts with the full-list Git command.

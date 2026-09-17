@@ -177,3 +177,41 @@ The final native CLI is `.devflow/bin/devflow.exe`. The implementation ledger is
 [`PROGRESS.md`](../PROGRESS.md). Native ConPTY input/output and SQL assertions do not establish
 clipboard behavior, pixel fidelity or the historical unexplained IDE-terminal
 exit. No claim is made about those manual terminal-host cases.
+
+## Windows CI deadline and watch-start follow-up
+
+[Windows job 105315689513](https://github.com/benjaco/devflow/actions/runs/35254804434/job/105315689513)
+on `95819ec` failed only `TestRunRequestDeadlineCancelsExecution/attached` and
+`TestWatchGeneratedOutputDoesNotHideSiblingSourceEdits/paths`. All other jobs,
+including Linux race, macOS, and both native Linux Payload/TUI Docker jobs,
+passed. The unchanged failing tests each pass ten local Windows repetitions;
+the hosted failures were at task/watch startup, before source-edit assertions.
+
+The deadline fixture assigned 500 ms to the entire operation, including durable
+run setup, then required the task to start. It now uses `testing/synctest` and a
+task-start barrier, checks the exact context deadline, verifies no cancellation
+immediately before expiry, and requires `context.DeadlineExceeded` at expiry.
+Both attached and detached cases verify the durable canceled run and error code.
+Detached execution is joined beyond its admission response, with a bounded wait
+for final evidence writes. Cleanup cancels and joins the request, including
+failed assertions. Queued deadline coverage remains separate.
+
+The watch-policy fixture now allows 30 seconds for initial setup while retaining
+the four-second flush watchdog and exact generation/service counts. Readiness
+failures include the marker error and current task status at the caller's line.
+A temporary five-second first-generation delay reproduces failure with the old
+four-second startup watchdog and passes with the corrected fixture, including
+all subsequent sibling-edit and no-extra-restart assertions. The injected delay
+was removed after this check. Production execution/deadline behavior is unchanged.
+
+Evidence under ignored `local/windows-audit/`: `deadline-watch-ci.log`,
+`deadline-watch-ci-jobs.jsonl`, `deadline-watch-baseline.log`, `deadline-clock.log`
+and `watch-startup-delayed-{red,green}.log`. Both reported tests pass five race
+repetitions (`deadline-watch-race.log`); the final running-deadline and queued-expiry
+cases pass ten race repetitions (`deadline-final-race.log`). Complete daemon and
+engine normal suites pass (`deadline-watch-packages.jsonl`), followed by the
+complete daemon suite after the explicit execution join (`deadline-daemon-final.log`).
+All these runs set both E2E flags. Affected-package
+vet, formatting and diff checks pass (`deadline-watch-quality.json`). The follow-up
+changes only fixtures and documentation; a hosted Windows run of the correction
+remains pending.

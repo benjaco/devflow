@@ -3734,6 +3734,7 @@ func waitForBool(timeout time.Duration, fn func() bool) bool {
 }
 
 func waitForEngineWatchReady(t *testing.T, worktree string) string {
+	t.Helper()
 	return waitForEngineWatchReadyWithin(t, worktree, 4*time.Second)
 }
 
@@ -3743,10 +3744,13 @@ func waitForEngineWatchReadyWithin(t *testing.T, worktree string, timeout time.D
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, timeout, func() bool {
-		_, err := os.Stat(instance.FlushWatchReadyPath(realWorktree, instanceID))
-		return err == nil
-	})
+	var markerErr error
+	if !waitForBool(timeout, func() bool {
+		_, markerErr = os.Stat(instance.FlushWatchReadyPath(realWorktree, instanceID))
+		return markerErr == nil
+	}) {
+		t.Fatalf("watch did not become ready within %s: marker error=%v; status=%s", timeout, markerErr, readStatusForFailure(realWorktree, instanceID))
+	}
 	return instanceID
 }
 

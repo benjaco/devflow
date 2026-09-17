@@ -4,15 +4,21 @@ Last updated: 2026-09-17
 
 ## Current Status
 
-- Phase: native Windows validation and Payload migration/TUI follow-up
-- State: native audit complete. All 32 test packages have passing normal and race verification after corrected-package reruns; real Payload engine/TUI workflows and Docker integrations pass.
-- Scope: fix failing tests first, verify Payload workflows through ConPTY and the TUI, remove avoidable Windows skips, and document native evidence and remaining platform limits.
+- Phase: Windows CI deadline and watch-start fixture correction
+- State: both reported test fixtures corrected; full daemon/engine packages and repeated focused race checks pass natively. Hosted Windows confirmation awaits the next CI run.
+- Scope: remove setup-speed assumptions while preserving request deadline, queued-expiry, flush and exact rebuild/restart assertions; the native audit and Payload/Docker verification remain recorded below.
 
 ## In Progress
 
-- None. Native terminal-host clipboard/rendering and the historical unexplained IDE exit remain manual follow-ups.
+- None locally. Confirm the correction in the next hosted Windows CI run. Native terminal-host clipboard/rendering and the historical unexplained IDE exit remain manual follow-ups.
 
 ## Completed
+
+- Windows CI request-deadline/watch-start fixture correction:
+  - [Windows job 105315689513](https://github.com/benjaco/devflow/actions/runs/35254804434/job/105315689513) failed only the attached request-deadline and generated-output `paths` startup cases; all other jobs, including Linux race and Payload/TUI Docker on both architectures, passed. Both unchanged tests pass ten local repetitions
+  - use controlled time for running-request deadlines, asserting the exact deadline, no early cancellation, deadline cause and durable canceled evidence for attached/detached runs. Join detached execution beyond its admission response, preserve the bounded finalization wait, and cancel/join on failure. Queued expiry remains separate
+  - give watch-policy setup its own 30-second watchdog and report marker/status evidence at the caller. A temporary five-second startup delay fails with the old four-second watchdog and passes with the correction; flush budgets and exact edit/restart assertions stay intact. No production behavior changes
+  - full daemon/engine normal suites pass; both reported cases pass five race repetitions, and final deadline/queued-expiry cases pass ten race repetitions. Both E2E flags were enabled. Affected-package vet, formatting and diff checks pass. Evidence: `docs_contributors/windows-verification.md` and ignored `local/windows-audit/deadline-*`, `watch-startup-delayed-*`
 
 - Rebased the Windows audit work onto `origin/main` (`c772a61`), preserving the upstream repository-repair diagnostics and all forty changed/new audit files. Only this ledger needed manual conflict resolution. Full repository-repair race tests, CLI repository-repair/upgrade-streaming race tests, affected-package vet, CLI/example builds, version JSON and formatting/diff checks pass; the native source binary is rebuilt. Follow-up evidence: `local/windows-audit/rebase-*` and the Windows verification document.
 
