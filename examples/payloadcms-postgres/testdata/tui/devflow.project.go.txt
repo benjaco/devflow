@@ -1,0 +1,27 @@
+package main
+
+import (
+	"context"
+	"time"
+
+	"github.com/benjaco/devflow/pkg/database"
+	"github.com/benjaco/devflow/pkg/project"
+)
+
+func init() {
+	project.Register(project.Define(func(_ context.Context, b *project.Builder) error {
+		b.Name("payload-tui-e2e").DefaultTarget("up")
+		b.RequiredCLIs("node", "npm").RequiredEnv("DATABASE_URL")
+		b.Env("NEXT_TELEMETRY_DISABLED", "1").Env("NODE_OPTIONS", "--no-deprecation")
+		install := b.Task("install").Command("npm", "ci", "--no-audit", "--no-fund").
+			Inputs("package.json", "package-lock.json").Outputs("node_modules").Stamp()
+		payload := database.PayloadCMS("payload").Config("payload.config.mjs").SchemaInputs("collections")
+		app := b.Service("app").DependsOn(install).
+			Command("node", "node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1").
+			Env("PORT", b.Port("app")).ReadyHTTP("app", "/health", 200).
+			ReadyTimeout(60 * time.Second).RestartOnInputChange()
+		payload.ConfigureDevService(app)
+		b.Target("up", app)
+		return nil
+	}))
+}

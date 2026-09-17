@@ -53,7 +53,7 @@ func PayloadCMS(name string) *PayloadCMSComponent {
 		name:          name,
 		configPath:    "src/payload.config.ts",
 		migrationsDir: "src/migrations",
-		schemaInputs:  []any{"src/collections", "src/globals", "src/fields"},
+		schemaInputs:  []any{"src/collections", "src/globals", "src/fields", "src/blocks"},
 		packageInputs: []any{"package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"},
 		commandName:   "npx",
 		commandArgs:   []string{"payload"},
@@ -147,8 +147,10 @@ func (p *PayloadCMSComponent) ConfigureDevService(service *project.TaskBuilder) 
 		return service
 	}
 	p.devServices[service] = true
+	p.migrationAction.Invalidates(service)
 	inputs := p.schemaPushInputs()
 	service.
+		ConfigureCommand(p.configureInteraction).
 		Inputs(inputs...).
 		InputEnv("DATABASE_URL").
 		BeforeRun(p.prepareSchemaPush).
@@ -171,6 +173,8 @@ func (p *PayloadCMSComponent) Migrations(b *project.Builder) *project.TaskBuilde
 				return err
 			}
 			spec := p.commandSpec("migrate")
+			spec.Env = rt.EnvWith(map[string]string{"PAYLOAD_CONFIG_PATH": rt.Abs(p.configPath)})
+			p.configureInteraction(&spec)
 			if err := rt.RunCmdSpec(ctx, spec); err != nil {
 				rt.EmitLogLine("stderr", p.name+"_migrations failed: "+err.Error())
 				return err
@@ -179,6 +183,7 @@ func (p *PayloadCMSComponent) Migrations(b *project.Builder) *project.TaskBuilde
 			return nil
 		})
 	p.requiredCLIs(p.migrationsTask)
+	p.migrationAction.Invalidates(p.migrationsTask)
 	return p.migrationsTask
 }
 
@@ -201,17 +206,13 @@ func (p *PayloadCMSComponent) NewMigration(b *project.Builder) *project.TaskBuil
 			if name == "" {
 				return fmt.Errorf("%s is required", p.migrationEnv)
 			}
-			if err := p.ensureRuntime(ctx, rt); err != nil {
-				rt.EmitLogLine("stderr", p.name+"_new_migration database failed: "+err.Error())
-				return err
-			}
 			args := []string{"migrate:create", name}
 			if isTruthy(firstNonEmptyDatabase(rt.Env[p.forceEnv], os.Getenv(p.forceEnv))) {
 				args = append(args, "--force-accept-warning")
 			}
 			spec := p.commandSpec(args...)
-			spec.Interactive = len(p.prompts) > 0
-			spec.Prompts = append([]process.PromptSpec(nil), p.prompts...)
+			spec.Env = rt.EnvWith(map[string]string{"PAYLOAD_CONFIG_PATH": rt.Abs(p.configPath)})
+			p.configureInteraction(&spec)
 			runner := project.CommandOutputTasklet{
 				Command:         spec,
 				RequiredFiles:   []string{path.Join(filepath.ToSlash(p.migrationsDir), "**", "*")},
@@ -253,6 +254,9 @@ type payloadSchemaPushState struct {
 func (p *PayloadCMSComponent) prepareSchemaPush(ctx context.Context, rt *project.Runtime) error {
 	if rt == nil || rt.Instance == nil || strings.TrimSpace(rt.Instance.ID) == "" {
 		return fmt.Errorf("prepare PayloadCMS schema push: runtime instance is required")
+	}
+	if err := p.ensureRuntime(ctx, rt); err != nil {
+		return fmt.Errorf("prepare PayloadCMS development database: %w", err)
 	}
 	current, err := p.schemaPushFingerprint(ctx, rt)
 	if err != nil {
@@ -439,9 +443,19 @@ func (p *PayloadCMSComponent) registerMigrationAction(b *project.Builder) {
 		}).
 		Writes(p.migrationsDir).
 		Touches("database." + p.name).
-		Invalidates(p.name + "_migrations").
 		RelaunchPreviousTargetAfterSuccess().
 		Alias(p.name + ":migration:create")
+	if p.migrationsTask != nil {
+		action.Invalidates(p.migrationsTask)
+	}
+	services := make([]string, 0, len(p.devServices))
+	for service := range p.devServices {
+		services = append(services, service.Name())
+	}
+	sort.Strings(services)
+	for _, service := range services {
+		action.Invalidates(service)
+	}
 	p.migrationAction = action
 }
 
@@ -484,8 +498,6 @@ func defaultPayloadPrompts() []process.PromptSpec {
 	return []process.PromptSpec{
 		{
 			Patterns: []string{
-				"DATA LOSS WARNING",
-				"data loss",
 				"Accept warnings and create migration? [y/N]: ",
 				"Accept warnings and push schema to database? [y/N]: ",
 				"Continue? [y/N]: ",

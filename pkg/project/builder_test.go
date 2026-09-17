@@ -21,6 +21,36 @@ func TestCommandSignatureDistinguishesTerminalExecution(t *testing.T) {
 	}
 }
 
+func TestCommandConfigurationSurvivesBuilderCallOrder(t *testing.T) {
+	var signatures []string
+	for _, before := range []bool{true, false} {
+		p := Define(func(_ context.Context, b *Builder) error {
+			b.Name("command-config")
+			b.RequiredCLIs("terminal-tool")
+			app := b.Service("app")
+			configure := func(spec *process.CommandSpec) { spec.Terminal = true; spec.Name = "terminal-tool" }
+			if before {
+				app.ConfigureCommand(configure)
+			}
+			app.Command("tool", "dev")
+			if !before {
+				app.ConfigureCommand(configure)
+			}
+			b.Target("up", app)
+			return nil
+		})
+		app := p.Tasks()[0]
+		if len(app.RequiredCLIs) != 1 || app.RequiredCLIs[0] != "terminal-tool" {
+			t.Fatalf("command metadata lost configuration: %+v", app)
+		}
+		signatures = append(signatures, app.Signature)
+	}
+	want := commandSignature(process.CommandSpec{Name: "terminal-tool", Args: []string{"dev"}, Terminal: true}, "", nil)
+	if signatures[0] != want || signatures[1] != want {
+		t.Fatalf("command configuration depends on builder order: %v", signatures)
+	}
+}
+
 func TestBuilderDefinesProjectWithCachedOutputTask(t *testing.T) {
 	p := Define(func(ctx context.Context, b *Builder) error {
 		b.Name("demo")

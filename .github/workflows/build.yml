@@ -163,3 +163,15 @@ jobs:
         env:
           DEVFLOW_E2E_DOCKER: "1"
         run: go test -count=1 -timeout=40m ./pkg/database -run 'TestDocker(EngineArchitectureMatchesHost|RuntimeServiceLifecycle|PostgresDumpSourcePolicyClonesSchemaAndDataFromNonDefaultPort|PostGISRuntimeSpatialQuery)E2E' -v
+
+      - name: Set up Node for Payload workflow tests
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: examples/payloadcms-postgres/testdata/workflow/package-lock.json
+
+      - name: Run real Payload and Next workflow and terminal TUI tests
+        env:
+          DEVFLOW_E2E_PAYLOAD: "1"
+        run: go test -count=1 -timeout=25m ./examples/payloadcms-postgres -run 'TestPayload(TUI)?WorkflowE2E' -v

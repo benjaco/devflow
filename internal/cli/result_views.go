@@ -192,6 +192,11 @@ func (a *App) resultView(value any) any {
 			continue
 		}
 		prompt.Message = sample.text(prompt.Message)
+		// Choice labels and indexes must remain exact to be answerable. Compact
+		// output points to full prompt inspection when the list cannot fit.
+		if !sample.identities(prompt.Choices...) {
+			prompt.Choices = nil
+		}
 		view.PendingPrompts = append(view.PendingPrompts, prompt)
 	}
 	view.Truncated.PendingPrompts = len(view.PendingPrompts) < len(prompts)

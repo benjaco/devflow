@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/benjaco/devflow/pkg/api"
@@ -23,7 +24,7 @@ func (e *Engine) waitForPromptAnswer(ctx context.Context, req Request, instanceI
 	}
 	prompt, err := instance.CreatePrompt(waitCtx, req.Worktree, instanceID, api.Prompt{
 		RunID: req.RunID, Task: taskName, AttemptID: attemptID,
-		Kind: string(request.Kind), Message: request.Prompt, Secret: request.Secret,
+		Kind: string(request.Kind), Message: request.Prompt, Secret: request.Secret, Choices: request.Choices,
 		State: state, Deadline: deadline,
 	})
 	if err != nil {
@@ -41,14 +42,14 @@ func (e *Engine) waitForPromptAnswer(ctx context.Context, req Request, instanceI
 		defer cleanupCancel()
 		err = errors.Join(err, instance.ClosePrompt(cleanupCtx, req.Worktree, instanceID, req.RunID, prompt.ID, state))
 		if waiting {
-			err = errors.Join(err, req.session.setWaiting(-1))
+			err = errors.Join(err, req.session.setWaiting(attemptID, -1))
 		}
 		if err != nil {
 			e.publishPromptEvent(req, instanceID, prompt, api.EventInteractionStop, err)
 		}
 	}()
 	if waiting {
-		if err := req.session.setWaiting(1); err != nil {
+		if err := req.session.setWaiting(attemptID, 1); err != nil {
 			return process.PromptResponse{}, err
 		}
 	}
@@ -73,6 +74,9 @@ func (e *Engine) waitForPromptAnswer(ctx context.Context, req Request, instanceI
 			if answer == nil {
 				continue
 			}
+			if answer.Cancel {
+				return response, &api.CommandError{Code: "interaction_cancelled", Phase: "execution", Message: "prompt cancelled by operator"}
+			}
 			if answer.Confirm != nil {
 				response.Value = "n"
 				if *answer.Confirm {
@@ -80,6 +84,8 @@ func (e *Engine) waitForPromptAnswer(ctx context.Context, req Request, instanceI
 				}
 			} else if answer.Text != nil {
 				response.Value = *answer.Text
+			} else if answer.Choice != nil {
+				response.Value = strconv.Itoa(*answer.Choice)
 			}
 			e.publishPromptEvent(req, instanceID, prompt, api.EventInteractionAck, nil)
 			return response, nil
@@ -87,13 +93,35 @@ func (e *Engine) waitForPromptAnswer(ctx context.Context, req Request, instanceI
 	}
 }
 
-func (s *runSession) setWaiting(delta int) error {
+type promptWait struct {
+	count int
+	since time.Time
+	total time.Duration
+}
+
+func (s *runSession) setWaiting(attemptID string, delta int) error {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pendingPrompts += delta
+	if s.promptWaits == nil {
+		s.promptWaits = map[string]promptWait{}
+	}
+	wait := s.promptWaits[attemptID]
+	if wait.count == 0 && delta > 0 {
+		wait.since = time.Now()
+	}
+	wait.count += delta
+	if wait.count == 0 {
+		wait.total += time.Since(wait.since)
+	}
+	s.promptWaits[attemptID] = wait
+	if s.promptChanged != nil {
+		close(s.promptChanged)
+	}
+	s.promptChanged = make(chan struct{})
 	s.record.State = api.RunRunning
 	if s.pendingPrompts > 0 {
 		s.record.State = api.RunWaiting
@@ -102,12 +130,30 @@ func (s *runSession) setWaiting(delta int) error {
 	return s.err
 }
 
+// Only this attempt's operator wait pauses its startup budget. The operation
+// deadline and each prompt's own deadline keep running independently.
+func (s *runSession) promptTiming(attemptID string) (time.Duration, bool, <-chan struct{}) {
+	if s == nil {
+		return 0, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.promptChanged == nil {
+		s.promptChanged = make(chan struct{})
+	}
+	wait := s.promptWaits[attemptID]
+	if wait.count > 0 {
+		wait.total += time.Since(wait.since)
+	}
+	return wait.total, wait.count > 0, s.promptChanged
+}
+
 func (e *Engine) publishPromptEvent(req Request, instanceID string, prompt api.Prompt, eventType api.EventType, err error) {
 	evt := api.Event{
 		TS: process.NowRFC3339Nano(), Type: eventType,
 		InstanceID: instanceID, RunID: req.RunID, Worktree: req.Worktree, Target: req.Target,
 		Task: prompt.Task, AttemptID: prompt.AttemptID, Mode: req.Mode,
-		PromptID: prompt.ID, PromptKind: prompt.Kind, Prompt: prompt.Message, PromptSecret: prompt.Secret,
+		PromptID: prompt.ID, PromptKind: prompt.Kind, Prompt: prompt.Message, PromptSecret: prompt.Secret, PromptChoices: prompt.Choices,
 	}
 	if err != nil {
 		evt.Error = err.Error()

@@ -139,13 +139,16 @@ func (a *App) promptsCmd(args []string) error {
 	instanceID := fs.String("instance", "", "")
 	runID := fs.String("run", "", "")
 	var task, attemptID, confirm, answerText string
-	var fromStdin bool
+	var fromStdin, cancelPrompt bool
+	var choice int
 	if action == "respond" {
 		fs.StringVar(&task, "task", "", "")
 		fs.StringVar(&attemptID, "attempt", "", "")
 		fs.StringVar(&confirm, "confirm", "", "")
 		fs.StringVar(&answerText, "text", "", "")
 		fs.BoolVar(&fromStdin, "stdin", false, "")
+		fs.IntVar(&choice, "choice", 0, "")
+		fs.BoolVar(&cancelPrompt, "cancel", false, "")
 	}
 	if err := a.parseFlags(fs, args[1:]); err != nil {
 		return err
@@ -176,29 +179,40 @@ func (a *App) promptsCmd(args []string) error {
 			if _, err := fmt.Fprintf(a.Stdout, "%s  %-10s %s  %s: %s\n", prompt.ID, prompt.State, prompt.Task, prompt.Kind, prompt.Message); err != nil {
 				return err
 			}
+			for index, label := range prompt.Choices {
+				if _, err := fmt.Fprintf(a.Stdout, "  %d: %s\n", index, label); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	}
 	answer := api.PromptAnswer{RunID: *runID, Task: task, AttemptID: attemptID, PromptID: fs.Arg(0)}
-	var confirmSet, textSet bool
+	var confirmSet, textSet, choiceSet bool
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "confirm":
 			confirmSet = true
 		case "text":
 			textSet = true
+		case "choice":
+			choiceSet = true
 		}
 	})
 	count := 0
-	for _, selected := range []bool{confirmSet, textSet, fromStdin} {
+	for _, selected := range []bool{confirmSet, textSet, fromStdin, choiceSet, cancelPrompt} {
 		if selected {
 			count++
 		}
 	}
 	if count != 1 {
-		return evidenceArguments("provide exactly one of --confirm, --text or --stdin")
+		return evidenceArguments("provide exactly one of --confirm, --text, --stdin, --choice or --cancel")
 	}
 	switch {
+	case cancelPrompt:
+		answer.Cancel = true
+	case choiceSet:
+		answer.Choice = &choice
 	case confirmSet:
 		if confirm != "true" && confirm != "false" {
 			return evidenceArguments("--confirm must be true or false")

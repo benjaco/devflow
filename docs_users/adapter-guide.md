@@ -263,7 +263,7 @@ db := database.Postgres("payload").PortName("postgres")
 payload := database.PayloadCMS("payload").
     Config("src/payload.config.ts").
     MigrationDir("src/migrations").
-    SchemaInputs("src/collections", "src/globals", "src/fields").
+    SchemaInputs("src/collections", "src/globals", "src/fields", "src/blocks").
     Database(db)
 
 npmInstall := b.Task("npm_install").
@@ -271,12 +271,11 @@ npmInstall := b.Task("npm_install").
     Inputs("package.json", "package-lock.json").
     Stamp()
 
-migrations := payload.Migrations(b).DependsOn(npmInstall)
 payload.NewMigration(b).DependsOn(npmInstall)
 
 app := b.Service("app").
     Command("npm", "run", "dev").
-    DependsOn(migrations).
+    DependsOn(npmInstall).
     Inputs("src", "package.json", "package-lock.json").
     InputEnv("DATABASE_URL", "PAYLOAD_SECRET", "PORT").
     Env("PORT", b.Port("app")).
@@ -295,9 +294,9 @@ db: postgresAdapter({
 })
 ```
 
-`ConfigureDevService(app)` fingerprints the Payload config, configured schema inputs, package manifest/common lockfiles, and a password-free database identity before every service start. It sets `PAYLOAD_SCHEMA_PUSH=true` on the first start or after one of those inputs changes, and `false` for unrelated restarts. The applied fingerprint is written under the worktree's per-instance `.devflow/state` only after the service passes its declared readiness check. A configured service must therefore define `Ready`, `ReadyHTTP`, `ReadyTCP`, or `ReadyFile`.
+`ConfigureDevService(app)` fingerprints the Payload config, configured schema inputs, package manifest/common lockfiles, and a password-free database identity before every service start. It sets `PAYLOAD_SCHEMA_PUSH=true` on the first start or after one of those inputs changes, and `false` for unrelated restarts. The applied fingerprint is written under the worktree's per-instance `.devflow/state` only after the service passes its declared readiness check. Readiness must verify Payload database initialization, for example an HTTP endpoint that awaits `getPayload`; checking only Next’s listening port is insufficient. The helper also ensures the configured managed Postgres runtime before launch.
 
-The same schema inputs are direct service inputs, so watch mode restarts the app with `true` when a collection/global/field/config module changes. Once that restart is ready, later non-schema restarts return to `false`. The default schema module paths are `src/collections`, `src/globals`, and `src/fields`; configure `SchemaInputs(...)` or `AddSchemaInputs(...)` for blocks, plugins, or reusable Payload config modules elsewhere. The default package inputs cover `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, and `bun.lockb`; use `PackageInputs(...)` for another workspace layout. Passwords and the full `DATABASE_URL` are never stored in the schema state.
+The same schema inputs are direct service inputs, so watch mode restarts the app with `true` when a collection/global/field/block/config module changes. Once that restart is ready, later non-schema restarts return to `false`. The default schema module paths are `src/collections`, `src/globals`, `src/fields`, and `src/blocks`; configure `SchemaInputs(...)` or `AddSchemaInputs(...)` for plugins or reusable Payload config modules elsewhere. The default package inputs cover `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, and `bun.lockb`; use `PackageInputs(...)` for another workspace layout. Passwords and the full `DATABASE_URL` are never stored in the schema state.
 
 By default, the component uses `npx payload migrate` and `npx payload migrate:create <name>`. If your project wraps Payload in an npm script, use:
 
@@ -305,7 +304,13 @@ By default, the component uses `npx payload migrate` and `npx payload migrate:cr
 payload.Command("npm", "run", "payload", "--")
 ```
 
-Payload migration creation may ask for confirmations around destructive changes. The component declares those prompts so the TUI and daemon can ask the user. It also requires a newly created regular file under the configured migration directory: a zero exit without a new migration is retried instead of reported as success. Existing migrations are preserved; the component never enables output-directory cleanup for migration authoring. Normal boot/watch targets should depend on `payload.Migrations(b)`, not `payload.NewMigration(b)`.
+`ConfigureDevService` also enables terminal input and structured prompts on the service’s declared `.Command(...)` or `.CommandSpec(...)`, regardless of builder call order. Drizzle’s create/rename menus appear as selectable lists in the TUI; warning and blank-migration questions appear as confirmations. A migration may ask equivalent questions for UP and DOWN SQL. The service readiness timer pauses while you answer, while the operation deadline and five-minute prompt limit still apply. Custom `.Run(...)` callbacks own their process configuration.
+
+Configured development services are associated with the component’s migration action, so selecting the app and pressing `m`/`F4` finds that action even when the project has several components. Only declared migration tasks appear in the action’s invalidation metadata.
+
+Migration creation uses snapshots and does not require Postgres to be running. It honors `Config(...)` through `PAYLOAD_CONFIG_PATH` and requires a new file in `MigrationDir(...)`; the Payload config must use that same migration directory. A declined question stops immediately, without retrying. Unexpected successful exits without a file still use bounded output convergence, preserving all migration history. `--force-accept-warning` does not decide create versus rename.
+
+Do not put `payload.Migrations(b)` in the dependency chain of a service that uses development push against the same database. Payload documents these as separate workflows. Apply/check migrations in a separate database, or set `push: false` and use migrations exclusively. The [Payload example](../examples/payloadcms-postgres/devflow.project.go) keeps development on its managed DB and requires an explicit `PAYLOAD_MIGRATION_DATABASE_URL` for its separate `migrate` target.
 
 ## Required CLI Installation
 
@@ -447,7 +452,7 @@ Observe the supplied callback context in external calls and loops. `run`, `watch
 
 ## Explicit Interactive Actions
 
-Prompting commands should be explicit authoring or operator actions, not hidden in normal `up`/watch paths. For custom tools, use interactive command specs:
+Migration authoring and resets remain explicit operator actions. Questions that arise during normal development, such as Payload schema-push conflicts, must use the structured prompt path so operators can answer them. For custom tools, use interactive command specs:
 
 ```go
 task := b.Task("dangerous_authoring_action").

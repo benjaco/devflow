@@ -45,6 +45,7 @@ type Event struct {
 	AffectedTasks      []string  `json:"affectedTasks,omitempty"`
 	PromptID           string    `json:"promptId,omitempty"`
 	PromptKind         string    `json:"promptKind,omitempty"`
+	PromptChoices      []string  `json:"promptChoices,omitempty"`
 	Prompt             string    `json:"prompt,omitempty"`
 	Error              string    `json:"error,omitempty"`
 	Success            *bool     `json:"success,omitempty"`

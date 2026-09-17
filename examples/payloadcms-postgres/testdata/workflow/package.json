@@ -1,0 +1,12 @@
+{
+  "name": "devflow-payload-workflow-test",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "payload": "3.88.0",
+    "@payloadcms/db-postgres": "3.88.0",
+    "next": "15.4.11",
+    "react": "19.1.2",
+    "react-dom": "19.1.2"
+  }
+}

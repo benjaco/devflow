@@ -90,7 +90,7 @@ func TestServiceReadinessDoesNotCommitAfterServiceExit(t *testing.T) {
 			return nil
 		},
 	}
-	err := (&Engine{}).awaitServiceReady(context.Background(), &project.Runtime{}, task, handle)
+	err := (&Engine{}).awaitServiceReady(context.Background(), &project.Runtime{}, task, handle, nil)
 	var earlyExit *serviceEarlyExitError
 	if !errors.As(err, &earlyExit) || committed {
 		t.Fatalf("dead service passed readiness: error=%v afterReady=%t", err, committed)

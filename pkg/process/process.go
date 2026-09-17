@@ -21,6 +21,7 @@ type PromptKind string
 const (
 	PromptConfirm PromptKind = "confirm"
 	PromptText    PromptKind = "text"
+	PromptSelect  PromptKind = "select"
 )
 
 type PromptSpec struct {
@@ -33,10 +34,22 @@ type PromptSpec struct {
 }
 
 type PromptRequest struct {
-	Prompt string
-	Kind   PromptKind
-	Secret bool
+	Prompt  string
+	Kind    PromptKind
+	Secret  bool
+	Choices []string
 }
+
+// PromptMatch describes a rendered question and translates an explicit answer
+// into the child's input protocol. Input returns exact bytes, without an added newline.
+type PromptMatch struct {
+	Request PromptRequest
+	Input   func(PromptResponse) (string, error)
+}
+
+// PromptParser recognizes tool-specific questions in bounded, settled output.
+// It must return nil for incomplete output and completed prompt redraws.
+type PromptParser func(string) *PromptMatch
 
 type PromptResponse struct {
 	Value string
@@ -54,9 +67,10 @@ type CommandSpec struct {
 	ReadyWait   time.Duration
 	Interactive bool
 	// Terminal gives a prompting child its own terminal; output streams are merged.
-	Terminal bool
-	Prompts  []PromptSpec
-	OnPrompt func(PromptRequest) (PromptResponse, error)
+	Terminal    bool
+	Prompts     []PromptSpec
+	OnPrompt    func(PromptRequest) (PromptResponse, error)
+	ParsePrompt PromptParser
 }
 
 type Result struct {
@@ -317,7 +331,7 @@ func runInteractive(ctx context.Context, spec CommandSpec) (Result, error) {
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return Result{ExitCode: exitErr.ExitCode()}, fmt.Errorf("%s exited with code %d", spec.Name, exitErr.ExitCode())
+			return Result{ExitCode: exitErr.ExitCode()}, fmt.Errorf("%s exited with code %d: %w", spec.Name, exitErr.ExitCode(), err)
 		}
 		return Result{}, err
 	}
@@ -356,12 +370,13 @@ func startInteractive(ctx context.Context, spec CommandSpec) (*Handle, error) {
 	waitCh := make(chan error, 1)
 	var readWG sync.WaitGroup
 	reader := &interactiveReader{
-		stdin:    stdin,
-		writer:   writer,
-		onLine:   spec.OnLine,
-		onPrompt: spec.OnPrompt,
-		prompts:  spec.Prompts,
-		failed:   make(chan struct{}),
+		stdin:       stdin,
+		writer:      writer,
+		onLine:      spec.OnLine,
+		onPrompt:    spec.OnPrompt,
+		prompts:     spec.Prompts,
+		parsePrompt: spec.ParsePrompt,
+		failed:      make(chan struct{}),
 	}
 	readWG.Add(2)
 	go func() {
@@ -381,6 +396,7 @@ func startInteractive(ctx context.Context, spec CommandSpec) (*Handle, error) {
 	}
 	go func() {
 		readWG.Wait()
+		reader.finish()
 		// Another command or callback may append to this attempt next. Close
 		// the retained line only after both readers finish, without a live event.
 		if reader.logPartial {
@@ -417,6 +433,10 @@ type interactiveReader struct {
 	onLine           func(string, string)
 	onPrompt         func(PromptRequest) (PromptResponse, error)
 	prompts          []PromptSpec
+	parsePrompt      PromptParser
+	promptTimer      *time.Timer
+	finished         bool
+	promptGeneration uint64
 	promptIndex      int
 	failed           chan struct{}
 	outputSuppressed bool
@@ -450,8 +470,8 @@ func (r *interactiveReader) consumeChunk(stream, chunk string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.recentBuf += chunk
-	if len(r.recentBuf) > 4096 {
-		r.recentBuf = r.recentBuf[len(r.recentBuf)-4096:]
+	if len(r.recentBuf) > 64<<10 {
+		r.recentBuf = r.recentBuf[len(r.recentBuf)-(64<<10):]
 	}
 	if !r.outputSuppressed {
 		r.writeLogChunk(stream, chunk)
@@ -474,7 +494,33 @@ func (r *interactiveReader) consumeChunk(stream, chunk string) {
 			*lineBuf = (*lineBuf)[idx+1:]
 		}
 	}
-	r.maybePrompt()
+	if r.parsePrompt != nil {
+		// Menus have no trailing delimiter and can span many pipe/PTY reads.
+		// Wait for the render to settle before publishing its complete choices.
+		if r.promptTimer != nil {
+			r.promptTimer.Stop()
+		}
+		r.promptGeneration++
+		generation := r.promptGeneration
+		r.promptTimer = time.AfterFunc(100*time.Millisecond, func() {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if !r.finished && generation == r.promptGeneration {
+				r.maybePrompt()
+			}
+		})
+	} else {
+		r.maybePrompt()
+	}
+}
+
+func (r *interactiveReader) finish() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.finished = true
+	if r.promptTimer != nil {
+		r.promptTimer.Stop()
+	}
 }
 
 func (r *interactiveReader) writeLogChunk(stream, chunk string) {
@@ -504,7 +550,36 @@ func (r *interactiveReader) writeLogChunk(stream, chunk string) {
 
 func (r *interactiveReader) maybePrompt() {
 	// Retain teardown output without reopening an interaction that already failed.
-	if r.err() != nil || r.promptIndex >= len(r.prompts) {
+	if r.err() != nil {
+		return
+	}
+	if r.parsePrompt != nil {
+		if match := r.parsePrompt(r.recentBuf); match != nil {
+			if r.onPrompt == nil {
+				r.setErr(fmt.Errorf("interactive prompt encountered without handler: %s", match.Request.Prompt))
+				return
+			}
+			response, err := r.onPrompt(match.Request)
+			if err == nil {
+				var input string
+				if match.Input == nil {
+					err = fmt.Errorf("prompt parser returned no input encoder")
+				} else {
+					input, err = match.Input(response)
+				}
+				if err == nil {
+					r.hideSecretOutput(match.Request.Secret)
+					_, err = io.WriteString(r.stdin, input)
+				}
+			}
+			if err != nil {
+				r.setErr(err)
+			}
+			r.recentBuf = ""
+			return
+		}
+	}
+	if r.promptIndex >= len(r.prompts) {
 		return
 	}
 	spec := r.prompts[r.promptIndex]
@@ -526,7 +601,19 @@ func (r *interactiveReader) maybePrompt() {
 		r.setErr(err)
 		return
 	}
-	if spec.Secret && !r.outputSuppressed {
+	r.hideSecretOutput(spec.Secret)
+	if _, err := io.WriteString(r.stdin, resp.Value+"\n"); err != nil {
+		r.setErr(err)
+		return
+	}
+	if !spec.Repeat {
+		r.promptIndex++
+	}
+	r.recentBuf = ""
+}
+
+func (r *interactiveReader) hideSecretOutput(secret bool) {
+	if secret && !r.outputSuppressed {
 		// A child can transform or split an echoed answer. Suppress subsequent
 		// output before writing the secret, while still detecting later prompts.
 		r.outputSuppressed = true
@@ -540,14 +627,6 @@ func (r *interactiveReader) maybePrompt() {
 			r.onLine("stderr", marker)
 		}
 	}
-	if _, err := io.WriteString(r.stdin, resp.Value+"\n"); err != nil {
-		r.setErr(err)
-		return
-	}
-	if !spec.Repeat {
-		r.promptIndex++
-	}
-	r.recentBuf = ""
 }
 
 func (p PromptSpec) match(value string) string {

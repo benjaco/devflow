@@ -879,7 +879,7 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 			return taskResult{name: task.Name, err: err}
 		}
 		task.Ready = state.trackAttemptReadiness(rt.AttemptID, task.Ready)
-		if err := e.awaitServiceReady(ctx, taskRuntime, task, handle); err != nil {
+		if err := e.awaitServiceReady(ctx, taskRuntime, task, handle, state.req.session); err != nil {
 			err = errors.Join(err, state.stopServices(state.req, []string{task.Name}))
 			state.setErrorState(task.Name, ctx, "", err, 0)
 			return taskResult{name: task.Name, err: err}
@@ -892,14 +892,16 @@ func (e *Engine) executeTask(ctx context.Context, state *runState, rt *project.R
 	return taskResult{name: task.Name}
 }
 
-func (e *Engine) awaitServiceReady(ctx context.Context, rt *project.Runtime, task project.Task, handle project.ServiceHandle) error {
+func (e *Engine) awaitServiceReady(ctx context.Context, rt *project.Runtime, task project.Task, handle project.ServiceHandle, session *runSession) error {
 	if task.Ready != nil {
 		timeout := task.ReadyTimeout
 		if timeout <= 0 {
 			timeout = 10 * time.Second
 		}
-		readyCtx, cancel := context.WithTimeout(ctx, timeout)
+		readyCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
+		started := time.Now()
+		waitBefore, _, _ := session.promptTiming(rt.AttemptID)
 
 		readyCh := make(chan error, 1)
 		exitCh := make(chan error, 1)
@@ -910,31 +912,57 @@ func (e *Engine) awaitServiceReady(ctx context.Context, rt *project.Runtime, tas
 			exitCh <- handle.Wait()
 		}()
 
-		select {
-		case err := <-readyCh:
-			if err != nil {
-				return err
-			}
-			if err := readyCtx.Err(); err != nil {
-				return err
-			}
-			// A successful probe can race the process exit. Do not commit
-			// AfterReady state for a service that is already known to be dead.
-			select {
-			case err := <-exitCh:
-				return &serviceEarlyExitError{cause: err}
-			default:
-			}
-			if !handle.Alive() {
-				return &serviceEarlyExitError{}
-			}
-		case err := <-exitCh:
-			return &serviceEarlyExitError{cause: err}
-		case <-readyCtx.Done():
-			if errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		ready := false
+		for {
+			wait, waiting, changed := session.promptTiming(rt.AttemptID)
+			remaining := timeout - time.Since(started) + wait - waitBefore
+			if !waiting && remaining <= 0 {
 				return fmt.Errorf("service readiness timed out after %s", timeout)
 			}
-			return readyCtx.Err()
+			if ready && !waiting {
+				if err := readyCtx.Err(); err != nil {
+					return err
+				}
+				if !handle.Alive() {
+					return &serviceEarlyExitError{}
+				}
+				break
+			}
+			timer.Stop()
+			var expired <-chan time.Time
+			if !waiting {
+				timer.Reset(remaining)
+				expired = timer.C
+			}
+			select {
+			case err := <-readyCh:
+				if err != nil {
+					return err
+				}
+				if err := readyCtx.Err(); err != nil {
+					return err
+				}
+				// A successful probe can race the process exit. Do not commit
+				// AfterReady state for a service that is already known to be dead.
+				select {
+				case err := <-exitCh:
+					return &serviceEarlyExitError{cause: err}
+				default:
+				}
+				if !handle.Alive() {
+					return &serviceEarlyExitError{}
+				}
+				ready = true
+				readyCh = nil
+			case err := <-exitCh:
+				return &serviceEarlyExitError{cause: err}
+			case <-readyCtx.Done():
+				return readyCtx.Err()
+			case <-changed:
+			case <-expired:
+			}
 		}
 	}
 	if task.AfterReady != nil {
@@ -1983,6 +2011,10 @@ func (e *Engine) evaluateFlushService(ctx context.Context, req Request, baseRT *
 		return service
 	}
 	service.Alive = true
+	if _, waiting, _ := req.session.promptTiming(node.AttemptID); waiting {
+		service.Error = "service is waiting for operator input"
+		return service
+	}
 	if task.Ready == nil {
 		service.Ready = true
 		return service
@@ -2012,6 +2044,8 @@ func (e *Engine) evaluateFlushService(ctx context.Context, req Request, baseRT *
 				service.Error = err.Error()
 			} else if err := readyCtx.Err(); err != nil {
 				service.Error = err.Error()
+			} else if _, waiting, _ := req.session.promptTiming(node.AttemptID); waiting {
+				service.Error = "service is waiting for operator input"
 			} else {
 				service.Ready = true
 			}

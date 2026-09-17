@@ -159,9 +159,11 @@ Prompt handling defaults to `--headless fail`: an unexpected typed prompt ends w
 ```bash
 devflow prompts list --run <run-id> --json
 devflow prompts respond <prompt-id> --run <run-id> --task <task> --attempt <attempt-id> --confirm true --json
+devflow prompts respond <prompt-id> --run <run-id> --task <task> --attempt <attempt-id> --choice 1 --json
+devflow prompts respond <prompt-id> --run <run-id> --task <task> --attempt <attempt-id> --cancel --json
 ```
 
-Status includes `runId` and `pendingPrompts`. Responses must match the complete run/task/attempt/prompt identity and provide the declared answer type: `--confirm true|false`, `--text <value>`, or `--stdin` for text input without putting the answer in process arguments. Stale, duplicate, expired, canceled and mismatched answers fail, as do answers without a live recorded owner. A diagnostic prompt from a failed run cannot be answered. Cancellation removes undelivered answers, including accepted answers left by an exited owner, without claiming external resources stopped. Secret answers are transient and do not appear in ordinary prompt metadata or result/event output; adapters must avoid echoing them. Devflow never automatically confirms a question.
+Status includes `runId` and `pendingPrompts`. Responses must match the complete run/task/attempt/prompt identity and provide the declared answer type: `--confirm true|false`, `--text <value>`, or `--stdin` for text input without putting the answer in process arguments. Stale, duplicate, expired, canceled and mismatched answers fail, as do answers without a live recorded owner. A diagnostic prompt from a failed run cannot be answered. Cancellation removes undelivered answers, including accepted answers left by an exited owner, without claiming external resources stopped. Secret answers are transient and do not appear in ordinary prompt metadata or result/event output; adapters must avoid echoing them. Devflow never automatically confirms a question. For `kind: "select"`, inspect the full ordered `choices` array and submit its zero-based index with `--choice`. Do not infer rename choices from task names or auto-accept the first item. Payload migration authoring may ask separately for UP and DOWN generation; development schema push uses the same public prompt path.
 
 ## Readiness Workflow
 
