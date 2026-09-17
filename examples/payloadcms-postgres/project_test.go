@@ -41,10 +41,13 @@ func TestPayloadCMSProjectDetectionAndGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"npm_install", "payload_migrations", "app"} {
+	for _, want := range []string{"npm_install", "app"} {
 		if !containsStringPayloadTest(closure, want) {
 			t.Fatalf("expected up closure to contain %q, got %v", want, closure)
 		}
+	}
+	if containsStringPayloadTest(closure, "payload_migrations") {
+		t.Fatal("development schema push must not apply migrations to the same database")
 	}
 }
 

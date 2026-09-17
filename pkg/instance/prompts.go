@@ -18,14 +18,11 @@ func CreatePrompt(ctx context.Context, worktree, instanceID string, prompt api.P
 	if err := ctx.Err(); err != nil {
 		return api.Prompt{}, err
 	}
-	if prompt.Kind != "confirm" && prompt.Kind != "text" {
-		return api.Prompt{}, promptError("invalid_prompt", "prompt kind must be confirm or text")
+	if err := validatePrompt(prompt); err != nil {
+		return api.Prompt{}, err
 	}
 	if prompt.Task == "" || ValidateAttemptID(prompt.AttemptID) != nil {
 		return api.Prompt{}, promptError("invalid_prompt", "prompt requires a task and valid attempt ID")
-	}
-	if len(prompt.Message) > 64<<10 {
-		return api.Prompt{}, promptError("invalid_prompt", "prompt message exceeds 64 KiB")
 	}
 	if prompt.State == "" {
 		prompt.State = api.PromptPending
@@ -103,9 +100,19 @@ func RespondPrompt(ctx context.Context, worktree, instanceID string, answer api.
 			}
 			return promptError("prompt_not_pending", "prompt operation was cancelled")
 		}
-		if (prompt.Kind == "confirm" && (answer.Confirm == nil || answer.Text != nil)) ||
-			(prompt.Kind == "text" && (answer.Text == nil || answer.Confirm != nil)) {
-			return promptError("invalid_prompt_answer", "confirm prompts require a boolean; text prompts require a string")
+		count := 0
+		for _, set := range []bool{answer.Confirm != nil, answer.Text != nil, answer.Choice != nil, answer.Cancel} {
+			if set {
+				count++
+			}
+		}
+		if count != 1 {
+			return promptError("invalid_prompt_answer", "provide exactly one typed answer or cancel")
+		}
+		if !answer.Cancel && ((prompt.Kind == "confirm" && answer.Confirm == nil) ||
+			(prompt.Kind == "text" && answer.Text == nil) ||
+			(prompt.Kind == "select" && (answer.Choice == nil || *answer.Choice < 0 || *answer.Choice >= len(prompt.Choices)))) {
+			return promptError("invalid_prompt_answer", "answer must match the prompt kind and a selection must name an available choice index")
 		}
 		if answer.Text != nil && len(*answer.Text) > 1<<20 {
 			return promptError("invalid_prompt_answer", "text response exceeds 1 MiB")
@@ -313,10 +320,30 @@ func loadPromptLocked(path, runID, promptID string) (*api.Prompt, error) {
 	if prompt.ID != promptID || prompt.RunID != runID {
 		return nil, promptError("prompt_mismatch", "stored prompt identity does not match its path")
 	}
-	if prompt.Kind != "confirm" && prompt.Kind != "text" {
-		return nil, promptError("invalid_prompt", "stored prompt kind must be confirm or text")
+	if err := validatePrompt(prompt); err != nil {
+		return nil, err
 	}
 	return &prompt, nil
+}
+
+func validatePrompt(prompt api.Prompt) error {
+	if prompt.Kind != "confirm" && prompt.Kind != "text" && prompt.Kind != "select" {
+		return promptError("invalid_prompt", "prompt kind must be confirm, text or select")
+	}
+	if (prompt.Kind == "select") != (len(prompt.Choices) > 0) || len(prompt.Choices) > 1000 {
+		return promptError("invalid_prompt", "only select prompts require choices (at most 1000)")
+	}
+	size := len(prompt.Message)
+	for _, choice := range prompt.Choices {
+		if strings.TrimSpace(choice) == "" {
+			return promptError("invalid_prompt", "prompt choices must not be empty")
+		}
+		size += len(choice)
+	}
+	if size > 64<<10 {
+		return promptError("invalid_prompt", "prompt text and choices exceed 64 KiB")
+	}
+	return nil
 }
 
 func promptPath(worktree, instanceID, runID, promptID string) (string, error) {

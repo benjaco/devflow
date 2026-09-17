@@ -1,18 +1,48 @@
 # Progress
 
-Last updated: 2026-09-15
+Last updated: 2026-09-17
 
 ## Current Status
 
-- Phase: interactive migration authoring
-- State: native Windows failures reproduced locally and corrected; focused/full normal/race tests and quality gates pass. Native Windows rerun remains pending.
-- Scope: preserve explicit user confirmation, retained logs and owned-process cleanup; use maintained terminal support rather than copying platform implementations.
+- Phase: PR #26 Windows terminal-title prompt correction
+- State: captured failure reproduced before correction; fix, full normal suite and three focused race repetitions pass locally.
+- Scope: a terminal-title (OSC) control inserted inside a question word prevents recognition; retain exact choice text and prompt cancellation behavior.
 
 ## In Progress
 
-- Await review and native Windows execution of the focused correction. Application adapter/database policy remains separate.
+- Next verification: native Windows CI with the OSC correction.
+- Real Payload workflow rerun is blocked before project startup by the unavailable local Docker daemon; opening Docker Desktop did not restore its socket.
+- Local real Delve checks remain blocked by disabled macOS Developer Tools security; no machine security settings changed.
 
 ## Completed
+
+- PR #26 captured Windows terminal-title correction:
+  - [Windows job 105225702804](https://github.com/benjaco/devflow/actions/runs/35228380375/job/105225702804) passes the earlier cases but captures an OSC title inside the word "renamed" during cancellation; zero callbacks precede the deadline
+  - exact captured-byte replay fails locally with zero prompts and a ten-second deadline before correction. Remove complete OSC strings before cursor/text parsing and wait for partial strings; preserve adjacent words, choices and warnings, including BEL/ST terminators and opaque metadata
+  - the cancellation replay now requests one prompt and stops in 0.12 seconds. Three focused race repetitions, including existing real-terminal authoring scenarios, pass; full normal suite, vet, Staticcheck, CLI/example builds, tidy-diff, version JSON, Windows database test cross-compilation and formatting/diff checks pass
+  - full normal suite retains the existing Delve skip. Both opt-in E2Es were attempted but could not reach Docker before project startup. Evidence and native verification limits: [Payload workflow verification](docs_contributors/payload-workflow-verification.md)
+
+- PR #26 Windows Payload prompt correction:
+  - retrieved [Windows job 105175918452](https://github.com/benjaco/devflow/actions/runs/35213350923/job/105175918452); its merge tree matches the prepared checkout. Deleted-field confirmation and terminal rename/create/decline timed out; the unchanged tests pass on macOS
+  - synthetic terminal regressions fail before correction for coalesced cursor controls, positioned rows and compressed spacing. Payload now recognizes the latest question and initial Hanji selection, rejects completed/selected redraws, and matches literal confirmations through the colon without requiring trailing spaces
+  - real-terminal tests cover repeated questions, exact answers, declines and cancellation under both renderings, with escaped output on failure. Three focused race repetitions and both real Payload/Next/Postgres engine/TUI workflows pass
+  - full normal suite, vet, Staticcheck v0.8.1, govulncheck v1.6.0, tidy-diff, CLI/example builds, version JSON and affected Windows test cross-compilation pass. Delve is excluded from the local test PATH because macOS Developer Tools security is disabled
+  - initial parallel race suite hit the unchanged daemon deadline fixture; three isolated race repetitions and the full serial race recheck pass without changing it. Formatting and diff checks pass. Evidence and native verification limits: [Payload workflow verification](docs_contributors/payload-workflow-verification.md)
+
+- Real Next/Payload bootstrap and TUI end-to-end test:
+  - build the public CLI, materialize a fresh pinned Next/Payload project without installed dependencies, and launch bare `devflow` in a controlling terminal; normal adapter compilation, daemon/watch, `npm ci` and Payload table creation all run
+  - edit the real collection module, wait for a pending prompt and painted TUI menu, select rename with Down/Enter and verify the original value survives in the renamed column. Remove a populated field, accept the rendered warning with Left/Enter and verify the column is removed while other data survives
+  - answers travel exclusively through terminal keys; prompt records are read only for assertions. Require answered attempt identity, resumed readiness and `q` shutting down the TUI, daemon and observed Next services; failure cleanup uses public stop-all and joins processes/readers
+  - both real workflows pass together; the TUI test passes under `go test -race` with the CLI's ordinary bootstrap build. Native Linux Docker CI now selects both tests; Windows test cross-compilation passes, with native execution still pending
+  - implementation and operator boundary documented in [Payload workflow verification](docs_contributors/payload-workflow-verification.md). Session logs: `/tmp/devflow-payload-tui-{e2e,final,race,package}.log`
+
+- Payload 3.88.0 workflow correction:
+  - owned terminal commands plus adapter-local Payload/Drizzle parsing expose dynamic create/rename choices and complete warning confirmations through persisted prompts, CLI and dashboard. Menus support Up/Down/Enter, explicit cancel, reconnect, exact indexes and headless failure; declines stop before zero-exit authoring retries
+  - pause only the prompting service attempt's startup budget; retain operation/prompt deadlines, block readiness commits during questions and report waiting services unready through flush. Default schema inputs include blocks; configured config paths reach both migration commands
+  - author migrations from snapshots without starting Postgres. Development push and migration replay are separate example targets/databases; migration action metadata identifies configured apps and only declared migration tasks, regardless of builder order
+  - committed real Payload/Next/Postgres workflow passes startup, seeded collection/block renames through watch, UP/DOWN authoring, data-preserving UP replay, create-new SQL, unchanged restart, blank accept/decline, headless/cancel, mixed-mode warning and destructive push decline/retry. Add the pinned fixture to native Linux Docker CI; disposable runtime/volume cleaned up
+  - normal and full race suites pass with Delve excluded from PATH using existing skips. Original-PATH tests time out in the two real Delve app-readiness cases; remaining tests pass. Focused final action/builder normal/race checks pass
+  - vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, CLI/example builds, version JSON, formatting/diff checks and affected Windows test cross-compilation pass. Native platform execution is not inferred from cross-compilation. Evidence and limits: [Payload workflow verification](docs_contributors/payload-workflow-verification.md)
 
 - PR #25 Windows prompt teardown correction:
   - retrieved the [Windows job](https://github.com/benjaco/devflow/actions/runs/35016655194/job/104541700144): failed callbacks repeat during ConPTY teardown, and the secret fixture never matches because its trailing space is encoded as cursor movement. Its diagnostic did not establish a secret leak

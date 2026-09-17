@@ -2010,9 +2010,30 @@ func (d *dashboard) openPrompt(evt api.Event) {
 	d.activeInput = true
 	d.renderFooter()
 	switch evt.PromptKind {
+	case string(process.PromptSelect):
+		choices := tview.NewList().ShowSecondaryText(false)
+		for index, label := range evt.PromptChoices {
+			choices.AddItem(tview.Escape(label), "", 0, func() {
+				d.answerPrompt(evt, api.PromptAnswer{Choice: &index})
+			})
+		}
+		choices.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+			if event.Key() == tcell.KeyEscape {
+				d.answerPrompt(evt, api.PromptAnswer{Cancel: true})
+				return nil
+			}
+			return event
+		})
+		question := tview.NewTextView().SetDynamicColors(false).SetText(evt.Prompt)
+		panel := tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(question, 3, 0, false).
+			AddItem(choices, 0, 1, true)
+		panel.SetBorder(true).SetTitle(" Choose an option · ↑/↓ Enter · Esc cancels ")
+		d.pages.AddPage("prompt", wideCentered(panel, min(len(evt.PromptChoices)+5, 24)), true, true)
+		d.app.SetFocus(choices)
 	case string(process.PromptConfirm):
 		modal := tview.NewModal().
-			SetText(evt.Prompt).
+			SetText(tview.Escape(evt.Prompt)).
 			AddButtons([]string{"Yes", "No"}).
 			SetDoneFunc(func(_ int, label string) {
 				answer := label == "Yes"
@@ -2025,6 +2046,7 @@ func (d *dashboard) openPrompt(evt api.Event) {
 				d.setStatus(fmt.Sprintf("[yellow]answered %s prompt", evt.Task))
 				d.closePrompt()
 			})
+		modal.SetFocus(1)
 		d.pages.AddPage("prompt", modal, true, true)
 		d.app.SetFocus(modal)
 	default:
@@ -2032,6 +2054,10 @@ func (d *dashboard) openPrompt(evt api.Event) {
 		input = tview.NewInputField().
 			SetLabel(evt.Prompt + " ").
 			SetDoneFunc(func(key tcell.Key) {
+				if key == tcell.KeyEscape {
+					d.answerPrompt(evt, api.PromptAnswer{Cancel: true})
+					return
+				}
 				if key != tcell.KeyEnter {
 					return
 				}
@@ -2054,6 +2080,16 @@ func (d *dashboard) openPrompt(evt api.Event) {
 		d.pages.AddPage("prompt", centered(frame, 80, 7), true, true)
 		d.app.SetFocus(input)
 	}
+}
+
+func (d *dashboard) answerPrompt(evt api.Event, answer api.PromptAnswer) {
+	answer.RunID, answer.Task, answer.AttemptID, answer.PromptID = evt.RunID, evt.Task, evt.AttemptID, evt.PromptID
+	if err := instance.RespondPrompt(context.Background(), d.root, d.instanceID, answer); err != nil {
+		d.setStatus(fmt.Sprintf("[red]failed to answer prompt: %v", err))
+		return
+	}
+	d.setStatus(fmt.Sprintf("[yellow]answered %s prompt", evt.Task))
+	d.closePrompt()
 }
 
 func (d *dashboard) reconcilePrompts(snap snapshot) {
@@ -2083,7 +2119,7 @@ func (d *dashboard) reconcilePrompts(snap snapshot) {
 	// reconnect and queues parallel requests without replacing an open dialog.
 	d.openPrompt(api.Event{
 		RunID: first.RunID, Task: first.Task, AttemptID: first.AttemptID,
-		PromptID: first.ID, PromptKind: first.Kind, Prompt: first.Message, PromptSecret: first.Secret,
+		PromptID: first.ID, PromptKind: first.Kind, Prompt: first.Message, PromptSecret: first.Secret, PromptChoices: first.Choices,
 	})
 }
 

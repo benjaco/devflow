@@ -21,6 +21,8 @@ import (
 
 type runSession struct {
 	pendingPrompts int
+	promptWaits    map[string]promptWait
+	promptChanged  chan struct{}
 	mu             sync.Mutex
 	worktree       string
 	record         *api.RunRecord

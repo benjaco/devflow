@@ -62,22 +62,36 @@ func TestTerminalRetainsOutputAndExitStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"output", "failure", "secret"} {
+	for _, mode := range []string{"output", "failure", "secret", "parsed secret"} {
 		t.Run(mode, func(t *testing.T) {
 			logPath := filepath.Join(t.TempDir(), "terminal.log")
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			prompts := 0
-			result, err := Run(ctx, CommandSpec{
+			helperMode := mode
+			if mode == "parsed secret" {
+				helperMode = "secret"
+			}
+			spec := CommandSpec{
 				Name: executable, Args: []string{"-test.run=^TestTerminalProcessHelper$"},
-				Env:      map[string]string{"DEVFLOW_TERMINAL_HELPER": mode},
+				Env:      map[string]string{"DEVFLOW_TERMINAL_HELPER": helperMode},
 				Terminal: true, LogPath: logPath,
 				Prompts: []PromptSpec{{Pattern: terminalSecretPromptPattern, Kind: PromptText, Secret: true}},
 				OnPrompt: func(PromptRequest) (PromptResponse, error) {
 					prompts++
 					return PromptResponse{Value: "fixture-secret-value"}, nil
 				},
-			})
+			}
+			if mode == "parsed secret" {
+				spec.Prompts = nil
+				spec.ParsePrompt = func(output string) *PromptMatch {
+					if !strings.Contains(output, terminalSecretPromptPattern) {
+						return nil
+					}
+					return &PromptMatch{Request: PromptRequest{Kind: PromptText, Secret: true, Prompt: "Secret"}, Input: func(answer PromptResponse) (string, error) { return answer.Value + "\n", nil }}
+				}
+			}
+			result, err := Run(ctx, spec)
 			if mode == "failure" {
 				if err == nil || result.ExitCode != 7 {
 					t.Fatalf("exit status lost: %+v %v", result, err)
@@ -90,7 +104,7 @@ func TestTerminalRetainsOutputAndExitStatus(t *testing.T) {
 				t.Fatal(err)
 			}
 			text := string(data)
-			if mode == "secret" {
+			if helperMode == "secret" {
 				if prompts != 1 || !strings.Contains(text, "[output hidden after secret response]") {
 					t.Fatalf("secret prompt did not complete once: prompts=%d log=%q", prompts, text)
 				}

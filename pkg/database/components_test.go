@@ -219,6 +219,39 @@ func TestPayloadCMSComponentDefinesMigrationTasks(t *testing.T) {
 	}
 }
 
+func TestPayloadCMSMigrationActionIdentifiesDeclaredServicesAndMigrations(t *testing.T) {
+	for _, authorFirst := range []bool{false, true} {
+		for _, withMigrations := range []bool{false, true} {
+			p := project.Define(func(_ context.Context, b *project.Builder) error {
+				b.Name("payload-actions")
+				payload := PayloadCMS("payload")
+				if authorFirst {
+					payload.NewMigration(b)
+				}
+				if withMigrations {
+					payload.Migrations(b)
+				}
+				app := b.Service("app").Command("node", "server.js")
+				payload.ConfigureDevService(app)
+				payload.ConfigureDevService(app)
+				if !authorFirst {
+					payload.NewMigration(b)
+				}
+				b.Target("up", app)
+				return nil
+			})
+			action := actionByIDDatabaseTest(project.Actions(p), "payload.migration.create")
+			want := 1
+			if withMigrations {
+				want++
+			}
+			if len(action.Effects.Invalidates) != want || !stringSliceContainsDatabaseTest(action.Effects.Invalidates, "app") || stringSliceContainsDatabaseTest(action.Effects.Invalidates, "payload_migrations") != withMigrations {
+				t.Fatalf("authorFirst=%v withMigrations=%v: incorrect action selection metadata: %+v", authorFirst, withMigrations, action)
+			}
+		}
+	}
+}
+
 func TestPayloadCMSDevServiceGatesSchemaPushUntilReadiness(t *testing.T) {
 	worktree := t.TempDir()
 	writeComponentTestFile(t, worktree, "src/payload.config.ts", "export default {}\n")
@@ -240,7 +273,7 @@ func TestPayloadCMSDevServiceGatesSchemaPushUntilReadiness(t *testing.T) {
 		return nil
 	})
 	app := taskByName(p.Tasks(), "app")
-	for _, input := range []string{"src/payload.config.ts", "src/collections", "src/globals", "src/fields", "package.json", "pnpm-lock.yaml"} {
+	for _, input := range []string{"src/payload.config.ts", "src/collections", "src/globals", "src/fields", "src/blocks", "package.json", "pnpm-lock.yaml"} {
 		if !stringSliceContainsDatabaseTest(app.Inputs.Paths, input) {
 			t.Fatalf("expected Payload dev-service input %q, got %+v", input, app.Inputs.Paths)
 		}
@@ -295,6 +328,18 @@ func TestPayloadCMSDevServiceGatesSchemaPushUntilReadiness(t *testing.T) {
 		t.Fatalf("schema-change push = %q, want true", got)
 	}
 	if err := app.AfterReady(context.Background(), schemaChange); err != nil {
+		t.Fatal(err)
+	}
+
+	writeComponentTestFile(t, worktree, "src/blocks/Hero.ts", "export const Hero = { slug: 'hero', fields: [] }\n")
+	blockChange := newRuntime(firstURL)
+	if err := app.BeforeRun(context.Background(), blockChange); err != nil {
+		t.Fatal(err)
+	}
+	if got := blockChange.Env[PayloadSchemaPushEnv]; got != "true" {
+		t.Fatalf("block-change push = %q, want true", got)
+	}
+	if err := app.AfterReady(context.Background(), blockChange); err != nil {
 		t.Fatal(err)
 	}
 

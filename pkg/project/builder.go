@@ -47,10 +47,11 @@ type TaskBuilder struct {
 	builder *Builder
 	task    Task
 
-	command process.CommandSpec
-	dir     string
-	env     map[string]envValue
-	noCache bool
+	command       process.CommandSpec
+	commandConfig []func(*process.CommandSpec)
+	dir           string
+	env           map[string]envValue
+	noCache       bool
 }
 
 type TaskRef struct {
@@ -433,6 +434,13 @@ func (t *TaskBuilder) CommandSpec(spec process.CommandSpec) *TaskBuilder {
 	return t
 }
 
+// ConfigureCommand decorates the declared command after builder configuration,
+// independent of whether Command is called before or after the component helper.
+func (t *TaskBuilder) ConfigureCommand(fn func(*process.CommandSpec)) *TaskBuilder {
+	t.commandConfig = append(t.commandConfig, fn)
+	return t
+}
+
 func (t *TaskBuilder) Dir(dir string) *TaskBuilder {
 	t.dir = dir
 	return t
@@ -639,13 +647,16 @@ func (t *TaskBuilder) build(requiredCatalog map[string]bool) Task {
 	task.RequiredCLIs = uniqueStrings(task.RequiredCLIs)
 	task.RequiredEnv = uniqueStrings(task.RequiredEnv)
 	if t.command.Name != "" {
-		if requiredCatalog[t.command.Name] {
-			task.RequiredCLIs = uniqueStrings(append(task.RequiredCLIs, t.command.Name))
+		command := t.command
+		for _, configure := range t.commandConfig {
+			configure(&command)
+		}
+		if requiredCatalog[command.Name] {
+			task.RequiredCLIs = uniqueStrings(append(task.RequiredCLIs, command.Name))
 		}
 		if task.Signature == "" {
-			task.Signature = commandSignature(t.command, t.dir, t.env)
+			task.Signature = commandSignature(command, t.dir, t.env)
 		}
-		command := t.command
 		dir := t.dir
 		env := cloneEnvValues(t.env)
 		task.Run = func(ctx context.Context, rt *Runtime) error {

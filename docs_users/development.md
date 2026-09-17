@@ -170,6 +170,8 @@ devflow migration create add_user --component prisma --json
 
 Use `--component` when a project has more than one migration system.
 
+For Payload, keep development schema push separate from migration replay. The app’s `ConfigureDevService` handles create/rename choices and data-loss confirmations in the dashboard. Use ↑/↓ and Enter to choose, or Escape to cancel the question. Migration authoring can ask separate UP and DOWN questions. Declining a warning stops the attempt; correct the schema or rerun when ready. Existing migrations are not replayed into a database already managed by push.
+
 ## Watch Mode
 
 Watch mode observes task inputs before initial execution, then reruns the affected downstream slice when those inputs change. Edits made during startup or a rebuild are reconciled before a successful flush. If a task also rewrites an input file, an edit made after that task finishes still triggers a rerun, even while downstream work is running; generated changes are excluded only when their metadata still matches what the producer left behind.

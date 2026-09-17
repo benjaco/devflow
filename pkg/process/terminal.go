@@ -51,6 +51,7 @@ func startTerminal(ctx context.Context, spec CommandSpec) (*Handle, error) {
 	reader := &interactiveReader{
 		stdin: input, writer: writer, onLine: spec.OnLine,
 		onPrompt: spec.OnPrompt, prompts: spec.Prompts, failed: make(chan struct{}),
+		parsePrompt: spec.ParsePrompt,
 	}
 	handle := &Handle{cmd: cmd, stdin: input, done: make(chan struct{}), grace: defaultGrace(spec.Grace)}
 	readDone := make(chan struct{})
@@ -63,6 +64,7 @@ func startTerminal(ctx context.Context, spec CommandSpec) (*Handle, error) {
 		waitErr := xpty.WaitProcess(context.Background(), cmd)
 		finishErr := finish()
 		<-readDone
+		reader.finish()
 		if reader.logPartial {
 			reader.writeLogChunk(reader.logStream, "\n")
 		}

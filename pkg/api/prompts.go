@@ -26,6 +26,7 @@ type Prompt struct {
 	AttemptID string      `json:"attemptId"`
 	Kind      string      `json:"kind"`
 	Message   string      `json:"message"`
+	Choices   []string    `json:"choices,omitempty"`
 	Secret    bool        `json:"secret,omitempty"`
 	State     PromptState `json:"state"`
 	CreatedAt time.Time   `json:"createdAt"`
@@ -40,4 +41,6 @@ type PromptAnswer struct {
 	PromptID  string  `json:"promptId"`
 	Confirm   *bool   `json:"confirm,omitempty"`
 	Text      *string `json:"text,omitempty"`
+	Choice    *int    `json:"choice,omitempty"`
+	Cancel    bool    `json:"cancel,omitempty"`
 }

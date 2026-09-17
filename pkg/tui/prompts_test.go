@@ -2,8 +2,13 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/gdamore/tcell/v2"
 
 	"github.com/benjaco/devflow/pkg/api"
 	"github.com/benjaco/devflow/pkg/instance"
@@ -73,5 +78,69 @@ func TestDashboardRecoversAndQueuesPersistedPrompts(t *testing.T) {
 	}
 	if d.activePromptID != "" || d.activeInput {
 		t.Fatal("cancelled prompt dialog remained open")
+	}
+}
+
+func TestChoicePromptUsesRealTUIKeysAndReconnect(t *testing.T) {
+	for _, cancelChoice := range []bool{false, true} {
+		t.Run(fmt.Sprint(cancelChoice), func(t *testing.T) {
+			root := t.TempDir()
+			record := &api.RunRecord{Project: "prompt-ui", Target: "up", Mode: api.ModeWatch, OwnerPID: os.Getpid()}
+			if err := instance.CreateRun(root, "fixture", record); err != nil {
+				t.Fatal(err)
+			}
+			attempt := instance.NewAttemptID()
+			record.Attempts = []api.TaskAttempt{{Task: "app", AttemptID: attempt, State: api.StateRunning}}
+			if err := instance.SaveRun(root, "fixture", record); err != nil {
+				t.Fatal(err)
+			}
+			prompt, err := instance.CreatePrompt(context.Background(), root, "fixture", api.Prompt{RunID: record.RunID, Task: "app", AttemptID: attempt, Kind: "select", Message: "Is headline created or renamed?", Choices: []string{"+ headline create column", "~ title › headline rename column"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := newDashboard(root, "fixture")
+			screen := newObservedSimulationScreen(80, 24)
+			d.app.SetScreen(screen)
+			done := make(chan error, 1)
+			go func() { done <- runTUIApplication(d.app) }()
+			t.Cleanup(func() {
+				d.app.Stop()
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Error("TUI did not stop")
+				}
+			})
+			screen.waitForFrame(t)
+			d.app.QueueUpdateDraw(func() {
+				d.reconcilePrompts(snapshot{state: &instance.State{RunID: record.RunID}, prompts: []api.Prompt{prompt}})
+			})
+			text := dashboardState(t, d, func() string { return simulationScreenText(screen, 80, 24) })
+			if !strings.Contains(text, "headline") || !strings.Contains(text, "rename column") {
+				t.Fatalf("choice dialog omitted question/options:\n%s", text)
+			}
+			if cancelChoice {
+				screen.postKey(t, tcell.KeyEscape, 0)
+			} else {
+				screen.postKey(t, tcell.KeyDown, 0)
+				screen.postKey(t, tcell.KeyEnter, 0)
+			}
+			answer, err := instance.ConsumePromptAnswer(context.Background(), root, "fixture", record.RunID, prompt.ID)
+			if err != nil || answer == nil {
+				t.Fatalf("TUI did not submit: %+v %v", answer, err)
+			}
+			if cancelChoice && !answer.Cancel {
+				t.Fatalf("Escape did not cancel: %+v", answer)
+			}
+			if !cancelChoice && (answer.Choice == nil || *answer.Choice != 1) {
+				t.Fatalf("arrow selection not delivered: %+v", answer)
+			}
+			if dashboardState(t, d, func() bool { return d.activeInput }) {
+				t.Fatal("prompt stayed open after response")
+			}
+			if screen.finalized.Load() {
+				t.Fatal("prompt Escape exited the dashboard")
+			}
+		})
 	}
 }

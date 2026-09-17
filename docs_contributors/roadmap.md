@@ -15,7 +15,7 @@
 - exclusive worktree execution leases shared by CI/daemon, serialized daemon transitions, cleanup-aware recovery and structured ownership conflicts
 - first usable TUI with task/log panes and selected-task actions
 - project-scoped required CLI checks and installers
-- interactive prompt plumbing for prompt-driven subprocesses
+- interactive confirm/text/select plumbing for finite commands and services, including Payload development/migration workflows and real Payload/Next/Postgres coverage
 - Docker-backed Postgres runtime helpers and snapshot planning
 - project-local `devflow.project.go` bootstrap flow
 - `devflow flush [target]` readiness gate for detached watch workflows

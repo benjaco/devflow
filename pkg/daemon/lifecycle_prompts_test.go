@@ -32,6 +32,13 @@ func TestLifecycleReplacementPreservesExplicitPromptPolicy(t *testing.T) {
 					if err == nil && answer.Value != "y" {
 						return errors.New("expected confirmation")
 					}
+					if err != nil {
+						return err
+					}
+					answer, err = rt.OnPrompt(rt.TaskName, process.PromptRequest{Kind: process.PromptSelect, Prompt: "Create or rename?", Choices: []string{"Create column", "Rename column"}})
+					if err == nil && answer.Value != "1" {
+						return errors.New("expected rename selection")
+					}
 					return err
 				}}},
 				targets: []project.Target{{Name: "up", RootTasks: []string{"check"}}, {Name: "other", RootTasks: []string{"check"}}},
@@ -52,20 +59,32 @@ func TestLifecycleReplacementPreservesExplicitPromptPolicy(t *testing.T) {
 			go func() {
 				finished <- s.handleRequest(context.Background(), Request{Action: action, Target: "other", Task: "check", Headless: api.HeadlessWait})
 			}()
-			var prompt api.Prompt
-			if !waitForDaemonCondition(2*time.Second, func() bool {
-				status, err := s.statusResult()
-				if err == nil && len(status.PendingPrompts) > 0 {
-					prompt = status.PendingPrompts[0]
-					return true
+			for _, kind := range []string{"confirm", "select"} {
+				var prompt api.Prompt
+				if !waitForDaemonCondition(2*time.Second, func() bool {
+					status, err := s.statusResult()
+					if err == nil && len(status.PendingPrompts) > 0 && status.PendingPrompts[0].Kind == kind {
+						prompt = status.PendingPrompts[0]
+						return true
+					}
+					return false
+				}) {
+					t.Fatalf("replacement discarded the explicit wait policy for %s", kind)
 				}
-				return false
-			}) {
-				t.Fatal("replacement discarded the explicit wait policy")
-			}
-			yes := true
-			if err := instance.RespondPrompt(context.Background(), worktree, inst.ID, api.PromptAnswer{RunID: prompt.RunID, Task: prompt.Task, AttemptID: prompt.AttemptID, PromptID: prompt.ID, Confirm: &yes}); err != nil {
-				t.Fatal(err)
+				answer := api.PromptAnswer{RunID: prompt.RunID, Task: prompt.Task, AttemptID: prompt.AttemptID, PromptID: prompt.ID}
+				if kind == "confirm" {
+					yes := true
+					answer.Confirm = &yes
+				} else {
+					if len(prompt.Choices) != 2 || prompt.Choices[1] != "Rename column" {
+						t.Fatalf("daemon lost choice metadata: %+v", prompt)
+					}
+					index := 1
+					answer.Choice = &index
+				}
+				if err := instance.RespondPrompt(context.Background(), worktree, inst.ID, answer); err != nil {
+					t.Fatal(err)
+				}
 			}
 			select {
 			case response := <-finished:

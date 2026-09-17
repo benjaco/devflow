@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -80,6 +81,28 @@ func TestCompactPromptRetainsResponseIdentity(t *testing.T) {
 	}
 	if !view.Truncated.Text || status.PendingPrompts[0].Message != prompt.Message {
 		t.Fatal("compact prompt sampling lost truncation evidence or changed its source")
+	}
+}
+
+func TestCompactPromptChoicesAreExactOrEntirelyOmitted(t *testing.T) {
+	for _, choices := range [][]string{{"Create column", "Rename existing column"}, {"Create column", strings.Repeat("x", 20<<10)}} {
+		prompt := api.Prompt{ID: "prompt-AAAAAAAAAAAAAAAAAAAAAAAAAA", Task: "migrate", Kind: "select", Message: "Create or rename?", Choices: choices}
+		status := api.StatusResult{PendingPrompts: []api.Prompt{prompt}}
+		view := (&App{details: "summary"}).resultView(status).(*api.ExecutionView)
+		if len(view.PendingPrompts) != 1 {
+			t.Fatalf("lost prompt: %+v", view)
+		}
+		got := view.PendingPrompts[0]
+		if len(choices[1]) > 8<<10 {
+			if len(got.Choices) != 0 || !view.Truncated.Text {
+				t.Fatalf("oversized choices partially returned or not marked: %+v", view)
+			}
+		} else if !slices.Equal(got.Choices, choices) {
+			t.Fatalf("choice indexes/labels changed: %+v", got)
+		}
+		if !slices.Equal(status.PendingPrompts[0].Choices, choices) {
+			t.Fatal("compact view mutated full evidence")
+		}
 	}
 }
 

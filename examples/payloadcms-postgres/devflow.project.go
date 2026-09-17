@@ -57,12 +57,21 @@ func buildPayloadCMSProject() project.Project {
 			Inputs("package.json", "package-lock.json").
 			Stamp()
 
-		migrations := payload.Migrations(b).DependsOn(npmInstall)
+		// A separate explicit URL prevents replaying migrations into the pushed
+		// development database. This component does not provision a managed DB.
+		migrations := database.PayloadCMS("release_payload").Migrations(b).
+			DependsOn(npmInstall).
+			RequiredEnv("PAYLOAD_MIGRATION_DATABASE_URL").
+			InputEnv("PAYLOAD_MIGRATION_DATABASE_URL").
+			BeforeRun(func(_ context.Context, rt *project.Runtime) error {
+				rt.Env["DATABASE_URL"] = rt.Env["PAYLOAD_MIGRATION_DATABASE_URL"]
+				return nil
+			})
 		payload.NewMigration(b).DependsOn(npmInstall)
 
 		app := b.Service("app").
 			Command("npm", "run", "dev").
-			DependsOn(migrations).
+			DependsOn(npmInstall).
 			Inputs("src", "package.json", "package-lock.json").
 			InputEnv("DATABASE_URL", "PAYLOAD_SECRET", "PORT").
 			Env("PORT", b.Port("app")).
@@ -73,12 +82,14 @@ func buildPayloadCMSProject() project.Project {
 
 		smoke := b.Task("smoke").
 			Command("npm", "run", "smoke").
-			DependsOn(migrations).
+			DependsOn(app).
 			Inputs("src/smoke.ts", "package.json", "package-lock.json").
 			InputEnv("DATABASE_URL", "PAYLOAD_SECRET").
 			NoCache()
 
-		b.Target("setup", npmInstall, migrations)
+		// Use migrations only with a separate database that has never used push.
+		b.Target("migrate", migrations)
+		b.Target("setup", npmInstall)
 		b.Target("test", smoke)
 		b.Target("up", app)
 		return nil
