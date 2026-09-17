@@ -10,6 +10,7 @@ import (
 )
 
 var payloadTerminalControl = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+var payloadTerminalOSC = regexp.MustCompile(`(?s)\x1b\].*?(?:\x07|\x1b\\)`)
 var payloadQuestionStart = regexp.MustCompile(`(?m)^(?:Is .+ created or renamed from another .+\?|\? )`)
 var payloadChoiceLine = regexp.MustCompile(`^(?:❯\s*)?([+~]\s+.+?\s+(?:create|rename|move|rename/move) (?:column|table|enum|schema|sequence|role|policy|view))`)
 var payloadConfirm = regexp.MustCompile(`(?s)^\?\s+(.+?)\s+[›»]\s+\([yYnN]/[yYnN]\)`)
@@ -18,6 +19,12 @@ var payloadConfirm = regexp.MustCompile(`(?s)^\?\s+(.+?)\s+[›»]\s+\([yYnN]/[y
 // ConPTY can coalesce show/hide controls between questions and render new rows
 // with cursor positioning. Recognize the latest question's text, not a fresh hide.
 func parsePayloadPrompt(output string) *process.PromptMatch {
+	// ConPTY can insert an OSC title inside a word. Its contents are opaque,
+	// including cursor controls; wait if the terminator is in a later read.
+	output = payloadTerminalOSC.ReplaceAllString(output, "")
+	if strings.Contains(output, "\x1b]") {
+		return nil
+	}
 	if end := strings.LastIndex(output, "\x1b[?25h"); end >= 0 {
 		output = output[end+len("\x1b[?25h"):]
 	}

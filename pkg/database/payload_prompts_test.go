@@ -95,6 +95,87 @@ func TestPayloadPromptRepaintedTerminalOutput(t *testing.T) {
 	})
 }
 
+// Native Windows capture, before timeout/teardown. The title interrupts "renamed".
+const payloadConPTYTitleMenu = "\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[2;1HIs headline column in posts table created or re\x1b]0;C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\go-build3720199404\\b481\\database.test.exe\anamed from another column?\r\n❯ + headline create column\r\n  ~ title › headline rename column\r\n  ~ subtitle › headline rename column"
+
+func TestPayloadPromptConPTYTitle(t *testing.T) {
+	want := process.PromptRequest{Kind: process.PromptSelect,
+		Prompt:  "Is headline column in posts table created or renamed from another column?",
+		Choices: []string{"+ headline create column", "~ title › headline rename column", "~ subtitle › headline rename column"},
+	}
+	for _, terminator := range []string{"\a", "\x1b\\"} {
+		t.Run(fmt.Sprintf("terminator %q", terminator), func(t *testing.T) {
+			output := strings.Replace(payloadConPTYTitleMenu, "\a", terminator, 1)
+			match := parsePayloadPrompt(output)
+			if match == nil || !reflect.DeepEqual(match.Request, want) {
+				t.Fatalf("title interrupted the captured question: %+v", match)
+			}
+			input, err := match.Input(process.PromptResponse{Value: "1"})
+			if err != nil || input != "\x1b[B\r" {
+				t.Fatalf("rename input=%q err=%v", input, err)
+			}
+			withChoiceTitle := strings.Replace(output, "headline rename", "headline re\x1b]2;fixture"+terminator+"name", 1)
+			if match := parsePayloadPrompt(withChoiceTitle); match == nil || !reflect.DeepEqual(match.Request, want) {
+				t.Fatalf("title changed the choices: %+v", match)
+			}
+			withCursorTitle := strings.Replace(output, "\x1b]0;", "\x1b]0;\x1b[?25h", 1)
+			if match := parsePayloadPrompt(withCursorTitle); match == nil || !reflect.DeepEqual(match.Request, want) {
+				t.Fatalf("title contents changed prompt visibility: %+v", match)
+			}
+			// OSC contents are terminal metadata, even if they resemble a menu.
+			metadata := "\x1b]0;\n" + want.Prompt + "\n❯ + headline create column\n  ~ title › headline rename column"
+			for _, partial := range []string{metadata, metadata + "\x1b"} {
+				if match := parsePayloadPrompt(partial); match != nil {
+					t.Fatalf("unfinished title became a question: %+v", match)
+				}
+			}
+			if match := parsePayloadPrompt(metadata + terminator); match != nil {
+				t.Fatalf("title contents became a question: %+v", match)
+			}
+			question := "Warnings detected. Accept warnings and push schema to database?"
+			confirmation := "? " + strings.Replace(question, "warnings", "warn\x1b]2;fixture"+terminator+"ings", 1) + " › (y/N)"
+			if match := parsePayloadPrompt(confirmation); match == nil || match.Request.Prompt != question {
+				t.Fatalf("title changed confirmation text: %+v", match)
+			}
+		})
+	}
+}
+
+func TestPayloadConPTYTitleCancellation(t *testing.T) {
+	if os.Getenv("DEVFLOW_PAYLOAD_TITLE_REPLAY") == "1" {
+		// Pipes preserve the exact captured Windows bytes on every host. Tiny
+		// writes also exercise reads split inside the title and its terminator.
+		for _, part := range []byte(payloadConPTYTitleMenu) {
+			_, _ = os.Stdout.Write([]byte{part})
+		}
+		_, _ = bufio.NewReader(os.Stdin).ReadByte()
+		os.Exit(14) // Cancellation must stop this child without sending an answer.
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	prompts := 0
+	_, err = process.Run(ctx, process.CommandSpec{
+		Name: executable, Args: []string{"-test.run=^TestPayloadConPTYTitleCancellation$"},
+		Interactive: true,
+		Env:         map[string]string{"DEVFLOW_PAYLOAD_TITLE_REPLAY": "1"}, ParsePrompt: parsePayloadPrompt,
+		OnPrompt: func(request process.PromptRequest) (process.PromptResponse, error) {
+			prompts++
+			if request.Kind != process.PromptSelect || len(request.Choices) != 3 {
+				t.Errorf("unexpected captured prompt: %+v", request)
+			}
+			cancel()
+			return process.PromptResponse{}, ctx.Err()
+		},
+	})
+	if !errors.Is(err, context.Canceled) || prompts != 1 {
+		t.Fatalf("captured question did not cancel promptly: prompts=%d err=%v", prompts, err)
+	}
+}
+
 func TestPayloadLiteralConfirmationWithTerminalSpacing(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {

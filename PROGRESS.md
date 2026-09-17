@@ -4,16 +4,23 @@ Last updated: 2026-09-17
 
 ## Current Status
 
-- Phase: PR #26 Windows Payload prompt correction
-- State: focused correction implemented and verified locally, including portable regressions, both real Payload workflows, the normal suite and the full serial race suite.
-- Scope: deleted-field migration confirmation and terminal rename/create/decline scenarios; keep the correction focused on the observed Windows failures.
+- Phase: PR #26 Windows terminal-title prompt correction
+- State: captured failure reproduced before correction; fix, full normal suite and three focused race repetitions pass locally.
+- Scope: a terminal-title (OSC) control inserted inside a question word prevents recognition; retain exact choice text and prompt cancellation behavior.
 
 ## In Progress
 
-- Next verification: native Windows execution in the corrected branch's CI run. Both native Linux Payload workflow jobs passed on the original PR head.
+- Next verification: native Windows CI with the OSC correction.
+- Real Payload workflow rerun is blocked before project startup by the unavailable local Docker daemon; opening Docker Desktop did not restore its socket.
 - Local real Delve checks remain blocked by disabled macOS Developer Tools security; no machine security settings changed.
 
 ## Completed
+
+- PR #26 captured Windows terminal-title correction:
+  - [Windows job 105225702804](https://github.com/benjaco/devflow/actions/runs/35228380375/job/105225702804) passes the earlier cases but captures an OSC title inside the word "renamed" during cancellation; zero callbacks precede the deadline
+  - exact captured-byte replay fails locally with zero prompts and a ten-second deadline before correction. Remove complete OSC strings before cursor/text parsing and wait for partial strings; preserve adjacent words, choices and warnings, including BEL/ST terminators and opaque metadata
+  - the cancellation replay now requests one prompt and stops in 0.12 seconds. Three focused race repetitions, including existing real-terminal authoring scenarios, pass; full normal suite, vet, Staticcheck, CLI/example builds, tidy-diff, version JSON, Windows database test cross-compilation and formatting/diff checks pass
+  - full normal suite retains the existing Delve skip. Both opt-in E2Es were attempted but could not reach Docker before project startup. Evidence and native verification limits: [Payload workflow verification](docs_contributors/payload-workflow-verification.md)
 
 - PR #26 Windows Payload prompt correction:
   - retrieved [Windows job 105175918452](https://github.com/benjaco/devflow/actions/runs/35213350923/job/105175918452); its merge tree matches the prepared checkout. Deleted-field confirmation and terminal rename/create/decline timed out; the unchanged tests pass on macOS

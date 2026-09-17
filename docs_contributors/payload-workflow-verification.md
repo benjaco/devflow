@@ -210,3 +210,37 @@ three isolated race repetitions and the full `go test -race -p 1 -count=1 ./...`
 recheck pass without changing that fixture. Logs: `/tmp/devflow-pr26-full.log`,
 `/tmp/devflow-pr26-race.log`, `/tmp/devflow-pr26-daemon-recheck.log` and
 `/tmp/devflow-pr26-race-serial.log`.
+
+### Captured terminal-title follow-up
+
+The [next Windows job at `05c4b88`](https://github.com/benjaco/devflow/actions/runs/35228380375/job/105225702804)
+passed the earlier failures but timed out in the cancel scenario before publishing
+any prompt. Its retained bytes show a terminal-title OSC inserted between `re`
+and `named` in the question. Removing CSI controls alone leaves that word broken.
+
+Replaying the captured bytes locally reproduces zero callbacks and the ten-second
+deadline before correction. The adapter now removes complete OSC strings before
+interpreting cursor controls, without adding whitespace between the surrounding
+characters. It waits for incomplete strings and supports both
+[documented title terminators](https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#window-title),
+BEL and ST. Metadata cannot become a structured question or change its visibility.
+
+`TestPayloadPromptConPTYTitle` checks the captured menu, exact choices/keystrokes,
+titles inside choice and confirmation text, and incomplete strings.
+`TestPayloadConPTYTitleCancellation` replays the bytes through the interactive
+process reader using pipes to preserve them on every host, then requires one
+callback and cancellation rather than deadline expiry. Existing PTY/ConPTY
+authoring scenarios remain in the same focused race run.
+
+Red/green evidence: `/tmp/devflow-pr26-osc-red.log` and
+`/tmp/devflow-pr26-osc-focused.log`. Native Windows execution remains a separate
+CI verification; captured-byte replay does not substitute for it.
+
+Three focused race repetitions pass, with the captured cancellation completing
+in 0.12 seconds each time. The full normal suite, vet, Staticcheck, builds,
+tidy-diff, version JSON and Windows database test cross-compilation pass. The
+normal suite retains the existing local Delve skip. Both real Payload E2Es were
+attempted but failed before project startup because the local Docker socket was
+absent; launching Docker Desktop did not restore daemon access. This rerun does
+not establish real workflow success for the OSC correction. Logs:
+`/tmp/devflow-pr26-osc-full.log` and `/tmp/devflow-pr26-osc-e2e.log`.
