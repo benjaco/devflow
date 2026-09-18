@@ -13,6 +13,119 @@ import (
 	"github.com/benjaco/devflow/pkg/project"
 )
 
+func TestActionRelaunchPreservesWatchPromptPolicy(t *testing.T) {
+	for _, policy := range []api.HeadlessPolicy{api.HeadlessWait, api.HeadlessFail} {
+		t.Run(string(policy), func(t *testing.T) {
+			worktree := t.TempDir()
+			inst, err := instance.Resolve(worktree, "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var starts atomic.Int32
+			promptErrors := make(chan error, 1)
+			name := "action-relaunch-prompts-" + string(policy)
+			project.Register(project.Define(func(_ context.Context, b *project.Builder) error {
+				b.Name(name)
+				check := b.Task("check").NoCache().Run(func(_ context.Context, rt *project.Runtime) error {
+					if starts.Add(1) == 1 {
+						return nil
+					}
+					answer, err := rt.OnPrompt(rt.TaskName, process.PromptRequest{
+						Kind: process.PromptSelect, Prompt: "Create or rename?", Choices: []string{"Create column", "Rename column"},
+					})
+					promptErrors <- err
+					if err == nil && answer.Value != "1" {
+						return errors.New("expected rename selection")
+					}
+					return err
+				})
+				author := b.Task("author").NoCache().Run(func(context.Context, *project.Runtime) error { return nil })
+				b.Target("up", check)
+				b.Action("create").Task(author).RelaunchPreviousTargetAfterSuccess()
+				return nil
+			}))
+			s := &Server{worktree: worktree, instanceID: inst.ID, projectName: name, subscribers: map[chan api.Event]bool{}}
+			t.Cleanup(func() { s.stopActive(3 * time.Second) })
+			response := s.handleRequest(context.Background(), Request{Action: ActionWatch, Target: "up", Headless: policy})
+			if !response.OK {
+				t.Fatal(response.Error)
+			}
+			if !waitForDaemonCondition(3*time.Second, func() bool {
+				state, err := instance.LoadStatus(worktree, inst.ID)
+				return err == nil && state.Nodes["check"].State == api.StateDone
+			}) {
+				t.Fatal("initial watcher did not settle")
+			}
+			// The foreground action's policy, deadline and cancellation are
+			// independent of the development watcher it temporarily replaces.
+			actionPolicy := api.HeadlessWait
+			if policy == api.HeadlessWait {
+				actionPolicy = api.HeadlessFail
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			response = s.handleRequest(ctx, Request{Action: ActionRunAction, ActionID: "create", Headless: actionPolicy, TimeoutMs: 5000})
+			cancel()
+			if !response.OK {
+				t.Fatal(response.Error)
+			}
+			s.mu.Lock()
+			resumed := s.active
+			s.mu.Unlock()
+			if resumed == nil || resumed.target != "up" || resumed.headless != policy {
+				t.Fatalf("action lost the watch prompt policy: %+v", resumed)
+			}
+			record, err := instance.LoadRun(worktree, inst.ID, resumed.runID)
+			if err != nil || !record.Deadline.IsZero() {
+				t.Fatalf("action deadline leaked into resumed watch: %+v, %v", record, err)
+			}
+			if policy == api.HeadlessWait {
+				var prompt api.Prompt
+				if !waitForDaemonCondition(3*time.Second, func() bool {
+					status, err := s.statusResult()
+					if err == nil && len(status.PendingPrompts) == 1 {
+						prompt = status.PendingPrompts[0]
+						return true
+					}
+					return false
+				}) {
+					t.Fatal("resumed watch did not retain a pending prompt")
+				}
+				if prompt.RunID != resumed.runID || prompt.Kind != "select" || len(prompt.Choices) != 2 {
+					t.Fatalf("incorrect resumed prompt identity: %+v", prompt)
+				}
+				choice := 1
+				if err := instance.RespondPrompt(context.Background(), worktree, inst.ID, api.PromptAnswer{
+					RunID: prompt.RunID, Task: prompt.Task, AttemptID: prompt.AttemptID, PromptID: prompt.ID, Choice: &choice,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !waitForDaemonCondition(3*time.Second, func() bool {
+				state, err := instance.LoadStatus(worktree, inst.ID)
+				if err != nil {
+					return false
+				}
+				node := state.Nodes["check"]
+				if policy == api.HeadlessWait {
+					return node.State == api.StateDone
+				}
+				return node.State == api.StateFailed
+			}) {
+				t.Fatal("resumed watch did not honor its own prompt policy")
+			}
+			if err := <-promptErrors; policy == api.HeadlessFail {
+				var detail *api.CommandError
+				if !errors.As(err, &detail) || detail.Code != "interaction_required" {
+					t.Fatalf("headless failure lost its structured cause: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestLifecycleReplacementPreservesExplicitPromptPolicy(t *testing.T) {
 	for _, action := range []Action{ActionRetarget, ActionInvalidate, ActionRestart} {
 		t.Run(string(action), func(t *testing.T) {

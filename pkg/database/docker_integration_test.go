@@ -434,7 +434,7 @@ func requireDockerE2E(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := New().pingDocker(ctx); err != nil {
-		t.Skipf("Docker Engine not ready through the Go API: %v", err)
+		t.Fatalf("DEVFLOW_E2E_DOCKER=1 requires a ready Docker Engine through the Go API: %v", err)
 	}
 }
 
@@ -442,7 +442,7 @@ func requirePostgresClientsE2E(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{"pg_dump", "psql"} {
 		if _, err := exec.LookPath(name); err != nil {
-			t.Skipf("%s is required for the remote Postgres clone e2e test: %v", name, err)
+			t.Fatalf("%s is required for the requested remote Postgres clone e2e test: %v", name, err)
 		}
 	}
 }

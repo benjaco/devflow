@@ -530,6 +530,11 @@ If exactly one migration-create action exists, the component flag can be omitted
 
 In the TUI, `m`/`F4` resolves the highlighted task against migration actions' `task` and `effects.invalidates` declarations, then sends the selected action ID through the existing daemon request. The prompt displays that action's label/ID and keeps it fixed across task-selection changes. A single registered migration action remains available from any task; multiple unmatched or overlapping actions produce a selection error before prompting or dispatching work.
 
+Successful authoring resumes the prior detached target with its existing prompt
+policy. A TUI watcher still shows Payload development questions after creating a
+migration. The resumed run has a new identity and does not inherit the completed
+action's deadline or cancellation.
+
 Prisma's standard authoring helper runs in a separate child terminal so warning
 confirmations reach the existing prompt popup. Warnings are never accepted
 automatically. The TUI displays task logs during authoring and leaves them visible

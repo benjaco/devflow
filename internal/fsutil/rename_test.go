@@ -71,6 +71,51 @@ func TestRenamePersistentConflictIsBoundedAndDiagnosable(t *testing.T) {
 	})
 }
 
+func TestRenamePublishesCompleteDirectoryAfterReaderCloses(t *testing.T) {
+	root := t.TempDir()
+	source, destination := filepath.Join(root, ".staged"), filepath.Join(root, "published")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "record.json"), []byte(`{"complete":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := os.Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	synctest.Test(t, func(t *testing.T) {
+		finished := make(chan error, 1)
+		go func() { finished <- Rename(context.Background(), source, destination) }()
+		synctest.Wait()
+		select {
+		case err := <-finished:
+			// Unix permits renaming an open directory. Windows must wait for
+			// this reader without dropping the complete staged record.
+			if err != nil {
+				t.Fatalf("publication failed before reader closed: %v", err)
+			}
+		default:
+			if _, err := os.Stat(destination); !os.IsNotExist(err) {
+				t.Fatalf("blocked publication exposed a destination: %v", err)
+			}
+			if err := reader.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-finished; err != nil {
+				t.Fatalf("publication failed after reader closed: %v", err)
+			}
+		}
+	})
+	if data, err := os.ReadFile(filepath.Join(destination, "record.json")); err != nil || string(data) != `{"complete":true}` {
+		t.Fatalf("published record = %q, %v", data, err)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("staged directory survived publication: %v", err)
+	}
+}
+
 func TestRenamePermanentFailureDoesNotRetry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()

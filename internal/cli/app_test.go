@@ -870,30 +870,39 @@ func (b *notifyingBuffer) String() string {
 
 func TestUpgradeTextStreamsGoInstallOutputBeforeCompletion(t *testing.T) {
 	installFakeGo(t, 0)
-	t.Setenv("DEVFLOW_FAKE_GO_UPGRADE_DELAY", "500ms")
+	release := filepath.Join(t.TempDir(), "release")
+	t.Setenv("DEVFLOW_FAKE_GO_UPGRADE_RELEASE", release)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	stream := newNotifyingBuffer("fake go output")
-	app := &App{Stdout: stream, Stderr: stream}
+	app := &App{Context: ctx, Stdout: stream, Stderr: stream}
 	done := make(chan error, 1)
 	go func() {
 		done <- app.Run([]string{"upgrade"})
+		close(done)
 	}()
+	t.Cleanup(func() { cancel(); <-done })
 
 	select {
 	case <-stream.seen:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for streamed go install output")
+	case err := <-done:
+		t.Fatalf("upgrade exited before streaming output: %v\n%s", err, stream.String())
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for streamed go install output\n%s", stream.String())
 	}
 	select {
 	case err := <-done:
 		t.Fatalf("upgrade completed before its child output was observed: %v", err)
 	default:
 	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-ctx.Done():
 		t.Fatal("timed out waiting for upgrade completion")
 	}
 	output := stream.String()
@@ -906,31 +915,40 @@ func TestUpgradeTextStreamsGoInstallOutputBeforeCompletion(t *testing.T) {
 
 func TestUpgradeJSONStreamsToStderrAndKeepsStdoutMachineClean(t *testing.T) {
 	installFakeGo(t, 0)
-	t.Setenv("DEVFLOW_FAKE_GO_UPGRADE_DELAY", "500ms")
+	release := filepath.Join(t.TempDir(), "release")
+	t.Setenv("DEVFLOW_FAKE_GO_UPGRADE_RELEASE", release)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	stdout := &bytes.Buffer{}
 	stderr := newNotifyingBuffer("fake go output")
-	app := &App{Stdout: stdout, Stderr: stderr}
+	app := &App{Context: ctx, Stdout: stdout, Stderr: stderr}
 	done := make(chan error, 1)
 	go func() {
 		done <- app.Run([]string{"upgrade", "--json"})
+		close(done)
 	}()
+	t.Cleanup(func() { cancel(); <-done })
 
 	select {
 	case <-stderr.seen:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for JSON-mode streamed go install output")
+	case err := <-done:
+		t.Fatalf("JSON upgrade exited before streaming output: %v\n%s", err, stderr.String())
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for JSON-mode streamed go install output\n%s", stderr.String())
 	}
 	select {
 	case err := <-done:
 		t.Fatalf("JSON upgrade completed before its child output was observed: %v", err)
 	default:
 	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-ctx.Done():
 		t.Fatal("timed out waiting for JSON upgrade completion")
 	}
 
@@ -2491,13 +2509,16 @@ func main() {
 		mustWrite(argsPath, strings.Join(os.Args[1:], " ")+"\n")
 		mustWrite(argsPath+".goproxy", os.Getenv("GOPROXY")+"\n")
 		fmt.Println("fake go output")
-		if delay := os.Getenv("DEVFLOW_FAKE_GO_UPGRADE_DELAY"); delay != "" {
-			parsed, err := time.ParseDuration(delay)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(2)
+		// Keep the child alive until the test has observed its streamed output.
+		if release := os.Getenv("DEVFLOW_FAKE_GO_UPGRADE_RELEASE"); release != "" {
+			for {
+				if _, err := os.Stat(release); err == nil {
+					break
+				} else if !os.IsNotExist(err) {
+					panic(err)
+				}
+				time.Sleep(5 * time.Millisecond)
 			}
-			time.Sleep(parsed)
 		}
 		os.Exit(exitCode)
 	case "build":

@@ -16,16 +16,13 @@ import (
 )
 
 func TestCommandSourcePolicyMergesAdapterAndDatabaseEnv(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-based test is unix-only")
-	}
 	worktree := t.TempDir()
 	output := filepath.Join(worktree, "source.txt")
 	policy := CommandSourcePolicy{
 		PolicyName: "clone-dev",
 		Spec: process.CommandSpec{
-			Name: "sh",
-			Args: []string{"-c", "printf '%s|%s|%s' \"$REMOTE_URL\" \"$PGDATABASE\" \"$DATABASE_URL\" > \"$OUT_FILE\""},
+			Name: testutil.BuildTestCommand(t),
+			Args: []string{"write-env", output, "REMOTE_URL", "PGDATABASE", "DATABASE_URL"},
 		},
 	}
 	db := api.DBInstance{
@@ -515,9 +512,6 @@ func TestRuntimePrepareProgressLogsOnceAndEmitsEvent(t *testing.T) {
 }
 
 func TestCommandSourcePolicyRuntimePrepareOptionsDoNotDuplicateProcessLogs(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-based test is unix-only")
-	}
 	worktree := t.TempDir()
 	logPath := filepath.Join(worktree, "db_prepare.log")
 	var events []string
@@ -535,8 +529,8 @@ func TestCommandSourcePolicyRuntimePrepareOptionsDoNotDuplicateProcessLogs(t *te
 	policy := CommandSourcePolicy{
 		PolicyName: "clone-dev",
 		Spec: process.CommandSpec{
-			Name: "sh",
-			Args: []string{"-c", "printf 'hello\\n'"},
+			Name: testutil.BuildTestCommand(t),
+			Args: []string{"emit", "hello"},
 		},
 	}
 
@@ -561,12 +555,5 @@ func TestCommandSourcePolicyRuntimePrepareOptionsDoNotDuplicateProcessLogs(t *te
 	}
 	if got := strings.Count(strings.Join(events, "\n"), "stdout: "+line); got != 1 {
 		t.Fatalf("expected one subprocess event, got %d in %#v", got, events)
-	}
-}
-
-func mustWriteExecutable(t *testing.T, path, contents string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
-		t.Fatal(err)
 	}
 }

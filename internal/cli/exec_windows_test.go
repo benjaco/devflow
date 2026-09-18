@@ -182,18 +182,15 @@ func TestWindowsLocalChildForcedCancellationPreservesDaemonDescendant(t *testing
 	env := withEnv(os.Environ(), "DEVFLOW_WINDOWS_CHILD_HELPER", "observer")
 	env = withEnv(env, "DEVFLOW_WINDOWS_CHILD_READY", ready)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	var stdout, stderr bytes.Buffer
 	finished := make(chan error, 1)
 	go func() {
 		finished <- execLocalBinary(ctx, executable,
 			[]string{executable, "-test.run=^TestWindowsLocalChildHelper$"}, env, &stdout, &stderr, false, logPath)
+		close(finished)
 	}()
-	waitForBootstrapReady(t, ready, finished)
-	data, err := os.ReadFile(ready)
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { cancel(); <-finished })
+	data := waitForBootstrapReady(t, ready, finished)
 	pid, err := strconv.Atoi(string(data))
 	if err != nil {
 		t.Fatal(err)

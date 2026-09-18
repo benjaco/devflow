@@ -2720,6 +2720,12 @@ func (s *Server) runProjectAction(ctx context.Context, projectName, actionID, ki
 	relaunchMode := inst.LastRun.Mode
 	relaunchMaxParallel := inst.LastRun.MaxParallel
 	shouldRelaunch := action.Relaunch == project.ActionRelaunchPreviousTargetAfterSuccess && inst.LastRun.Detached && relaunchTarget != ""
+	relaunchHeadless := api.HeadlessFail
+	s.mu.Lock()
+	if previous := s.active; previous != nil && previous.projectName == projectName && previous.target == relaunchTarget {
+		relaunchHeadless = previous.headless
+	}
+	s.mu.Unlock()
 
 	result := &ActionRunResult{
 		RunID:     operation.id,
@@ -2764,8 +2770,9 @@ func (s *Server) runProjectAction(ctx context.Context, projectName, actionID, ki
 		s.publishStatus("relaunching detached target %s after action %s", relaunchTarget, action.ID)
 		// Resuming development starts another execution; the completed action's
 		// identity, cancellation and deadline must not transfer to that watcher.
+		// Preserve its interaction policy so TUI prompts still work after authoring.
 		relaunchCtx := context.WithValue(context.WithoutCancel(ctx), runOperationKey{}, (*runOperation)(nil))
-		relaunchCtx = context.WithValue(relaunchCtx, runOptionsKey{}, runOptions{})
+		relaunchCtx = context.WithValue(relaunchCtx, runOptionsKey{}, runOptions{headless: relaunchHeadless})
 		started, err := s.startActiveLocked(relaunchCtx, projectName, relaunchTarget, relaunchMode, relaunchMaxParallel)
 		if err != nil {
 			result.Status = "succeeded_with_relaunch_failed"

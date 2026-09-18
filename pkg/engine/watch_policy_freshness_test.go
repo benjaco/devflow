@@ -455,7 +455,9 @@ func startWatchPolicyFreshnessTest(t *testing.T, root string, tasks []project.Ta
 			t.Error("watch did not exit after cancellation")
 		}
 	})
-	return waitForEngineWatchReady(t, root)
+	// Startup includes durable run/status writes; it is not the source-edit
+	// latency assertion. Keep flush and exact rerun-count checks separate.
+	return waitForEngineWatchReadyWithin(t, root, 30*time.Second)
 }
 
 func flushWatchPolicyFreshnessTest(t *testing.T, root, instanceID string) api.FlushResult {

@@ -402,7 +402,7 @@ func PostgresMigrationFileApplier(fileName string) MigrationApplyFunc {
 		return withPostgresCommandCredentials(db.URL, db, baseEnv, func(env map[string]string, sanitizedURL string) error {
 			spec := process.CommandSpec{
 				Name:      "psql",
-				Args:      []string{sanitizedURL, "-v", "ON_ERROR_STOP=1", "-f", migrationPath},
+				Args:      []string{"-X", "-w", "-v", "ON_ERROR_STOP=1", "-f", migrationPath, "-d", sanitizedURL},
 				Dir:       opts.Worktree,
 				Env:       env,
 				LogPath:   opts.LogPath,

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/benjaco/devflow/internal/testutil"
 )
 
 func TestCopyDirPopulatesReadOnlyModuleCacheBeforeRestoringModes(t *testing.T) {
@@ -116,9 +118,6 @@ func TestMovePathWritableMovesReadOnlyDirectoryAndRestoresMode(t *testing.T) {
 }
 
 func TestCopierPreservesInternalPNPMSymlinksWithoutExpandingGraph(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink fixture requires developer-mode symlink support")
-	}
 	root := t.TempDir()
 	src := filepath.Join(root, "node_modules")
 	pkg := filepath.Join(src, ".pnpm", "pkg@1.0.0", "node_modules", "pkg")
@@ -128,9 +127,7 @@ func TestCopierPreservesInternalPNPMSymlinksWithoutExpandingGraph(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(pkg, "index.js"), []byte("module.exports = 1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(".pnpm", "pkg@1.0.0", "node_modules", "pkg"), filepath.Join(src, "pkg")); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Symlink(t, filepath.Join(".pnpm", "pkg@1.0.0", "node_modules", "pkg"), filepath.Join(src, "pkg"))
 
 	var last CopyProgress
 	copier := NewCopier(CopyOptions{OnProgress: func(progress CopyProgress) { last = progress }})
@@ -158,9 +155,6 @@ func TestCopierPreservesInternalPNPMSymlinksWithoutExpandingGraph(t *testing.T) 
 }
 
 func TestCopierRejectsExternalRelativeSymlink(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink fixture requires developer-mode symlink support")
-	}
 	root := t.TempDir()
 	src := filepath.Join(root, "projection")
 	if err := os.MkdirAll(src, 0o755); err != nil {
@@ -170,9 +164,7 @@ func TestCopierRejectsExternalRelativeSymlink(t *testing.T) {
 	if err := os.WriteFile(external, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join("..", "external.txt"), filepath.Join(src, "external")); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Symlink(t, filepath.Join("..", "external.txt"), filepath.Join(src, "external"))
 	err := NewCopier(CopyOptions{}).Copy(context.Background(), src, src, filepath.Join(root, "dst"))
 	if err == nil || !strings.Contains(err.Error(), "outside copy projection") {
 		t.Fatalf("expected external symlink rejection, got %v", err)

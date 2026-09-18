@@ -17,7 +17,6 @@ func TestRunCancellationStopsDescendantsHoldingOutput(t *testing.T) {
 	}
 	ready := filepath.Join(t.TempDir(), "ready")
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	finished := make(chan error, 1)
 	go func() {
 		_, err := Run(ctx, CommandSpec{
@@ -26,10 +25,13 @@ func TestRunCancellationStopsDescendantsHoldingOutput(t *testing.T) {
 			Env:  map[string]string{"DEVFLOW_PROCESS_CANCEL_HELPER": "parent", "DEVFLOW_PROCESS_CANCEL_READY": ready},
 		})
 		finished <- err
+		close(finished)
 	}()
+	t.Cleanup(func() { cancel(); <-finished })
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
-	deadline := time.NewTimer(10 * time.Second)
+	// Cold helper startup is independent of the strict cancellation bound below.
+	deadline := time.NewTimer(30 * time.Second)
 	defer deadline.Stop()
 	for {
 		if _, err := os.Stat(ready); err == nil {
