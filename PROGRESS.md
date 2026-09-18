@@ -1,18 +1,31 @@
 # Progress
 
-Last updated: 2026-09-17
+Last updated: 2026-09-18
 
 ## Current Status
 
-- Phase: Windows CI deadline and watch-start fixture correction
-- State: both reported test fixtures corrected; full daemon/engine packages and repeated focused race checks pass natively. Hosted Windows confirmation awaits the next CI run.
-- Scope: remove setup-speed assumptions while preserving request deadline, queued-expiry, flush and exact rebuild/restart assertions; the native audit and Payload/Docker verification remain recorded below.
+- Phase: watch prerequisite recovery after a failed branch cancels sibling work
+- State: rebasing onto main at `5f61103`; code merged cleanly, with integration verification pending.
+- Scope: recover required unfinished prerequisites, reuse satisfied work, preserve watch/restart/lifecycle boundaries and consistent retained state/flush results.
 
 ## In Progress
 
-- None locally. Confirm the correction in the next hosted Windows CI run. Native terminal-host clipboard/rendering and the historical unexplained IDE exit remain manual follow-ups.
+- Verify watch recovery and lifecycle/prompt integration after the rebase; retain upstream native Windows audit and CI-fixture corrections.
 
 ## Completed
+
+- Watch recovery across canceled sibling branches:
+  - a real-watch fixture with separate schema/migration inputs and channel/synctest barriers reproduced the reported ready-services/canceled-prerequisites state in three runs before implementation; the scheduler counted only dependencies in its selected slice and admitted consumers without checking omitted prerequisites
+  - watch recovery now recursively includes required unfinished prerequisites before service cleanup, and scheduler admission checks successful finite state or a ready/live owned service generation. Reuse completed/cached work and healthy services; preserve warmup/restart/manual-stop barriers and avoid sync-only retry loops
+  - selected work skipped after failure loses stale success from an earlier cycle while completed historical attempts remain intact. Recovery-cycle events retain the watch run ID; JSON shapes remain unchanged
+  - cover the supplied two-root topology, execution/event ordering, status/flush agreement, recursive recovery, persistent prerequisite failure, prior-cycle success, cache/service reuse, stale/disallowed warmups, restart-never services, and manual stop followed by explicit restart. Lifecycle fixtures settle observer reconciliation before editing inputs
+  - `go test -p 2 -count=1 ./...` and `go test -race -p 2 -count=1 ./...` pass; focused recovery tests pass three race repetitions, with final normal/race checks for event identity and explicit restart. Vet, Staticcheck v0.8.1, govulncheck v1.6.0 (no vulnerabilities), tidy-diff, formatting/diff checks, CLI/example builds, version JSON and Windows engine test compilation pass
+  - updated architecture, CLI, operator/agent, testing and durable-memory docs. Evidence: `/tmp/devflow-watch-recovery-{red,full,race,race-focused,events,policy,policy-race}.log`. Verification uses disposable generic fixtures; the unavailable application and native Windows/Linux execution were not exercised
+
+- Applied Prisma migration rollback investigation:
+  - the reported changed/removed-migration guard and explicit refresh target are absent from Devflow; the user confirmed the consuming project is inaccessible here and requested an implementation prompt for that project
+  - existing database regressions pass for deleted-latest exact-snapshot restoration, changed-latest tail replay, and changed-older source rebuild; no Devflow runtime change is needed for the reported adapter guard
+
 
 - Windows CI request-deadline/watch-start fixture correction:
   - [Windows job 105315689513](https://github.com/benjaco/devflow/actions/runs/35254804434/job/105315689513) failed only the attached request-deadline and generated-output `paths` startup cases; all other jobs, including Linux race and Payload/TUI Docker on both architectures, passed. Both unchanged tests pass ten local repetitions
@@ -1264,6 +1277,7 @@ Last updated: 2026-09-17
 
 ## Next Steps
 
+- Review the watch prerequisite recovery correction and confirm it on native Windows/Linux CI and the consuming application's rollback workflow.
 - Confirm the repository repair path diagnostics on the next native CI matrix run.
 - Confirm the PR #25 prompt teardown correction on the next native Windows CI run; the prior daemon fixture cleanup passes in that PR's initial Windows job.
 - Review the compact attention view (`a`) in the user's terminal, including native multiline log selection on a small screen.

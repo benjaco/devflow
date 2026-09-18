@@ -179,6 +179,12 @@ Require `success=true` before relying on detached watch results for downstream t
 
 `synced` and `success` are distinct: JSON `synced=true` confirms observation processing and acknowledgement, while `success=true` also requires freshness and healthy services. `watch_restart_required` means a restart policy or blocked warmup prevented changed work from rerunning. It persists across flushes until that task executes successfully or the target is explicitly restarted. `watch_stopped` means the captured watch ended or was replaced; inspect the current execution and issue a new flush. Flush issues retain `canceled` and `timeout` kinds; the command error codes are `operation_cancelled` and `deadline_exceeded`.
 
+After a task failure, a relevant input edit also retries unfinished prerequisites
+required by the affected work, including canceled tasks on another branch. This
+uses the same watch run and preserves valid completed work. Consumers remain
+blocked when a prerequisite still fails or watch policy prevents its recovery;
+a flush with no further changes reports that state without another retry.
+
 This guarantee is limited to declared inputs visible to polling through the final scan. It cannot prove transient or metadata-preserving edits were observed, and it does not execute tests absent from the target. Generated task outputs are excluded only when their current metadata still matches the producer's completion record. Adjacent source edits and later edits to input/output paths remain observable, including changes made while downstream tasks are still running.
 
 For explicit service lifecycle changes, preview and then execute against the same per-worktree daemon:
