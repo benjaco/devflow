@@ -52,9 +52,15 @@ func shouldExecLocalProject(args []string, worktree string) bool {
 
 func (a *App) execLocalProject(args []string, worktree string) error {
 	bootstrapRoot := bootstrapRoot()
+	if a.githubCI && a.githubDebug {
+		githubWriteDebug(a.progressWriter(), "bootstrap preparing adapter worktree=%q source_override=%q", worktree, bootstrapRoot)
+	}
 	localBinary, err := ensureLocalProjectBinary(a.context(), bootstrapRoot, worktree)
 	if err != nil {
 		return err
+	}
+	if a.githubCI && a.githubDebug {
+		githubWriteDebug(a.progressWriter(), "bootstrap adapter ready binary=%q", localBinary)
 	}
 	// Tasks inherit the environment; only this exact executable can skip loading.
 	env := withEnv(os.Environ(), envLocalExec, localBinary)

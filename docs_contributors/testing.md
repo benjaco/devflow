@@ -184,10 +184,19 @@ go test ./pkg/daemon -run 'Test.*Flush' -count=1
 
 Automatic GitHub presentation tests explicitly select literal true/false/empty/
 unset invocation environments, JSON/text, quiet/states/logs and project-local
-bootstrap. CLI `TestMain` unsets inherited GitHub presentation/summary variables
+bootstrap. CLI `TestMain` unsets inherited GitHub presentation/summary/debug variables
 so ordinary hosted fixtures retain their intended plain output. GitHub fixtures
 set their own environment; non-CI and machine log/watch stream contracts remain
 separate. The environment must never override selected mode or parallelism.
+
+Debug regressions cover exact `RUNNER_DEBUG=1`, unset/empty/false/noncanonical
+values, conflicting raw `ACTIONS_*_DEBUG` inputs and adapter env, text/JSON,
+compact details and quiet/states/logs. Compare diagnostic cache keys and attempt
+identities with real miss/hit retained evidence. Exercise debug during compiled
+bootstrap, parallel execution, blocked replay and queue-overflow reconciliation;
+it must preserve whole groups, single replay and raw machine streams. Debug
+metadata must exclude secret prompt payloads, neutralize both workflow-command
+syntaxes and remain bounded UTF-8 after oversized input.
 
 Use task barriers to prove overlap/shared-dependency execution and block the
 presentation writer while a sibling emits beyond the lossless event capacity.

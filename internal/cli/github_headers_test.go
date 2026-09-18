@@ -82,7 +82,7 @@ func TestGitHubHeaderCacheMissSurvivesCompletionAndReconciliation(t *testing.T) 
 	for _, source := range []string{"event", "record", "result"} {
 		t.Run(source, func(t *testing.T) {
 			var output bytes.Buffer
-			p := newGitHubPresenter(&output, "logs", "")
+			p := newGitHubPresenter(&output, "logs", "", false)
 			record := api.RunRecord{RunID: "run", Attempts: []api.TaskAttempt{attempt}}
 			result := api.RunResult{RunID: "run", Target: "verify"}
 			switch source {

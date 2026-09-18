@@ -54,6 +54,7 @@ type App struct {
 	details                 string
 	progress                string
 	githubActions           bool
+	githubDebug             bool
 	githubCI                bool
 	githubStepSummary       string
 	launcherVersion         string
@@ -459,7 +460,11 @@ func (a *App) runDirect(target string, jsonOut bool, worktreeFlag, projectName s
 	var record *api.RunRecord
 	var github *githubPresenter
 	if mode == api.ModeCI && a.githubActions {
-		github = newGitHubPresenter(a.Stderr, a.progress, a.githubStepSummary)
+		github = newGitHubPresenter(a.Stderr, a.progress, a.githubStepSummary, a.githubDebug)
+		if a.githubDebug {
+			github.debugMessage("debug logging enabled (RUNNER_DEBUG=1); devflow=%s go=%s platform=%s/%s", version.Current().Version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+			github.debugMessage("request project=%q target=%q worktree=%q mode=%s max_parallel=%d (0=engine default) timeout=%s headless=%s", projectName, resolvedTarget, root, mode, maxParallel, opts.Timeout, opts.Headless)
+		}
 	}
 	finishGitHub := func() {
 		if github == nil {

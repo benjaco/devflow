@@ -21,10 +21,11 @@ import (
 )
 
 type githubCLIProject struct {
-	name              string
-	tasks             []project.Task
-	roots             []string
-	githubEnvironment string
+	name                   string
+	tasks                  []project.Task
+	roots                  []string
+	githubEnvironment      string
+	runnerDebugEnvironment string
 }
 
 func (p *githubCLIProject) Name() string          { return p.name }
@@ -34,7 +35,7 @@ func (p *githubCLIProject) Targets() []project.Target {
 }
 func (p *githubCLIProject) ConfigureInstance(context.Context, string) (project.InstanceConfig, error) {
 	// Presentation follows the invoking process, even when task env disagrees.
-	return project.InstanceConfig{Env: map[string]string{"GITHUB_ACTIONS": p.githubEnvironment}}, nil
+	return project.InstanceConfig{Env: map[string]string{"GITHUB_ACTIONS": p.githubEnvironment, "RUNNER_DEBUG": p.runnerDebugEnvironment}}, nil
 }
 
 func githubCLIFixture(t *testing.T, tasks []project.Task, roots ...string) (*githubCLIProject, string) {
@@ -131,7 +132,7 @@ func githubCLIParseGroups(t *testing.T, output string) []githubCLIGroup {
 			active = nil
 		default:
 			if active != nil {
-				if strings.HasPrefix(line, "[devflow]") || strings.HasPrefix(line, "::error") {
+				if strings.HasPrefix(line, "[devflow]") || strings.HasPrefix(line, "::error") || strings.HasPrefix(line, "::debug::") {
 					t.Fatalf("lifecycle interleaved with retained log: %s", output)
 				}
 				active.body += line + "\n"
@@ -146,6 +147,7 @@ func githubCLIParseGroups(t *testing.T, output string) []githubCLIGroup {
 
 func TestGitHubCIParallelSharedDependencyAndRecordedDurations(t *testing.T) {
 	t.Setenv("GITHUB_ACTIONS", "true")
+	t.Setenv("RUNNER_DEBUG", "1")
 	summary := filepath.Join(t.TempDir(), "summary.md")
 	t.Setenv("GITHUB_STEP_SUMMARY", summary)
 	started := make(chan string, 2)
@@ -260,6 +262,7 @@ func (w *githubCLIBlockingWriter) Write(data []byte) (int, error) {
 
 func TestGitHubCISlowReplayDoesNotBlockSiblingExecution(t *testing.T) {
 	t.Setenv("GITHUB_ACTIONS", "true")
+	t.Setenv("RUNNER_DEBUG", "1")
 	t.Setenv("GITHUB_STEP_SUMMARY", "")
 	out := &githubCLIBlockingWriter{blocked: make(chan struct{}), release: make(chan struct{})}
 	secondDone := make(chan struct{})
@@ -327,6 +330,7 @@ func TestGitHubCISlowReplayDoesNotBlockSiblingExecution(t *testing.T) {
 
 func TestGitHubCICacheFailureAndFinalSummary(t *testing.T) {
 	t.Setenv("GITHUB_ACTIONS", "true")
+	t.Setenv("RUNNER_DEBUG", "1")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
@@ -396,6 +400,7 @@ func (h *githubCLIService) Stop() error {
 }
 
 func TestGitHubCIServiceCleanupAndInterruptedLogs(t *testing.T) {
+	t.Setenv("RUNNER_DEBUG", "1")
 	for _, interrupted := range []bool{false, true} {
 		t.Run(fmt.Sprintf("interrupted=%t", interrupted), func(t *testing.T) {
 			t.Setenv("GITHUB_ACTIONS", "true")
@@ -467,6 +472,7 @@ func TestGitHubCIServiceCleanupAndInterruptedLogs(t *testing.T) {
 
 func TestBootstrapGitHubCIPresentationUsesInvocationEnvironment(t *testing.T) {
 	isolateJSONContractState(t)
+	t.Setenv("RUNNER_DEBUG", "1")
 	root, err := repoRoot()
 	if err != nil {
 		t.Fatal(err)
@@ -506,7 +512,15 @@ func TestBootstrapGitHubCIPresentationUsesInvocationEnvironment(t *testing.T) {
 				if strings.Contains(stderr, "::group::frontend:lint | SUCCESS |") != grouped {
 					t.Fatalf("bootstrap lost invocation environment: %s", stderr)
 				}
+				if strings.Contains(stderr, "::debug::[devflow]") != grouped {
+					t.Fatalf("bootstrap lost runner debug selection: %s", stderr)
+				}
 				if grouped {
+					for _, marker := range []string{"bootstrap preparing adapter", "bootstrap adapter ready", "debug logging enabled (RUNNER_DEBUG=1)", "event=run_started"} {
+						if !strings.Contains(stderr, marker) {
+							t.Errorf("bootstrap omitted %q: %s", marker, stderr)
+						}
+					}
 					if strings.Count(stderr, "frontend-lint-line-1") != 1 {
 						t.Fatalf("compiled task output lost or duplicated: %s", stderr)
 					}
@@ -537,6 +551,7 @@ func TestBootstrapGitHubCIPresentationUsesInvocationEnvironment(t *testing.T) {
 
 func TestGitHubCISummaryFollowsRepositoryFinalization(t *testing.T) {
 	t.Setenv("GITHUB_ACTIONS", "true")
+	t.Setenv("RUNNER_DEBUG", "1")
 	summary := filepath.Join(t.TempDir(), "summary.md")
 	t.Setenv("GITHUB_STEP_SUMMARY", summary)
 	worktree := initRepositoryRepairGitWorktree(t)
@@ -605,6 +620,7 @@ func TestGitHubCIPresentationIgnoresAdapterEnvironment(t *testing.T) {
 
 func TestGitHubEnvironmentDoesNotSelectCIMode(t *testing.T) {
 	t.Setenv("GITHUB_ACTIONS", "true")
+	t.Setenv("RUNNER_DEBUG", "1")
 	t.Setenv("GITHUB_STEP_SUMMARY", "")
 	p, root := githubCLIFixture(t, []project.Task{{Name: "check", Kind: project.KindOnce, Run: func(_ context.Context, rt *project.Runtime) error {
 		if rt.Mode != api.ModeDev {
@@ -622,13 +638,14 @@ func TestGitHubEnvironmentDoesNotSelectCIMode(t *testing.T) {
 	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); err != nil || decodeErr != nil || !result.Success || result.Mode != api.ModeDev {
 		t.Fatalf("GitHub selected CI execution: err=%v decode=%v stdout=%s stderr=%s", err, decodeErr, &stdout, &stderr)
 	}
-	if strings.Contains(stderr.String(), "::group::") {
+	if strings.Contains(stderr.String(), "::group::") || strings.Contains(stderr.String(), "::debug::") {
 		t.Fatalf("finite CI presentation entered development mode: %s", &stderr)
 	}
 }
 
 func TestGitHubCIRetainedLogJSONLRemainsRaw(t *testing.T) {
 	t.Setenv("GITHUB_ACTIONS", "true")
+	t.Setenv("RUNNER_DEBUG", "1")
 	t.Setenv("GITHUB_STEP_SUMMARY", "")
 	const childMarker = "::group::raw-retained-child-marker"
 	p, root := githubCLIFixture(t, []project.Task{{Name: "check", Kind: project.KindOnce, Run: func(_ context.Context, rt *project.Runtime) error {
@@ -663,6 +680,7 @@ func TestGitHubCIRetainedLogJSONLRemainsRaw(t *testing.T) {
 
 func TestCompiledGitHubWatchPreservesJSONLContract(t *testing.T) {
 	t.Setenv("GITHUB_ACTIONS", "true")
+	t.Setenv("RUNNER_DEBUG", "1")
 	t.Setenv("GITHUB_STEP_SUMMARY", "")
 	// Reuse the transport contract's start/event/error assertions under the
 	// hosted invocation environment, including the project-local bootstrap.
