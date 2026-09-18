@@ -381,6 +381,15 @@ The watcher is scoped to declared inputs in the selected target closure plus Dev
 
 Watch cascades respect dependency barriers. If an intermediate task in the affected slice is not allowed to run in watch mode, downstream tasks past that intermediate are not run in that cycle.
 
+When an earlier failure canceled work on another branch, a later affected cycle
+also recovers that branch's unfinished tasks if they are prerequisites of the
+selected work. Consumers and groups wait for those prerequisites to succeed;
+completed/cached tasks and healthy services are reused. Recovery honors warmup
+and restart restrictions and does not revive a manually stopped external
+service prerequisite. The watch run stays active. A sync-only `flush` reports
+remaining failures without starting another recovery attempt; the JSON fields
+and event types are unchanged.
+
 `graph affected --files a,b --explain --json` reports why changed files do or do not affect tasks. Explanations include direct file matches, directory matches, glob matches, filtered matches, ignored paths, and unmatched files. This is the primary debugging tool for generated-output watch loops.
 
 `validate` hardens finite task graphs without changing the real worktree:
@@ -427,6 +436,7 @@ Every applicable validation phase emits an immediate start and completion event 
 For service restart policies, `RestartNever` blocks watch restarts, `RestartOnInputChange` follows the affected downstream slice, and `RestartAlways` restarts the service on any watch cycle that affects the selected target.
 
 For watch-cycle events:
+- `runId` identifies the existing watch run during recovery as well as initial execution
 - `files` contains reconciled task-input changes after removing sync sentinels and immediate task-output writes
 - `affectedTasks` is the directly affected task list derived from those file changes
 

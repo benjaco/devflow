@@ -84,6 +84,7 @@ type runState struct {
 	redactDiagnostic  func(string) string
 	watchOutputs      []watchOutputEvidence
 	watchBlocked      map[string]bool
+	manuallyStopped   map[string]bool
 }
 
 type taskResult struct {
@@ -598,6 +599,7 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 	failed := false
 	var runErr error
 	failedTask := ""
+	started := make(map[string]bool, len(order))
 
 	for completed < len(order) {
 		for !failed && running < maxParallel && len(ready) > 0 {
@@ -605,6 +607,23 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 			name := ready[0]
 			ready = ready[1:]
 			task := e.graph.Tasks[name]
+			// The selected slice is an execution plan, not evidence that omitted
+			// prerequisites succeeded. Recheck liveness here as services can exit
+			// after watch recovery planned the slice.
+			for _, dep := range task.Deps {
+				if !e.prerequisiteSatisfied(state, dep) {
+					runErr = fmt.Errorf("task %q blocked by unsatisfied dependency %q", name, dep)
+					state.setNodeState(name, api.StateBlocked, "", runErr.Error(), 0)
+					started[name] = true
+					failed, failedTask = true, name
+					cancel()
+					break
+				}
+			}
+			if failed {
+				break
+			}
+			started[name] = true
 
 			if task.Kind == project.KindGroup {
 				state.setNodeState(name, api.StateDone, "", "", 0)
@@ -679,10 +698,10 @@ func (e *Engine) runReadyQueue(ctx context.Context, cancel context.CancelFunc, b
 			downstream[name] = true
 		}
 		for _, name := range order {
-			node := state.statusSnapshot()[name]
-			if node.State != api.StatePending && node.State != api.StateStarting {
+			if started[name] {
 				continue
 			}
+			node := state.statusSnapshot()[name]
 			if downstream[name] {
 				state.setNodeState(name, api.StateBlocked, node.LastRunKey, fmt.Sprintf("blocked by failed dependency %s", failedTask), 0)
 			} else {
@@ -1163,6 +1182,12 @@ func (e *Engine) applyServiceLifecycleCommand(ctx context.Context, req Request, 
 	state.drainAttemptOutput(node.AttemptID)
 	state.completeAttempt(node.AttemptID)
 	if command.action == "stop" {
+		state.mu.Lock()
+		if state.manuallyStopped == nil {
+			state.manuallyStopped = map[string]bool{}
+		}
+		state.manuallyStopped[command.task] = true
+		state.mu.Unlock()
 		return result, nil
 	}
 	if command.action != "restart" {
@@ -1448,6 +1473,7 @@ func (s *runState) registerService(task string, handle project.ServiceHandle) {
 	s.serviceGeneration[task]++
 	generation := s.serviceGeneration[task]
 	s.services[task] = handle
+	delete(s.manuallyStopped, task)
 	if pid := handle.PID(); pid > 0 {
 		s.inst.Processes[task] = api.ProcessRef{PID: pid, StartedAt: time.Now().UTC(), Generation: generation}
 	} else {
