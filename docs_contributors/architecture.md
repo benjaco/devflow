@@ -892,9 +892,26 @@ Each executed or restored producer records its declared outputs' metadata when i
 On each batch:
 - changed files are mapped to task inputs
 - the affected downstream slice inside the target closure is computed
+- unfinished prerequisites of that slice are included recursively, even when their inputs did not change in this batch
 - impacted running services are stopped first
 - affected one-shot tasks rerun in dependency order with normal cache semantics
 - impacted services restart after their dependencies complete and are only considered back once readiness passes
+
+A partial scheduling slice does not make its omitted prerequisites successful.
+The scheduler checks each dependency before launching a task or completing a
+group. Completed/cached finite work is reusable unless watch policy has left it
+stale; service prerequisites require a ready, running state and the live owned
+handle for that generation. Recovery expands the slice before service cleanup,
+so replacement resources retain normal stop/readiness/ownership handling.
+Disallowed warmups, `RestartNever` services and manually stopped external service
+prerequisites are not started by recovery; their consumers remain blocked.
+
+After a failure, every selected task that never started in that cycle becomes
+blocked or canceled, including tasks that succeeded in a previous cycle. Earlier
+completed attempt records retain their original outcome. A later relevant input
+change can recover required unfinished work in the same watch run; a sync-only
+flush reports unresolved failures without retrying them. Successful unrelated
+work and healthy services outside the affected slice remain reusable.
 
 Watch propagation now treats service-to-service dependency edges specially:
 - service restarts do not automatically cascade into downstream services by default

@@ -183,6 +183,14 @@ For Payload, keep development schema push separate from migration replay. The ap
 
 Watch mode observes task inputs before initial execution, then reruns the affected downstream slice when those inputs change. Edits made during startup or a rebuild are reconciled before a successful flush. If a task also rewrites an input file, an edit made after that task finishes still triggers a rerun, even while downstream work is running; generated changes are excluded only when their metadata still matches what the producer left behind.
 
+If a failure cancels required work on another branch, repairing the relevant
+inputs also recovers those unfinished prerequisites before restarting consumers.
+You can keep the same TUI/watch session open. Completed work is reused, and
+consumers stay blocked if a prerequisite still fails or cannot run under its
+watch policy. Recovery does not restart a manually stopped prerequisite service.
+Running `flush` without further input changes reports the failure without
+repeatedly retrying it.
+
 Devflow watches the declared input paths for the selected target closure, not the whole project tree. This keeps folders such as `node_modules` out of the idle watch loop. If edits are not being picked up, add the missing source path to the relevant task inputs and check it with `graph affected --explain`.
 
 Run:
