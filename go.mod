@@ -13,8 +13,8 @@ require (
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/rivo/tview v0.42.0
 	golang.org/x/mod v0.41.0
-	golang.org/x/sys v0.47.0
-	golang.org/x/term v0.45.0
+	golang.org/x/sys v0.48.0
+	golang.org/x/term v0.46.0
 )
 
 require (
