@@ -6,7 +6,7 @@ require (
 	github.com/charmbracelet/x/xpty v0.1.4
 	github.com/containerd/errdefs v1.0.0
 	github.com/distribution/reference v0.6.0
-	github.com/docker/cli v29.8.0+incompatible
+	github.com/docker/cli v29.9.2+incompatible
 	github.com/gdamore/tcell/v2 v2.13.10
 	github.com/moby/moby/api v1.56.0
 	github.com/moby/moby/client v0.6.0
